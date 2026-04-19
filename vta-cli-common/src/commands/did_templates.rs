@@ -82,26 +82,49 @@ pub fn cmd_init(kind: String) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ── Online (Phase 2: global scope against the VTA) ──────────────────
+// ── Online (global scope — Phase 2; context scope — Phase 3) ────────
 
-/// `pnm did-templates list` — show stored global templates on the VTA.
+fn scope_label(context: Option<&str>) -> String {
+    context
+        .map(|c| format!("context '{c}'"))
+        .unwrap_or_else(|| "global".into())
+}
+
+/// `pnm did-templates list [--context X]` — show stored templates.
 ///
-/// Built-ins are not merged in here — use `list-builtins` for those. Keeping
-/// the two listings separate makes it obvious whether a template is
-/// server-managed (listed here) or forked from a built-in.
-pub async fn cmd_list(client: &VtaClient) -> Result<(), Box<dyn std::error::Error>> {
-    let records = client.list_did_templates().await?;
+/// Without `--context`, lists global-scope templates. With `--context X`,
+/// lists templates scoped to that context. Built-ins are not merged in —
+/// use `list-builtins`. Keeping scopes visually distinct makes it obvious
+/// whether a template is cross-context (global), context-local, or
+/// embedded.
+pub async fn cmd_list(
+    client: &VtaClient,
+    context: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let records = match context {
+        Some(ctx) => client.list_context_did_templates(ctx).await?,
+        None => client.list_did_templates().await?,
+    };
+
     if records.is_empty() {
-        println!("No DID templates stored on the VTA.");
+        match context {
+            Some(ctx) => println!("No DID templates stored in context '{ctx}'."),
+            None => println!("No DID templates stored on the VTA."),
+        }
         println!("  {DIM}Scaffold one with{RESET} `pnm did-templates init <kind> > tpl.json`,");
-        println!("  {DIM}then{RESET} `pnm did-templates create --file tpl.json`.");
+        let create_hint = match context {
+            Some(ctx) => format!("pnm did-templates create --context {ctx} --file tpl.json"),
+            None => "pnm did-templates create --file tpl.json".into(),
+        };
+        println!("  {DIM}then{RESET} `{create_hint}`.");
         return Ok(());
     }
 
-    println!(
-        "{CYAN}Stored DID templates{RESET} ({} total):\n",
-        records.len()
-    );
+    let header = match context {
+        Some(ctx) => format!("DID templates in context '{ctx}'"),
+        None => "Stored DID templates (global)".into(),
+    };
+    println!("{CYAN}{header}{RESET} ({} total):\n", records.len());
     for r in &records {
         println!(
             "  {GREEN}\u{25b8}{RESET} {CYAN}{}{RESET} ({DIM}{}{RESET})",
@@ -125,14 +148,12 @@ pub async fn cmd_list(client: &VtaClient) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// `pnm did-templates show <name> [--rendered --var K=V ...]` — fetch one template.
-///
-/// Without `--rendered`, prints the raw record. With `--rendered`, fetches the
-/// template then renders it server-side with caller-supplied `--var` pairs
-/// (useful for previewing what the eventual DID document will look like).
+/// `pnm did-templates show <name> [--context X] [--rendered --var K=V ...]` —
+/// fetch one template, optionally rendered.
 pub async fn cmd_show(
     client: &VtaClient,
     name: &str,
+    context: Option<&str>,
     rendered: bool,
     vars: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -141,43 +162,59 @@ pub async fn cmd_show(
         for (k, v) in vars {
             vars_map.insert(k, serde_json::Value::String(v));
         }
-        // Ambient reserved vars not supplied by the server in Phase 2 (DID,
-        // SIGNING_KEY_MB, KA_KEY_MB, CONTEXT_ID, CONTEXT_DID) must come from
-        // --var so the preview doesn't fail. Phase 4 wires these through a
-        // create flow; preview is a best-effort tool for authors.
-        let doc = client.render_did_template(name, vars_map).await?;
+        // DID / SIGNING_KEY_MB / KA_KEY_MB are reserved ambient vars the
+        // server will fill from Phase 4 onward. Until then, supply them via
+        // --var to preview what a rendered document will look like.
+        let doc = match context {
+            Some(ctx) => {
+                client
+                    .render_context_did_template(ctx, name, vars_map)
+                    .await?
+            }
+            None => client.render_did_template(name, vars_map).await?,
+        };
         println!("{}", serde_json::to_string_pretty(&doc)?);
         return Ok(());
     }
 
-    let r = client.get_did_template(name).await?;
+    let r = match context {
+        Some(ctx) => client.get_context_did_template(ctx, name).await?,
+        None => client.get_did_template(name).await?,
+    };
     let pretty = serde_json::to_string_pretty(&r)?;
     println!("{pretty}");
     Ok(())
 }
 
-/// `pnm did-templates create --file <path>` — upload a new global template.
+/// `pnm did-templates create --file <path> [--context X]` — upload a template.
 ///
-/// The file is validated locally before upload, so authoring errors fail
-/// immediately without burning a round-trip to a super admin ACL check.
+/// The file is validated locally before upload so authoring errors fail
+/// fast without burning a round-trip to a super-admin ACL check.
 pub async fn cmd_create(
     client: &VtaClient,
+    context: Option<&str>,
     file: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tpl = DidTemplate::load_file(&file)
         .map_err(|e| format!("template at {} is invalid: {e}", file.display()))?;
-    let record = client.create_did_template(tpl).await?;
+    let record = match context {
+        Some(ctx) => client.create_context_did_template(ctx, tpl).await?,
+        None => client.create_did_template(tpl).await?,
+    };
     println!(
-        "{GREEN}\u{2713}{RESET} Created {CYAN}'{}'{RESET} ({DIM}{}{RESET}) on the VTA.",
-        record.template.name, record.template.kind
+        "{GREEN}\u{2713}{RESET} Created {CYAN}'{}'{RESET} ({DIM}{}{RESET}) in {}.",
+        record.template.name,
+        record.template.kind,
+        scope_label(context)
     );
     Ok(())
 }
 
-/// `pnm did-templates update <name> --file <path>` — replace a stored template.
+/// `pnm did-templates update <name> --file <path> [--context X]` — replace a template.
 pub async fn cmd_update(
     client: &VtaClient,
     name: &str,
+    context: Option<&str>,
     file: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tpl = DidTemplate::load_file(&file)
@@ -189,18 +226,32 @@ pub async fn cmd_update(
         )
         .into());
     }
-    let record = client.update_did_template(name, tpl).await?;
+    let record = match context {
+        Some(ctx) => client.update_context_did_template(ctx, name, tpl).await?,
+        None => client.update_did_template(name, tpl).await?,
+    };
     println!(
-        "{GREEN}\u{2713}{RESET} Updated {CYAN}'{}'{RESET} on the VTA.",
-        record.template.name
+        "{GREEN}\u{2713}{RESET} Updated {CYAN}'{}'{RESET} in {}.",
+        record.template.name,
+        scope_label(context)
     );
     Ok(())
 }
 
-/// `pnm did-templates delete <name>` — remove a stored template.
-pub async fn cmd_delete(client: &VtaClient, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    client.delete_did_template(name).await?;
-    println!("{GREEN}\u{2713}{RESET} Deleted {CYAN}'{name}'{RESET} on the VTA.");
+/// `pnm did-templates delete <name> [--context X]` — remove a stored template.
+pub async fn cmd_delete(
+    client: &VtaClient,
+    name: &str,
+    context: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match context {
+        Some(ctx) => client.delete_context_did_template(ctx, name).await?,
+        None => client.delete_did_template(name).await?,
+    }
+    println!(
+        "{GREEN}\u{2713}{RESET} Deleted {CYAN}'{name}'{RESET} from {}.",
+        scope_label(context)
+    );
     Ok(())
 }
 

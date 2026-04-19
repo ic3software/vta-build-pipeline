@@ -398,6 +398,7 @@ pub async fn handle_preview_delete_context(
         &state.contexts_ks,
         &state.keys_ks,
         &state.acl_ks,
+        &state.did_templates_ks,
         #[cfg(feature = "webvh")]
         &state.webvh_ks,
         &auth,

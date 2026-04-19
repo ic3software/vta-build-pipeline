@@ -121,6 +121,7 @@ pub async fn preview_delete_context_handler(
         &state.contexts_ks,
         &state.keys_ks,
         &state.acl_ks,
+        &state.did_templates_ks,
         #[cfg(feature = "webvh")]
         &state.webvh_ks,
         &auth.0,

@@ -96,6 +96,21 @@ pub fn router() -> Router<AppState> {
             "/did-templates/{name}/render",
             post(did_templates::render_handler),
         )
+        // DID templates — context scope (Phase 3)
+        .route(
+            "/contexts/{id}/did-templates",
+            get(did_templates::list_context_handler).post(did_templates::create_context_handler),
+        )
+        .route(
+            "/contexts/{id}/did-templates/{name}",
+            get(did_templates::get_context_handler)
+                .put(did_templates::update_context_handler)
+                .delete(did_templates::delete_context_handler),
+        )
+        .route(
+            "/contexts/{id}/did-templates/{name}/render",
+            post(did_templates::render_context_handler),
+        )
         // ACL routes (flattened for consistency)
         .route("/acl", get(acl::list_acl).post(acl::create_acl))
         .route(

@@ -203,17 +203,26 @@ enum DidTemplateCommands {
     #[command(name = "list-builtins")]
     ListBuiltins,
 
-    /// List DID templates stored on the VTA (global scope).
-    List,
+    /// List DID templates stored on the VTA.
+    ///
+    /// Without `--context`, lists global-scope templates (visible across
+    /// every context). With `--context X`, lists templates scoped to X.
+    List {
+        /// Scope the listing to one context. Omit for global scope.
+        #[arg(long)]
+        context: Option<String>,
+    },
 
     /// Show a stored template by name.
     ///
-    /// Without `--rendered`, prints the raw record (metadata + document with
-    /// placeholders). With `--rendered`, renders the template server-side
-    /// using `--var KEY=VALUE` pairs and prints the concrete DID document.
+    /// Without `--rendered`, prints the raw record. With `--rendered`, the
+    /// server renders the template using `--var KEY=VALUE` pairs.
     Show {
         /// Template name as stored on the VTA.
         name: String,
+        /// Look up the template in this context. Omit for global scope.
+        #[arg(long)]
+        context: Option<String>,
         /// Render the template rather than showing its raw record.
         #[arg(long)]
         rendered: bool,
@@ -222,26 +231,38 @@ enum DidTemplateCommands {
         vars: Vec<(String, String)>,
     },
 
-    /// Upload a new global template. Super admin only.
+    /// Upload a new template.
+    ///
+    /// Without `--context`: global scope (super admin only). With
+    /// `--context X`: context scope (context admin or super admin).
     Create {
         /// Path to a template JSON file.
         #[arg(long)]
         file: std::path::PathBuf,
+        /// Create in this context's scope instead of global.
+        #[arg(long)]
+        context: Option<String>,
     },
 
-    /// Replace a stored global template. Super admin only.
+    /// Replace a stored template.
     Update {
         /// Template name as stored on the VTA.
         name: String,
         /// Path to the replacement JSON file. Its `name` field must match.
         #[arg(long)]
         file: std::path::PathBuf,
+        /// Operate on this context's scope instead of global.
+        #[arg(long)]
+        context: Option<String>,
     },
 
-    /// Delete a stored global template. Super admin only.
+    /// Delete a stored template.
     Delete {
         /// Template name.
         name: String,
+        /// Operate on this context's scope instead of global.
+        #[arg(long)]
+        context: Option<String>,
     },
 }
 
@@ -1147,17 +1168,26 @@ async fn main() {
             DidTemplateCommands::Validate { .. }
             | DidTemplateCommands::Init { .. }
             | DidTemplateCommands::ListBuiltins => unreachable!("offline commands run pre-auth"),
-            DidTemplateCommands::List => did_templates::cmd_list(&client).await,
+            DidTemplateCommands::List { context } => {
+                did_templates::cmd_list(&client, context.as_deref()).await
+            }
             DidTemplateCommands::Show {
                 name,
+                context,
                 rendered,
                 vars,
-            } => did_templates::cmd_show(&client, &name, rendered, vars).await,
-            DidTemplateCommands::Create { file } => did_templates::cmd_create(&client, file).await,
-            DidTemplateCommands::Update { name, file } => {
-                did_templates::cmd_update(&client, &name, file).await
+            } => did_templates::cmd_show(&client, &name, context.as_deref(), rendered, vars).await,
+            DidTemplateCommands::Create { file, context } => {
+                did_templates::cmd_create(&client, context.as_deref(), file).await
             }
-            DidTemplateCommands::Delete { name } => did_templates::cmd_delete(&client, &name).await,
+            DidTemplateCommands::Update {
+                name,
+                file,
+                context,
+            } => did_templates::cmd_update(&client, &name, context.as_deref(), file).await,
+            DidTemplateCommands::Delete { name, context } => {
+                did_templates::cmd_delete(&client, &name, context.as_deref()).await
+            }
         },
         Commands::Vta {
             command: VtaCommands::Restart,

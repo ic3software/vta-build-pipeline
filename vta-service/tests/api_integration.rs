@@ -1916,3 +1916,274 @@ async fn did_templates_invalid_body_rejected_at_create() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+// ── Context-scoped DID templates (Phase 3) ─────────────────────────
+
+async fn create_test_context(app: &TestApp, super_token: &str, id: &str) {
+    let (status, _) = app
+        .request(post_auth(
+            "/contexts",
+            super_token,
+            json!({ "id": id, "name": id }),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "failed to create context '{id}'"
+    );
+}
+
+#[tokio::test]
+async fn ctx_did_templates_create_requires_context_admin_or_super() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+    create_test_context(&app, &super_token, "tpl-ctx").await;
+
+    // Reader with context access — may list/read, must not write.
+    let reader = ctx
+        .auth_token("did:key:z6MkReader", "reader", vec!["tpl-ctx".into()])
+        .await;
+    let (status, _) = app
+        .request(post_auth(
+            "/contexts/tpl-ctx/did-templates",
+            &reader,
+            sample_template("rejected"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Admin scoped to a different context — no access to tpl-ctx at all.
+    let other_admin = ctx
+        .auth_token("did:key:z6MkOther", "admin", vec!["somewhere-else".into()])
+        .await;
+    let (status, _) = app
+        .request(post_auth(
+            "/contexts/tpl-ctx/did-templates",
+            &other_admin,
+            sample_template("rejected"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn ctx_did_templates_context_admin_can_crud() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+    create_test_context(&app, &super_token, "cx-admin-test").await;
+
+    let ctx_admin = ctx
+        .auth_token(
+            "did:key:z6MkCtxAdmin",
+            "admin",
+            vec!["cx-admin-test".into()],
+        )
+        .await;
+
+    // Create
+    let (status, body) = app
+        .request(post_auth(
+            "/contexts/cx-admin-test/did-templates",
+            &ctx_admin,
+            sample_template("scoped-tpl"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(body["scope"]["type"], "context");
+    assert_eq!(body["scope"]["contextId"], "cx-admin-test");
+    assert_eq!(body["name"], "scoped-tpl");
+
+    // Get + list
+    let (status, body) = app
+        .request(get_auth(
+            "/contexts/cx-admin-test/did-templates/scoped-tpl",
+            &ctx_admin,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "scoped-tpl");
+
+    let (status, body) = app
+        .request(get_auth(
+            "/contexts/cx-admin-test/did-templates",
+            &ctx_admin,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["templates"].as_array().map(|a| a.len()), Some(1));
+
+    // Update
+    let mut updated = sample_template("scoped-tpl");
+    updated["description"] = json!("changed");
+    let (status, body) = app
+        .request(put_auth(
+            "/contexts/cx-admin-test/did-templates/scoped-tpl",
+            &ctx_admin,
+            updated,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["description"], "changed");
+
+    // Delete
+    let (status, _) = app
+        .request(delete_auth(
+            "/contexts/cx-admin-test/did-templates/scoped-tpl",
+            &ctx_admin,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = app
+        .request(get_auth(
+            "/contexts/cx-admin-test/did-templates/scoped-tpl",
+            &ctx_admin,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn ctx_did_templates_rejects_missing_context() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+
+    let (status, _) = app
+        .request(post_auth(
+            "/contexts/does-not-exist/did-templates",
+            &super_token,
+            sample_template("orphan"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn ctx_did_templates_shadow_global_without_conflict() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+    create_test_context(&app, &super_token, "shadow-ctx").await;
+
+    // Create a global "mediator" template.
+    let (status, _) = app
+        .request(post_auth(
+            "/did-templates",
+            &super_token,
+            sample_template("mediator"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Same name in a context — must coexist without conflict.
+    let (status, body) = app
+        .request(post_auth(
+            "/contexts/shadow-ctx/did-templates",
+            &super_token,
+            sample_template("mediator"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(body["scope"]["type"], "context");
+
+    let (_, global) = app
+        .request(get_auth("/did-templates/mediator", &super_token))
+        .await;
+    let (_, context_local) = app
+        .request(get_auth(
+            "/contexts/shadow-ctx/did-templates/mediator",
+            &super_token,
+        ))
+        .await;
+    assert_eq!(global["scope"]["type"], "global");
+    assert_eq!(context_local["scope"]["type"], "context");
+}
+
+#[tokio::test]
+async fn ctx_did_templates_render_injects_context_vars() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+    create_test_context(&app, &super_token, "render-ctx").await;
+
+    // Template references CONTEXT_ID in its document.
+    let mut tpl = sample_template("ctxtpl");
+    tpl["document"]["service"][0]["serviceEndpoint"]["contextId"] = json!("{CONTEXT_ID}");
+    let (status, _) = app
+        .request(post_auth(
+            "/contexts/render-ctx/did-templates",
+            &super_token,
+            tpl,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = app
+        .request(post_auth(
+            "/contexts/render-ctx/did-templates/ctxtpl/render",
+            &super_token,
+            json!({
+                "vars": {
+                    "DID": "did:x",
+                    "SIGNING_KEY_MB": "z6Mk",
+                    "URL": "https://example.com"
+                }
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["document"]["service"][0]["serviceEndpoint"]["contextId"],
+        "render-ctx"
+    );
+}
+
+#[tokio::test]
+async fn ctx_did_templates_deleted_when_parent_context_deleted() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+    create_test_context(&app, &super_token, "cascade-ctx").await;
+
+    // Add a template to the context.
+    let _ = app
+        .request(post_auth(
+            "/contexts/cascade-ctx/did-templates",
+            &super_token,
+            sample_template("will-be-deleted"),
+        ))
+        .await;
+
+    // Preview must list the template among resources to be removed.
+    let (status, preview) = app
+        .request(get_auth(
+            "/contexts/cascade-ctx/delete-preview",
+            &super_token,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        preview["did_templates"].as_array().map(|a| a.len()),
+        Some(1)
+    );
+    assert_eq!(preview["did_templates"][0], "will-be-deleted");
+
+    // Force-delete the context.
+    let (status, _) = app
+        .request(delete_auth(
+            "/contexts/cascade-ctx?force=true",
+            &super_token,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Template is gone; context itself is gone too so the lookup fails.
+    let (status, _) = app
+        .request(get_auth(
+            "/contexts/cascade-ctx/did-templates/will-be-deleted",
+            &super_token,
+        ))
+        .await;
+    assert!(
+        matches!(status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+        "expected 403/404 after context delete, got {status}"
+    );
+}

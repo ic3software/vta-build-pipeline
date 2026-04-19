@@ -1,7 +1,13 @@
-//! REST routes for DID templates (global scope — Phase 2).
+//! REST routes for DID templates (global + context scope).
 //!
-//! Writes (`POST`, `PUT`, `DELETE`) gate on [`SuperAdminAuth`]; reads and
-//! render accept any authenticated caller via [`AuthClaims`].
+//! Global-scope writes (`POST`, `PUT`, `DELETE` under `/did-templates`)
+//! gate on [`SuperAdminAuth`]; reads and render accept any authenticated
+//! caller via [`AuthClaims`].
+//!
+//! Context-scope routes (`/contexts/{id}/did-templates/...`) use
+//! [`AuthClaims`] for every handler and delegate authz to the operations
+//! layer, which accepts super admin OR admin-with-context for writes,
+//! and any caller with context access for reads.
 
 use std::collections::HashMap;
 
@@ -130,6 +136,126 @@ pub async fn render_handler(
         &state.did_templates_ks,
         &config,
         &auth,
+        &name,
+        caller_vars,
+        "rest",
+    )
+    .await?;
+    Ok(Json(RenderDidTemplateResponse { document }))
+}
+
+// ── Context-scoped handlers ──────────────────────────────────────────
+
+/// `GET /contexts/{id}/did-templates` — list context-scoped templates.
+pub async fn list_context_handler(
+    auth: AuthClaims,
+    State(state): State<AppState>,
+    Path(context_id): Path<String>,
+) -> Result<Json<ListDidTemplatesResponse>, AppError> {
+    let templates = operations::did_templates::list_context(
+        &state.did_templates_ks,
+        &auth,
+        &context_id,
+        "rest",
+    )
+    .await?;
+    Ok(Json(ListDidTemplatesResponse { templates }))
+}
+
+/// `POST /contexts/{id}/did-templates` — create a context-scoped template.
+pub async fn create_context_handler(
+    auth: AuthClaims,
+    State(state): State<AppState>,
+    Path(context_id): Path<String>,
+    Json(template): Json<DidTemplate>,
+) -> Result<(StatusCode, Json<DidTemplateRecord>), AppError> {
+    let record = operations::did_templates::create_context(
+        &state.did_templates_ks,
+        &state.contexts_ks,
+        &state.audit_ks,
+        &auth,
+        &context_id,
+        template,
+        "rest",
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(record)))
+}
+
+/// `GET /contexts/{id}/did-templates/{name}` — fetch one context template.
+pub async fn get_context_handler(
+    auth: AuthClaims,
+    State(state): State<AppState>,
+    Path((context_id, name)): Path<(String, String)>,
+) -> Result<Json<DidTemplateRecord>, AppError> {
+    let record = operations::did_templates::get_context(
+        &state.did_templates_ks,
+        &auth,
+        &context_id,
+        &name,
+        "rest",
+    )
+    .await?;
+    Ok(Json(record))
+}
+
+/// `PUT /contexts/{id}/did-templates/{name}` — replace a context template.
+pub async fn update_context_handler(
+    auth: AuthClaims,
+    State(state): State<AppState>,
+    Path((context_id, name)): Path<(String, String)>,
+    Json(template): Json<DidTemplate>,
+) -> Result<Json<DidTemplateRecord>, AppError> {
+    let record = operations::did_templates::update_context(
+        &state.did_templates_ks,
+        &state.audit_ks,
+        &auth,
+        &context_id,
+        &name,
+        template,
+        "rest",
+    )
+    .await?;
+    Ok(Json(record))
+}
+
+/// `DELETE /contexts/{id}/did-templates/{name}` — remove a context template.
+pub async fn delete_context_handler(
+    auth: AuthClaims,
+    State(state): State<AppState>,
+    Path((context_id, name)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    operations::did_templates::delete_context(
+        &state.did_templates_ks,
+        &state.audit_ks,
+        &auth,
+        &context_id,
+        &name,
+        "rest",
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /contexts/{id}/did-templates/{name}/render` — render a context template.
+pub async fn render_context_handler(
+    auth: AuthClaims,
+    State(state): State<AppState>,
+    Path((context_id, name)): Path<(String, String)>,
+    Json(req): Json<RenderDidTemplateRequest>,
+) -> Result<Json<RenderDidTemplateResponse>, AppError> {
+    let mut caller_vars = TemplateVars::new();
+    for (k, v) in req.vars {
+        caller_vars.insert(k, v);
+    }
+
+    let config = state.config.read().await.clone();
+    let document = operations::did_templates::render_context(
+        &state.did_templates_ks,
+        &state.contexts_ks,
+        &config,
+        &auth,
+        &context_id,
         &name,
         caller_vars,
         "rest",

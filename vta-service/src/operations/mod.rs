@@ -19,6 +19,7 @@ pub struct Keyspaces<'a> {
     pub keys: &'a KeyspaceHandle,
     pub acl: &'a KeyspaceHandle,
     pub contexts: &'a KeyspaceHandle,
+    pub did_templates: &'a KeyspaceHandle,
     pub audit: &'a KeyspaceHandle,
     pub imported: &'a KeyspaceHandle,
     #[cfg(feature = "webvh")]
@@ -32,6 +33,7 @@ impl<'a> Keyspaces<'a> {
             keys: &s.keys_ks,
             acl: &s.acl_ks,
             contexts: &s.contexts_ks,
+            did_templates: &s.did_templates_ks,
             audit: &s.audit_ks,
             imported: &s.imported_ks,
             #[cfg(feature = "webvh")]
@@ -46,6 +48,7 @@ impl<'a> Keyspaces<'a> {
             keys: &s.keys_ks,
             acl: &s.acl_ks,
             contexts: &s.contexts_ks,
+            did_templates: &s.did_templates_ks,
             audit: &s.audit_ks,
             imported: &s.imported_ks,
             #[cfg(feature = "webvh")]

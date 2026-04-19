@@ -293,6 +293,7 @@ pub async fn run(
                 keys_ks: keys_ks.clone(),
                 acl_ks: acl_ks.clone(),
                 contexts_ks: contexts_ks.clone(),
+                did_templates_ks: did_templates_ks.clone(),
                 audit_ks: audit_ks.clone(),
                 imported_ks: imported_ks.clone(),
                 #[cfg(feature = "webvh")]

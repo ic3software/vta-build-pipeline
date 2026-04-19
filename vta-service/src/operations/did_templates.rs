@@ -1,11 +1,16 @@
 //! DID template CRUD + render operations.
 //!
-//! Phase 2: **global** scope only. All writes gated on super admin
-//! (Admin role with no `allowed_contexts`). Reads allowed for any
-//! authenticated caller — templates are advisory shapes, not secrets.
+//! Two scopes:
 //!
-//! Context-scoped templates (Phase 3) will follow the same pattern with
-//! an additional `context_id` in the key and a context-admin authz gate.
+//! - **Global**: writes gated on super admin, reads open to any
+//!   authenticated caller.
+//! - **Context**: writes gated on context admin (Admin role with the
+//!   target context in `allowed_contexts`) or super admin. Reads gated
+//!   on context access (any role that has the context on their ACL).
+//!
+//! Templates are advisory shapes, not secrets — reads are intentionally
+//! permissive so managers and initiators can preview what a create flow
+//! will produce.
 
 use chrono::Utc;
 use serde_json::Value;
@@ -215,7 +220,8 @@ pub async fn render_global(
 /// Build the ambient variable set the server can fill in without caller input.
 ///
 /// Phase 4 extends this with DID-creation-flow vars (DID, SIGNING_KEY_MB,
-/// KA_KEY_MB, CONTEXT_ID, CONTEXT_DID). Phase 2 only has config-level vars.
+/// KA_KEY_MB). Phase 3 adds `CONTEXT_ID` / `CONTEXT_DID` when a render
+/// happens in context scope — see [`ambient_vars_with_context`].
 fn ambient_vars(config: &crate::config::AppConfig) -> TemplateVars {
     let mut vars = TemplateVars::new();
     if let Some(vta_did) = config.vta_did.as_deref() {
@@ -226,6 +232,274 @@ fn ambient_vars(config: &crate::config::AppConfig) -> TemplateVars {
     }
     vars.insert_string("NOW", Utc::now().to_rfc3339());
     vars
+}
+
+/// Like [`ambient_vars`], but also injects `CONTEXT_ID` and (if the context
+/// has a DID set) `CONTEXT_DID`. Used by context-scope render.
+async fn ambient_vars_with_context(
+    config: &crate::config::AppConfig,
+    contexts_ks: &KeyspaceHandle,
+    context_id: &str,
+) -> TemplateVars {
+    let mut vars = ambient_vars(config);
+    vars.insert_string("CONTEXT_ID", context_id);
+    if let Ok(Some(ctx)) = crate::contexts::get_context(contexts_ks, context_id).await
+        && let Some(ref did) = ctx.did
+    {
+        vars.insert_string("CONTEXT_DID", did.clone());
+    }
+    vars
+}
+
+// ── Context scope ────────────────────────────────────────────────────
+
+/// Write-side authz for context-scoped templates: super admin, or admin
+/// with the target context in `allowed_contexts`.
+fn require_context_write(auth: &AuthClaims, context_id: &str) -> Result<(), AppError> {
+    if auth.is_super_admin() {
+        return Ok(());
+    }
+    auth.require_admin()?;
+    auth.require_context(context_id)?;
+    Ok(())
+}
+
+/// Read-side authz for context-scoped templates: any authenticated caller
+/// with access to the context (super admin or context in `allowed_contexts`).
+fn require_context_read(auth: &AuthClaims, context_id: &str) -> Result<(), AppError> {
+    auth.require_context(context_id)
+}
+
+/// Create a new context-scoped template. Context-admin-or-super.
+///
+/// Rejects if the context does not exist — templates attached to a missing
+/// parent would orphan on creation.
+pub async fn create_context(
+    templates_ks: &KeyspaceHandle,
+    contexts_ks: &KeyspaceHandle,
+    audit_ks: &KeyspaceHandle,
+    auth: &AuthClaims,
+    context_id: &str,
+    template: DidTemplate,
+    channel: &str,
+) -> Result<DidTemplateRecord, AppError> {
+    require_context_write(auth, context_id)?;
+
+    if crate::contexts::get_context(contexts_ks, context_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::NotFound(format!(
+            "context not found: {context_id}"
+        )));
+    }
+
+    template
+        .validate()
+        .map_err(|e| AppError::Validation(e.to_string()))?;
+
+    if store::get_context_template(templates_ks, context_id, &template.name)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(format!(
+            "template already exists in context '{context_id}': {}",
+            template.name
+        )));
+    }
+
+    let now = unix_secs();
+    let record = DidTemplateRecord {
+        template,
+        scope: Scope::Context {
+            context_id: context_id.to_string(),
+        },
+        created_at: now,
+        updated_at: now,
+        created_by: auth.did.clone(),
+    };
+
+    store::store_context_template(templates_ks, context_id, &record).await?;
+    let _ = audit::record(
+        audit_ks,
+        "did_template.created",
+        &auth.did,
+        Some(&record.template.name),
+        "success",
+        Some(channel),
+        Some(context_id),
+    )
+    .await;
+
+    info!(
+        channel,
+        context_id,
+        name = %record.template.name,
+        "did template created (context scope)"
+    );
+    Ok(record)
+}
+
+/// Replace an existing context-scoped template. Context-admin-or-super.
+pub async fn update_context(
+    templates_ks: &KeyspaceHandle,
+    audit_ks: &KeyspaceHandle,
+    auth: &AuthClaims,
+    context_id: &str,
+    name: &str,
+    template: DidTemplate,
+    channel: &str,
+) -> Result<DidTemplateRecord, AppError> {
+    require_context_write(auth, context_id)?;
+
+    if template.name != name {
+        return Err(AppError::Validation(format!(
+            "template name in body ('{}') does not match path ('{name}')",
+            template.name
+        )));
+    }
+
+    template
+        .validate()
+        .map_err(|e| AppError::Validation(e.to_string()))?;
+
+    let existing = store::get_context_template(templates_ks, context_id, name)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "template not found in context '{context_id}': {name}"
+            ))
+        })?;
+
+    let record = DidTemplateRecord {
+        template,
+        scope: Scope::Context {
+            context_id: context_id.to_string(),
+        },
+        created_at: existing.created_at,
+        updated_at: unix_secs(),
+        created_by: existing.created_by,
+    };
+
+    store::store_context_template(templates_ks, context_id, &record).await?;
+    let _ = audit::record(
+        audit_ks,
+        "did_template.updated",
+        &auth.did,
+        Some(&record.template.name),
+        "success",
+        Some(channel),
+        Some(context_id),
+    )
+    .await;
+
+    info!(
+        channel,
+        context_id,
+        name = %record.template.name,
+        "did template updated (context scope)"
+    );
+    Ok(record)
+}
+
+/// Fetch a single context-scoped template by name.
+pub async fn get_context(
+    templates_ks: &KeyspaceHandle,
+    auth: &AuthClaims,
+    context_id: &str,
+    name: &str,
+    _channel: &str,
+) -> Result<DidTemplateRecord, AppError> {
+    require_context_read(auth, context_id)?;
+    store::get_context_template(templates_ks, context_id, name)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "template not found in context '{context_id}': {name}"
+            ))
+        })
+}
+
+/// List context-scoped templates for one context.
+pub async fn list_context(
+    templates_ks: &KeyspaceHandle,
+    auth: &AuthClaims,
+    context_id: &str,
+    _channel: &str,
+) -> Result<Vec<DidTemplateRecord>, AppError> {
+    require_context_read(auth, context_id)?;
+    store::list_context_templates(templates_ks, context_id).await
+}
+
+/// Delete a context-scoped template. Context-admin-or-super.
+pub async fn delete_context(
+    templates_ks: &KeyspaceHandle,
+    audit_ks: &KeyspaceHandle,
+    auth: &AuthClaims,
+    context_id: &str,
+    name: &str,
+    channel: &str,
+) -> Result<(), AppError> {
+    require_context_write(auth, context_id)?;
+
+    if store::get_context_template(templates_ks, context_id, name)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::NotFound(format!(
+            "template not found in context '{context_id}': {name}"
+        )));
+    }
+
+    store::delete_context_template(templates_ks, context_id, name).await?;
+    let _ = audit::record(
+        audit_ks,
+        "did_template.deleted",
+        &auth.did,
+        Some(name),
+        "success",
+        Some(channel),
+        Some(context_id),
+    )
+    .await;
+
+    info!(
+        channel,
+        context_id, name, "did template deleted (context scope)"
+    );
+    Ok(())
+}
+
+/// Render a context-scoped template with caller-supplied variables. Any
+/// caller with read access to the context. Ambient vars include
+/// `CONTEXT_ID` (always) and `CONTEXT_DID` (if set on the context record).
+#[allow(clippy::too_many_arguments)]
+pub async fn render_context(
+    templates_ks: &KeyspaceHandle,
+    contexts_ks: &KeyspaceHandle,
+    config: &crate::config::AppConfig,
+    auth: &AuthClaims,
+    context_id: &str,
+    name: &str,
+    caller_vars: TemplateVars,
+    _channel: &str,
+) -> Result<Value, AppError> {
+    require_context_read(auth, context_id)?;
+    let record = store::get_context_template(templates_ks, context_id, name)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "template not found in context '{context_id}': {name}"
+            ))
+        })?;
+
+    let mut vars = ambient_vars_with_context(config, contexts_ks, context_id).await;
+    vars.extend(caller_vars);
+
+    record
+        .template
+        .render(&vars)
+        .map_err(|e| AppError::Validation(e.to_string()))
 }
 
 fn unix_secs() -> u64 {

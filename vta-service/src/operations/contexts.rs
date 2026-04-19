@@ -182,6 +182,7 @@ pub async fn preview_delete_context(
     contexts_ks: &KeyspaceHandle,
     keys_ks: &KeyspaceHandle,
     acl_ks: &KeyspaceHandle,
+    did_templates_ks: &KeyspaceHandle,
     #[cfg(feature = "webvh")] webvh_ks: &KeyspaceHandle,
     auth: &AuthClaims,
     id: &str,
@@ -196,13 +197,21 @@ pub async fn preview_delete_context(
     let preview = collect_context_resources(
         keys_ks,
         acl_ks,
+        did_templates_ks,
         #[cfg(feature = "webvh")]
         webvh_ks,
         id,
     )
     .await?;
 
-    info!(channel, id = %id, keys = preview.keys.len(), dids = preview.webvh_dids.len(), "context delete preview");
+    info!(
+        channel,
+        id = %id,
+        keys = preview.keys.len(),
+        dids = preview.webvh_dids.len(),
+        templates = preview.did_templates.len(),
+        "context delete preview"
+    );
     Ok(preview)
 }
 
@@ -216,6 +225,7 @@ pub async fn delete_context(
     let contexts_ks = ks.contexts;
     let keys_ks = ks.keys;
     let acl_ks = ks.acl;
+    let did_templates_ks = ks.did_templates;
     #[cfg(feature = "webvh")]
     let webvh_ks = ks.webvh;
     auth.require_super_admin()?;
@@ -227,6 +237,7 @@ pub async fn delete_context(
     let preview = collect_context_resources(
         keys_ks,
         acl_ks,
+        did_templates_ks,
         #[cfg(feature = "webvh")]
         webvh_ks,
         id,
@@ -236,7 +247,8 @@ pub async fn delete_context(
     let has_resources = !preview.keys.is_empty()
         || !preview.webvh_dids.is_empty()
         || !preview.acl_entries_removed.is_empty()
-        || !preview.acl_entries_updated.is_empty();
+        || !preview.acl_entries_updated.is_empty()
+        || !preview.did_templates.is_empty();
 
     if has_resources && !force {
         return Err(AppError::Validation(
@@ -268,6 +280,10 @@ pub async fn delete_context(
         }
     }
 
+    // Delete any DID templates scoped to this context
+    let templates_removed =
+        crate::did_templates::delete_all_context_templates(did_templates_ks, id).await?;
+
     // Delete the context record itself
     delete_context_store(contexts_ks, id).await?;
 
@@ -278,6 +294,7 @@ pub async fn delete_context(
         dids_removed = preview.webvh_dids.len(),
         acl_removed = preview.acl_entries_removed.len(),
         acl_updated = preview.acl_entries_updated.len(),
+        templates_removed,
         "context deleted with cascade"
     );
     Ok(DeleteContextResultBody {
@@ -290,6 +307,7 @@ pub async fn delete_context(
 async fn collect_context_resources(
     keys_ks: &KeyspaceHandle,
     acl_ks: &KeyspaceHandle,
+    did_templates_ks: &KeyspaceHandle,
     #[cfg(feature = "webvh")] webvh_ks: &KeyspaceHandle,
     context_id: &str,
 ) -> Result<DeleteContextPreviewResultBody, AppError> {
@@ -336,6 +354,11 @@ async fn collect_context_resources(
             }
         }
     }
+
+    // DID templates scoped to this context
+    let templates =
+        crate::did_templates::list_context_templates(did_templates_ks, context_id).await?;
+    preview.did_templates = templates.into_iter().map(|r| r.template.name).collect();
 
     Ok(preview)
 }
