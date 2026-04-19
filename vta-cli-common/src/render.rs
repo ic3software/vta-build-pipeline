@@ -15,6 +15,71 @@ pub const CYAN: &str = "\x1b[36m";
 pub const YELLOW: &str = "\x1b[33m";
 pub const RESET: &str = "\x1b[0m";
 
+// ── Error reporting ─────────────────────────────────────────────────
+
+/// Print a CLI error to stderr in a form an operator can act on.
+///
+/// Downcasts to [`vta_sdk::error::VtaError`] when possible and emits a
+/// tailored remediation hint for the common failure modes (auth, network,
+/// forbidden, validation). Falls back to the raw error message + source
+/// chain for anything else, so unknown failures still get their underlying
+/// cause surfaced.
+///
+/// Call this from the top-level CLI match instead of `eprintln!("Error:
+/// {e}")` — the raw form loses auth/network context that operators need
+/// to fix things themselves.
+pub fn print_cli_error(err: &(dyn std::error::Error + 'static)) {
+    use vta_sdk::error::VtaError;
+    if let Some(vta_err) = err.downcast_ref::<VtaError>() {
+        match vta_err {
+            VtaError::Auth(msg) => {
+                eprintln!("{RED}\u{2717}{RESET} Authentication failed: {msg}");
+                eprintln!(
+                    "  {DIM}Token may be expired. Try `pnm setup` to re-authenticate, or check \
+                     that the VTA's `/auth` endpoint is reachable.{RESET}"
+                );
+            }
+            VtaError::Forbidden(msg) => {
+                eprintln!("{RED}\u{2717}{RESET} Forbidden: {msg}");
+                eprintln!(
+                    "  {DIM}Your role or context access doesn't permit this operation. \
+                     Inspect with `pnm acl get <your-did>`.{RESET}"
+                );
+            }
+            VtaError::NotFound(msg) => {
+                eprintln!("{RED}\u{2717}{RESET} Not found: {msg}");
+            }
+            VtaError::Conflict(msg) => {
+                eprintln!("{RED}\u{2717}{RESET} Conflict: {msg}");
+            }
+            VtaError::Validation(msg) => {
+                eprintln!("{RED}\u{2717}{RESET} Invalid request: {msg}");
+            }
+            VtaError::Network(e) => {
+                eprintln!("{RED}\u{2717}{RESET} Network error: {e}");
+                eprintln!("  {DIM}Is the VTA reachable? Check its URL with `pnm vta info`.{RESET}");
+            }
+            VtaError::Server { status, body } => {
+                eprintln!("{RED}\u{2717}{RESET} Server error (HTTP {status}): {body}");
+                eprintln!(
+                    "  {DIM}This is a VTA-side failure. Check server logs or contact the operator.{RESET}"
+                );
+            }
+            VtaError::Protocol(msg) => {
+                eprintln!("{RED}\u{2717}{RESET} Protocol error: {msg}");
+            }
+            other => eprintln!("{RED}\u{2717}{RESET} Error: {other}"),
+        }
+        return;
+    }
+    eprintln!("{RED}\u{2717}{RESET} Error: {err}");
+    let mut source = err.source();
+    while let Some(s) = source {
+        eprintln!("  {DIM}caused by: {s}{RESET}");
+        source = s.source();
+    }
+}
+
 // ── Ratatui rendering helpers ───────────────────────────────────────
 
 pub fn print_widget(widget: impl Widget, height: u16) {

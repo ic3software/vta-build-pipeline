@@ -1018,7 +1018,7 @@ async fn main() {
         Commands::Setup => {
             let result = setup::run_setup(setup::SetupOptions {}, &mut pnm_config).await;
             if let Err(e) = result {
-                eprintln!("Error: {e}");
+                vta_cli_common::render::print_cli_error(e.as_ref());
                 std::process::exit(1);
             }
             return;
@@ -1051,7 +1051,7 @@ async fn main() {
                 }
             };
             if let Err(e) = result {
-                eprintln!("Error: {e}");
+                vta_cli_common::render::print_cli_error(e.as_ref());
                 std::process::exit(1);
             }
             return;
@@ -1066,7 +1066,7 @@ async fn main() {
                 _ => unreachable!("online did-templates run post-auth"),
             };
             if let Err(e) = result {
-                eprintln!("Error: {e}");
+                vta_cli_common::render::print_cli_error(e.as_ref());
                 std::process::exit(1);
             }
             return;
@@ -1191,7 +1191,7 @@ async fn main() {
         match auth::connect(url_override.as_deref(), &keyring_key).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Error: {e}");
+                vta_cli_common::render::print_cli_error(e.as_ref());
                 std::process::exit(1);
             }
         }
@@ -1609,7 +1609,7 @@ async fn main() {
     client.shutdown().await;
 
     if let Err(e) = result {
-        eprintln!("Error: {e}");
+        vta_cli_common::render::print_cli_error(e.as_ref());
         std::process::exit(1);
     }
 }

@@ -12,7 +12,19 @@ use vta_cli_common::commands::{
 use vta_cli_common::render::{CYAN, DIM, GREEN, RED, RESET, YELLOW, print_section};
 
 #[derive(Parser)]
-#[command(name = "cnm-cli", about = "CLI for VTC Verifiable Trust Agents")]
+#[command(
+    name = "cnm-cli",
+    about = "CLI for VTC Verifiable Trust Agents (community-admin scope)",
+    long_about = "Community Network Manager — community-admin-scoped CLI for the VTA.\n\
+                  \n\
+                  CNM is deliberately a reduced surface compared to `pnm`:\n\
+                  - No `webvh` / `audit` / `backup` / `keys import` — those are VTA-\n\
+                    operator concerns, not community-admin concerns, and live on pnm.\n\
+                  - DID-template management is mirrored here because community admins\n\
+                    own context-scoped templates.\n\
+                  - Contexts + ACL + auth-credential generation are present because\n\
+                    a community admin needs to provision application identities."
+)]
 struct Cli {
     /// Base URL of the VTA service (overrides config)
     #[arg(long, env = "VTA_URL")]
@@ -832,7 +844,7 @@ async fn main() {
         match auth::connect(url_override.as_deref(), &keyring_key).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Error: {e}");
+                vta_cli_common::render::print_cli_error(e.as_ref());
                 std::process::exit(1);
             }
         }
@@ -1074,7 +1086,7 @@ async fn main() {
     client.shutdown().await;
 
     if let Err(e) = result {
-        eprintln!("Error: {e}");
+        vta_cli_common::render::print_cli_error(e.as_ref());
         std::process::exit(1);
     }
 }
