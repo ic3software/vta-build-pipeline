@@ -739,27 +739,38 @@ pub async fn run_setup_wizard(
     eprintln!();
     eprintln!("\x1b[1;36m── What to do next ──\x1b[0m");
     eprintln!();
-    eprintln!("  1. Start the VTA:");
-    eprintln!("       vta --config {}", config_path.display());
+    eprintln!("  1. On your operator workstation (with the VTA still stopped),");
+    eprintln!("     run `pnm setup` and choose \"Connect to an existing non-TEE");
+    eprintln!("     VTA\". When it asks for the VTA DID, enter:");
     eprintln!();
-    eprintln!("  2. On your operator workstation, run `pnm setup` and choose");
-    eprintln!("     \"Connect to an existing non-TEE VTA\". Enter:");
-    if let Some(url) = &config.public_url {
-        eprintln!("       VTA URL: {url}");
-    } else {
-        eprintln!("       VTA URL: (the URL this VTA will be reachable at)");
-    }
     if let Some(did) = &config.vta_did {
-        eprintln!("       VTA DID: {did}");
+        eprintln!("       \x1b[1m{did}\x1b[0m");
+    } else {
+        eprintln!("       (the VTA DID shown above)");
     }
     eprintln!();
     eprintln!("     `pnm setup` mints a temp did:key and prints an");
-    eprintln!("     `vta import-did` command that you run here on the VTA host to");
-    eprintln!("     grant admin access. PNM will rotate to a fresh long-lived");
-    eprintln!("     did:key on first successful authentication.");
+    eprintln!("     `vta import-did` command.");
     eprintln!();
-    eprintln!("  3. (Optional) To bootstrap multiple admins, repeat step 2 on");
-    eprintln!("     each operator's workstation.");
+    eprintln!("  2. Back on this host, run the `vta import-did` command pnm");
+    eprintln!("     printed. This grants admin access to the temp did:key by");
+    eprintln!("     writing to the local store — no network call, no running VTA");
+    eprintln!("     required.");
+    eprintln!();
+    eprintln!("  3. Start the VTA:");
+    eprintln!(
+        "       \x1b[1mvta --config {}\x1b[0m",
+        config_path.display()
+    );
+    eprintln!();
+    eprintln!("     On the operator workstation's first authenticated command");
+    eprintln!("     (e.g. `pnm health`), PNM rotates to a fresh long-lived");
+    eprintln!("     did:key and removes the temp from the ACL.");
+    eprintln!();
+    eprintln!("  4. (Optional) To bootstrap additional admins, repeat steps 1–2");
+    eprintln!("     on each operator's workstation before or after starting the");
+    eprintln!("     VTA — `vta import-did` takes a store-level lock and must not");
+    eprintln!("     run while the VTA process is holding the store open.");
     eprintln!();
 
     Ok(())

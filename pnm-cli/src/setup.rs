@@ -61,40 +61,11 @@ pub async fn run_setup(
 async fn connect_to_non_tee_vta(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
     let vta_did: String = Input::new()
-        .with_prompt("VTA DID (ask your admin, or see `vta config show`)")
+        .with_prompt("VTA DID (see `vta config show` on the VTA host)")
         .interact_text()?;
     let vta_did = vta_did.trim().to_string();
     if !vta_did.starts_with("did:") {
         return Err("VTA DID must start with `did:` (e.g. did:webvh:... or did:key:...)".into());
-    }
-
-    // Resolve REST URL from the DID's `#vta-rest` service endpoint.
-    // Let the operator override or supply manually if resolution fails —
-    // e.g. in a new-deploy state where the DID document isn't published
-    // yet, or when testing against a local VTA.
-    eprintln!("Resolving {vta_did}...");
-    let discovered_url = match vta_sdk::session::resolve_vta_url(&vta_did).await {
-        Ok(u) => {
-            eprintln!("  VTA URL: {u}");
-            Some(u)
-        }
-        Err(e) => {
-            eprintln!("  Could not resolve a URL from the DID document: {e}");
-            None
-        }
-    };
-    let url: String = match discovered_url {
-        Some(u) => Input::new()
-            .with_prompt("VTA URL")
-            .default(u)
-            .interact_text()?,
-        None => Input::new()
-            .with_prompt("VTA URL (e.g. https://vta.example.com)")
-            .interact_text()?,
-    };
-    let url = url.trim().trim_end_matches('/').to_string();
-    if url.is_empty() {
-        return Err("VTA URL is required".into());
     }
 
     let default_name = vta_did
@@ -115,22 +86,21 @@ async fn connect_to_non_tee_vta(config: &mut PnmConfig) -> Result<(), Box<dyn st
     // admin; PNM rotates it out of the ACL the first time it successfully
     // authenticates, so an accidental leak over email/chat only exposes a
     // short-lived identity.
-    let (bundle, did) =
-        vta_cli_common::local_keygen::generate_admin_did_key(&vta_did, Some(url.clone()));
+    let (bundle, did) = vta_cli_common::local_keygen::generate_admin_did_key(&vta_did, None);
 
     auth::store_session_pending_rotation(
         &keyring_key,
         &did,
         &bundle.private_key_multibase,
         &vta_did,
-        &url,
+        None,
     )?;
 
     config.vtas.insert(
         slug.clone(),
         VtaConfig {
             name: name.clone(),
-            url: Some(url.clone()),
+            url: None,
             vta_did: Some(vta_did.clone()),
         },
     );
@@ -142,7 +112,8 @@ async fn connect_to_non_tee_vta(config: &mut PnmConfig) -> Result<(), Box<dyn st
     eprintln!();
     eprintln!("\x1b[1;32mTemp admin identity created.\x1b[0m");
     eprintln!();
-    eprintln!("  VTA:       {slug}  ({url})");
+    eprintln!("  VTA slug:  {slug}");
+    eprintln!("  VTA DID:   {vta_did}");
     eprintln!("  Temp DID:  {did}");
     eprintln!();
     eprintln!("Ask your VTA admin to grant this identity admin access. On the VTA host,");
@@ -151,8 +122,9 @@ async fn connect_to_non_tee_vta(config: &mut PnmConfig) -> Result<(), Box<dyn st
     eprintln!("  \x1b[1mvta import-did --did {did} --role admin\x1b[0m");
     eprintln!();
     eprintln!("Once the grant is in place, run any PNM command (e.g. `pnm health`). PNM");
-    eprintln!("will automatically rotate to a fresh long-lived did:key on first connect");
-    eprintln!("and remove the temp DID from the ACL.");
+    eprintln!("will resolve the VTA's REST / DIDComm endpoints from its DID document,");
+    eprintln!("rotate to a fresh long-lived did:key on first connect, and remove the");
+    eprintln!("temp DID from the ACL.");
     eprintln!();
 
     Ok(())
@@ -224,13 +196,9 @@ async fn setup_tee(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Err
     let keyring_key = vta_keyring_key(&slug);
 
     // Store session directly — the TEE admin identity does not rotate.
-    auth::store_session(
-        &keyring_key,
-        &did,
-        &private_key_multibase,
-        &vta_did,
-        "", // No REST URL in TEE mode
-    )?;
+    // No REST URL in TEE mode; operator reaches the VTA via DIDComm through
+    // the mediator, resolved from the VTA DID at connect time.
+    auth::store_session(&keyring_key, &did, &private_key_multibase, &vta_did, None)?;
 
     // 8. Save to config
     config.vtas.insert(

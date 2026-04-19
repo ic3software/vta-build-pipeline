@@ -70,6 +70,11 @@ enum Commands {
     ExportAdmin,
     /// Show VTA status and statistics
     Status,
+    /// Inspect the configuration file (offline, no server required).
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     /// Create a did:key in a context (offline, no server required)
     CreateDidKey {
         /// Target context ID
@@ -259,6 +264,16 @@ enum WebvhCommands {
 }
 
 #[derive(Subcommand)]
+enum ConfigCommands {
+    /// Print the VTA's identity and service settings.
+    ///
+    /// Output matches what `pnm setup` asks for (VTA DID, public URL,
+    /// mediator) plus the config/data paths. No network calls; the data
+    /// store is not opened, so this works while the VTA is running.
+    Show,
+}
+
+#[derive(Subcommand)]
 enum AclCommands {
     /// List all ACL entries
     List {
@@ -352,6 +367,15 @@ async fn main() {
                 init_tracing(&config);
             }
             if let Err(e) = status::run_status(cli.config).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Config { command }) => {
+            let result = match command {
+                ConfigCommands::Show => run_config_show(cli.config),
+            };
+            if let Err(e) = result {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
@@ -694,6 +718,76 @@ async fn run_bootstrap_admin(
 }
 
 // init_tracing is now in vta_service::init_tracing (lib.rs)
+
+/// Print the VTA's identity and service settings from `config.toml`.
+///
+/// Explicitly does NOT open the data store, so it works while the VTA
+/// process is running. Also doesn't resolve DIDs or touch the network —
+/// this is the quick, safe "what did setup write?" command.
+fn run_config_show(config_path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let config = AppConfig::load(config_path)?;
+
+    const BOLD: &str = "\x1b[1m";
+    const CYAN: &str = "\x1b[36m";
+    const DIM: &str = "\x1b[2m";
+    const RESET: &str = "\x1b[0m";
+
+    fn line(label: &str, value: Option<&str>) {
+        match value {
+            Some(v) if !v.is_empty() => {
+                println!("  {CYAN}{:<13}{RESET} {v}", label);
+            }
+            _ => {
+                println!("  {CYAN}{:<13}{RESET} {DIM}(not set){RESET}", label);
+            }
+        }
+    }
+
+    println!();
+    println!("{BOLD}VTA configuration{RESET}");
+    println!();
+    line("Name", config.vta_name.as_deref());
+    line("VTA DID", config.vta_did.as_deref());
+    line("Public URL", config.public_url.as_deref());
+
+    let mut svc_list = Vec::new();
+    if config.services.rest {
+        svc_list.push("REST");
+    }
+    if config.services.didcomm {
+        svc_list.push("DIDComm");
+    }
+    let svc_display = if svc_list.is_empty() {
+        "(none)".to_string()
+    } else {
+        svc_list.join(", ")
+    };
+    line("Services", Some(&svc_display));
+    line(
+        "Listen",
+        Some(&format!("{}:{}", config.server.host, config.server.port)),
+    );
+
+    if let Some(msg) = &config.messaging {
+        line("Mediator DID", Some(&msg.mediator_did));
+        if !msg.mediator_url.is_empty() {
+            line("Mediator URL", Some(&msg.mediator_url));
+        }
+    } else {
+        line("Mediator DID", None);
+    }
+
+    line(
+        "Config file",
+        Some(&config.config_path.display().to_string()),
+    );
+    line(
+        "Data store",
+        Some(&config.store.data_dir.display().to_string()),
+    );
+    println!();
+    Ok(())
+}
 
 async fn export_admin(config_path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::load(config_path)?;

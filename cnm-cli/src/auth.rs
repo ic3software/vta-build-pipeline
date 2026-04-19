@@ -51,7 +51,16 @@ pub fn store_session_direct(
     vta_did: &str,
     vta_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    store().store_direct(keyring_key, did, private_key, vta_did, vta_url)
+    // cnm-cli keeps its wrapper API taking `&str` for vta_url — all the
+    // cnm-cli call sites have a concrete URL in hand from `prompt_vta_url`.
+    // vta-sdk's SessionStore now takes Option<&str>; empty strings map to
+    // None so the runtime resolver kicks in if a caller passes "".
+    let url_opt = if vta_url.is_empty() {
+        None
+    } else {
+        Some(vta_url)
+    };
+    store().store_direct(keyring_key, did, private_key, vta_did, url_opt)
 }
 
 /// Clear stored credentials and cached tokens.

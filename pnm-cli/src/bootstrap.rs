@@ -334,7 +334,7 @@ pub async fn run_connect(
         &credential.did,
         &credential.private_key_multibase,
         &credential.vta_did,
-        &vta_url,
+        Some(&vta_url),
     )?;
     // Verify the credential works end-to-end before declaring success.
     auth::ensure_authenticated(&vta_url, &keyring_key).await?;

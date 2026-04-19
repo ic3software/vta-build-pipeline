@@ -462,19 +462,24 @@ impl SessionStore {
     }
 
     /// Store a session directly (without performing authentication).
+    ///
+    /// `vta_url` is optional — omit it to force runtime endpoint resolution
+    /// from the VTA's DID document (`#vta-rest` service or did:web/did:webvh
+    /// parsing). Supply it only when you want to pin a specific URL (e.g.
+    /// staging, local dev, or when the DID document is not yet reachable).
     pub fn store_direct(
         &self,
         key: &str,
         did: &str,
         private_key: &str,
         vta_did: &str,
-        vta_url: &str,
+        vta_url: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let session = Session {
             client_did: did.to_string(),
             private_key: private_key.to_string(),
             vta_did: vta_did.to_string(),
-            vta_url: Some(vta_url.to_string()),
+            vta_url: vta_url.map(str::to_string),
             access_token: None,
             access_expires_at: None,
             needs_rotation: false,
@@ -489,19 +494,21 @@ impl SessionStore {
     /// the ACL entry exists, `ensure_authenticated()` will atomically rotate
     /// to a fresh did:key and drop the temp one, so the DID that may have
     /// been copy-pasted through a low-trust channel does not remain live.
+    ///
+    /// `vta_url` is optional — see [`Self::store_direct`].
     pub fn store_pending_rotation(
         &self,
         key: &str,
         did: &str,
         private_key: &str,
         vta_did: &str,
-        vta_url: &str,
+        vta_url: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let session = Session {
             client_did: did.to_string(),
             private_key: private_key.to_string(),
             vta_did: vta_did.to_string(),
-            vta_url: Some(vta_url.to_string()),
+            vta_url: vta_url.map(str::to_string),
             access_token: None,
             access_expires_at: None,
             needs_rotation: true,
@@ -1390,7 +1397,7 @@ mod tests {
                 "did:key:z6Mk1",
                 "zSeed",
                 "did:key:zVTA",
-                "https://vta.example.com",
+                Some("https://vta.example.com"),
             )
             .unwrap();
         assert!(store.has_session("test"));

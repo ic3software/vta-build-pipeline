@@ -15,12 +15,15 @@ fn store() -> SessionStore {
 ///
 /// Used by the TEE setup flow where the admin identity is a stable key baked
 /// into the enclave config and must not be rotated.
+///
+/// Pass `vta_url: None` to force runtime endpoint resolution from the VTA
+/// DID; pass `Some(url)` only to pin an explicit URL.
 pub fn store_session(
     keyring_key: &str,
     did: &str,
     private_key: &str,
     vta_did: &str,
-    vta_url: &str,
+    vta_url: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     store().store_direct(keyring_key, did, private_key, vta_did, vta_url)
 }
@@ -35,7 +38,7 @@ pub fn store_session_pending_rotation(
     did: &str,
     private_key: &str,
     vta_did: &str,
-    vta_url: &str,
+    vta_url: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     store().store_pending_rotation(keyring_key, did, private_key, vta_did, vta_url)
 }
