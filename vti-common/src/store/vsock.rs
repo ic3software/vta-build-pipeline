@@ -72,9 +72,10 @@ struct VsockConnection {
 impl VsockConnection {
     async fn connect(cid: u32, port: u32) -> Result<Self, AppError> {
         let addr = tokio_vsock::VsockAddr::new(cid, port);
-        let stream = tokio_vsock::VsockStream::connect(addr).await.map_err(|e| {
-            AppError::Internal(format!("vsock connect to CID {cid}:{port} failed: {e}"))
-        })?;
+        let stream = tokio_vsock::VsockStream::connect(addr)
+            .await
+            .map_err(AppError::vsock("vsock connect"))?;
+        tracing::trace!(cid, port, "vsock connected");
         Ok(Self { stream })
     }
 
@@ -83,30 +84,32 @@ impl VsockConnection {
         self.stream
             .write_u32(payload.len() as u32)
             .await
-            .map_err(|e| AppError::Internal(format!("vsock write error: {e}")))?;
+            .map_err(AppError::vsock("vsock write"))?;
         self.stream
             .write_all(payload)
             .await
-            .map_err(|e| AppError::Internal(format!("vsock write error: {e}")))?;
+            .map_err(AppError::vsock("vsock write"))?;
         self.stream
             .flush()
             .await
-            .map_err(|e| AppError::Internal(format!("vsock flush error: {e}")))?;
+            .map_err(AppError::vsock("vsock flush"))?;
 
         // Read frame
         let len = self
             .stream
             .read_u32()
             .await
-            .map_err(|e| AppError::Internal(format!("vsock read error: {e}")))?;
+            .map_err(AppError::vsock("vsock read"))?;
         if len > MAX_MESSAGE_SIZE {
-            return Err(AppError::Internal(format!("response too large: {len}")));
+            return Err(AppError::Internal(format!(
+                "vsock response too large: {len} > {MAX_MESSAGE_SIZE}"
+            )));
         }
         let mut buf = vec![0u8; len as usize];
         self.stream
             .read_exact(&mut buf)
             .await
-            .map_err(|e| AppError::Internal(format!("vsock read error: {e}")))?;
+            .map_err(AppError::vsock("vsock read"))?;
         Ok(buf)
     }
 }

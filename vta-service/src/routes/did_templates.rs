@@ -131,10 +131,14 @@ pub async fn render_handler(
         caller_vars.insert(k, v);
     }
 
-    let config = state.config.read().await.clone();
+    // Hold the read guard for the duration of render — it's purely CPU,
+    // no network or storage writes, so we don't block writers meaningfully.
+    // Cloning AppConfig (with its Arc/RwLock internals) on every render
+    // request was the old behaviour; this avoids the per-request deep copy.
+    let config_guard = state.config.read().await;
     let document = operations::did_templates::render_global(
         &state.did_templates_ks,
-        &config,
+        &config_guard,
         &auth,
         &name,
         caller_vars,
@@ -249,11 +253,13 @@ pub async fn render_context_handler(
         caller_vars.insert(k, v);
     }
 
-    let config = state.config.read().await.clone();
+    // See render_handler above — render is CPU-only, so we hold the read
+    // guard across the call rather than deep-cloning AppConfig per request.
+    let config_guard = state.config.read().await;
     let document = operations::did_templates::render_context(
         &state.did_templates_ks,
         &state.contexts_ks,
-        &config,
+        &config_guard,
         &auth,
         &context_id,
         &name,

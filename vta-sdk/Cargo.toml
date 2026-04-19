@@ -49,6 +49,7 @@ sealed-transfer = [
   "dep:sha2",
   "dep:x25519-dalek",
   "dep:ed25519-dalek",
+  "dep:zeroize",
 ]
 # Full AWS Nitro attestation verification (COSE_Sign1 + certificate chain
 # against the AWS Nitro root). Consumers of sealed-bootstrap Mode B enable
@@ -84,6 +85,8 @@ ciborium = { version = "0.2", optional = true }
 getrandom = { version = "0.4", optional = true }
 nitro_attest = { version = "0.2", optional = true }
 time = { version = "0.3", optional = true, features = ["macros"] }
+# Scrub secret byte buffers on drop (sealed-transfer, key derivation).
+zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

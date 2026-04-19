@@ -48,6 +48,28 @@ pub enum AppError {
     /// Services create helper functions to construct these with appropriate status codes.
     #[error("{message}")]
     ServiceError { status: StatusCode, message: String },
+
+    /// An I/O failure in a vsock operation. Preserves the underlying
+    /// `std::io::Error` via `#[source]` while adding a human-readable
+    /// label of which operation failed (connect / read / write / flush).
+    ///
+    /// Construct via [`AppError::vsock`] for ergonomic `.map_err(...)`.
+    #[error("{operation} failed: {source}")]
+    Vsock {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl AppError {
+    /// Build a closure suitable for `.map_err(...)` that wraps an
+    /// `std::io::Error` into [`AppError::Vsock`] with the given operation
+    /// label. Keeps the source chain intact for downstream error walkers
+    /// while giving log readers the operation name.
+    pub fn vsock(operation: &'static str) -> impl FnOnce(std::io::Error) -> AppError {
+        move |source| AppError::Vsock { operation, source }
+    }
 }
 
 impl IntoResponse for AppError {
@@ -67,6 +89,7 @@ impl IntoResponse for AppError {
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::ServiceError { status, .. } => *status,
+            AppError::Vsock { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         if status.is_server_error() {

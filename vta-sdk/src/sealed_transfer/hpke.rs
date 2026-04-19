@@ -17,6 +17,7 @@ use hpke::{
     single_shot_open, single_shot_seal,
 };
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use super::error::SealedTransferError;
 
@@ -27,21 +28,29 @@ const HPKE_INFO: &[u8] = b"vta-sealed-transfer/v1";
 /// Adapter from `getrandom` to the rand_core trait version that `hpke` 0.13
 /// re-exports. We can't use the `rand` crate directly because rand 0.10 /
 /// rand_core 0.10 are not compatible with hpke's rand_core 0.9 traits.
+///
+/// **On CSPRNG failure we panic.** `rand_core::RngCore` is infallible by
+/// design — the only alternatives on `getrandom::fill` error are (a) return
+/// zeros (catastrophic: attacker-predictable HPKE keys) or (b) silently
+/// degrade to a weaker source (worse). A panic propagates the failure to
+/// the handler, which bubbles up as a 500. In practice OS CSPRNG only
+/// fails pre-init on broken platforms; in a TEE with proper boot it
+/// cannot fail after startup.
 struct OsCsprng;
 
 impl RngCore for OsCsprng {
     fn next_u32(&mut self) -> u32 {
         let mut buf = [0u8; 4];
-        getrandom::fill(&mut buf).expect("OS CSPRNG failed");
+        getrandom::fill(&mut buf).expect("OS CSPRNG failed — see OsCsprng docs");
         u32::from_le_bytes(buf)
     }
     fn next_u64(&mut self) -> u64 {
         let mut buf = [0u8; 8];
-        getrandom::fill(&mut buf).expect("OS CSPRNG failed");
+        getrandom::fill(&mut buf).expect("OS CSPRNG failed — see OsCsprng docs");
         u64::from_le_bytes(buf)
     }
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        getrandom::fill(dest).expect("OS CSPRNG failed");
+        getrandom::fill(dest).expect("OS CSPRNG failed — see OsCsprng docs");
     }
 }
 
@@ -115,7 +124,12 @@ pub fn open(
 /// Generate a fresh X25519 keypair (secret, public). The secret is the
 /// recipient's input to [`open`]; the public is what they advertise via a
 /// [`crate::sealed_transfer::request::BootstrapRequest`].
-pub fn generate_keypair() -> ([u8; 32], [u8; 32]) {
+///
+/// The secret is returned in a [`Zeroizing`] wrapper so the bytes are
+/// scrubbed from memory when the value is dropped. `Deref<Target = [u8; 32]>`
+/// so call sites that pass `&[u8; 32]` (e.g. to [`open`] / [`crate::sealed_transfer::open_bundle`])
+/// keep working unchanged via auto-deref.
+pub fn generate_keypair() -> (Zeroizing<[u8; 32]>, [u8; 32]) {
     let mut rng = OsCsprng;
     let (sk, pk) = <Kem as KemTrait>::gen_keypair(&mut rng);
     let sk_bytes: [u8; 32] = sk
@@ -128,5 +142,5 @@ pub fn generate_keypair() -> ([u8; 32], [u8; 32]) {
         .as_slice()
         .try_into()
         .expect("X25519 public is 32 bytes");
-    (sk_bytes, pk_bytes)
+    (Zeroizing::new(sk_bytes), pk_bytes)
 }
