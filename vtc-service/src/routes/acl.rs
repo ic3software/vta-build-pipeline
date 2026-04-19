@@ -28,6 +28,8 @@ pub struct AclEntryResponse {
     pub allowed_contexts: Vec<String>,
     pub created_at: u64,
     pub created_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 impl From<AclEntry> for AclEntryResponse {
@@ -39,6 +41,7 @@ impl From<AclEntry> for AclEntryResponse {
             allowed_contexts: e.allowed_contexts,
             created_at: e.created_at,
             created_by: e.created_by,
+            expires_at: e.expires_at,
         }
     }
 }
@@ -77,6 +80,8 @@ pub struct CreateAclRequest {
     pub label: Option<String>,
     #[serde(default)]
     pub allowed_contexts: Vec<String>,
+    #[serde(default)]
+    pub expires_at: Option<u64>,
 }
 
 pub async fn create_acl(
@@ -103,7 +108,7 @@ pub async fn create_acl(
         allowed_contexts: req.allowed_contexts,
         created_at: now_epoch(),
         created_by: auth.0.did,
-        expires_at: None,
+        expires_at: req.expires_at,
     };
 
     store_acl_entry(&acl, &entry).await?;

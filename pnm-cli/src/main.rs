@@ -330,7 +330,16 @@ enum ContextCommands {
         /// Context ID (e.g. "vta")
         id: String,
     },
-    /// Create a new application context
+    /// Create a new application context, optionally with an admin ACL entry.
+    ///
+    /// Without `--admin-did` the command just creates the context (historical
+    /// behaviour). Supply `--admin-did` to atomically grant that DID admin
+    /// access scoped to the new context.
+    ///
+    /// The admin ACL entry is **permanent** by default. Pass `--admin-expires`
+    /// to make it a **setup ACL** that auto-expires if the admin never claims
+    /// it — useful when the DID was minted on a fresh `pnm setup` and you
+    /// want an automatic safety window.
     Create {
         /// Context slug (lowercase alphanumeric + hyphens)
         #[arg(long)]
@@ -341,6 +350,20 @@ enum ContextCommands {
         /// Optional description
         #[arg(long)]
         description: Option<String>,
+        /// DID to grant admin access to (must start with `did:`). When set,
+        /// creates an ACL entry with role=admin scoped to this context.
+        #[arg(long)]
+        admin_did: Option<String>,
+        /// Human-readable label for the admin ACL entry.
+        #[arg(long)]
+        admin_label: Option<String>,
+        /// Setup-ACL expiry — accepts `N[s|m|h|d|w]` (e.g. `24h`, `7d`).
+        /// When set, the admin ACL entry auto-expires via the server's ACL
+        /// sweeper; the expectation is that the admin authenticates and
+        /// rotates to a fresh did:key before expiry. Without this flag the
+        /// entry is permanent. Requires `--admin-did`.
+        #[arg(long, requires = "admin_did")]
+        admin_expires: Option<String>,
     },
     /// Update an existing context
     Update {
@@ -729,6 +752,29 @@ fn print_banner() {
 /// Implementation of `pnm auth login --credential-bundle <file>`.
 ///
 /// Opens an armored sealed bundle (matching a secret persisted earlier by
+/// Parse `pnm contexts create`'s `--admin-did` / `--admin-label` /
+/// `--admin-expires` flags into [`contexts::AdminAclOptions`]. Resolves the
+/// duration string to an absolute unix-epoch `expires_at` on the client
+/// side so the server just stores the value verbatim.
+fn resolve_admin_acl_options(
+    admin_did: Option<String>,
+    admin_label: Option<String>,
+    admin_expires: Option<&str>,
+) -> Result<contexts::AdminAclOptions, Box<dyn std::error::Error>> {
+    let expires_at = match admin_expires {
+        Some(s) => Some(
+            vta_cli_common::duration::duration_to_expires_at(s)
+                .map_err(|e| format!("--admin-expires: {e}"))?,
+        ),
+        None => None,
+    };
+    Ok(contexts::AdminAclOptions {
+        did: admin_did,
+        label: admin_label,
+        expires_at,
+    })
+}
+
 /// Resolve CLI `--recipient` / `--recipient-pubkey` / `--recipient-nonce`
 /// arguments into a [`vta_cli_common::sealed_producer::SealedRecipient`].
 ///
@@ -1019,7 +1065,17 @@ async fn main() {
                 id,
                 name,
                 description,
-            } => contexts::cmd_context_create(&client, &id, &name, description).await,
+                admin_did,
+                admin_label,
+                admin_expires,
+            } => {
+                match resolve_admin_acl_options(admin_did, admin_label, admin_expires.as_deref()) {
+                    Ok(admin) => {
+                        contexts::cmd_context_create(&client, &id, &name, description, admin).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             ContextCommands::Update {
                 id,
                 name,

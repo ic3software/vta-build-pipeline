@@ -151,11 +151,39 @@ pub async fn cmd_context_get(
     Ok(())
 }
 
+/// Options for optionally creating a context-scoped admin ACL entry as
+/// part of `pnm contexts create`.
+///
+/// Omit the entire struct to create the context without touching the ACL —
+/// the historical behaviour. Supply a [`AdminAclOptions::did`] to atomically
+/// create an `admin`-role ACL entry scoped to the new context in the same
+/// CLI invocation.
+///
+/// Setting [`AdminAclOptions::expires_at`] flips the entry from **permanent**
+/// to a **setup ACL** that auto-expires (pruned by the VTA's ACL sweeper) if
+/// the admin never authenticates and rotates to a fresh did:key.
+#[derive(Debug, Default, Clone)]
+pub struct AdminAclOptions {
+    /// DID to grant admin access to. Must start with `did:`.
+    pub did: Option<String>,
+    /// Human-readable label stored on the ACL entry.
+    pub label: Option<String>,
+    /// Unix-epoch seconds at which the entry auto-expires. `None` = permanent.
+    pub expires_at: Option<u64>,
+}
+
+impl AdminAclOptions {
+    fn is_requested(&self) -> bool {
+        self.did.is_some()
+    }
+}
+
 pub async fn cmd_context_create(
     client: &VtaClient,
     id: &str,
     name: &str,
     description: Option<String>,
+    admin: AdminAclOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let req = CreateContextRequest {
         id: id.to_string(),
@@ -167,6 +195,53 @@ pub async fn cmd_context_create(
     println!("  ID:        {}", resp.id);
     println!("  Name:      {}", resp.name);
     println!("  Base Path: {}", resp.base_path);
+
+    if admin.is_requested() {
+        let did = admin.did.as_deref().unwrap_or_default();
+        if !did.starts_with("did:") {
+            return Err(format!(
+                "--admin-did must start with `did:` (got {did:?}) — context was created but no ACL entry was added"
+            )
+            .into());
+        }
+        let mut acl_req =
+            vta_sdk::client::CreateAclRequest::new(did, "admin").contexts(vec![id.to_string()]);
+        if let Some(label) = admin.label.as_deref() {
+            acl_req = acl_req.label(label);
+        }
+        if let Some(expires_at) = admin.expires_at {
+            acl_req = acl_req.expires_at(expires_at);
+        }
+        let acl = client.create_acl(acl_req).await?;
+
+        println!();
+        println!("Admin ACL entry created:");
+        println!("  DID:        {}", acl.did);
+        println!("  Role:       {}", acl.role);
+        println!("  Contexts:   {}", acl.allowed_contexts.join(", "));
+        if let Some(ref label) = acl.label {
+            println!("  Label:      {label}");
+        }
+        match acl.expires_at {
+            Some(secs) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let remaining = secs.saturating_sub(now);
+                println!(
+                    "  Expires at: {secs} (unix, ~{} hours from now) — setup ACL",
+                    remaining / 3600
+                );
+                println!();
+                println!("  The admin should authenticate before expiry. On first successful");
+                println!("  connect PNM rotates to a fresh long-lived did:key and replaces this");
+                println!("  temporary entry with a permanent one.");
+            }
+            None => println!("  Expires at: (permanent)"),
+        }
+    }
+
     Ok(())
 }
 

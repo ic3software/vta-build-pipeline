@@ -322,6 +322,11 @@ pub struct AclEntryResponse {
     pub allowed_contexts: Vec<String>,
     pub created_at: u64,
     pub created_by: String,
+    /// Unix-epoch seconds at which this entry expires. `None` = permanent.
+    /// Pre-Phase-2 entries on the wire never carried this field, so
+    /// defaults to `None` for backward compat.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +341,11 @@ pub struct CreateAclRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub allowed_contexts: Vec<String>,
+    /// Unix-epoch seconds at which this entry auto-expires. `None` = permanent.
+    /// Useful for setup ACLs where the temp did:key should stop authenticating
+    /// if the admin never claims it via `pnm setup` + rotation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 impl CreateAclRequest {
@@ -345,6 +355,7 @@ impl CreateAclRequest {
             role: role.into(),
             label: None,
             allowed_contexts: Vec::new(),
+            expires_at: None,
         }
     }
     pub fn label(mut self, label: impl Into<String>) -> Self {
@@ -353,6 +364,10 @@ impl CreateAclRequest {
     }
     pub fn contexts(mut self, contexts: Vec<String>) -> Self {
         self.allowed_contexts = contexts;
+        self
+    }
+    pub fn expires_at(mut self, unix_secs: u64) -> Self {
+        self.expires_at = Some(unix_secs);
         self
     }
 }
@@ -1728,6 +1743,7 @@ mod tests {
             role: "admin".into(),
             label: None,
             allowed_contexts: vec!["vta".into()],
+            expires_at: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["did"], "did:key:z6Mk123");

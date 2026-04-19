@@ -202,6 +202,18 @@ enum ContextCommands {
         /// Optional description
         #[arg(long)]
         description: Option<String>,
+        /// DID to grant admin access to (must start with `did:`). When set,
+        /// creates an ACL entry with role=admin scoped to this context.
+        #[arg(long)]
+        admin_did: Option<String>,
+        /// Human-readable label for the admin ACL entry.
+        #[arg(long)]
+        admin_label: Option<String>,
+        /// Setup-ACL expiry — accepts `N[s|m|h|d|w]` (e.g. `24h`, `7d`).
+        /// When set, the admin entry auto-expires via the VTC's sweeper.
+        /// Requires `--admin-did`.
+        #[arg(long, requires = "admin_did")]
+        admin_expires: Option<String>,
     },
     /// Update an existing context
     Update {
@@ -754,7 +766,27 @@ async fn main() {
                 id,
                 name,
                 description,
-            } => contexts::cmd_context_create(&client, &id, &name, description).await,
+                admin_did,
+                admin_label,
+                admin_expires,
+            } => {
+                let expires_at = match admin_expires.as_deref() {
+                    Some(s) => match vta_cli_common::duration::duration_to_expires_at(s) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            eprintln!("Error: --admin-expires: {e}");
+                            std::process::exit(1);
+                        }
+                    },
+                    None => None,
+                };
+                let admin = contexts::AdminAclOptions {
+                    did: admin_did,
+                    label: admin_label,
+                    expires_at,
+                };
+                contexts::cmd_context_create(&client, &id, &name, description, admin).await
+            }
             ContextCommands::Update {
                 id,
                 name,

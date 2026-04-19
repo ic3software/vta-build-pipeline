@@ -451,6 +451,7 @@ pub async fn handle_create_acl(
         role,
         body.label,
         body.allowed_contexts,
+        body.expires_at,
         "didcomm",
     )
     .await

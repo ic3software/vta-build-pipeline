@@ -34,6 +34,10 @@ pub struct CreateAclRequest {
     pub label: Option<String>,
     #[serde(default)]
     pub allowed_contexts: Vec<String>,
+    /// Unix-epoch seconds at which this entry auto-expires. Omit or set to
+    /// `null` for a permanent entry.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
 }
 
 /// POST /acl — create a new ACL entry for a DID. Auth: Admin or Initiator.
@@ -50,6 +54,7 @@ pub async fn create_acl(
         req.role,
         req.label,
         req.allowed_contexts,
+        req.expires_at,
         "rest",
     )
     .await?;

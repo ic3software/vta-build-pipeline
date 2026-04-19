@@ -28,6 +28,7 @@ fn to_result_body(e: &AclEntry) -> CreateAclResultBody {
         allowed_contexts: e.allowed_contexts.clone(),
         created_at: e.created_at,
         created_by: e.created_by.clone(),
+        expires_at: e.expires_at,
     }
 }
 
@@ -40,6 +41,7 @@ pub async fn create_acl(
     role: Role,
     label: Option<String>,
     allowed_contexts: Vec<String>,
+    expires_at: Option<u64>,
     channel: &str,
 ) -> Result<CreateAclResultBody, AppError> {
     auth.require_manage()?;
@@ -59,7 +61,7 @@ pub async fn create_acl(
         allowed_contexts,
         created_at: now_epoch(),
         created_by: auth.did.clone(),
-        expires_at: None,
+        expires_at,
     };
 
     store_acl_entry(acl_ks, &entry).await?;
