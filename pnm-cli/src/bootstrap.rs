@@ -333,7 +333,15 @@ pub async fn run_connect(
     crate::config::save_config(pnm_config)?;
 
     let keyring_key = crate::config::vta_keyring_key(&slug);
-    auth::login(&credential, &vta_url, &keyring_key).await?;
+    auth::store_session(
+        &keyring_key,
+        &credential.did,
+        &credential.private_key_multibase,
+        &credential.vta_did,
+        &vta_url,
+    )?;
+    // Verify the credential works end-to-end before declaring success.
+    auth::ensure_authenticated(&vta_url, &keyring_key).await?;
 
     println!();
     println!("Bootstrap complete.");

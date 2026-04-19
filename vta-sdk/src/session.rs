@@ -22,6 +22,14 @@ struct Session {
     vta_url: Option<String>,
     access_token: Option<String>,
     access_expires_at: Option<u64>,
+    /// Marks a session whose `client_did` was minted locally with no live
+    /// VTA to register it against — the user has been told to ask their
+    /// admin to run `vta acl create --did <did>`. On the first successful
+    /// authentication we atomically rotate to a fresh did:key and drop
+    /// the original from the ACL, so the DID the user initially exposed
+    /// (maybe over chat/email) does not remain long-lived.
+    #[serde(default)]
+    needs_rotation: bool,
 }
 
 // ── Public types ────────────────────────────────────────────────────
@@ -428,6 +436,7 @@ impl SessionStore {
             vta_url: bundle.vta_url.clone(),
             access_token: None,
             access_expires_at: None,
+            needs_rotation: false,
         };
         self.save_session(key, &session)?;
         debug!(keyring_key = key, "session saved");
@@ -468,6 +477,34 @@ impl SessionStore {
             vta_url: Some(vta_url.to_string()),
             access_token: None,
             access_expires_at: None,
+            needs_rotation: false,
+        };
+        self.save_session(key, &session)
+    }
+
+    /// Store a session marked for rotation on first successful authentication.
+    ///
+    /// Use this when the client has generated a did:key locally and handed
+    /// it to a human to add to the VTA's ACL. Once the VTA is reachable and
+    /// the ACL entry exists, `ensure_authenticated()` will atomically rotate
+    /// to a fresh did:key and drop the temp one, so the DID that may have
+    /// been copy-pasted through a low-trust channel does not remain live.
+    pub fn store_pending_rotation(
+        &self,
+        key: &str,
+        did: &str,
+        private_key: &str,
+        vta_did: &str,
+        vta_url: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let session = Session {
+            client_did: did.to_string(),
+            private_key: private_key.to_string(),
+            vta_did: vta_did.to_string(),
+            vta_url: Some(vta_url.to_string()),
+            access_token: None,
+            access_expires_at: None,
+            needs_rotation: true,
         };
         self.save_session(key, &session)
     }
@@ -515,6 +552,12 @@ impl SessionStore {
     /// If no credentials are stored, returns an error.
     /// If a cached token is still valid (>30s remaining), returns it.
     /// Otherwise, performs a full challenge-response authentication.
+    ///
+    /// When the loaded session is flagged `needs_rotation`, the first
+    /// successful challenge-response triggers an automatic key roll:
+    /// a fresh did:key is minted, the VTA ACL entry for the temp DID is
+    /// mirrored onto the new DID, the temp DID is removed from the ACL,
+    /// and the session is updated in place. See [`Self::rotate_key`].
     pub async fn ensure_authenticated(
         &self,
         base_url: &str,
@@ -523,17 +566,22 @@ impl SessionStore {
         debug!(base_url, keyring_key = key, "ensuring authentication");
 
         let mut session = self.load_session(key).ok_or(
-            "Not authenticated.\n\nTo authenticate, import a credential:\n  <cli> auth login <credential-string>",
+            "Not authenticated.\n\nRun `pnm setup` (or the equivalent) to provision an admin identity.",
         )?;
 
         debug!(
             client_did = %session.client_did,
             vta_did = %session.vta_did,
+            needs_rotation = session.needs_rotation,
             "session loaded"
         );
 
-        // Check cached token
-        if let (Some(token), Some(expires_at)) = (&session.access_token, session.access_expires_at)
+        // Check cached token — but only if we're not pending rotation.
+        // A cached token on a pending-rotation session means we rotated in
+        // a previous call already, which `rotate_key` handled atomically.
+        if !session.needs_rotation
+            && let (Some(token), Some(expires_at)) =
+                (&session.access_token, session.access_expires_at)
             && now_epoch() + 30 < expires_at
         {
             debug!(expires_in = expires_at - now_epoch(), "using cached token");
@@ -542,7 +590,7 @@ impl SessionStore {
 
         debug!("cached token expired or missing, performing challenge-response");
 
-        // Full challenge-response
+        // Full challenge-response with the current (possibly temp) identity.
         let result = challenge_response(
             base_url,
             &session.client_did,
@@ -550,6 +598,20 @@ impl SessionStore {
             &session.vta_did,
         )
         .await?;
+
+        // If the session was provisioned as a temp did:key, rotate now —
+        // before we return the token to the caller or persist the temp
+        // token in the session.
+        if session.needs_rotation {
+            debug!("session is pending rotation, swapping to fresh did:key");
+            let (new_session, new_token_result) =
+                rotate_key(base_url, session, &result.access_token).await?;
+            session = new_session;
+            session.access_token = Some(new_token_result.access_token.clone());
+            session.access_expires_at = Some(new_token_result.access_expires_at);
+            self.save_session(key, &session)?;
+            return Ok(new_token_result.access_token);
+        }
 
         let token = result.access_token.clone();
         session.access_token = Some(result.access_token);
@@ -612,6 +674,165 @@ impl SessionStore {
             }
         }
     }
+}
+
+// ── Temp-key rotation ───────────────────────────────────────────────
+
+/// Generate a fresh Ed25519 did:key. Returns `(did, private_key_multibase)`.
+///
+/// The seed is sourced from `getrandom` (the OS CSPRNG). `private_key_multibase`
+/// is the raw 32-byte seed base58btc-encoded, matching the format used by the
+/// rest of the workspace (see `decode_private_key_multibase`).
+fn generate_did_key() -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed)
+        .map_err(|e| format!("CSPRNG failed while minting rotated did:key: {e}"))?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pubkey = signing.verifying_key().to_bytes();
+    let did = format!(
+        "did:key:{}",
+        crate::did_key::ed25519_multibase_pubkey(&pubkey)
+    );
+    let private_key_multibase = multibase::encode(multibase::Base::Base58Btc, seed);
+    Ok((did, private_key_multibase))
+}
+
+/// Swap a `needs_rotation=true` session's temp did:key for a fresh one.
+///
+/// Precondition: `temp_token` is a valid bearer token authenticating as
+/// `session.client_did` (the temp DID). Returned `Session` carries the new
+/// did:key and `needs_rotation=false`; caller is responsible for persisting
+/// it alongside the returned `TokenResult` (which is an auth under the new
+/// DID, confirming the ACL swap actually lived).
+///
+/// Flow:
+/// 1. `GET /acl/{temp_did}` — read role + allowed_contexts the admin granted.
+/// 2. `POST /acl` — create an entry for the new DID with the same scope.
+/// 3. Run challenge-response as the new DID to confirm the new entry is
+///    live. If that fails, we bail *before* deleting the temp — so the
+///    temp still works and the caller can retry.
+/// 4. `DELETE /acl/{temp_did}` — best-effort; warn on failure.
+async fn rotate_key(
+    base_url: &str,
+    session: Session,
+    temp_token: &str,
+) -> Result<(Session, TokenResult), Box<dyn std::error::Error>> {
+    let http = reqwest::Client::new();
+
+    // 1. Read the ACL entry the admin granted to the temp DID.
+    let acl_url = format!(
+        "{}/acl/{}",
+        base_url.trim_end_matches('/'),
+        &session.client_did
+    );
+    debug!(url = %acl_url, "fetching ACL entry for temp DID");
+    let acl_resp = http
+        .get(&acl_url)
+        .bearer_auth(temp_token)
+        .send()
+        .await
+        .map_err(|e| format!("GET {acl_url}: {e}"))?;
+    if !acl_resp.status().is_success() {
+        let status = acl_resp.status();
+        let body = acl_resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "rotate: cannot read temp DID's ACL entry ({status}): {body} — has your admin run `vta acl create --did {} --role admin` yet?",
+            session.client_did
+        )
+        .into());
+    }
+    let acl_entry: crate::client::AclEntryResponse = acl_resp
+        .json()
+        .await
+        .map_err(|e| format!("parse ACL entry: {e}"))?;
+    let role = acl_entry.role.clone();
+    let contexts = acl_entry.allowed_contexts.clone();
+    let label = acl_entry.label.clone();
+
+    // 2. Mint a new did:key and register it.
+    let (new_did, new_private_key) = generate_did_key()?;
+    debug!(%new_did, %role, "minted rotation DID, creating ACL entry");
+    let mut create_req = crate::client::CreateAclRequest::new(&new_did, role).contexts(contexts);
+    if let Some(l) = label {
+        create_req = create_req.label(l);
+    }
+    let acl_post = format!("{}/acl", base_url.trim_end_matches('/'));
+    let create_resp = http
+        .post(&acl_post)
+        .bearer_auth(temp_token)
+        .json(&create_req)
+        .send()
+        .await
+        .map_err(|e| format!("POST {acl_post}: {e}"))?;
+    if !create_resp.status().is_success() {
+        let status = create_resp.status();
+        let body = create_resp.text().await.unwrap_or_default();
+        return Err(
+            format!("rotate: failed to create ACL entry for new DID ({status}): {body}").into(),
+        );
+    }
+
+    // 3. Verify the new DID can actually authenticate. Fail *before* we
+    //    delete the temp — if this errors, the temp still works.
+    let new_token_result = challenge_response(
+        base_url,
+        &new_did,
+        &new_private_key,
+        &session.vta_did,
+    )
+    .await
+    .map_err(|e| {
+        format!(
+            "rotate: new DID failed challenge-response (ACL entry present but login failed): {e}"
+        )
+    })?;
+
+    // 4. Drop the temp DID from the ACL. Best-effort — if this fails, the
+    //    new DID is already live, so we log and continue rather than leave
+    //    the caller unauthenticated.
+    let del_url = format!(
+        "{}/acl/{}",
+        base_url.trim_end_matches('/'),
+        &session.client_did
+    );
+    match http
+        .delete(&del_url)
+        .bearer_auth(&new_token_result.access_token)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            debug!(temp_did = %session.client_did, "temp DID removed from ACL");
+        }
+        Ok(resp) => {
+            tracing::warn!(
+                temp_did = %session.client_did,
+                status = %resp.status(),
+                "could not delete temp DID from ACL after rotation — manual cleanup may be required",
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                temp_did = %session.client_did,
+                error = %e,
+                "could not delete temp DID from ACL after rotation — manual cleanup may be required",
+            );
+        }
+    }
+
+    let Session {
+        vta_did, vta_url, ..
+    } = session;
+    let rotated = Session {
+        client_did: new_did,
+        private_key: new_private_key,
+        vta_did,
+        vta_url,
+        access_token: None,
+        access_expires_at: None,
+        needs_rotation: false,
+    };
+    Ok((rotated, new_token_result))
 }
 
 // ── Challenge-response auth ─────────────────────────────────────────
@@ -1062,6 +1283,7 @@ mod tests {
             vta_url: Some("https://vta.example.com".into()),
             access_token: Some("tok123".into()),
             access_expires_at: Some(1700000000),
+            needs_rotation: false,
         };
         let json = serde_json::to_string(&session).unwrap();
         let restored: Session = serde_json::from_str(&json).unwrap();

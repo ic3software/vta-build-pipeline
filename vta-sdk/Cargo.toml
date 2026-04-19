@@ -30,6 +30,9 @@ session = [
   "didcomm",
   "dep:affinidi-did-resolver-cache-sdk",
   "dep:tokio",
+  # Rotation of a temp-provisioned did:key on first successful auth needs
+  # a CSPRNG seed for the replacement Ed25519 key.
+  "dep:getrandom",
 ]
 integration = ["client", "session"]
 keyring = ["dep:keyring"]

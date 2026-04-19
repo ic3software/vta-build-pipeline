@@ -1,4 +1,3 @@
-use vta_sdk::credentials::CredentialBundle;
 use vta_sdk::session::{SessionStore, TokenStatus};
 
 pub use vta_sdk::session::SessionInfo;
@@ -12,34 +11,10 @@ fn store() -> SessionStore {
     )
 }
 
-/// Store a credential bundle and authenticate.
-pub async fn login(
-    credential: &CredentialBundle,
-    base_url: &str,
-    keyring_key: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(all(feature = "config-session", not(feature = "keyring")))]
-    eprintln!(
-        "Warning: sessions are stored unprotected on disk (~/.config/pnm/sessions.json).\n         \
-         Do not use config-session in production."
-    );
-
-    let result = store().login(credential, base_url, keyring_key).await?;
-
-    println!("Credential imported:");
-    println!("  Client DID: {}", result.client_did);
-    println!("  VTA DID:    {}", result.vta_did);
-    if let Some(ref url) = result.vta_url {
-        println!("  VTA URL:    {url}");
-    }
-    println!("\nAuthentication successful.");
-    Ok(())
-}
-
 /// Store a session directly in the keyring without performing auth.
 ///
-/// Used by the TEE setup flow to save the admin credential before
-/// authenticating (the VTA may not be reachable for challenge-response yet).
+/// Used by the TEE setup flow where the admin identity is a stable key baked
+/// into the enclave config and must not be rotated.
 pub fn store_session(
     keyring_key: &str,
     did: &str,
@@ -48,6 +23,21 @@ pub fn store_session(
     vta_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     store().store_direct(keyring_key, did, private_key, vta_did, vta_url)
+}
+
+/// Store a session flagged for rotation on first successful authentication.
+///
+/// Used by `pnm setup` for the non-TEE flow: the did:key is handed to an
+/// admin out-of-band to be added to the ACL, and PNM rotates it out as soon
+/// as it can authenticate (see `SessionStore::ensure_authenticated` in vta-sdk).
+pub fn store_session_pending_rotation(
+    keyring_key: &str,
+    did: &str,
+    private_key: &str,
+    vta_did: &str,
+    vta_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    store().store_pending_rotation(keyring_key, did, private_key, vta_did, vta_url)
 }
 
 /// Clear stored credentials and cached tokens.
@@ -90,8 +80,7 @@ pub fn status(keyring_key: &str) {
         }
         None => {
             println!("Not authenticated.");
-            println!("\nTo authenticate, import a credential:");
-            println!("  pnm auth login <credential-string>");
+            println!("\nRun `pnm setup` to provision an admin identity for a VTA.");
         }
     }
 }

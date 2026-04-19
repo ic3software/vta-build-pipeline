@@ -1,45 +1,33 @@
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
 
 use dialoguer::{Input, Select};
 use ed25519_dalek::SigningKey;
 use rand::Rng;
-use vta_sdk::credentials::CredentialBundle;
 use vta_sdk::prelude::*;
 
 use crate::auth;
 use crate::config::{PnmConfig, VtaConfig, save_config, slugify, vta_keyring_key};
 
 /// Options for interactive setup from the CLI.
-pub struct SetupOptions {
-    /// Path to an armored sealed bundle (skip the interactive menu).
-    pub credential_bundle: Option<PathBuf>,
-    /// Expected SHA-256 digest of the sealed bundle.
-    pub expect_digest: Option<String>,
-    /// Skip out-of-band digest verification.
-    pub no_verify_digest: bool,
-}
+///
+/// Kept as a struct for forward-compatibility — today there are no setup
+/// flags (the wizard is fully interactive). `pnm setup` never ingests a
+/// credential file: PNM always self-mints, then coordinates an ACL grant
+/// + key rotation via the admin.
+pub struct SetupOptions {}
 
 /// Interactive setup for PNM.
 ///
-/// Presents the user with a choice between connecting to an existing VTA
-/// (with a sealed admin credential bundle) or preparing a new TEE deployment
-/// (generating a did:key for the config).
+/// Two paths:
+/// - **Connect to an existing non-TEE VTA** — PNM mints a temp did:key
+///   locally, tells the admin to add it to the ACL, and auto-rotates to a
+///   fresh long-lived did:key on first successful authentication.
+/// - **Set up a new VTA in a TEE** — operator is bootstrapping a brand new
+///   enclave; generates an admin did:key to embed in the TEE config.
 pub async fn run_setup(
-    opts: SetupOptions,
+    _opts: SetupOptions,
     config: &mut PnmConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // If a bundle was passed on the CLI, skip the menu
-    if let Some(path) = opts.credential_bundle {
-        return setup_with_bundle(
-            &path,
-            opts.expect_digest.as_deref(),
-            opts.no_verify_digest,
-            config,
-        )
-        .await;
-    }
-
     let choices = &[
         "Connect to an existing non-TEE VTA",
         "Set up a new VTA in a TEE  — generate admin identity for enclave deployment",
@@ -58,42 +46,19 @@ pub async fn run_setup(
     }
 }
 
-/// "Connect to an existing non-TEE VTA" branch.
+/// Connect to an existing non-TEE VTA.
 ///
-/// Splits into two sub-flows depending on whether the operator can reach the
-/// VTA directly from this machine:
+/// PNM generates a temp did:key locally, stores the session flagged
+/// `needs_rotation`, and prints an `vta acl create ...` command for the
+/// admin to run. On first successful authentication, the session auto-
+/// rotates to a fresh did:key and drops the temp from the ACL (see
+/// `vta_sdk::session::SessionStore::ensure_authenticated`).
 ///
-/// - **Online**: PNM generates a fresh did:key locally, stores the session,
-///   and prints an `vta acl create ...` command the admin runs on the VTA
-///   host. The private key never leaves this machine; no sealed transfer
-///   is involved because there's nothing to transfer.
-/// - **Offline**: The full sealed-transfer credential dance. PNM creates a
-///   request file; admin mints and seals a credential; PNM opens it.
+/// The operator does not need to reach the VTA during setup — rotation
+/// happens the first time a command actually needs a token. Setup
+/// succeeds even if the VTA is offline or the admin has not yet granted
+/// the DID.
 async fn connect_to_non_tee_vta(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let reachable_options = &[
-        "Online  — I can reach the VTA from this machine",
-        "Offline — I can't reach the VTA directly; my admin will send me a credential",
-    ];
-    let reachable = Select::new()
-        .with_prompt("Is the VTA reachable from here?")
-        .items(reachable_options)
-        .default(0)
-        .interact()?;
-
-    match reachable {
-        0 => connect_online_non_tee(config).await,
-        1 => connect_offline_non_tee(config).await,
-        _ => unreachable!(),
-    }
-}
-
-/// Online connection to a non-TEE VTA.
-///
-/// Generates a local did:key, stores a session pre-populated with the
-/// operator-provided VTA URL + DID, and prints the `vta acl create`
-/// command for the admin to run. The admin's action is authoritative —
-/// until they add the did:key to the ACL, PNM will fail to authenticate.
-async fn connect_online_non_tee(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
     let url: String = Input::new()
         .with_prompt("VTA URL (e.g. https://vta.example.com)")
@@ -125,13 +90,14 @@ async fn connect_online_non_tee(config: &mut PnmConfig) -> Result<(), Box<dyn st
     let slug = slugify(&name);
     let keyring_key = vta_keyring_key(&slug);
 
-    // Mint admin did:key locally — private key never leaves this host.
+    // Mint a temp admin did:key. This is the DID the user shares with the
+    // admin; PNM rotates it out of the ACL the first time it successfully
+    // authenticates, so an accidental leak over email/chat only exposes a
+    // short-lived identity.
     let (bundle, did) =
         vta_cli_common::local_keygen::generate_admin_did_key(&vta_did, Some(url.clone()));
 
-    // Store the session directly; PNM is ready to authenticate as soon as
-    // the admin adds the did to the ACL.
-    auth::store_session(
+    auth::store_session_pending_rotation(
         &keyring_key,
         &did,
         &bundle.private_key_multibase,
@@ -139,7 +105,6 @@ async fn connect_online_non_tee(config: &mut PnmConfig) -> Result<(), Box<dyn st
         &url,
     )?;
 
-    // Save config
     config.vtas.insert(
         slug.clone(),
         VtaConfig {
@@ -154,217 +119,20 @@ async fn connect_online_non_tee(config: &mut PnmConfig) -> Result<(), Box<dyn st
     save_config(config)?;
 
     eprintln!();
-    eprintln!("\x1b[1;32mLocal admin identity created.\x1b[0m");
+    eprintln!("\x1b[1;32mTemp admin identity created.\x1b[0m");
     eprintln!();
-    eprintln!("  VTA:        {slug}  ({url})");
-    eprintln!("  Client DID: {did}");
+    eprintln!("  VTA:       {slug}  ({url})");
+    eprintln!("  Temp DID:  {did}");
     eprintln!();
     eprintln!("Ask your VTA admin to grant this identity admin access. On the VTA host,");
     eprintln!("they should run:");
     eprintln!();
     eprintln!("  \x1b[1mvta acl create --did {did} --role admin\x1b[0m");
     eprintln!();
-    eprintln!("Once that completes, verify with:");
-    eprintln!("  pnm health");
+    eprintln!("Once the grant is in place, run any PNM command (e.g. `pnm health`). PNM");
+    eprintln!("will automatically rotate to a fresh long-lived did:key on first connect");
+    eprintln!("and remove the temp DID from the ACL.");
     eprintln!();
-
-    Ok(())
-}
-
-/// Offline connection to a non-TEE VTA — the full sealed-transfer dance.
-///
-/// 1. Either generate a `BootstrapRequest` inline (writes the secret to
-///    `~/.config/pnm/bootstrap-secrets/` and the JSON to a file you pick),
-///    or accept that the user already has a sealed bundle from the admin.
-/// 2. In the generate case, show the request JSON + the hand-off
-///    instructions so the operator can ship it to the admin without
-///    jumping to another CLI.
-/// 3. Prompt for the armored sealed bundle path + optional digest once the
-///    admin has returned it.
-/// 4. Open and install.
-async fn connect_offline_non_tee(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let have_bundle_options = &[
-        "I need to request one — create a request file to send to my admin",
-        "I already have a credential file from my admin",
-    ];
-    let have_bundle = Select::new()
-        .with_prompt("Admin credential")
-        .items(have_bundle_options)
-        .default(0)
-        .interact()?;
-
-    if have_bundle == 0 {
-        generate_and_show_connection_request()?;
-    }
-
-    eprintln!();
-    let path: String = Input::new()
-        .with_prompt(
-            "Path to the credential file from your admin (leave empty to exit and resume later)",
-        )
-        .allow_empty(true)
-        .interact_text()?;
-    if path.trim().is_empty() {
-        eprintln!();
-        eprintln!("Exiting. When you receive the credential file, re-run:");
-        eprintln!(
-            "  pnm auth login --credential-bundle <file> --expect-digest <hex>    # to install",
-        );
-        eprintln!("or re-run `pnm setup` and choose \"I already have a credential file\".");
-        return Ok(());
-    }
-    let digest: String = Input::new()
-        .with_prompt("Expected SHA-256 digest from your admin (empty = skip verification)")
-        .allow_empty(true)
-        .interact_text()?;
-    let (expect_digest, no_verify) = if digest.trim().is_empty() {
-        (None, true)
-    } else {
-        (Some(digest.trim().to_string()), false)
-    };
-    setup_with_bundle(
-        Path::new(path.trim()),
-        expect_digest.as_deref(),
-        no_verify,
-        config,
-    )
-    .await
-}
-
-/// Generate a connection request (a [`BootstrapRequest`] under the hood),
-/// persist its secret, write the JSON to a file the user picks, and print
-/// the contents + hand-off instructions. Mirrors `pnm bootstrap request
-/// --out` but inline so the user does not have to exit the wizard.
-fn generate_and_show_connection_request() -> Result<(), Box<dyn std::error::Error>> {
-    let config_dir = crate::config::config_dir()?;
-
-    let label: String = Input::new()
-        .with_prompt("Label for this request (shown to your admin)")
-        .default("pnm-setup".to_string())
-        .interact_text()?;
-    let label = label.trim().to_string();
-    let label_opt = if label.is_empty() { None } else { Some(label) };
-
-    let out_path: String = Input::new()
-        .with_prompt("Write request to file")
-        .default("request.json".to_string())
-        .interact_text()?;
-    let out_path = out_path.trim().to_string();
-
-    let created =
-        vta_cli_common::sealed_consumer::create_bootstrap_request(&config_dir, label_opt.clone())?;
-    let json = serde_json::to_string_pretty(&created.request)?;
-    std::fs::write(&out_path, json.as_bytes()).map_err(|e| format!("write {out_path}: {e}"))?;
-
-    eprintln!();
-    eprintln!("\x1b[1;32mConnection request generated.\x1b[0m");
-    eprintln!();
-    eprintln!("  Client pubkey: {}", created.request.client_pubkey);
-    eprintln!("  Nonce (b64):   {}", created.request.nonce);
-    if let Some(ref l) = label_opt {
-        eprintln!("  Label:         {l}");
-    }
-    eprintln!("  Request file:  {out_path}");
-    eprintln!();
-    eprintln!("── Request file contents ──");
-    eprintln!("{json}");
-    eprintln!("──");
-    eprintln!();
-    eprintln!("Send the request file to your VTA admin. They will return a credential");
-    eprintln!("file and a SHA-256 digest for you to verify.");
-    eprintln!();
-    Ok(())
-}
-
-/// Connect to an existing VTA using an armored sealed credential bundle.
-async fn setup_with_bundle(
-    path: &Path,
-    expect_digest: Option<&str>,
-    no_verify_digest: bool,
-    config: &mut PnmConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let config_dir = crate::config::config_dir()?;
-    if no_verify_digest {
-        eprintln!(
-            "WARNING: --no-verify-digest disables out-of-band integrity verification.\n\
-             You are trusting the producer pubkey embedded in the bundle without\n\
-             any external anchor. Use only for testing."
-        );
-    }
-    let opened = vta_cli_common::sealed_consumer::open_armored_bundle(
-        path,
-        &config_dir,
-        expect_digest,
-        no_verify_digest,
-    )?;
-    eprintln!(
-        "Sealed bundle opened ({} — digest {}).",
-        opened.bundle_id_hex, opened.digest
-    );
-    let bundle: CredentialBundle =
-        vta_cli_common::sealed_consumer::extract_admin_credential(opened.payload)?;
-
-    // Prompt for a name/slug
-    let default_name = if bundle.vta_did.is_empty() {
-        "My VTA".to_string()
-    } else {
-        // Use the last segment of the DID as a reasonable default
-        bundle
-            .vta_did
-            .rsplit(':')
-            .next()
-            .unwrap_or("my-vta")
-            .to_string()
-    };
-
-    let name: String = Input::new()
-        .with_prompt("Name for this VTA")
-        .default(default_name)
-        .interact_text()?;
-
-    let slug = slugify(&name);
-    let keyring_key = vta_keyring_key(&slug);
-
-    // Resolve URL from DID
-    let url = if let Some(ref url) = bundle.vta_url {
-        url.clone()
-    } else if !bundle.vta_did.is_empty() {
-        eprintln!("Resolving VTA DID: {}", bundle.vta_did);
-        vta_sdk::session::resolve_vta_url(&bundle.vta_did).await?
-    } else {
-        let url: String = Input::new().with_prompt("VTA URL").interact_text()?;
-        url
-    };
-    let url = url.trim_end_matches('/').to_string();
-
-    // Save to config
-    config.vtas.insert(
-        slug.clone(),
-        VtaConfig {
-            name: name.clone(),
-            url: Some(url.clone()),
-            vta_did: if bundle.vta_did.is_empty() {
-                None
-            } else {
-                Some(bundle.vta_did.clone())
-            },
-        },
-    );
-    if config.default_vta.is_none() || config.vtas.len() == 1 {
-        config.default_vta = Some(slug.clone());
-    }
-    save_config(config)?;
-
-    // Authenticate
-    auth::login(&bundle, &url, &keyring_key).await?;
-
-    let path = crate::config::config_path()?;
-    eprintln!();
-    eprintln!("VTA '{slug}' configured.");
-    eprintln!("  Config: {}", path.display());
-    if config.default_vta.as_deref() == Some(&slug) {
-        eprintln!("  Default: yes");
-    }
 
     Ok(())
 }
@@ -377,6 +145,9 @@ async fn setup_with_bundle(
 /// 3. Wait for operator to deploy + boot VTA
 /// 4. Prompt for VTA DID
 /// 5. Store credential in keyring, save config
+///
+/// The TEE admin identity is NOT rotated — it's the bootstrap key baked
+/// into the TEE's config. Rotating it would break enclave boot.
 async fn setup_tee(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
     eprintln!("This will create an admin identity for a VTA running in a");
@@ -431,8 +202,7 @@ async fn setup_tee(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Err
     //    later, inside the TEE-first-boot flow, when the VTA is reachable.
     let keyring_key = vta_keyring_key(&slug);
 
-    // Store session directly — the VTA may not be reachable for auth yet
-    // (DIDComm connections need time to establish)
+    // Store session directly — the TEE admin identity does not rotate.
     auth::store_session(
         &keyring_key,
         &did,
