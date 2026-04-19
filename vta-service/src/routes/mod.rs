@@ -9,6 +9,7 @@ mod cache;
 mod capabilities;
 mod config;
 mod contexts;
+mod did_templates;
 #[cfg(feature = "webvh")]
 mod did_webvh;
 mod health;
@@ -79,6 +80,21 @@ pub fn router() -> Router<AppState> {
         .route(
             "/contexts/{id}/delete-preview",
             get(contexts::preview_delete_context_handler),
+        )
+        // DID template routes (global scope — Phase 2)
+        .route(
+            "/did-templates",
+            get(did_templates::list_handler).post(did_templates::create_handler),
+        )
+        .route(
+            "/did-templates/{name}",
+            get(did_templates::get_handler)
+                .put(did_templates::update_handler)
+                .delete(did_templates::delete_handler),
+        )
+        .route(
+            "/did-templates/{name}/render",
+            post(did_templates::render_handler),
         )
         // ACL routes (flattened for consistency)
         .route("/acl", get(acl::list_acl).post(acl::create_acl))

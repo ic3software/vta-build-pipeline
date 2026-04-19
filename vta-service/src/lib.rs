@@ -12,6 +12,7 @@ pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod contexts;
+pub mod did_templates;
 pub mod didcomm_bridge;
 pub mod error;
 pub mod keys;

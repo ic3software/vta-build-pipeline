@@ -100,25 +100,74 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DidTemplateCommands {
-    /// Validate a DID template file against the v1 schema.
+    /// Validate a DID template file against the v1 schema (offline).
     Validate {
         /// Path to a template JSON file to validate.
         file: std::path::PathBuf,
     },
 
-    /// Scaffold a starter template by forking an embedded built-in.
-    ///
-    /// Emits JSON on stdout. `kind` accepts the full built-in name
-    /// (`didcomm-mediator`, `webvh-hosting-server`) or a short alias
-    /// (`mediator`, `webvh-hosting`, `hosting`).
+    /// Scaffold a starter template by forking an embedded built-in (offline).
     Init {
         /// Built-in kind or alias to fork.
         kind: String,
     },
 
-    /// List every built-in template shipped with this SDK.
+    /// List every built-in template shipped with this SDK (offline).
     #[command(name = "list-builtins")]
     ListBuiltins,
+
+    /// List DID templates stored on the VTA (global scope).
+    List,
+
+    /// Show a stored template by name. `--rendered` previews the DID document.
+    Show {
+        /// Template name.
+        name: String,
+        /// Render the template rather than showing its raw record.
+        #[arg(long)]
+        rendered: bool,
+        /// `KEY=VALUE` — supply a template variable. Repeatable.
+        #[arg(long = "var", value_parser = parse_key_value_cnm)]
+        vars: Vec<(String, String)>,
+    },
+
+    /// Upload a new global template. Super admin only.
+    Create {
+        /// Path to a template JSON file.
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+
+    /// Replace a stored global template. Super admin only.
+    Update {
+        /// Template name.
+        name: String,
+        /// Path to the replacement JSON file.
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+
+    /// Delete a stored global template. Super admin only.
+    Delete {
+        /// Template name.
+        name: String,
+    },
+}
+
+fn parse_key_value_cnm(s: &str) -> Result<(String, String), String> {
+    let (k, v) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected KEY=VALUE, got '{s}'"))?;
+    Ok((k.to_string(), v.to_string()))
+}
+
+fn is_online_template_cmd(cmd: &DidTemplateCommands) -> bool {
+    !matches!(
+        cmd,
+        DidTemplateCommands::Validate { .. }
+            | DidTemplateCommands::Init { .. }
+            | DidTemplateCommands::ListBuiltins
+    )
 }
 
 #[derive(Subcommand)]
@@ -536,6 +585,9 @@ fn resolve_recipient(
 
 /// Returns true if this command requires authentication.
 fn requires_auth(cmd: &Commands) -> bool {
+    if let Commands::DidTemplates { command } = cmd {
+        return is_online_template_cmd(command);
+    }
     !matches!(
         cmd,
         Commands::Health
@@ -543,7 +595,6 @@ fn requires_auth(cmd: &Commands) -> bool {
             | Commands::Setup
             | Commands::Community { .. }
             | Commands::Bootstrap { .. }
-            | Commands::DidTemplates { .. }
     )
 }
 
@@ -914,6 +965,17 @@ async fn main() {
             DidTemplateCommands::Validate { file } => did_templates::cmd_validate(file),
             DidTemplateCommands::Init { kind } => did_templates::cmd_init(kind),
             DidTemplateCommands::ListBuiltins => did_templates::cmd_list_builtins(),
+            DidTemplateCommands::List => did_templates::cmd_list(&client).await,
+            DidTemplateCommands::Show {
+                name,
+                rendered,
+                vars,
+            } => did_templates::cmd_show(&client, &name, rendered, vars).await,
+            DidTemplateCommands::Create { file } => did_templates::cmd_create(&client, file).await,
+            DidTemplateCommands::Update { name, file } => {
+                did_templates::cmd_update(&client, &name, file).await
+            }
+            DidTemplateCommands::Delete { name } => did_templates::cmd_delete(&client, &name).await,
         },
         Commands::Keys { command } => match command {
             KeyCommands::Create {

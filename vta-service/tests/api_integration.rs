@@ -74,11 +74,13 @@ impl TestApp {
 
         let imported_ks = store.keyspace("imported_secrets").unwrap();
         let sealed_nonces_ks = store.keyspace("sealed_nonces").unwrap();
+        let did_templates_ks = store.keyspace("did_templates").unwrap();
         let state = AppState {
             keys_ks: keys_ks.clone(),
             sessions_ks: sessions_ks.clone(),
             acl_ks: acl_ks.clone(),
             contexts_ks,
+            did_templates_ks,
             audit_ks: audit_ks.clone(),
             imported_ks,
             cache_ks,
@@ -1665,6 +1667,252 @@ async fn create_did_webvh_neither_server_nor_url_rejected() {
                 "context_id": "test-neither",
             }),
         ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ── DID templates (Phase 2, global scope) ──────────────────────────
+
+/// Minimum valid template body for create/update tests.
+fn sample_template(name: &str) -> Value {
+    json!({
+        "schemaVersion": 1,
+        "name": name,
+        "kind": "custom",
+        "description": "integration-test template",
+        "methods": ["webvh"],
+        "requiredVars": ["URL"],
+        "optionalVars": { "ACCEPT": ["didcomm/v2"] },
+        "defaults": {},
+        "document": {
+            "@context": ["https://www.w3.org/ns/did/v1"],
+            "id": "{DID}",
+            "verificationMethod": [{
+                "id": "{DID}#key-1",
+                "type": "Multikey",
+                "controller": "{DID}",
+                "publicKeyMultibase": "{SIGNING_KEY_MB}"
+            }],
+            "service": [{
+                "id": "{DID}#svc",
+                "type": "Custom",
+                "serviceEndpoint": { "uri": "{URL}", "accept": "{ACCEPT}" }
+            }]
+        }
+    })
+}
+
+#[tokio::test]
+async fn did_templates_list_empty_for_fresh_vta() {
+    let (app, ctx) = TestApp::new().await;
+    let token = ctx
+        .auth_token("did:key:z6MkReader", "reader", vec!["any".into()])
+        .await;
+    let (status, body) = app.request(get_auth("/did-templates", &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["templates"].as_array().map(|a| a.len()), Some(0));
+}
+
+#[tokio::test]
+async fn did_templates_create_requires_super_admin() {
+    let (app, ctx) = TestApp::new().await;
+    // An admin with allowed_contexts is NOT a super admin.
+    let token = ctx
+        .auth_token("did:key:z6MkAdmin", "admin", vec!["some-ctx".into()])
+        .await;
+
+    let (status, _) = app
+        .request(post_auth(
+            "/did-templates",
+            &token,
+            sample_template("forbidden"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn did_templates_create_get_delete_roundtrip() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+
+    // Create
+    let (status, body) = app
+        .request(post_auth(
+            "/did-templates",
+            &super_token,
+            sample_template("rt"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(body["name"], "rt");
+    assert_eq!(body["scope"]["type"], "global");
+    assert_eq!(body["created_by"], "did:key:z6MkSuper");
+
+    // Duplicate rejected
+    let (status, _) = app
+        .request(post_auth(
+            "/did-templates",
+            &super_token,
+            sample_template("rt"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Get
+    let (status, body) = app
+        .request(get_auth("/did-templates/rt", &super_token))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "rt");
+
+    // List shows one
+    let (status, body) = app.request(get_auth("/did-templates", &super_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["templates"].as_array().map(|a| a.len()), Some(1));
+
+    // Delete
+    let (status, _) = app
+        .request(delete_auth("/did-templates/rt", &super_token))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Gone
+    let (status, _) = app
+        .request(get_auth("/did-templates/rt", &super_token))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn did_templates_update_replaces_body_preserves_created_at() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+
+    let (status, original) = app
+        .request(post_auth(
+            "/did-templates",
+            &super_token,
+            sample_template("evolving"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created_at_original = original["created_at"].clone();
+
+    // Update with a tweaked description.
+    let mut updated = sample_template("evolving");
+    updated["description"] = json!("new description");
+    let (status, body) = app
+        .request(put_auth("/did-templates/evolving", &super_token, updated))
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["description"], "new description");
+    // created_at preserved, updated_at advances (can't assert >, but must exist).
+    assert_eq!(body["created_at"], created_at_original);
+    assert!(body["updated_at"].is_u64());
+}
+
+#[tokio::test]
+async fn did_templates_update_name_mismatch_rejected() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+
+    let _ = app
+        .request(post_auth(
+            "/did-templates",
+            &super_token,
+            sample_template("fixed-name"),
+        ))
+        .await;
+
+    // Body names "other" but path is "fixed-name".
+    let (status, _) = app
+        .request(put_auth(
+            "/did-templates/fixed-name",
+            &super_token,
+            sample_template("other"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn did_templates_render_injects_ambient_and_merges_caller_vars() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+
+    let _ = app
+        .request(post_auth(
+            "/did-templates",
+            &super_token,
+            sample_template("renderable"),
+        ))
+        .await;
+
+    let reader = ctx
+        .auth_token("did:key:z6MkReader", "reader", vec!["any".into()])
+        .await;
+    // DID/SIGNING_KEY_MB are reserved ambient but Phase 2 doesn't mint them —
+    // callers must supply for a preview render.
+    let (status, body) = app
+        .request(post_auth(
+            "/did-templates/renderable/render",
+            &reader,
+            json!({
+                "vars": {
+                    "DID": "did:webvh:example.com:test",
+                    "SIGNING_KEY_MB": "z6MkSigning",
+                    "URL": "https://example.com"
+                }
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["document"]["id"], "did:webvh:example.com:test");
+    assert_eq!(
+        body["document"]["service"][0]["serviceEndpoint"]["uri"],
+        "https://example.com"
+    );
+    // ACCEPT defaulted from optionalVars, survived as array.
+    assert_eq!(
+        body["document"]["service"][0]["serviceEndpoint"]["accept"],
+        json!(["didcomm/v2"])
+    );
+}
+
+#[tokio::test]
+async fn did_templates_render_missing_required_var_errors() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+
+    let _ = app
+        .request(post_auth(
+            "/did-templates",
+            &super_token,
+            sample_template("needs-url"),
+        ))
+        .await;
+
+    // Omit URL — server should 400 with a clear message.
+    let (status, _) = app
+        .request(post_auth(
+            "/did-templates/needs-url/render",
+            &super_token,
+            json!({ "vars": { "DID": "did:x", "SIGNING_KEY_MB": "z6MkX" } }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn did_templates_invalid_body_rejected_at_create() {
+    let (app, ctx) = TestApp::new().await;
+    let super_token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+
+    let mut bad = sample_template("bad-name-has-space");
+    bad["name"] = json!("Has Space");
+    let (status, _) = app
+        .request(post_auth("/did-templates", &super_token, bad))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }

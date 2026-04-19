@@ -1,14 +1,15 @@
-//! Offline DID template commands.
+//! DID template commands — offline (Phase 1) and online (Phase 2 global scope).
 //!
-//! Phase 1 surface: no network, no VTA client. Operators author templates
-//! locally and lint them before uploading, or scaffold a starter by forking
-//! a built-in. Phase 2 adds the `list`, `show`, `create`, `update`, `delete`
-//! commands that hit the VTA.
+//! Offline: validate a file, init a starter from an embedded builtin, list
+//! builtins. Online: list/show/create/update/delete/render against the VTA.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use vta_sdk::did_templates::{BUILTIN_NAMES, DidTemplate, load_embedded};
+use vta_sdk::prelude::*;
 
+use crate::duration::format_local_time;
 use crate::render::{CYAN, DIM, GREEN, RED, RESET, YELLOW};
 
 /// `pnm did-templates validate <file>` / `cnm did-templates validate <file>`.
@@ -80,6 +81,130 @@ pub fn cmd_init(kind: String) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("       pnm did-templates init {kind} > my-{builtin_name}.json");
     Ok(())
 }
+
+// ── Online (Phase 2: global scope against the VTA) ──────────────────
+
+/// `pnm did-templates list` — show stored global templates on the VTA.
+///
+/// Built-ins are not merged in here — use `list-builtins` for those. Keeping
+/// the two listings separate makes it obvious whether a template is
+/// server-managed (listed here) or forked from a built-in.
+pub async fn cmd_list(client: &VtaClient) -> Result<(), Box<dyn std::error::Error>> {
+    let records = client.list_did_templates().await?;
+    if records.is_empty() {
+        println!("No DID templates stored on the VTA.");
+        println!("  {DIM}Scaffold one with{RESET} `pnm did-templates init <kind> > tpl.json`,");
+        println!("  {DIM}then{RESET} `pnm did-templates create --file tpl.json`.");
+        return Ok(());
+    }
+
+    println!(
+        "{CYAN}Stored DID templates{RESET} ({} total):\n",
+        records.len()
+    );
+    for r in &records {
+        println!(
+            "  {GREEN}\u{25b8}{RESET} {CYAN}{}{RESET} ({DIM}{}{RESET})",
+            r.template.name, r.template.kind
+        );
+        if let Some(desc) = &r.template.description {
+            println!("    {desc}");
+        }
+        if !r.template.required_vars.is_empty() {
+            println!(
+                "    {DIM}requiredVars: {}{RESET}",
+                r.template.required_vars.join(", ")
+            );
+        }
+        println!(
+            "    {DIM}created: {} by {}{RESET}",
+            format_local_time(r.created_at),
+            r.created_by
+        );
+    }
+    Ok(())
+}
+
+/// `pnm did-templates show <name> [--rendered --var K=V ...]` — fetch one template.
+///
+/// Without `--rendered`, prints the raw record. With `--rendered`, fetches the
+/// template then renders it server-side with caller-supplied `--var` pairs
+/// (useful for previewing what the eventual DID document will look like).
+pub async fn cmd_show(
+    client: &VtaClient,
+    name: &str,
+    rendered: bool,
+    vars: Vec<(String, String)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if rendered {
+        let mut vars_map: HashMap<String, serde_json::Value> = HashMap::new();
+        for (k, v) in vars {
+            vars_map.insert(k, serde_json::Value::String(v));
+        }
+        // Ambient reserved vars not supplied by the server in Phase 2 (DID,
+        // SIGNING_KEY_MB, KA_KEY_MB, CONTEXT_ID, CONTEXT_DID) must come from
+        // --var so the preview doesn't fail. Phase 4 wires these through a
+        // create flow; preview is a best-effort tool for authors.
+        let doc = client.render_did_template(name, vars_map).await?;
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+        return Ok(());
+    }
+
+    let r = client.get_did_template(name).await?;
+    let pretty = serde_json::to_string_pretty(&r)?;
+    println!("{pretty}");
+    Ok(())
+}
+
+/// `pnm did-templates create --file <path>` — upload a new global template.
+///
+/// The file is validated locally before upload, so authoring errors fail
+/// immediately without burning a round-trip to a super admin ACL check.
+pub async fn cmd_create(
+    client: &VtaClient,
+    file: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tpl = DidTemplate::load_file(&file)
+        .map_err(|e| format!("template at {} is invalid: {e}", file.display()))?;
+    let record = client.create_did_template(tpl).await?;
+    println!(
+        "{GREEN}\u{2713}{RESET} Created {CYAN}'{}'{RESET} ({DIM}{}{RESET}) on the VTA.",
+        record.template.name, record.template.kind
+    );
+    Ok(())
+}
+
+/// `pnm did-templates update <name> --file <path>` — replace a stored template.
+pub async fn cmd_update(
+    client: &VtaClient,
+    name: &str,
+    file: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tpl = DidTemplate::load_file(&file)
+        .map_err(|e| format!("template at {} is invalid: {e}", file.display()))?;
+    if tpl.name != name {
+        return Err(format!(
+            "file's template name '{}' does not match --name argument '{}'",
+            tpl.name, name
+        )
+        .into());
+    }
+    let record = client.update_did_template(name, tpl).await?;
+    println!(
+        "{GREEN}\u{2713}{RESET} Updated {CYAN}'{}'{RESET} on the VTA.",
+        record.template.name
+    );
+    Ok(())
+}
+
+/// `pnm did-templates delete <name>` — remove a stored template.
+pub async fn cmd_delete(client: &VtaClient, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    client.delete_did_template(name).await?;
+    println!("{GREEN}\u{2713}{RESET} Deleted {CYAN}'{name}'{RESET} on the VTA.");
+    Ok(())
+}
+
+// ── Offline (Phase 1 helpers) ───────────────────────────────────────
 
 /// `pnm did-templates list-builtins`.
 ///

@@ -202,6 +202,54 @@ enum DidTemplateCommands {
     /// List every built-in template shipped with this SDK.
     #[command(name = "list-builtins")]
     ListBuiltins,
+
+    /// List DID templates stored on the VTA (global scope).
+    List,
+
+    /// Show a stored template by name.
+    ///
+    /// Without `--rendered`, prints the raw record (metadata + document with
+    /// placeholders). With `--rendered`, renders the template server-side
+    /// using `--var KEY=VALUE` pairs and prints the concrete DID document.
+    Show {
+        /// Template name as stored on the VTA.
+        name: String,
+        /// Render the template rather than showing its raw record.
+        #[arg(long)]
+        rendered: bool,
+        /// `KEY=VALUE` — supply a template variable. Repeatable.
+        #[arg(long = "var", value_parser = parse_key_value)]
+        vars: Vec<(String, String)>,
+    },
+
+    /// Upload a new global template. Super admin only.
+    Create {
+        /// Path to a template JSON file.
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+
+    /// Replace a stored global template. Super admin only.
+    Update {
+        /// Template name as stored on the VTA.
+        name: String,
+        /// Path to the replacement JSON file. Its `name` field must match.
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+
+    /// Delete a stored global template. Super admin only.
+    Delete {
+        /// Template name.
+        name: String,
+    },
+}
+
+fn parse_key_value(s: &str) -> Result<(String, String), String> {
+    let (k, v) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected KEY=VALUE, got '{s}'"))?;
+    Ok((k.to_string(), v.to_string()))
 }
 
 #[derive(Subcommand)]
@@ -848,6 +896,12 @@ fn requires_auth(cmd: &Commands) -> bool {
     ) {
         return true;
     }
+    // did-templates has both offline (Validate/Init/ListBuiltins) and online
+    // (List/Show/Create/Update/Delete) subcommands — the former run without
+    // authentication, the latter need a VTA connection.
+    if let Commands::DidTemplates { command } = cmd {
+        return is_online_template_cmd(command);
+    }
     !matches!(
         cmd,
         Commands::Health
@@ -855,7 +909,15 @@ fn requires_auth(cmd: &Commands) -> bool {
             | Commands::Setup
             | Commands::Vta { .. }
             | Commands::Bootstrap { .. }
-            | Commands::DidTemplates { .. }
+    )
+}
+
+fn is_online_template_cmd(cmd: &DidTemplateCommands) -> bool {
+    !matches!(
+        cmd,
+        DidTemplateCommands::Validate { .. }
+            | DidTemplateCommands::Init { .. }
+            | DidTemplateCommands::ListBuiltins
     )
 }
 
@@ -934,11 +996,14 @@ async fn main() {
             }
             return;
         }
-        Commands::DidTemplates { command } => {
+        Commands::DidTemplates { command } if !is_online_template_cmd(command) => {
             let result = match command {
                 DidTemplateCommands::Validate { file } => did_templates::cmd_validate(file.clone()),
                 DidTemplateCommands::Init { kind } => did_templates::cmd_init(kind.clone()),
                 DidTemplateCommands::ListBuiltins => did_templates::cmd_list_builtins(),
+                // Online subcommands fall through to the authenticated dispatch
+                // below; the `requires_auth` guard routes them there.
+                _ => unreachable!("online did-templates run post-auth"),
             };
             if let Err(e) = result {
                 eprintln!("Error: {e}");
@@ -1078,7 +1143,22 @@ async fn main() {
     let result = match cli.command {
         Commands::Setup => unreachable!(),
         Commands::Bootstrap { .. } => unreachable!(),
-        Commands::DidTemplates { .. } => unreachable!(),
+        Commands::DidTemplates { command } => match command {
+            DidTemplateCommands::Validate { .. }
+            | DidTemplateCommands::Init { .. }
+            | DidTemplateCommands::ListBuiltins => unreachable!("offline commands run pre-auth"),
+            DidTemplateCommands::List => did_templates::cmd_list(&client).await,
+            DidTemplateCommands::Show {
+                name,
+                rendered,
+                vars,
+            } => did_templates::cmd_show(&client, &name, rendered, vars).await,
+            DidTemplateCommands::Create { file } => did_templates::cmd_create(&client, file).await,
+            DidTemplateCommands::Update { name, file } => {
+                did_templates::cmd_update(&client, &name, file).await
+            }
+            DidTemplateCommands::Delete { name } => did_templates::cmd_delete(&client, &name).await,
+        },
         Commands::Vta {
             command: VtaCommands::Restart,
         } => cmd_restart(&client).await,

@@ -76,6 +76,7 @@ pub struct AppState {
     pub sessions_ks: KeyspaceHandle,
     pub acl_ks: KeyspaceHandle,
     pub contexts_ks: KeyspaceHandle,
+    pub did_templates_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub imported_ks: KeyspaceHandle,
     pub cache_ks: KeyspaceHandle,
@@ -135,6 +136,7 @@ pub async fn build_app_state(
     let sessions_ks = apply_encryption(store.keyspace("sessions")?);
     let acl_ks = apply_encryption(store.keyspace("acl")?);
     let contexts_ks = apply_encryption(store.keyspace("contexts")?);
+    let did_templates_ks = apply_encryption(store.keyspace("did_templates")?);
     let audit_ks = apply_encryption(store.keyspace("audit")?);
     let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
     let cache_ks = store.keyspace("cache")?;
@@ -153,6 +155,7 @@ pub async fn build_app_state(
         sessions_ks,
         acl_ks,
         contexts_ks,
+        did_templates_ks,
         audit_ks,
         imported_ks,
         cache_ks,
@@ -227,6 +230,7 @@ pub async fn run(
         let sessions_ks = apply_encryption(store.keyspace("sessions")?);
         let acl_ks = apply_encryption(store.keyspace("acl")?);
         let contexts_ks = apply_encryption(store.keyspace("contexts")?);
+        let did_templates_ks = apply_encryption(store.keyspace("did_templates")?);
         let audit_ks = apply_encryption(store.keyspace("audit")?);
         let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
         let cache_ks = store.keyspace("cache")?;
@@ -317,6 +321,7 @@ pub async fn run(
                 sessions_ks,
                 acl_ks,
                 contexts_ks,
+                did_templates_ks,
                 audit_ks,
                 imported_ks,
                 cache_ks,
