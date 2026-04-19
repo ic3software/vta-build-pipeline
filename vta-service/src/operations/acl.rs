@@ -136,7 +136,11 @@ pub async fn update_acl(
     params: UpdateAclParams,
     channel: &str,
 ) -> Result<CreateAclResultBody, AppError> {
-    auth.require_manage()?;
+    // Modifying an ACL entry can downgrade an existing admin's role or
+    // shrink their `allowed_contexts`. That's a privilege-tamper surface
+    // — narrow it to Admin callers (creation still accepts Initiator via
+    // `require_manage` so operators can grant Reader/Application access).
+    auth.require_admin()?;
 
     let mut entry = get_acl_entry(acl_ks, did)
         .await?

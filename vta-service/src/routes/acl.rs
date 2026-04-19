@@ -6,7 +6,7 @@ use serde::Deserialize;
 use vta_sdk::protocols::acl_management::{create::CreateAclResultBody, list::ListAclResultBody};
 
 use crate::acl::Role;
-use crate::auth::ManageAuth;
+use crate::auth::{AdminAuth, ManageAuth};
 use crate::error::AppError;
 use crate::operations;
 use crate::server::AppState;
@@ -78,9 +78,11 @@ pub struct UpdateAclRequest {
     pub allowed_contexts: Option<Vec<String>>,
 }
 
-/// PATCH /acl/{did} — update role, label, or allowed contexts for an ACL entry. Auth: Admin or Initiator.
+/// PATCH /acl/{did} — update role, label, or allowed contexts for an ACL entry.
+/// Auth: Admin only (the operation layer also enforces this; gating at the
+/// extractor fails earlier with a clearer error).
 pub async fn update_acl(
-    auth: ManageAuth,
+    auth: AdminAuth,
     State(state): State<AppState>,
     Path(did): Path<String>,
     Json(req): Json<UpdateAclRequest>,

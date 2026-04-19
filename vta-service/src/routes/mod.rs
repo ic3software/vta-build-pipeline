@@ -16,15 +16,29 @@ mod health;
 pub mod keys;
 mod vta;
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
+use tower_governor::GovernorLayer;
+use tower_governor::governor::GovernorConfigBuilder;
 
 use crate::server::AppState;
 
 /// Maximum request body size (1 MB). Protects against memory exhaustion,
 /// especially critical in TEE deployments where enclave memory is limited.
 const MAX_BODY_SIZE: usize = 1024 * 1024;
+
+/// Per-client-IP rate-limit budget for unauthenticated endpoints.
+///
+/// 5 req/sec with a 10-request burst — loose enough that a legit operator
+/// running provisioning scripts doesn't hit it, tight enough that a
+/// sustained flood from one IP is rejected with 429. These endpoints do
+/// real crypto work (attestation, HPKE seal, Ed25519 verify) so throttling
+/// them protects VTA CPU regardless of any reverse proxy upstream.
+const UNAUTH_RPS: u64 = 5;
+const UNAUTH_BURST: u32 = 10;
 
 /// Health-check route — served without the request/response trace layer.
 /// Minimal response only; detailed info requires authentication.
@@ -33,13 +47,31 @@ pub fn health_router() -> Router<AppState> {
 }
 
 pub fn router() -> Router<AppState> {
-    let router = Router::new()
-        // Sealed-transfer bootstrap (unauthenticated — token or attestation gated)
+    // Per-IP rate-limit layer applied to every unauthenticated endpoint.
+    // Authenticated routes stay unthrottled — JWT auth is itself a gate,
+    // and legitimate operator traffic against the management plane
+    // shouldn't be rate-limited.
+    let governor_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(UNAUTH_RPS)
+            .burst_size(UNAUTH_BURST)
+            .key_extractor(tower_governor::key_extractor::SmartIpKeyExtractor)
+            .finish()
+            .expect("governor config values are static and non-zero"),
+    );
+    let unauth_layer = GovernorLayer::new(governor_config);
+
+    let unauth = Router::new()
+        // Sealed-transfer bootstrap (token or attestation gated inside)
         .route("/bootstrap/request", post(bootstrap::request))
-        // Auth routes (flattened to avoid nest + root-route matching issues in Axum 0.8)
+        // Auth flow entry points
         .route("/auth/challenge", post(auth::challenge))
         .route("/auth/", post(auth::authenticate))
         .route("/auth/refresh", post(auth::refresh))
+        .layer(unauth_layer);
+
+    let router = Router::new()
+        .merge(unauth)
         .route(
             "/auth/sessions",
             get(auth::session_list).delete(auth::revoke_sessions_by_did),

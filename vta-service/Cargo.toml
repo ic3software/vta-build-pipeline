@@ -102,6 +102,9 @@ tempfile = { version = "3", optional = true }
 libc = { version = "0.2", optional = true }
 zeroize = { version = "1", features = ["derive"] }
 tower = { version = "0.5", features = ["limit"] }
+# Per-IP rate limiting for unauthenticated endpoints (`/bootstrap/request`,
+# `/auth/*`) so a flood of requests can't burn CPU on attestation / crypto.
+tower_governor = "0.8"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 aes-gcm = "0.10"

@@ -103,11 +103,15 @@ impl JwtKeys {
         expiry_secs: u64,
         tee_attested: bool,
     ) -> Claims {
-        let exp = SystemTime::now()
+        // Fall back to 0 if the clock is before UNIX_EPOCH — happens on
+        // recovery boots before NTP sync. Token would expire immediately
+        // in that (very unusual) state, which is safer than panicking in
+        // a hot auth path.
+        let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + expiry_secs;
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let exp = now_secs + expiry_secs;
 
         Claims {
             aud: self.audience.clone(),

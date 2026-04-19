@@ -7,9 +7,9 @@ use tracing::info;
 
 use crate::acl::{
     AclEntry, Role, delete_acl_entry, get_acl_entry, is_acl_entry_visible, list_acl_entries,
-    store_acl_entry, validate_acl_modification,
+    store_acl_entry, validate_acl_modification, validate_role_assignment,
 };
-use crate::auth::{ManageAuth, session::now_epoch};
+use crate::auth::{AdminAuth, ManageAuth, session::now_epoch};
 use crate::error::AppError;
 use crate::server::AppState;
 
@@ -89,6 +89,9 @@ pub async fn create_acl(
     State(state): State<AppState>,
     Json(req): Json<CreateAclRequest>,
 ) -> Result<(StatusCode, Json<AclEntryResponse>), AppError> {
+    // Block Initiators from granting Admin — role ↔ context bound checks must
+    // run before we touch storage.
+    validate_role_assignment(&auth.0, &req.role)?;
     validate_acl_modification(&auth.0, &req.allowed_contexts)?;
 
     let acl = state.acl_ks.clone();
@@ -147,7 +150,10 @@ pub struct UpdateAclRequest {
 }
 
 pub async fn update_acl(
-    auth: ManageAuth,
+    // Modifying an ACL entry can downgrade an existing admin or shrink their
+    // `allowed_contexts`. Gate on Admin so an Initiator can't tamper with
+    // admin entries they happen to see (creation stays on `ManageAuth`).
+    auth: AdminAuth,
     State(state): State<AppState>,
     Path(did): Path<String>,
     Json(req): Json<UpdateAclRequest>,
@@ -165,6 +171,7 @@ pub async fn update_acl(
     }
 
     if let Some(role) = req.role {
+        validate_role_assignment(&auth.0, &role)?;
         entry.role = role;
     }
     if let Some(label) = req.label {
