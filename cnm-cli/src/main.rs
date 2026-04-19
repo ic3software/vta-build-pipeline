@@ -6,7 +6,9 @@ use clap::{Parser, Subcommand};
 use config::{community_keyring_key, resolve_community};
 use vta_sdk::client::VtaClient;
 
-use vta_cli_common::commands::{acl, config as config_cmd, contexts, credentials, keys};
+use vta_cli_common::commands::{
+    acl, config as config_cmd, contexts, credentials, did_templates, keys,
+};
 use vta_cli_common::render::{CYAN, DIM, GREEN, RED, RESET, YELLOW, print_section};
 
 #[derive(Parser)]
@@ -83,6 +85,40 @@ enum Commands {
         #[command(subcommand)]
         command: BootstrapCommands,
     },
+
+    /// DID document template management.
+    ///
+    /// Phase 1 surface is offline-only: validate a template file, or scaffold
+    /// a starter by forking a built-in. Later phases will add list/create/
+    /// update/delete commands that hit the VTA.
+    #[command(name = "did-templates")]
+    DidTemplates {
+        #[command(subcommand)]
+        command: DidTemplateCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DidTemplateCommands {
+    /// Validate a DID template file against the v1 schema.
+    Validate {
+        /// Path to a template JSON file to validate.
+        file: std::path::PathBuf,
+    },
+
+    /// Scaffold a starter template by forking an embedded built-in.
+    ///
+    /// Emits JSON on stdout. `kind` accepts the full built-in name
+    /// (`didcomm-mediator`, `webvh-hosting-server`) or a short alias
+    /// (`mediator`, `webvh-hosting`, `hosting`).
+    Init {
+        /// Built-in kind or alias to fork.
+        kind: String,
+    },
+
+    /// List every built-in template shipped with this SDK.
+    #[command(name = "list-builtins")]
+    ListBuiltins,
 }
 
 #[derive(Subcommand)]
@@ -507,6 +543,7 @@ fn requires_auth(cmd: &Commands) -> bool {
             | Commands::Setup
             | Commands::Community { .. }
             | Commands::Bootstrap { .. }
+            | Commands::DidTemplates { .. }
     )
 }
 
@@ -872,6 +909,11 @@ async fn main() {
                 expect_digest,
                 no_verify_digest,
             } => bootstrap_open(&bundle, expect_digest.as_deref(), no_verify_digest),
+        },
+        Commands::DidTemplates { command } => match command {
+            DidTemplateCommands::Validate { file } => did_templates::cmd_validate(file),
+            DidTemplateCommands::Init { kind } => did_templates::cmd_init(kind),
+            DidTemplateCommands::ListBuiltins => did_templates::cmd_list_builtins(),
         },
         Commands::Keys { command } => match command {
             KeyCommands::Create {

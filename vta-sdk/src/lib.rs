@@ -11,6 +11,7 @@ pub mod contexts;
 pub mod credentials;
 pub mod did_key;
 pub mod did_secrets;
+pub mod did_templates;
 #[cfg(feature = "client")]
 pub mod didcomm_light;
 #[cfg(feature = "session")]

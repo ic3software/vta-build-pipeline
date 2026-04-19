@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "name": "webvh-hosting-server",
+  "kind": "webvh-hosting",
+  "description": "did:webvh hosting server DID that publishes log entries for self-hosted DIDs. Exposes a WebVHHosting service endpoint clients use to register and update DID logs.",
+  "methods": ["webvh", "web"],
+  "requiredVars": ["URL"],
+  "optionalVars": {
+    "HOSTING_PATH": "/webvh"
+  },
+  "defaults": {
+    "preRotationCount": 2,
+    "portable": false,
+    "addMediatorService": false
+  },
+  "document": {
+    "@context": [
+      "https://www.w3.org/ns/did/v1",
+      "https://w3id.org/security/multikey/v1"
+    ],
+    "id": "{DID}",
+    "verificationMethod": [
+      {
+        "id": "{DID}#key-1",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{SIGNING_KEY_MB}"
+      },
+      {
+        "id": "{DID}#key-2",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{KA_KEY_MB}"
+      }
+    ],
+    "authentication": ["{DID}#key-1"],
+    "assertionMethod": ["{DID}#key-1"],
+    "keyAgreement": ["{DID}#key-2"],
+    "service": [
+      {
+        "id": "{DID}#webvh-hosting",
+        "type": "WebVHHosting",
+        "serviceEndpoint": {
+          "uri": "{URL}",
+          "hostingPath": "{HOSTING_PATH}"
+        }
+      }
+    ]
+  }
+}
