@@ -92,7 +92,14 @@ impl From<&str> for VtaError {
     }
 }
 
-// Allow converting from Box<dyn Error> for backward compat during migration
+// Backward-compat conversion from `Box<dyn Error>` (legacy CLI handler
+// return type) into a typed `VtaError`.
+//
+// **Discouraged for new code.** This conversion collapses the error into
+// `Other(String)`, dropping the `source()` chain — fine for call sites that
+// only surface `Display`, but it breaks programmatic error handling. For
+// new integrations, return a `VtaError` directly or add a typed variant
+// with `#[from]` on the underlying cause so the source chain is preserved.
 impl From<Box<dyn std::error::Error>> for VtaError {
     fn from(e: Box<dyn std::error::Error>) -> Self {
         Self::Other(e.to_string())

@@ -45,6 +45,12 @@ pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// 4. Config file seed (if `config-seed` compiled + `secrets.seed` set)
 /// 5. OS keyring (if `keyring` compiled — the default)
 /// 6. Plaintext file (always available — NOT secure)
+///
+/// `unused_variables` allowed: `config` is only read under specific
+/// feature flags; a build with none of the cloud/keyring/config-seed
+/// features compiled leaves it unused, which is fine — we fall through
+/// to the plaintext backend. rustc's dead-code lint can't see through
+/// the cfg-gated early returns.
 #[allow(unused_variables)]
 pub fn create_seed_store(config: &AppConfig) -> Result<Box<dyn SeedStore>, AppError> {
     #[cfg(feature = "aws-secrets")]
@@ -91,6 +97,11 @@ pub fn create_seed_store(config: &AppConfig) -> Result<Box<dyn SeedStore>, AppEr
         return Ok(Box::new(store));
     }
 
+    // `unreachable_code` allowed: each of the `return Ok(...)` branches above
+    // is `cfg(feature = ...)`-gated, so with every secure-backend feature
+    // enabled (or none of them), this tail is or isn't actually reached.
+    // Rustc can't resolve the combined cfg math — the allow is load-bearing
+    // only when `keyring` is the selected feature.
     #[allow(unreachable_code)]
     {
         tracing::warn!(

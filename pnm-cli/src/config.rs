@@ -113,6 +113,10 @@ pub fn vta_keyring_key(slug: &str) -> String {
 }
 
 /// Legacy keyring key (pre-multi-VTA). Used for migration detection.
+///
+/// `dead_code` allowed: referenced only by the migration path that runs at
+/// startup to transfer a single-VTA credential into the multi-VTA keyring
+/// layout. Deleting it would break operators upgrading from pre-0.4 pnm.
 #[allow(dead_code)]
 pub const LEGACY_SESSION_KEY: &str = "vta";
 

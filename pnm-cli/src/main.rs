@@ -658,7 +658,11 @@ enum AclCommands {
         /// DID to look up
         did: String,
     },
-    /// Create an ACL entry
+    /// Create an ACL entry.
+    ///
+    /// Not idempotent — errors with 409 Conflict if an entry already exists
+    /// for the given DID. To change a role or context list on an existing
+    /// entry use `pnm acl update`. To revoke access use `pnm acl delete`.
     Create {
         /// DID to grant access to
         #[arg(long)]
@@ -770,7 +774,11 @@ enum RetentionCommands {
 
 #[derive(Subcommand)]
 enum KeyCommands {
-    /// Create a new key
+    /// Create a new key.
+    ///
+    /// Not idempotent — every invocation mints a fresh key record (even with
+    /// identical arguments). Use `pnm keys list` to discover existing keys
+    /// in a context first if you're trying to avoid duplicates.
     Create {
         /// Key type: ed25519 or x25519
         #[arg(long)]

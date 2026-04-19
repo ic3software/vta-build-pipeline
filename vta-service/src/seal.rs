@@ -159,7 +159,14 @@ pub async fn run_unseal_challenge(store: &Store) -> Result<(), AppError> {
     eprintln!("  Then paste the signature (hex) and your DID below.");
     eprintln!();
 
-    // Read the admin DID
+    // Read the admin DID.
+    //
+    // `std::io::stdin().read_line` blocks the current tokio worker. That's
+    // intentional here — `run_unseal_challenge` is only ever called from the
+    // `vta unseal` CLI subcommand, where the process is exclusively waiting
+    // on operator input; there's no concurrent request load to starve. A
+    // `tokio::io::stdin()` would pull in an extra async boundary for no real
+    // benefit.
     eprint!("  Admin DID: ");
     let mut did_input = String::new();
     std::io::stdin()
