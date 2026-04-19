@@ -224,14 +224,10 @@ pub async fn cmd_context_create(
         }
         match acl.expires_at {
             Some(secs) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let remaining = secs.saturating_sub(now);
                 println!(
-                    "  Expires at: {secs} (unix, ~{} hours from now) — setup ACL",
-                    remaining / 3600
+                    "  Expires at: {} ({}) — setup ACL",
+                    crate::duration::format_local_time(secs),
+                    crate::duration::format_remaining(secs),
                 );
                 println!();
                 println!("  The admin should authenticate before expiry. On first successful");

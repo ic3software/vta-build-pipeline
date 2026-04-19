@@ -1,9 +1,17 @@
-//! Short duration parsing for CLI flags like `--admin-expires 7d`.
+//! Short duration parsing for CLI flags like `--admin-expires 7d`, plus
+//! user-facing display helpers.
 //!
-//! Accepts `N[s|m|h|d|w]` — seconds, minutes, hours, days, weeks — or a
-//! plain integer which is interpreted as seconds. Whitespace is trimmed.
+//! Internally we always store and transmit times as **UTC unix-epoch
+//! seconds**. Anything shown to the operator is converted to their local
+//! timezone for readability.
+//!
+//! Duration parsing accepts `N[s|m|h|d|w]` — seconds, minutes, hours,
+//! days, weeks — or a plain integer which is interpreted as seconds.
+//! Whitespace is trimmed.
 
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use chrono::{DateTime, Local};
 
 /// Parse a duration string into seconds.
 ///
@@ -39,11 +47,99 @@ pub fn parse_duration_secs(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
 /// (`now + duration`).
 pub fn duration_to_expires_at(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
     let secs = parse_duration_secs(s)?;
-    let now = SystemTime::now()
+    let now = now_unix();
+    Ok(now.saturating_add(secs))
+}
+
+/// Current unix-epoch seconds (UTC, monotonic with the system wall clock).
+pub fn now_unix() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    Ok(now.saturating_add(secs))
+        .unwrap_or(0)
+}
+
+/// Format a unix-epoch seconds value as a readable local-timezone string
+/// with an ISO-style offset, suitable for operator-facing output.
+///
+/// Example: `2026-04-20 15:32:17 +08:00`.
+pub fn format_local_time(unix_secs: u64) -> String {
+    match DateTime::from_timestamp(unix_secs as i64, 0) {
+        Some(utc) => utc
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S %:z")
+            .to_string(),
+        None => unix_secs.to_string(),
+    }
+}
+
+/// Format a relative-time string showing how long until `unix_secs` from
+/// `now_unix()`. Handles both future (`in 1h 0m`) and past (`expired 5m
+/// ago`) cases. Picks the largest sensible unit pair and rounds toward
+/// the nearest integer in each.
+///
+/// Uses full seconds internally so small intervals (a few minutes or
+/// less) don't collapse to "0h" via truncating integer division.
+pub fn format_remaining(unix_secs: u64) -> String {
+    let now = now_unix();
+    let (secs, expired) = if unix_secs >= now {
+        (unix_secs - now, false)
+    } else {
+        (now - unix_secs, true)
+    };
+
+    let pretty = humanize_duration(secs);
+    if expired {
+        format!("expired {pretty} ago")
+    } else {
+        format!("in {pretty}")
+    }
+}
+
+/// Format a duration in seconds as a compact two-part human string:
+/// "1h 30m", "5d 12h", "45s", "0s". Picks the largest unit that fits
+/// and adds one smaller unit when it helps readability.
+pub fn humanize_duration(secs: u64) -> String {
+    const MIN: u64 = 60;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+    const WEEK: u64 = 7 * DAY;
+
+    if secs >= WEEK {
+        let weeks = secs / WEEK;
+        let days = (secs % WEEK) / DAY;
+        if days == 0 {
+            format!("{weeks}w")
+        } else {
+            format!("{weeks}w {days}d")
+        }
+    } else if secs >= DAY {
+        let days = secs / DAY;
+        let hours = (secs % DAY) / HOUR;
+        if hours == 0 {
+            format!("{days}d")
+        } else {
+            format!("{days}d {hours}h")
+        }
+    } else if secs >= HOUR {
+        let hours = secs / HOUR;
+        let mins = (secs % HOUR) / MIN;
+        if mins == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h {mins}m")
+        }
+    } else if secs >= MIN {
+        let mins = secs / MIN;
+        let s = secs % MIN;
+        if s == 0 {
+            format!("{mins}m")
+        } else {
+            format!("{mins}m {s}s")
+        }
+    } else {
+        format!("{secs}s")
+    }
 }
 
 #[cfg(test)]
@@ -78,5 +174,35 @@ mod tests {
         let expiry = duration_to_expires_at("60s").unwrap();
         assert!(expiry >= before + 60);
         assert!(expiry <= before + 65);
+    }
+
+    #[test]
+    fn humanize_picks_the_right_unit_pair() {
+        assert_eq!(humanize_duration(0), "0s");
+        assert_eq!(humanize_duration(45), "45s");
+        assert_eq!(humanize_duration(60), "1m");
+        assert_eq!(humanize_duration(125), "2m 5s");
+        assert_eq!(humanize_duration(3600), "1h");
+        assert_eq!(humanize_duration(3660), "1h 1m");
+        assert_eq!(humanize_duration(86400), "1d");
+        assert_eq!(humanize_duration(90000), "1d 1h");
+        assert_eq!(humanize_duration(604_800), "1w");
+        assert_eq!(humanize_duration(691_200), "1w 1d");
+    }
+
+    #[test]
+    fn format_remaining_handles_future_and_past() {
+        let now = now_unix();
+        assert!(format_remaining(now + 3600).starts_with("in "));
+        assert!(format_remaining(now - 3600).starts_with("expired "));
+        assert!(format_remaining(now - 3600).ends_with("ago"));
+    }
+
+    #[test]
+    fn format_local_time_is_nonempty() {
+        let s = format_local_time(1776600737);
+        assert!(s.len() > 10, "unexpectedly short: {s}");
+        // Should contain a colon from HH:MM:SS
+        assert!(s.contains(':'));
     }
 }
