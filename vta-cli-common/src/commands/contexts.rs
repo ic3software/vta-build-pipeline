@@ -195,12 +195,47 @@ pub async fn cmd_context_create(
     description: Option<String>,
     admin: AdminAclOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::render::{RESET, YELLOW};
+    use vta_sdk::error::VtaError;
+
     let req = CreateContextRequest {
         id: id.to_string(),
         name: name.to_string(),
         description,
     };
-    let resp = client.create_context(req).await?;
+    let resp = match client.create_context(req).await {
+        Ok(r) => r,
+        // Friendly path when the operator's real intent was "grant this DID
+        // admin access to this context": the context already exists, so the
+        // scaffolding command is the wrong tool — point them at the ACL
+        // command and exit cleanly so repeated provisioning scripts don't
+        // choke on second runs.
+        Err(VtaError::Conflict(_)) if admin.is_requested() => {
+            let did = admin.did.as_deref().unwrap_or_default();
+            eprintln!(
+                "{YELLOW}\u{26a0}{RESET}  Context '{id}' already exists — skipping context creation."
+            );
+            eprintln!();
+            eprintln!("  The --admin-did was NOT added. To grant admin access to an existing");
+            eprintln!("  context, use the ACL command directly:");
+            eprintln!();
+            let mut hint = format!("    pnm acl create --did {did} --role admin --contexts {id}");
+            if let Some(label) = admin.label.as_deref() {
+                hint.push_str(&format!(" --label '{label}'"));
+            }
+            eprintln!("{hint}");
+            if admin.expires_at.is_some() {
+                eprintln!();
+                eprintln!("  (note: `pnm acl create` does not yet support --expires; create the");
+                eprintln!(
+                    "   permanent entry and rotate it out later, or use `pnm contexts provision`"
+                );
+                eprintln!("   for a fresh context with a setup ACL.)");
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
     println!("Context created:");
     println!("  ID:        {}", resp.id);
     println!("  Name:      {}", resp.name);
