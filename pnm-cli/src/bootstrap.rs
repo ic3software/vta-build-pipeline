@@ -2,14 +2,14 @@
 //!
 //! Phase 1 implements the offline (Mode C) consumer flow:
 //!
-//! - `pnm bootstrap request` generates a fresh X25519 keypair, persists the
-//!   secret on disk under `~/.config/pnm/bootstrap-secrets/<bundle_id>.key`,
-//!   and writes a `BootstrapRequest` JSON the operator can hand to the
-//!   producer.
-//! - `pnm bootstrap open` reads an armored sealed bundle, looks up the secret
-//!   by bundle_id, opens it, prints the payload, and (for `AdminCredential`
-//!   payloads) optionally hands off to `pnm auth login` so the new credential
-//!   is installed in the keyring.
+//! - `pnm bootstrap request` generates a fresh Ed25519 keypair, persists the
+//!   seed on disk under `~/.config/pnm/bootstrap-secrets/<bundle_id>.key`,
+//!   and writes a `BootstrapRequest` JSON (`client_did` as `did:key`) the
+//!   operator can hand to the producer.
+//! - `pnm bootstrap open` reads an armored sealed bundle, looks up the seed
+//!   by bundle_id, derives the X25519 HPKE secret, opens the bundle, prints
+//!   the payload, and (for `AdminCredential` payloads) optionally hands off
+//!   to `pnm auth login` so the new credential is installed in the keyring.
 //!
 //! `--expect-digest <hex>` is required by default. `--no-verify-digest` is
 //! available but prints a warning — there is no silent TOFU.
@@ -20,12 +20,11 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use vta_sdk::attestation::verify_nitro_assertion;
 use vta_sdk::sealed_transfer::{
-    BootstrapRequest, SealedPayloadV1, armor, bundle_digest, generate_keypair, open_bundle,
+    BootstrapRequest, SealedPayloadV1, armor, bundle_digest, ed25519_seed_to_x25519_secret,
+    generate_ed25519_keypair, open_bundle,
 };
 
 use crate::auth;
@@ -86,12 +85,12 @@ pub async fn run_request(
     out: PathBuf,
     label: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (secret, public) = generate_keypair();
+    let (seed, public) = generate_ed25519_keypair();
     let nonce: [u8; 16] = rand::random();
     let bundle_id_hex = hex_lower(&nonce);
 
     let path = secret_path(&bundle_id_hex)?;
-    write_secret(&path, &secret)?;
+    write_secret(&path, &seed)?;
 
     let request = BootstrapRequest::new(public, nonce, label);
     let json = serde_json::to_string_pretty(&request)?;
@@ -99,9 +98,9 @@ pub async fn run_request(
 
     println!("Bootstrap request written to {}", out.display());
     println!();
-    println!("  Bundle-Id:     {bundle_id_hex}");
-    println!("  Client pubkey: {}", B64URL.encode(public));
-    println!("  Secret stored: {}", path.display());
+    println!("  Bundle-Id:  {bundle_id_hex}");
+    println!("  Client DID: {}", request.client_did);
+    println!("  Seed saved: {}", path.display());
     println!();
     println!("Hand the request to the producer. They will return an armored bundle.");
     println!("Verify the SHA-256 digest they print to you out-of-band, then run:");
@@ -151,9 +150,10 @@ pub async fn run_open(
         )
         .into());
     }
-    let secret = read_secret(&secret_path)?;
+    let ed_seed = read_secret(&secret_path)?;
+    let x_secret = ed25519_seed_to_x25519_secret(&ed_seed);
 
-    let opened = open_bundle(&secret, bundle, expect_digest.as_deref())?;
+    let opened = open_bundle(&x_secret, bundle, expect_digest.as_deref())?;
 
     println!("Sealed bundle opened.");
     println!();
@@ -213,15 +213,6 @@ pub async fn run_open(
 
 // ── online flow (Mode B — TEE first-boot attestation) ──────────────────
 
-#[derive(Debug, Serialize)]
-struct BootstrapRequestWire {
-    version: u8,
-    client_pubkey: String,
-    nonce: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct BootstrapResponseWire {
     bundle: String,
@@ -230,11 +221,11 @@ struct BootstrapResponseWire {
 
 /// `pnm bootstrap connect --vta-url <URL> [--expect-digest <HEX>]`
 ///
-/// Online TEE first-boot bootstrap. Generates an ephemeral keypair, POSTs
-/// to `/bootstrap/request`, verifies the attestation quote, installs the
-/// minted admin credential, and registers the VTA under a slug in `pnm`
-/// config. Only the first successful call against a fresh TEE VTA
-/// succeeds — the carve-out closes on success.
+/// Online TEE first-boot bootstrap. Generates an ephemeral Ed25519 keypair,
+/// POSTs the `did:key` as `client_did` to `/bootstrap/request`, verifies
+/// the attestation quote, installs the minted admin credential, and
+/// registers the VTA under a slug in `pnm` config. Only the first successful
+/// call against a fresh TEE VTA succeeds — the carve-out closes on success.
 ///
 /// For non-TEE VTAs use `pnm setup` (temp did:key + admin grant via
 /// `vta acl create` + auto-rotate on first authenticated connect).
@@ -244,16 +235,14 @@ pub async fn run_connect(
     vta_slug: Option<String>,
     pnm_config: &mut crate::config::PnmConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (secret, public) = generate_keypair();
+    let (ed_seed, ed_pub) = generate_ed25519_keypair();
     let nonce: [u8; 16] = rand::random();
     let bundle_id_hex = hex_lower(&nonce);
 
-    let body = BootstrapRequestWire {
-        version: 1,
-        client_pubkey: B64URL.encode(public),
-        nonce: B64URL.encode(nonce),
-        label: None,
-    };
+    // Reuse the SDK's canonical wire type so pnm speaks the same shape the
+    // server `BootstrapRequestBody` deserializes. Emits `client_did` as a
+    // `did:key:z6Mk…` string.
+    let body = BootstrapRequest::new(ed_pub, nonce, None);
 
     let url = format!("{}/bootstrap/request", vta_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
@@ -291,9 +280,16 @@ pub async fn run_connect(
         return Err("server-returned bundle_id does not match our nonce".into());
     }
 
-    let opened = open_bundle(&secret, bundle, expect_digest.as_deref())?;
+    // HPKE decryption uses the X25519 secret derived from our Ed25519 seed.
+    let x_secret = ed25519_seed_to_x25519_secret(&ed_seed);
+    let opened = open_bundle(&x_secret, bundle, expect_digest.as_deref())?;
 
-    let attest = verify_nitro_assertion(&opened.producer, &public, &nonce)?;
+    // The attestation quote binds the *X25519* recipient pubkey (what HPKE
+    // saw), so we verify against the same X25519 derivation the server used
+    // when computing the quote's user_data.
+    let x_pub = affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&ed_pub)
+        .map_err(|e| format!("derive X25519 pubkey for attestation check: {e}"))?;
+    let attest = verify_nitro_assertion(&opened.producer, &x_pub, &nonce)?;
     println!("TEE attestation verified.");
     println!("  Enclave module: {}", attest.module_id);
     if !attest.pcr0_hex.is_empty() {

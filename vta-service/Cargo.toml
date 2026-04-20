@@ -48,6 +48,7 @@ path = "src/main.rs"
 [dependencies]
 vti-common = { path = "../vti-common", version = "0.3", features = ["encryption"] }
 vta-sdk = { path = "../vta-sdk", version = "0.5", features = ["didcomm", "sealed-transfer"] }
+affinidi-crypto = { workspace = true }
 hkdf = "0.12"
 affinidi-tdk = { workspace = true }
 affinidi-messaging-didcomm = "0.13"

@@ -399,13 +399,14 @@ enum ContextCommands {
         #[arg(long)]
         admin_label: Option<String>,
         /// Path to a BootstrapRequest JSON file produced by `cnm bootstrap request`.
-        #[arg(long, conflicts_with_all = ["recipient_pubkey", "recipient_nonce"])]
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
         recipient: Option<std::path::PathBuf>,
-        /// Recipient's base64url X25519 public key.
+        /// Recipient's `did:key` (Ed25519). The X25519 pubkey HPKE seals to
+        /// is derived locally.
         #[arg(long, requires = "recipient_nonce", conflicts_with = "recipient")]
-        recipient_pubkey: Option<String>,
+        recipient_did: Option<String>,
         /// Recipient's 16-byte nonce in hex.
-        #[arg(long, requires = "recipient_pubkey", conflicts_with = "recipient")]
+        #[arg(long, requires = "recipient_did", conflicts_with = "recipient")]
         recipient_nonce: Option<String>,
     },
 }
@@ -480,13 +481,14 @@ enum AuthCredentialCommands {
         #[arg(long, value_delimiter = ',')]
         contexts: Vec<String>,
         /// Path to a BootstrapRequest JSON file produced by `cnm bootstrap request`.
-        #[arg(long, conflicts_with_all = ["recipient_pubkey", "recipient_nonce"])]
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
         recipient: Option<std::path::PathBuf>,
-        /// Recipient's base64url X25519 public key.
+        /// Recipient's `did:key` (Ed25519). The X25519 pubkey HPKE seals to
+        /// is derived locally.
         #[arg(long, requires = "recipient_nonce", conflicts_with = "recipient")]
-        recipient_pubkey: Option<String>,
+        recipient_did: Option<String>,
         /// Recipient's 16-byte nonce in hex.
-        #[arg(long, requires = "recipient_pubkey", conflicts_with = "recipient")]
+        #[arg(long, requires = "recipient_did", conflicts_with = "recipient")]
         recipient_nonce: Option<String>,
     },
 }
@@ -621,21 +623,21 @@ async fn auth_login_sealed(
     auth::login(&bundle, client.base_url(), keyring_key).await
 }
 
-/// Resolve CLI `--recipient` / `--recipient-pubkey` / `--recipient-nonce`
+/// Resolve CLI `--recipient` / `--recipient-did` / `--recipient-nonce`
 /// arguments into a [`vta_cli_common::sealed_producer::SealedRecipient`].
 fn resolve_recipient(
     recipient: Option<&std::path::Path>,
-    recipient_pubkey: Option<&str>,
+    recipient_did: Option<&str>,
     recipient_nonce: Option<&str>,
 ) -> Result<vta_cli_common::sealed_producer::SealedRecipient, Box<dyn std::error::Error>> {
     use vta_cli_common::sealed_producer::SealedRecipient;
     if let Some(path) = recipient {
         SealedRecipient::from_file(path)
-    } else if let (Some(pk), Some(nonce)) = (recipient_pubkey, recipient_nonce) {
-        SealedRecipient::from_inline(pk, nonce)
+    } else if let (Some(did), Some(nonce)) = (recipient_did, recipient_nonce) {
+        SealedRecipient::from_inline(did, nonce)
     } else {
         Err(
-            "a recipient is required: pass --recipient <file> or both --recipient-pubkey and --recipient-nonce"
+            "a recipient is required: pass --recipient <file> or both --recipient-did and --recipient-nonce"
                 .into(),
         )
     }
@@ -667,12 +669,12 @@ fn bootstrap_request(
     let json = serde_json::to_string_pretty(&created.request)?;
     std::fs::write(&out, json.as_bytes())?;
 
-    let public_b64 = created.request.client_pubkey.clone();
+    let client_did = created.request.client_did.clone();
     println!("Bootstrap request written to {}", out.display());
     println!();
-    println!("  Bundle-Id:     {}", created.bundle_id_hex);
-    println!("  Client pubkey: {public_b64}");
-    println!("  Secret stored: {}", created.secret_path.display());
+    println!("  Bundle-Id:  {}", created.bundle_id_hex);
+    println!("  Client DID: {client_did}");
+    println!("  Seed saved: {}", created.secret_path.display());
     println!();
     println!("Hand the request to the operator. They return an armored sealed bundle.");
     println!("Verify the SHA-256 digest they print to you out-of-band, then run:");
@@ -952,11 +954,11 @@ async fn main() {
                 description,
                 admin_label,
                 recipient,
-                recipient_pubkey,
+                recipient_did,
                 recipient_nonce,
             } => match resolve_recipient(
                 recipient.as_deref(),
-                recipient_pubkey.as_deref(),
+                recipient_did.as_deref(),
                 recipient_nonce.as_deref(),
             ) {
                 Ok(recipient) => {
@@ -1006,11 +1008,11 @@ async fn main() {
                 label,
                 contexts,
                 recipient,
-                recipient_pubkey,
+                recipient_did,
                 recipient_nonce,
             } => match resolve_recipient(
                 recipient.as_deref(),
-                recipient_pubkey.as_deref(),
+                recipient_did.as_deref(),
                 recipient_nonce.as_deref(),
             ) {
                 Ok(recipient) => {

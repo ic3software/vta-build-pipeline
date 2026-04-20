@@ -200,9 +200,14 @@ Single endpoint for Modes A and B. Policy-gated on the server; uniform shape to 
 
 ```
 POST /bootstrap/request
-Body: { client_pubkey, nonce, token: Option<String>, label: Option<String> }
-Response: ArmoredBundle (SealedBundle, HPKE-sealed to client_pubkey)
+Body: { client_did, nonce, token: Option<String>, label: Option<String> }
+Response: ArmoredBundle (SealedBundle, HPKE-sealed to X25519 derived from client_did)
 ```
+
+`client_did` is an Ed25519 `did:key:z6Mk…`. The server derives the X25519
+pubkey locally for HPKE; the client holds the Ed25519 seed and derives the
+X25519 secret at open time. Every public-key surface in the protocol is a
+DID; the X25519 conversion is an internal detail of the HPKE layer.
 
 Server authorization logic (in order):
 

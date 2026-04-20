@@ -1,8 +1,10 @@
 //! CLI-side consumer helpers for `vta_sdk::sealed_transfer`.
 //!
-//! Generates ephemeral X25519 keypairs and persists the secret under
-//! `<config_dir>/bootstrap-secrets/<bundle_id>.key` (mode 0600 on Unix) so a
-//! subsequent open call can retrieve it.
+//! Generates ephemeral Ed25519 keypairs (exposed as `did:key` on the wire)
+//! and persists the seed under `<config_dir>/bootstrap-secrets/<bundle_id>.key`
+//! (mode 0600 on Unix) so a subsequent open call can retrieve it. At open
+//! time the X25519 HPKE secret is derived from the seed via
+//! [`vta_sdk::sealed_transfer::ed25519_seed_to_x25519_secret`].
 //!
 //! The pnm-cli and cnm-cli bootstrap subcommands both route through this
 //! module — the only per-CLI concern is which `config_dir` to use.
@@ -15,7 +17,8 @@ use std::path::{Path, PathBuf};
 
 use vta_sdk::credentials::CredentialBundle;
 use vta_sdk::sealed_transfer::{
-    BootstrapRequest, SealedPayloadV1, armor, bundle_digest, generate_keypair, open_bundle,
+    BootstrapRequest, SealedPayloadV1, armor, bundle_digest, ed25519_seed_to_x25519_secret,
+    generate_ed25519_keypair, open_bundle,
 };
 
 const SECRETS_SUBDIR: &str = "bootstrap-secrets";
@@ -69,17 +72,22 @@ pub struct CreatedRequest {
     pub secret_path: PathBuf,
 }
 
-/// Generate a fresh keypair + nonce, persist the secret under `config_dir`,
-/// and return a [`BootstrapRequest`] ready to hand to the producer.
+/// Generate a fresh Ed25519 keypair + nonce, persist the **seed** (not the
+/// derived X25519 secret) under `config_dir`, and return a
+/// [`BootstrapRequest`] ready to hand to the producer.
+///
+/// Persisting the Ed25519 seed (rather than the X25519 secret) means the
+/// same stored material can later be reused as a signing identity without
+/// regenerating.
 pub fn create_bootstrap_request(
     config_dir: &Path,
     label: Option<String>,
 ) -> Result<CreatedRequest, Box<dyn std::error::Error>> {
-    let (secret, public) = generate_keypair();
+    let (seed, public) = generate_ed25519_keypair();
     let nonce: [u8; 16] = rand::random();
     let bundle_id_hex = hex_lower(&nonce);
     let sp = secret_path(config_dir, &bundle_id_hex)?;
-    write_secret(&sp, &secret)?;
+    write_secret(&sp, &seed)?;
     let request = BootstrapRequest::new(public, nonce, label);
     Ok(CreatedRequest {
         request,
@@ -140,10 +148,11 @@ pub fn open_armored_bundle(
         )
         .into());
     }
-    let secret = read_secret(&sp)?;
+    let ed_seed = read_secret(&sp)?;
+    let x_secret = ed25519_seed_to_x25519_secret(&ed_seed);
 
     let digest = bundle_digest(bundle);
-    let opened = open_bundle(&secret, bundle, expect_digest)?;
+    let opened = open_bundle(&x_secret, bundle, expect_digest)?;
 
     // Best-effort cleanup. If the caller later fails, the secret is gone —
     // that's fine because the bundle id is single-use anyway; a retry would

@@ -64,9 +64,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-crypto"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88df282b0eda89a678e35b1a2d1ac7ece496efc6dc28b913311cb0c80f063573"
+checksum = "47c0fb004d079a20c37bd74bfb1d5be7122aaec25dcc6265c684e46b8b7b26c1"
 dependencies = [
  "affinidi-encoding",
  "base58",
@@ -2166,7 +2166,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -5325,6 +5325,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 name = "pnm-cli"
 version = "0.5.0"
 dependencies = [
+ "affinidi-crypto",
  "affinidi-did-resolver-cache-sdk",
  "base64 0.22.1",
  "chrono",
@@ -8044,6 +8045,7 @@ name = "vta-cli-common"
 version = "0.5.0"
 dependencies = [
  "aes-gcm",
+ "affinidi-crypto",
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
@@ -8079,6 +8081,7 @@ version = "0.5.0"
 dependencies = [
  "aes",
  "aes-gcm",
+ "affinidi-crypto",
  "affinidi-did-resolver-cache-sdk",
  "affinidi-tdk",
  "azure_identity",
@@ -8112,6 +8115,7 @@ version = "0.5.0"
 dependencies = [
  "aes",
  "aes-gcm",
+ "affinidi-crypto",
  "affinidi-did-resolver-cache-sdk",
  "affinidi-messaging-didcomm",
  "affinidi-messaging-didcomm-service",

@@ -15,7 +15,9 @@
 use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
+#[cfg(feature = "tee")]
 use base64::Engine;
+#[cfg(feature = "tee")]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use serde::{Deserialize, Serialize};
 
@@ -51,8 +53,9 @@ use crate::server::AppState;
 pub struct BootstrapRequestBody {
     /// Wire-format version. Currently 1.
     pub version: u8,
-    /// Consumer's ephemeral X25519 public key (32 bytes), base64url-no-pad.
-    pub client_pubkey: String,
+    /// Consumer's ephemeral `did:key` (Ed25519). The server derives the
+    /// X25519 pubkey from this for the HPKE seal.
+    pub client_did: String,
     /// Random 16-byte nonce, base64url-no-pad. Becomes the bundle_id.
     pub nonce: String,
     /// Optional human-readable label (operator-visible only). Echoed into
@@ -84,7 +87,7 @@ pub async fn request(
         )));
     }
 
-    let client_pubkey = decode_pubkey(&req.client_pubkey)?;
+    let client_pubkey = decode_client_did(&req.client_did)?;
     let bundle_id = decode_nonce(&req.nonce)?;
     let now = now_epoch();
 
@@ -241,20 +244,32 @@ async fn mint_mode_b(
     Ok(bundle)
 }
 
-fn decode_pubkey(s: &str) -> Result<[u8; 32], AppError> {
-    let raw = B64URL
-        .decode(s)
-        .map_err(|e| AppError::Validation(format!("invalid client_pubkey base64: {e}")))?;
-    raw.try_into()
-        .map_err(|_| AppError::Validation("client_pubkey must be 32 bytes".into()))
+/// Decode the consumer's `did:key` (Ed25519) and derive the X25519 pubkey
+/// used as the HPKE recipient. Wraps `affinidi_crypto::did_key::*`.
+fn decode_client_did(did: &str) -> Result<[u8; 32], AppError> {
+    let ed_pub = affinidi_crypto::did_key::did_key_to_ed25519_pub(did)
+        .map_err(|e| AppError::Validation(format!("invalid client_did: {e}")))?;
+    affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&ed_pub)
+        .map_err(|e| AppError::Validation(format!("client_did X25519 derivation: {e}")))
 }
 
+#[cfg(feature = "tee")]
 fn decode_nonce(s: &str) -> Result<[u8; 16], AppError> {
     let raw = B64URL
         .decode(s)
         .map_err(|e| AppError::Validation(format!("invalid nonce base64: {e}")))?;
     raw.try_into()
         .map_err(|_| AppError::Validation("nonce must be 16 bytes".into()))
+}
+
+#[cfg(not(feature = "tee"))]
+fn decode_nonce(_s: &str) -> Result<[u8; 16], AppError> {
+    // Non-TEE builds never reach the seal path; the handler returns Forbidden
+    // before calling this. Keep a stub with the right signature so the
+    // top-level handler compiles without ballooning the conditional code.
+    Err(AppError::Forbidden(
+        "bootstrap request requires TEE first-boot attestation".into(),
+    ))
 }
 
 impl IntoResponse for BootstrapResponseBody {

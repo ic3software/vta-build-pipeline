@@ -12,6 +12,7 @@ repository.workspace = true
 
 [dependencies]
 vta-sdk = { path = "../vta-sdk", version = "0.5", features = ["client", "sealed-transfer"] }
+affinidi-crypto = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 ratatui = { workspace = true }

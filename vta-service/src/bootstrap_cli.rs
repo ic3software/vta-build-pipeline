@@ -38,7 +38,7 @@ pub async fn run_seal(
         return Err(format!("unsupported request version: {}", request.version).into());
     }
 
-    let recipient_pk = request.decode_client_pubkey()?;
+    let recipient_pk = request.decode_client_x25519_pub()?;
     let bundle_id = request.decode_nonce()?;
 
     let payload_json = std::fs::read_to_string(&payload_path)

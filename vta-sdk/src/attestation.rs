@@ -6,7 +6,9 @@
 //! crate. We layer the sealed-bootstrap-specific checks on top: the
 //! quote's `user_data` must equal `SHA256(client_pubkey || nonce ||
 //! producer_pubkey)`, binding the attestation to the exact bundle we
-//! just opened.
+//! just opened. `client_pubkey` here is the X25519 pubkey HPKE sealed to
+//! — callers holding a `did:key` must derive it first via
+//! [`affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes`].
 //!
 //! Feature-gated behind `attest-verify` so clients that don't consume
 //! Mode B bundles don't pull in the attestation crate.

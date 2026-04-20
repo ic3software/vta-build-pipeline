@@ -29,6 +29,34 @@ pub use nonce::{InMemoryNonceStore, NonceStore};
 pub use request::BootstrapRequest;
 
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
+
+/// Generate a fresh Ed25519 keypair for a consumer bootstrap request.
+///
+/// Returns `(seed, pubkey)`. The seed is the 32-byte Ed25519 private key that
+/// the consumer persists (e.g. on disk under `bootstrap-secrets/`) to open the
+/// eventual sealed bundle; the pubkey is what goes into
+/// [`BootstrapRequest::new`] and is encoded as a `did:key` on the wire.
+///
+/// At open time the consumer passes the seed to
+/// [`ed25519_seed_to_x25519_secret`] and hands the result to [`open_bundle`].
+/// Keeping the seed (rather than pre-deriving the X25519 secret) means the
+/// same identity can later be used for signing without regenerating.
+pub fn generate_ed25519_keypair() -> (Zeroizing<[u8; 32]>, [u8; 32]) {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).expect("OS CSPRNG failed — see hpke::OsCsprng docs");
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pubkey = signing.verifying_key().to_bytes();
+    (Zeroizing::new(seed), pubkey)
+}
+
+/// Derive the X25519 HPKE secret that pairs with an Ed25519 seed. Thin wrapper
+/// around [`affinidi_crypto::ed25519::ed25519_private_to_x25519`] that keeps
+/// the returned bytes in a [`Zeroizing`] wrapper so the call site doesn't
+/// accidentally leave the derived scalar on the stack.
+pub fn ed25519_seed_to_x25519_secret(seed: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(affinidi_crypto::ed25519::ed25519_private_to_x25519(seed))
+}
 
 /// Default digest algorithm for new bundles.
 pub const DEFAULT_DIGEST_ALGO: &str = "sha256";
@@ -452,19 +480,38 @@ mod tests {
 
     #[test]
     fn bootstrap_request_round_trip() {
-        let (_sk, pk) = generate_keypair();
-        let req = BootstrapRequest::new(pk, [42u8; 16], Some("test".into()));
+        let (_seed, ed_pub) = generate_ed25519_keypair();
+        let req = BootstrapRequest::new(ed_pub, [42u8; 16], Some("test".into()));
+        // Wire field is a did:key string, not a raw pubkey.
+        assert!(req.client_did.starts_with("did:key:z6Mk"));
         let json = serde_json::to_string(&req).unwrap();
         let back: BootstrapRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.decode_client_pubkey().unwrap(), pk);
+        assert_eq!(back.decode_client_ed25519_pub().unwrap(), ed_pub);
         assert_eq!(back.decode_nonce().unwrap(), [42u8; 16]);
+    }
+
+    #[test]
+    fn bootstrap_request_derives_x25519_pub_from_did_key() {
+        // The producer only ever sees the did:key; it must derive the same
+        // X25519 pubkey that would pair with the consumer-side X25519 secret
+        // derived from the same Ed25519 seed.
+        let (seed, ed_pub) = generate_ed25519_keypair();
+        let req = BootstrapRequest::new(ed_pub, [1u8; 16], None);
+
+        let producer_x25519 = req.decode_client_x25519_pub().unwrap();
+        let consumer_x25519 = ed25519_seed_to_x25519_secret(&seed);
+
+        // Round-trip through HPKE's own primitives to confirm the pair agrees.
+        let sealed = hpke_seal(&producer_x25519, b"payload", b"aad").unwrap();
+        let opened = hpke_open(&consumer_x25519, &sealed, b"aad").unwrap();
+        assert_eq!(&opened, b"payload");
     }
 
     #[test]
     fn bootstrap_request_rejects_unknown_fields() {
         let json = r#"{
             "version": 1,
-            "client_pubkey": "AA",
+            "client_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
             "nonce": "AA",
             "requested_role": "Admin"
         }"#;

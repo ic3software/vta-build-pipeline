@@ -28,6 +28,10 @@ repository = "https://github.com/OpenVTC/verifiable-trust-infrastructure"
 
 # Affinidi Trust Development Kit
 affinidi-tdk = "0.6"
+# Raw crypto primitives (ed25519↔x25519 conversion, did:key helpers). Pulled
+# directly so sealed-transfer can use `affinidi_crypto::did_key::*` without
+# going through the higher-level Secret wrapper in secrets-resolver.
+affinidi-crypto = "0.1"
 affinidi-messaging-didcomm-service = "0.2"
 
 # Decentralized Trust Graph Credentials

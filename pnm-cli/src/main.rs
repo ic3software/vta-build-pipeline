@@ -567,13 +567,14 @@ enum ContextCommands {
         #[arg(long)]
         admin_label: Option<String>,
         /// Path to a BootstrapRequest JSON file produced by `pnm bootstrap request`.
-        #[arg(long, conflicts_with_all = ["recipient_pubkey", "recipient_nonce"])]
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
         recipient: Option<std::path::PathBuf>,
-        /// Recipient's base64url X25519 public key.
+        /// Recipient's `did:key` (Ed25519). The X25519 pubkey HPKE seals to
+        /// is derived locally.
         #[arg(long, requires = "recipient_nonce", conflicts_with = "recipient")]
-        recipient_pubkey: Option<String>,
+        recipient_did: Option<String>,
         /// Recipient's 16-byte nonce in hex.
-        #[arg(long, requires = "recipient_pubkey", conflicts_with = "recipient")]
+        #[arg(long, requires = "recipient_did", conflicts_with = "recipient")]
         recipient_nonce: Option<String>,
     },
     /// Provision a new application context with a portable config bundle
@@ -613,15 +614,16 @@ enum ContextCommands {
         #[arg(long, default_value = "0")]
         pre_rotation: u32,
         /// Path to a BootstrapRequest JSON file produced by `pnm bootstrap request`.
-        #[arg(long, conflicts_with_all = ["recipient_pubkey", "recipient_nonce"])]
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
         recipient: Option<std::path::PathBuf>,
-        /// Recipient's base64url X25519 public key (32 bytes).
+        /// Recipient's `did:key` (Ed25519). The X25519 pubkey HPKE seals to
+        /// is derived locally.
         /// Requires --recipient-nonce. Mutually exclusive with --recipient.
         #[arg(long, requires = "recipient_nonce", conflicts_with = "recipient")]
-        recipient_pubkey: Option<String>,
+        recipient_did: Option<String>,
         /// Recipient's 16-byte nonce in hex (32 chars).
-        /// Requires --recipient-pubkey. Mutually exclusive with --recipient.
-        #[arg(long, requires = "recipient_pubkey", conflicts_with = "recipient")]
+        /// Requires --recipient-did. Mutually exclusive with --recipient.
+        #[arg(long, requires = "recipient_did", conflicts_with = "recipient")]
         recipient_nonce: Option<String>,
     },
     /// Regenerate a provision bundle for an existing context
@@ -641,13 +643,14 @@ enum ContextCommands {
         #[arg(long)]
         admin_label: Option<String>,
         /// Path to a BootstrapRequest JSON file produced by `pnm bootstrap request`.
-        #[arg(long, conflicts_with_all = ["recipient_pubkey", "recipient_nonce"])]
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
         recipient: Option<std::path::PathBuf>,
-        /// Recipient's base64url X25519 public key.
+        /// Recipient's `did:key` (Ed25519). The X25519 pubkey HPKE seals to
+        /// is derived locally.
         #[arg(long, requires = "recipient_nonce", conflicts_with = "recipient")]
-        recipient_pubkey: Option<String>,
+        recipient_did: Option<String>,
         /// Recipient's 16-byte nonce in hex.
-        #[arg(long, requires = "recipient_pubkey", conflicts_with = "recipient")]
+        #[arg(long, requires = "recipient_did", conflicts_with = "recipient")]
         recipient_nonce: Option<String>,
     },
 }
@@ -726,13 +729,14 @@ enum AuthCredentialCommands {
         #[arg(long, value_delimiter = ',')]
         contexts: Vec<String>,
         /// Path to a BootstrapRequest JSON file produced by `pnm bootstrap request`.
-        #[arg(long, conflicts_with_all = ["recipient_pubkey", "recipient_nonce"])]
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
         recipient: Option<std::path::PathBuf>,
-        /// Recipient's base64url X25519 public key.
+        /// Recipient's `did:key` (Ed25519). The X25519 pubkey HPKE seals to
+        /// is derived locally.
         #[arg(long, requires = "recipient_nonce", conflicts_with = "recipient")]
-        recipient_pubkey: Option<String>,
+        recipient_did: Option<String>,
         /// Recipient's 16-byte nonce in hex.
-        #[arg(long, requires = "recipient_pubkey", conflicts_with = "recipient")]
+        #[arg(long, requires = "recipient_did", conflicts_with = "recipient")]
         recipient_nonce: Option<String>,
     },
 }
@@ -878,13 +882,14 @@ enum KeyCommands {
         /// Application context ID whose DID and keys to bundle
         context: String,
         /// Path to a BootstrapRequest JSON file produced by `pnm bootstrap request`.
-        #[arg(long, conflicts_with_all = ["recipient_pubkey", "recipient_nonce"])]
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
         recipient: Option<std::path::PathBuf>,
-        /// Recipient's base64url X25519 public key.
+        /// Recipient's `did:key` (Ed25519). The X25519 pubkey HPKE seals to
+        /// is derived locally.
         #[arg(long, requires = "recipient_nonce", conflicts_with = "recipient")]
-        recipient_pubkey: Option<String>,
+        recipient_did: Option<String>,
         /// Recipient's 16-byte nonce in hex.
-        #[arg(long, requires = "recipient_pubkey", conflicts_with = "recipient")]
+        #[arg(long, requires = "recipient_did", conflicts_with = "recipient")]
         recipient_nonce: Option<String>,
     },
     /// List seed generations
@@ -959,7 +964,7 @@ fn resolve_expires_at(expires: Option<&str>) -> Result<Option<u64>, Box<dyn std:
     }
 }
 
-/// Resolve CLI `--recipient` / `--recipient-pubkey` / `--recipient-nonce`
+/// Resolve CLI `--recipient` / `--recipient-did` / `--recipient-nonce`
 /// arguments into a [`vta_cli_common::sealed_producer::SealedRecipient`].
 ///
 /// Clap's `conflicts_with` + `requires` already guarantee at most one mode is
@@ -967,17 +972,17 @@ fn resolve_expires_at(expires: Option<&str>) -> Result<Option<u64>, Box<dyn std:
 /// consistent error message.
 fn resolve_recipient(
     recipient: Option<&std::path::Path>,
-    recipient_pubkey: Option<&str>,
+    recipient_did: Option<&str>,
     recipient_nonce: Option<&str>,
 ) -> Result<vta_cli_common::sealed_producer::SealedRecipient, Box<dyn std::error::Error>> {
     use vta_cli_common::sealed_producer::SealedRecipient;
     if let Some(path) = recipient {
         SealedRecipient::from_file(path)
-    } else if let (Some(pk), Some(nonce)) = (recipient_pubkey, recipient_nonce) {
-        SealedRecipient::from_inline(pk, nonce)
+    } else if let (Some(did), Some(nonce)) = (recipient_did, recipient_nonce) {
+        SealedRecipient::from_inline(did, nonce)
     } else {
         Err(
-            "a recipient is required: pass --recipient <file> or both --recipient-pubkey and --recipient-nonce"
+            "a recipient is required: pass --recipient <file> or both --recipient-did and --recipient-nonce"
                 .into(),
         )
     }
@@ -1341,11 +1346,11 @@ async fn main() {
                 description,
                 admin_label,
                 recipient,
-                recipient_pubkey,
+                recipient_did,
                 recipient_nonce,
             } => match resolve_recipient(
                 recipient.as_deref(),
-                recipient_pubkey.as_deref(),
+                recipient_did.as_deref(),
                 recipient_nonce.as_deref(),
             ) {
                 Ok(recipient) => {
@@ -1372,7 +1377,7 @@ async fn main() {
                 mediator_service,
                 pre_rotation,
                 recipient,
-                recipient_pubkey,
+                recipient_did,
                 recipient_nonce,
             } => {
                 if server.is_some() && did_url.is_some() {
@@ -1380,7 +1385,7 @@ async fn main() {
                 } else {
                     let recipient_spec = resolve_recipient(
                         recipient.as_deref(),
-                        recipient_pubkey.as_deref(),
+                        recipient_did.as_deref(),
                         recipient_nonce.as_deref(),
                     );
                     match recipient_spec {
@@ -1415,11 +1420,11 @@ async fn main() {
                 key,
                 admin_label,
                 recipient,
-                recipient_pubkey,
+                recipient_did,
                 recipient_nonce,
             } => match resolve_recipient(
                 recipient.as_deref(),
-                recipient_pubkey.as_deref(),
+                recipient_did.as_deref(),
                 recipient_nonce.as_deref(),
             ) {
                 Ok(recipient) => {
@@ -1458,11 +1463,11 @@ async fn main() {
                 label,
                 contexts,
                 recipient,
-                recipient_pubkey,
+                recipient_did,
                 recipient_nonce,
             } => match resolve_recipient(
                 recipient.as_deref(),
-                recipient_pubkey.as_deref(),
+                recipient_did.as_deref(),
                 recipient_nonce.as_deref(),
             ) {
                 Ok(recipient) => {
@@ -1634,11 +1639,11 @@ async fn main() {
             KeyCommands::Bundle {
                 context,
                 recipient,
-                recipient_pubkey,
+                recipient_did,
                 recipient_nonce,
             } => match resolve_recipient(
                 recipient.as_deref(),
-                recipient_pubkey.as_deref(),
+                recipient_did.as_deref(),
                 recipient_nonce.as_deref(),
             ) {
                 Ok(recipient) => keys::cmd_key_bundle(&client, &context, recipient).await,

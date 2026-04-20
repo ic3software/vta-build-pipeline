@@ -32,12 +32,13 @@ use vta_sdk::sealed_transfer::{
     armor, bundle_digest, generate_keypair, seal_payload,
 };
 
-/// Recipient of a sealed bundle — the X25519 pubkey the AEAD encrypts to,
-/// plus the bundle id (the recipient's nonce) that anchors anti-replay.
+/// Recipient of a sealed bundle — the X25519 pubkey the AEAD encrypts to
+/// (derived from the consumer's `did:key`), plus the bundle id (the
+/// recipient's nonce) that anchors anti-replay.
 ///
 /// Construct via [`Self::from_file`] (standard path: consumer ran
 /// `pnm bootstrap request --out <file>`) or [`Self::from_inline`] (fallback:
-/// consumer pasted pubkey/nonce over chat, no file transfer available).
+/// consumer pasted did:key / nonce over chat, no file transfer available).
 #[derive(Debug)]
 pub struct SealedRecipient {
     pub pubkey: [u8; 32],
@@ -66,25 +67,25 @@ impl SealedRecipient {
             );
         }
         Ok(Self {
-            pubkey: request.decode_client_pubkey()?,
+            pubkey: request.decode_client_x25519_pub()?,
             bundle_id: request.decode_nonce()?,
             label: request.label,
         })
     }
 
-    /// Construct from an inline base64url pubkey and hex nonce.
+    /// Construct from an inline `did:key` (Ed25519) and hex nonce.
     ///
     /// `nonce_hex` must be 32 hex characters (16 bytes). Accepts either case.
+    /// The `did:key` is decoded to an Ed25519 pubkey and converted to the
+    /// X25519 pubkey HPKE uses.
     pub fn from_inline(
-        pubkey_b64: &str,
+        client_did: &str,
         nonce_hex: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let pk_bytes = B64URL
-            .decode(pubkey_b64.trim())
-            .map_err(|e| format!("invalid recipient pubkey (base64url): {e}"))?;
-        let pubkey: [u8; 32] = pk_bytes
-            .try_into()
-            .map_err(|_| "recipient pubkey must be 32 bytes".to_string())?;
+        let ed_pub = affinidi_crypto::did_key::did_key_to_ed25519_pub(client_did.trim())
+            .map_err(|e| format!("invalid recipient did:key: {e}"))?;
+        let pubkey = affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&ed_pub)
+            .map_err(|e| format!("recipient did:key X25519 derivation: {e}"))?;
         let nonce_bytes = decode_hex(nonce_hex.trim())?;
         let bundle_id: [u8; 16] = nonce_bytes
             .try_into()
@@ -224,11 +225,15 @@ mod tests {
 
     #[test]
     fn recipient_from_inline_validates_sizes() {
-        // Valid: 32-byte X25519 pubkey b64url-encoded, 16-byte nonce hex.
-        let pk_b64 = B64URL.encode([1u8; 32]);
+        use vta_sdk::sealed_transfer::generate_ed25519_keypair;
+
+        let (_seed, ed_pub) = generate_ed25519_keypair();
+        let did = affinidi_crypto::did_key::ed25519_pub_to_did_key(&ed_pub);
         let nonce_hex = "00112233445566778899aabbccddeeff";
-        let r = SealedRecipient::from_inline(&pk_b64, nonce_hex).unwrap();
-        assert_eq!(r.pubkey, [1u8; 32]);
+        let r = SealedRecipient::from_inline(&did, nonce_hex).unwrap();
+        // Recipient-side pubkey is the derived X25519, not the raw Ed25519.
+        let expected_x = affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&ed_pub).unwrap();
+        assert_eq!(r.pubkey, expected_x);
         assert_eq!(
             r.bundle_id,
             [
@@ -237,12 +242,11 @@ mod tests {
             ]
         );
 
-        // Wrong pubkey size.
-        let short_pk = B64URL.encode([0u8; 16]);
-        assert!(SealedRecipient::from_inline(&short_pk, nonce_hex).is_err());
+        // Wrong did:key prefix.
+        assert!(SealedRecipient::from_inline("did:example:123", nonce_hex).is_err());
 
         // Wrong nonce size.
-        assert!(SealedRecipient::from_inline(&pk_b64, "deadbeef").is_err());
+        assert!(SealedRecipient::from_inline(&did, "deadbeef").is_err());
     }
 
     #[tokio::test]
@@ -285,13 +289,17 @@ mod tests {
 
     #[tokio::test]
     async fn seal_recipient_from_json_round_trip() {
-        let (recip_sk, recip_pk) = generate_keypair();
+        use vta_sdk::sealed_transfer::{ed25519_seed_to_x25519_secret, generate_ed25519_keypair};
+
+        let (ed_seed, ed_pub) = generate_ed25519_keypair();
         let bundle_id: [u8; 16] = rand::random();
-        let request = BootstrapRequest::new(recip_pk, bundle_id, Some("json-test".into()));
+        let request = BootstrapRequest::new(ed_pub, bundle_id, Some("json-test".into()));
         let json = serde_json::to_string(&request).unwrap();
 
         let recipient = SealedRecipient::from_json_str(&json).unwrap();
-        assert_eq!(recipient.pubkey, recip_pk);
+        // Recipient carries the X25519 pubkey derived from the did:key; the
+        // opener uses the X25519 secret derived from the same Ed25519 seed.
+        let recip_x_sk = ed25519_seed_to_x25519_secret(&ed_seed);
         assert_eq!(recipient.bundle_id, bundle_id);
         assert_eq!(recipient.label.as_deref(), Some("json-test"));
 
@@ -299,7 +307,7 @@ mod tests {
             .await
             .unwrap();
         let parsed = armor::decode(&sealed.armored).unwrap();
-        let opened = open_bundle(&recip_sk, &parsed[0], Some(&sealed.digest)).unwrap();
+        let opened = open_bundle(&recip_x_sk, &parsed[0], Some(&sealed.digest)).unwrap();
         assert_eq!(opened.bundle_id, bundle_id);
     }
 
@@ -307,7 +315,7 @@ mod tests {
     fn recipient_from_json_rejects_unknown_version() {
         // Manually craft an unsupported version — BootstrapRequest::new always
         // sets version=1, so there's no constructor for this.
-        let json = r#"{"version": 99, "client_pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "nonce": "AAAAAAAAAAAAAAAAAAAAAA"}"#;
+        let json = r#"{"version": 99, "client_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK", "nonce": "AAAAAAAAAAAAAAAAAAAAAA"}"#;
         let err = SealedRecipient::from_json_str(json)
             .unwrap_err()
             .to_string();
