@@ -30,7 +30,7 @@ use vta_sdk::credentials::CredentialBundle;
 #[cfg(feature = "tee")]
 use vta_sdk::sealed_transfer::{
     AssertionProof, AttestationQuoteAssertion, ProducerAssertion, SealedPayloadV1, armor,
-    bundle_digest, generate_keypair, seal_payload,
+    bundle_digest, generate_ed25519_keypair, seal_payload,
 };
 
 #[cfg(feature = "tee")]
@@ -87,16 +87,16 @@ pub async fn request(
         )));
     }
 
-    let client_pubkey = decode_client_did(&req.client_did)?;
+    let client_ed25519_pub = decode_client_did(&req.client_did)?;
     let bundle_id = decode_nonce(&req.nonce)?;
     let now = now_epoch();
 
     #[cfg(feature = "tee")]
-    let bundle = mint_mode_b(&state, &client_pubkey, bundle_id, now).await?;
+    let bundle = mint_mode_b(&state, &client_ed25519_pub, bundle_id, now).await?;
 
     #[cfg(not(feature = "tee"))]
     {
-        let _ = (state, client_pubkey, bundle_id, now);
+        let _ = (state, client_ed25519_pub, bundle_id, now);
         return Err(AppError::Forbidden(
             "bootstrap request requires TEE first-boot attestation, which is not available on \
              this VTA build. Non-TEE VTAs use the `pnm setup` temp-did:key + ACL flow instead."
@@ -143,7 +143,7 @@ pub async fn request(
 #[cfg(feature = "tee")]
 async fn mint_mode_b(
     state: &AppState,
-    client_pubkey: &[u8; 32],
+    client_ed25519_pub: &[u8; 32],
     bundle_id: [u8; 16],
     now: u64,
 ) -> Result<vta_sdk::sealed_transfer::SealedBundle, AppError> {
@@ -184,15 +184,20 @@ async fn mint_mode_b(
     let vta_url = cfg.public_url.clone();
     drop(cfg);
 
-    // Per-request ephemeral producer pubkey. The attestation quote binds
-    // it into `user_data` alongside the client-provided pubkey and nonce,
-    // so the consumer can recompute and verify on open.
-    let (_producer_sk, producer_pk) = generate_keypair();
+    // Per-request ephemeral producer Ed25519 keypair. The did:key bytes are
+    // bound into the attestation `user_data` alongside the client's did:key
+    // bytes + nonce so the consumer can recompute against DID-visible data.
+    let (_producer_seed, producer_ed_pub) = generate_ed25519_keypair();
+    let producer_did = affinidi_crypto::did_key::ed25519_pub_to_did_key(&producer_ed_pub);
 
+    // Attestation user_data binds DID-layer bytes end-to-end:
+    //   SHA256(client_ed25519 || bundle_id || producer_ed25519)
+    // Both halves match what the consumer sees via the `client_did` it sent
+    // and the `producer_did` in the returned `ProducerAssertion`.
     let mut hasher = Sha256::new();
-    hasher.update(client_pubkey);
-    hasher.update(&bundle_id);
-    hasher.update(&producer_pk);
+    hasher.update(client_ed25519_pub);
+    hasher.update(bundle_id);
+    hasher.update(producer_ed_pub);
     let user_data = hasher.finalize();
 
     // Attestation nonce: reuse the client nonce for freshness.
@@ -228,29 +233,42 @@ async fn mint_mode_b(
     };
 
     let assertion = ProducerAssertion {
-        producer_pubkey_b64: B64URL.encode(producer_pk),
+        producer_did,
         proof: AssertionProof::Attested(AttestationQuoteAssertion {
             format: format!("{}", report.tee_type),
             quote_b64: report.evidence,
         }),
     };
 
+    // HPKE targets the consumer's derived X25519 pubkey; the DID layer is
+    // invisible to the cipher. Any decoding error here should be impossible
+    // (the handler already validated `client_did`), so surface as 500.
+    let client_x25519_pub =
+        affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(client_ed25519_pub)
+            .map_err(|e| AppError::Internal(format!("client_did X25519 derivation: {e}")))?;
+
     let nonce_store = PersistentNonceStore::new(state.sealed_nonces_ks.clone());
     let payload = SealedPayloadV1::AdminCredential(Box::new(credential));
-    let bundle = seal_payload(client_pubkey, bundle_id, assertion, &payload, &nonce_store)
-        .await
-        .map_err(|e| AppError::Internal(format!("sealed-transfer seal failed: {e}")))?;
+    let bundle = seal_payload(
+        &client_x25519_pub,
+        bundle_id,
+        assertion,
+        &payload,
+        &nonce_store,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("sealed-transfer seal failed: {e}")))?;
     info!("TEE first-boot carve-out consumed — closed for good");
     Ok(bundle)
 }
 
-/// Decode the consumer's `did:key` (Ed25519) and derive the X25519 pubkey
-/// used as the HPKE recipient. Wraps `affinidi_crypto::did_key::*`.
+/// Decode the consumer's `did:key` (Ed25519) to its raw 32-byte pubkey.
+/// X25519 derivation happens inside `mint_mode_b` where HPKE is actually
+/// invoked; the Ed25519 pubkey is separately bound into the attestation
+/// `user_data` so the consumer can verify against did:key-visible bytes.
 fn decode_client_did(did: &str) -> Result<[u8; 32], AppError> {
-    let ed_pub = affinidi_crypto::did_key::did_key_to_ed25519_pub(did)
-        .map_err(|e| AppError::Validation(format!("invalid client_did: {e}")))?;
-    affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&ed_pub)
-        .map_err(|e| AppError::Validation(format!("client_did X25519 derivation: {e}")))
+    affinidi_crypto::did_key::did_key_to_ed25519_pub(did)
+        .map_err(|e| AppError::Validation(format!("invalid client_did: {e}")))
 }
 
 #[cfg(feature = "tee")]

@@ -58,7 +58,7 @@ sealed-transfer = [
 # Full AWS Nitro attestation verification (COSE_Sign1 + certificate chain
 # against the AWS Nitro root). Consumers of sealed-bootstrap Mode B enable
 # this to validate the `Attested` producer assertion end-to-end.
-attest-verify = ["dep:nitro_attest", "dep:time"]
+attest-verify = ["dep:nitro_attest", "dep:time", "dep:affinidi-crypto"]
 
 [dependencies]
 serde = { workspace = true }

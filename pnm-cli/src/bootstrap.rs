@@ -157,13 +157,10 @@ pub async fn run_open(
 
     println!("Sealed bundle opened.");
     println!();
-    println!("  Bundle-Id:        {bundle_id_hex}");
-    println!("  Digest (sha256):  {}", bundle_digest(bundle));
-    println!(
-        "  Producer pubkey:  {}",
-        opened.producer.producer_pubkey_b64
-    );
-    println!("  Producer proof:   {:?}", opened.producer.proof);
+    println!("  Bundle-Id:       {bundle_id_hex}");
+    println!("  Digest (sha256): {}", bundle_digest(bundle));
+    println!("  Producer DID:    {}", opened.producer.producer_did);
+    println!("  Producer proof:  {:?}", opened.producer.proof);
     println!();
     match &opened.payload {
         SealedPayloadV1::AdminCredential(c) => {
@@ -284,12 +281,11 @@ pub async fn run_connect(
     let x_secret = ed25519_seed_to_x25519_secret(&ed_seed);
     let opened = open_bundle(&x_secret, bundle, expect_digest.as_deref())?;
 
-    // The attestation quote binds the *X25519* recipient pubkey (what HPKE
-    // saw), so we verify against the same X25519 derivation the server used
-    // when computing the quote's user_data.
-    let x_pub = affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&ed_pub)
-        .map_err(|e| format!("derive X25519 pubkey for attestation check: {e}"))?;
-    let attest = verify_nitro_assertion(&opened.producer, &x_pub, &nonce)?;
+    // The attestation quote binds the did:key-visible bytes end-to-end:
+    //   SHA256(client_ed25519 || bundle_id || producer_ed25519)
+    // so we pass the raw Ed25519 pubkey we generated (the same bytes the
+    // server decoded from `client_did`) rather than any X25519 derivative.
+    let attest = verify_nitro_assertion(&opened.producer, &ed_pub, &nonce)?;
     println!("TEE attestation verified.");
     println!("  Enclave module: {}", attest.module_id);
     if !attest.pcr0_hex.is_empty() {

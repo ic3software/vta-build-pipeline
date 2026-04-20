@@ -12,11 +12,9 @@
 
 use std::path::PathBuf;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use vta_sdk::sealed_transfer::{
     AssertionProof, BootstrapRequest, ProducerAssertion, SealedPayloadV1, armor, bundle_digest,
-    generate_keypair, seal_payload,
+    generate_ed25519_keypair, seal_payload,
 };
 
 use crate::config::AppConfig;
@@ -47,10 +45,11 @@ pub async fn run_seal(
         serde_json::from_str(&payload_json).map_err(|e| format!("parse SealedPayloadV1: {e}"))?;
 
     // Fresh per-seal producer identity. In Mode C the consumer pins this
-    // pubkey out-of-band — it is not tied to the VTA's long-lived DID.
-    let (_producer_sk, producer_pk) = generate_keypair();
+    // did:key out-of-band — it is not tied to the VTA's long-lived DID.
+    let (_producer_seed, producer_ed_pub) = generate_ed25519_keypair();
+    let producer_did = affinidi_crypto::did_key::ed25519_pub_to_did_key(&producer_ed_pub);
     let producer = ProducerAssertion {
-        producer_pubkey_b64: B64URL.encode(producer_pk),
+        producer_did: producer_did.clone(),
         proof: AssertionProof::PinnedOnly,
     };
 
@@ -71,10 +70,10 @@ pub async fn run_seal(
     let digest = bundle_digest(&bundle);
     eprintln!("Sealed bundle written to {}", out_path.display());
     eprintln!();
-    eprintln!("  Bundle-Id:        {}", hex_lower(&bundle.bundle_id));
-    eprintln!("  Chunks:           {}", bundle.chunks.len());
-    eprintln!("  Producer pubkey:  {}", B64URL.encode(producer_pk));
-    eprintln!("  SHA-256 digest:   {digest}");
+    eprintln!("  Bundle-Id:       {}", hex_lower(&bundle.bundle_id));
+    eprintln!("  Chunks:          {}", bundle.chunks.len());
+    eprintln!("  Producer DID:    {producer_did}");
+    eprintln!("  SHA-256 digest:  {digest}");
     eprintln!();
     eprintln!(
         "Communicate the digest to the consumer out-of-band so they can run\n  \

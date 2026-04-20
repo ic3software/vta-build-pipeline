@@ -90,12 +90,13 @@ pub enum AssertionProof {
     PinnedOnly,
 }
 
-/// The producer's claim that it owns the pubkey embedded in chunk 0.
+/// The producer's claim that it owns the did:key embedded in chunk 0.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProducerAssertion {
-    /// X25519 producer public key (32 bytes), base64url-no-pad.
-    /// Pinned by the consumer out-of-band.
-    pub producer_pubkey_b64: String,
+    /// Producer's ephemeral Ed25519 `did:key`. Pinned by the consumer
+    /// out-of-band (PinnedOnly), bound into the attestation user_data
+    /// (Attested), or cross-checked against the signing DID (DidSigned).
+    pub producer_did: String,
     pub proof: AssertionProof,
 }
 

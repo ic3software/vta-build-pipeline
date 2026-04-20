@@ -28,9 +28,11 @@ pub struct ChunkPlaintext {
     pub bundle_id: [u8; 16],
     pub chunk_index: u16,
     pub total_chunks: u16,
-    /// Producer pubkey — present only on chunk 0.
+    /// Producer `did:key` — present only on chunk 0. Must match
+    /// `producer_assertion.producer_did`; the inner check defends against a
+    /// malicious open path mixing different assertions across chunks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub producer_pubkey: Option<[u8; 32]>,
+    pub producer_did: Option<String>,
     /// Producer assertion — present only on chunk 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer_assertion: Option<ProducerAssertion>,

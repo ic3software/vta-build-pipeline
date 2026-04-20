@@ -95,8 +95,6 @@ pub async fn seal_payload(
     ciborium::ser::into_writer(payload, &mut payload_bytes)
         .map_err(|e| SealedTransferError::CborEncode(e.to_string()))?;
 
-    let producer_pubkey = base64_url_decode_32(&producer.producer_pubkey_b64)?;
-
     let total_chunks_usize = payload_bytes.len().div_ceil(MAX_PAYLOAD_FRAGMENT).max(1);
     let total_chunks: u16 = total_chunks_usize
         .try_into()
@@ -113,7 +111,11 @@ pub async fn seal_payload(
             bundle_id,
             chunk_index,
             total_chunks,
-            producer_pubkey: if i == 0 { Some(producer_pubkey) } else { None },
+            producer_did: if i == 0 {
+                Some(producer.producer_did.clone())
+            } else {
+                None
+            },
             producer_assertion: if i == 0 { Some(producer.clone()) } else { None },
             payload_fragment: fragment,
         };
@@ -185,7 +187,7 @@ pub fn open_bundle(
             bundle_id: bundle.bundle_id,
             chunk_index: chunk.chunk_index,
             total_chunks: chunk.total_chunks,
-            producer_pubkey: None,
+            producer_did: None,
             producer_assertion: None,
             payload_fragment: Vec::new(),
         };
@@ -213,14 +215,14 @@ pub fn open_bundle(
         .producer_assertion
         .clone()
         .ok_or(SealedTransferError::MissingAssertion)?;
-    let declared_pk = chunk0
-        .producer_pubkey
+    let declared_did = chunk0
+        .producer_did
+        .clone()
         .ok_or(SealedTransferError::MissingAssertion)?;
-    let declared_b64 = base64_url_encode(&declared_pk);
-    if declared_b64 != producer.producer_pubkey_b64 {
+    if declared_did != producer.producer_did {
         return Err(SealedTransferError::ProducerMismatch {
-            declared: declared_b64,
-            expected: producer.producer_pubkey_b64.clone(),
+            declared: declared_did,
+            expected: producer.producer_did.clone(),
         });
     }
 
@@ -246,22 +248,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     acc == 0
 }
 
-fn base64_url_decode_32(s: &str) -> Result<[u8; 32], SealedTransferError> {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-    let raw = B64URL
-        .decode(s)
-        .map_err(|e| SealedTransferError::Base64(e.to_string()))?;
-    raw.try_into()
-        .map_err(|_| SealedTransferError::Wire("expected 32-byte X25519 pubkey".into()))
-}
-
-fn base64_url_encode(bytes: &[u8]) -> String {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-    B64URL.encode(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,9 +261,9 @@ mod tests {
         )))
     }
 
-    fn sample_assertion(pubkey_b64: String) -> ProducerAssertion {
+    fn sample_assertion(producer_did: String) -> ProducerAssertion {
         ProducerAssertion {
-            producer_pubkey_b64: pubkey_b64,
+            producer_did,
             proof: AssertionProof::PinnedOnly,
         }
     }
@@ -285,8 +271,9 @@ mod tests {
     #[tokio::test]
     async fn round_trip_single_chunk() {
         let (recip_sk, recip_pk) = generate_keypair();
-        let (_prod_sk, prod_pk) = generate_keypair();
-        let assertion = sample_assertion(base64_url_encode(&prod_pk));
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
         let store = InMemoryNonceStore::new();
         let bundle_id = [7u8; 16];
 
@@ -307,8 +294,9 @@ mod tests {
     #[tokio::test]
     async fn round_trip_multi_chunk() {
         let (recip_sk, recip_pk) = generate_keypair();
-        let (_prod_sk, prod_pk) = generate_keypair();
-        let assertion = sample_assertion(base64_url_encode(&prod_pk));
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
         let store = InMemoryNonceStore::new();
         let bundle_id = [9u8; 16];
 
@@ -337,8 +325,9 @@ mod tests {
     #[tokio::test]
     async fn replay_rejected_by_nonce_store() {
         let (_recip_sk, recip_pk) = generate_keypair();
-        let (_prod_sk, prod_pk) = generate_keypair();
-        let assertion = sample_assertion(base64_url_encode(&prod_pk));
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
         let store = InMemoryNonceStore::new();
         let bundle_id = [1u8; 16];
 
@@ -360,8 +349,9 @@ mod tests {
     #[tokio::test]
     async fn digest_mismatch_rejected() {
         let (recip_sk, recip_pk) = generate_keypair();
-        let (_prod_sk, prod_pk) = generate_keypair();
-        let assertion = sample_assertion(base64_url_encode(&prod_pk));
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
         let store = InMemoryNonceStore::new();
 
         let bundle = seal_payload(&recip_pk, [2u8; 16], assertion, &sample_payload(), &store)
@@ -374,8 +364,9 @@ mod tests {
     #[tokio::test]
     async fn digest_match_accepted() {
         let (recip_sk, recip_pk) = generate_keypair();
-        let (_prod_sk, prod_pk) = generate_keypair();
-        let assertion = sample_assertion(base64_url_encode(&prod_pk));
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
         let store = InMemoryNonceStore::new();
 
         let bundle = seal_payload(&recip_pk, [3u8; 16], assertion, &sample_payload(), &store)
@@ -388,8 +379,9 @@ mod tests {
     #[tokio::test]
     async fn armor_round_trip() {
         let (recip_sk, recip_pk) = generate_keypair();
-        let (_prod_sk, prod_pk) = generate_keypair();
-        let assertion = sample_assertion(base64_url_encode(&prod_pk));
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
         let store = InMemoryNonceStore::new();
 
         let bundle = seal_payload(&recip_pk, [4u8; 16], assertion, &sample_payload(), &store)
@@ -409,8 +401,9 @@ mod tests {
     #[tokio::test]
     async fn armor_corruption_caught_by_crc24() {
         let (_recip_sk, recip_pk) = generate_keypair();
-        let (_prod_sk, prod_pk) = generate_keypair();
-        let assertion = sample_assertion(base64_url_encode(&prod_pk));
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
         let store = InMemoryNonceStore::new();
 
         let bundle = seal_payload(&recip_pk, [5u8; 16], assertion, &sample_payload(), &store)
@@ -435,8 +428,9 @@ mod tests {
     #[tokio::test]
     async fn aad_tamper_caught_by_aead() {
         let (recip_sk, recip_pk) = generate_keypair();
-        let (_prod_sk, prod_pk) = generate_keypair();
-        let assertion = sample_assertion(base64_url_encode(&prod_pk));
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
         let store = InMemoryNonceStore::new();
 
         let bundle = seal_payload(&recip_pk, [6u8; 16], assertion, &sample_payload(), &store)
@@ -454,8 +448,9 @@ mod tests {
     #[tokio::test]
     async fn missing_chunk_rejected() {
         let (recip_sk, recip_pk) = generate_keypair();
-        let (_prod_sk, prod_pk) = generate_keypair();
-        let assertion = sample_assertion(base64_url_encode(&prod_pk));
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
         let store = InMemoryNonceStore::new();
         let big_keys: Vec<LabeledKey> = (0..2048)
             .map(|i| LabeledKey {

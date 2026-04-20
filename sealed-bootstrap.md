@@ -79,7 +79,7 @@ Every sensitive bundle type in the workspace becomes a variant here. After Phase
 
 ```rust
 pub struct ProducerAssertion {
-    pub producer_pubkey: [u8; 32],         // X25519 pinned by consumer
+    pub producer_did: String,      // Ed25519 did:key pinned by consumer
     pub proof: AssertionProof,
 }
 
@@ -103,11 +103,16 @@ ChunkPlaintext {
   bundle_id: [u8; 16],
   chunk_index: u16,
   total_chunks: u16,
-  producer_pubkey: [u8; 32],   // chunk 0 only; pinned by consumer
+  producer_did: Option<String>,  // chunk 0 only; Ed25519 did:key pinned by consumer
   producer_assertion: Option<ProducerAssertion>,  // chunk 0 only
   payload_fragment: Vec<u8>,
 }
 ```
+
+Every public-key surface — `client_did`, `producer_did`, VTA DID, admin DID —
+is a DID. HPKE still operates on raw X25519 bytes internally; those are derived
+on demand (public via `Edwards::to_montgomery`, private via `SHA-512(seed)[0..32]`
+clamped) and stay inside the cipher layer.
 
 ### Armor format
 
@@ -262,7 +267,7 @@ cnm-cli bootstrap connect ...                              # mirrors pnm-cli
 openvtc-cli2                                               # setup wizard → same flow under the hood
 ```
 
-- Connecting to a first-boot TEE VTA: `--token` omitted. Client verifies attestation quote; quote's `user_data` must match `SHA256(client_pubkey || nonce || bundle.producer_pubkey)`.
+- Connecting to a first-boot TEE VTA: `--token` omitted. Client verifies attestation quote; quote's `user_data` must match `SHA256(client_ed25519_pub || nonce || producer_ed25519_pub)` — the raw Ed25519 pubkeys underlying `client_did` (what the client sent) and `producer_did` (what the bundle's `ProducerAssertion` carries).
 - Any other VTA: `--token` required.
 
 ### Offline (Mode C)

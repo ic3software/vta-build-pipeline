@@ -25,11 +25,9 @@
 
 use std::path::Path;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use vta_sdk::sealed_transfer::{
     AssertionProof, BootstrapRequest, InMemoryNonceStore, ProducerAssertion, SealedPayloadV1,
-    armor, bundle_digest, generate_keypair, seal_payload,
+    armor, bundle_digest, generate_ed25519_keypair, seal_payload,
 };
 
 /// Recipient of a sealed bundle — the X25519 pubkey the AEAD encrypts to
@@ -107,9 +105,9 @@ pub struct SealedOutput {
     /// The recipient verifies this out-of-band to defeat producer
     /// impersonation — without it, `PinnedOnly` reduces to trust-on-first-use.
     pub digest: String,
-    /// Ephemeral producer pubkey (base64url). Communicated out-of-band
+    /// Ephemeral producer `did:key` (Ed25519). Communicated out-of-band
     /// alongside the digest so the recipient can confirm the assertion.
-    pub producer_pubkey_b64: String,
+    pub producer_did: String,
     pub bundle_id: [u8; 16],
 }
 
@@ -122,10 +120,10 @@ pub async fn seal_for_recipient(
     recipient: &SealedRecipient,
     payload: &SealedPayloadV1,
 ) -> Result<SealedOutput, Box<dyn std::error::Error>> {
-    let (_producer_sk, producer_pk) = generate_keypair();
-    let producer_pubkey_b64 = B64URL.encode(producer_pk);
+    let (_producer_seed, producer_pk) = generate_ed25519_keypair();
+    let producer_did = affinidi_crypto::did_key::ed25519_pub_to_did_key(&producer_pk);
     let producer = ProducerAssertion {
-        producer_pubkey_b64: producer_pubkey_b64.clone(),
+        producer_did: producer_did.clone(),
         proof: AssertionProof::PinnedOnly,
     };
     let nonce_store = InMemoryNonceStore::new();
@@ -142,20 +140,20 @@ pub async fn seal_for_recipient(
     Ok(SealedOutput {
         armored,
         digest,
-        producer_pubkey_b64,
+        producer_did,
         bundle_id: recipient.bundle_id,
     })
 }
 
 /// Print a standard "sealed output emitted" banner to stderr alongside the
-/// digest + producer pubkey. Armor goes to stdout via `println!`.
+/// digest + producer DID. Armor goes to stdout via `println!`.
 pub fn emit_sealed_output(sealed: &SealedOutput) {
     let bundle_id_hex = hex_lower(&sealed.bundle_id);
     println!("{}", sealed.armored);
     eprintln!();
-    eprintln!("  Bundle-Id:        {bundle_id_hex}");
-    eprintln!("  Producer pubkey:  {}", sealed.producer_pubkey_b64);
-    eprintln!("  SHA-256 digest:   {}", sealed.digest);
+    eprintln!("  Bundle-Id:       {bundle_id_hex}");
+    eprintln!("  Producer DID:    {}", sealed.producer_did);
+    eprintln!("  SHA-256 digest:  {}", sealed.digest);
     eprintln!();
     eprintln!(
         "Communicate the digest to the recipient out-of-band so they can run:\n  \
@@ -251,8 +249,14 @@ mod tests {
 
     #[tokio::test]
     async fn seal_round_trips_via_armor() {
-        // Recipient generates keypair + nonce (simulating `pnm bootstrap request`).
-        let (recip_sk, recip_pk) = generate_keypair();
+        use vta_sdk::sealed_transfer::{ed25519_seed_to_x25519_secret, generate_ed25519_keypair};
+
+        // Recipient generates Ed25519 keypair + nonce (simulating
+        // `pnm bootstrap request`). The HPKE target is the derived X25519.
+        let (recip_seed, recip_ed_pub) = generate_ed25519_keypair();
+        let recip_pk =
+            affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&recip_ed_pub).unwrap();
+        let recip_sk = ed25519_seed_to_x25519_secret(&recip_seed);
         let bundle_id: [u8; 16] = rand::random();
         let recipient = SealedRecipient {
             pubkey: recip_pk,
@@ -278,13 +282,10 @@ mod tests {
             _ => panic!("wrong payload variant"),
         }
 
-        // Producer assertion is PinnedOnly and the pubkey matches what we
+        // Producer assertion is PinnedOnly and the did:key matches what we
         // surfaced in the output.
         assert!(matches!(opened.producer.proof, AssertionProof::PinnedOnly));
-        assert_eq!(
-            opened.producer.producer_pubkey_b64,
-            sealed.producer_pubkey_b64
-        );
+        assert_eq!(opened.producer.producer_did, sealed.producer_did);
     }
 
     #[tokio::test]

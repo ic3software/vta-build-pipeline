@@ -143,7 +143,7 @@ async fn seal_private_key(
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
     use vta_sdk::sealed_transfer::{
         AssertionProof, InMemoryNonceStore, ProducerAssertion, RawPrivateKey, SealedPayloadV1,
-        armor, generate_keypair, seal_payload,
+        armor, generate_ed25519_keypair, seal_payload,
     };
 
     // JWK `x` is base64url-no-pad; the server encodes with URL_SAFE_NO_PAD
@@ -164,9 +164,9 @@ async fn seal_private_key(
     // because it's authenticated at the request layer, and the sealed bundle
     // is protected by HPKE bound to the server's wrapping pubkey. The
     // PinnedOnly assertion is just a placeholder for wire-format uniformity.
-    let (_sk, producer_pk) = generate_keypair();
+    let (_seed, producer_ed_pub) = generate_ed25519_keypair();
     let producer = ProducerAssertion {
-        producer_pubkey_b64: B64URL.encode(producer_pk),
+        producer_did: affinidi_crypto::did_key::ed25519_pub_to_did_key(&producer_ed_pub),
         proof: AssertionProof::PinnedOnly,
     };
 

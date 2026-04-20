@@ -317,7 +317,7 @@ mod tests {
     async fn test_unwrap_sealed_round_trip() {
         use vta_sdk::sealed_transfer::{
             AssertionProof, InMemoryNonceStore, ProducerAssertion, RawPrivateKey, SealedPayloadV1,
-            armor, generate_keypair, seal_payload,
+            armor, generate_ed25519_keypair, seal_payload,
         };
 
         let cache = WrappingKeyCache::new();
@@ -329,9 +329,9 @@ mod tests {
             key_type: "ed25519".into(),
             key_bytes_b64: BASE64.encode(secret_key),
         });
-        let (_prod_sk, prod_pk) = generate_keypair();
+        let (_prod_seed, prod_ed_pub) = generate_ed25519_keypair();
         let producer = ProducerAssertion {
-            producer_pubkey_b64: BASE64.encode(prod_pk),
+            producer_did: affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_ed_pub),
             proof: AssertionProof::PinnedOnly,
         };
         let store = InMemoryNonceStore::new();

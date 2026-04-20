@@ -705,13 +705,10 @@ fn bootstrap_open(
     )?;
     println!("Sealed bundle opened.");
     println!();
-    println!("  Bundle-Id:        {}", opened.bundle_id_hex);
-    println!("  Digest (sha256):  {}", opened.digest);
-    println!(
-        "  Producer pubkey:  {}",
-        opened.producer.producer_pubkey_b64
-    );
-    println!("  Producer proof:   {:?}", opened.producer.proof);
+    println!("  Bundle-Id:       {}", opened.bundle_id_hex);
+    println!("  Digest (sha256): {}", opened.digest);
+    println!("  Producer DID:    {}", opened.producer.producer_did);
+    println!("  Producer proof:  {:?}", opened.producer.proof);
     println!();
     use vta_sdk::sealed_transfer::SealedPayloadV1;
     match &opened.payload {

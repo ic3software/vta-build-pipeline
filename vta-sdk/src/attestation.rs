@@ -4,11 +4,11 @@
 //! Delegates the heavy lifting (COSE_Sign1 parsing, AWS Nitro root-cert
 //! chain validation, ECDSA signature verification) to the `nitro_attest`
 //! crate. We layer the sealed-bootstrap-specific checks on top: the
-//! quote's `user_data` must equal `SHA256(client_pubkey || nonce ||
-//! producer_pubkey)`, binding the attestation to the exact bundle we
-//! just opened. `client_pubkey` here is the X25519 pubkey HPKE sealed to
-//! — callers holding a `did:key` must derive it first via
-//! [`affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes`].
+//! quote's `user_data` must equal
+//! `SHA256(client_ed25519_pub || nonce || producer_ed25519_pub)`, binding
+//! the attestation to the exact did:keys the consumer saw (`client_did`
+//! in the request, `producer_did` in the returned assertion) rather than
+//! to the derived X25519 pubkeys HPKE internally consumed.
 //!
 //! Feature-gated behind `attest-verify` so clients that don't consume
 //! Mode B bundles don't pull in the attestation crate.
@@ -46,8 +46,8 @@ pub enum AttestationVerifyError {
     MissingUserData,
     #[error("user_data mismatch — quote does not commit to this bundle")]
     UserDataMismatch,
-    #[error("producer_pubkey in assertion is not 32 bytes")]
-    BadProducerPubkey,
+    #[error("invalid producer did:key: {0}")]
+    BadProducerDid(String),
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -68,12 +68,12 @@ fn is_nitro_format(format: &str) -> bool {
 }
 
 /// Verify an [`AttestationQuoteAssertion`] against the exact triple
-/// `(client_pubkey, nonce, producer_pubkey)` that the sealed-bootstrap
-/// handshake committed to. Returns the verified enclave identity on
-/// success.
+/// `(client_ed25519_pub, nonce, producer_ed25519_pub)` that the
+/// sealed-bootstrap handshake committed to. Returns the verified enclave
+/// identity on success.
 pub fn verify_nitro_assertion(
     producer: &ProducerAssertion,
-    client_pubkey: &[u8; 32],
+    client_ed25519_pub: &[u8; 32],
     nonce: &[u8; 16],
 ) -> Result<VerifiedAttestation, AttestationVerifyError> {
     let quote = match &producer.proof {
@@ -86,16 +86,16 @@ pub fn verify_nitro_assertion(
         }
     };
 
-    verify_nitro_quote(quote, client_pubkey, nonce, &producer.producer_pubkey_b64)
+    verify_nitro_quote(quote, client_ed25519_pub, nonce, &producer.producer_did)
 }
 
 /// Variant that takes the quote + expected commitment components directly.
-/// Useful for callers that already pulled the pubkey out of the assertion.
+/// Useful for callers that already pulled the did:key out of the assertion.
 pub fn verify_nitro_quote(
     quote: &AttestationQuoteAssertion,
-    client_pubkey: &[u8; 32],
+    client_ed25519_pub: &[u8; 32],
     nonce: &[u8; 16],
-    producer_pubkey_b64: &str,
+    producer_did: &str,
 ) -> Result<VerifiedAttestation, AttestationVerifyError> {
     if !is_nitro_format(&quote.format) {
         return Err(AttestationVerifyError::UnknownFormat(quote.format.clone()));
@@ -109,18 +109,13 @@ pub fn verify_nitro_quote(
         .parse_and_verify(OffsetDateTime::now_utc())
         .map_err(|e| AttestationVerifyError::QuoteInvalid(format!("{e:?}")))?;
 
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-    let producer_pk = B64URL
-        .decode(producer_pubkey_b64)
-        .map_err(|e| AttestationVerifyError::Base64(e.to_string()))?;
-    if producer_pk.len() != 32 {
-        return Err(AttestationVerifyError::BadProducerPubkey);
-    }
+    let producer_ed_pub = affinidi_crypto::did_key::did_key_to_ed25519_pub(producer_did)
+        .map_err(|e| AttestationVerifyError::BadProducerDid(e.to_string()))?;
 
     let mut hasher = Sha256::new();
-    hasher.update(client_pubkey);
+    hasher.update(client_ed25519_pub);
     hasher.update(nonce);
-    hasher.update(&producer_pk);
+    hasher.update(producer_ed_pub);
     let expected = hasher.finalize();
 
     let user_data_bytes: &[u8] = parsed
