@@ -47,8 +47,13 @@ path = "src/main.rs"
 
 [dependencies]
 vti-common = { path = "../vti-common", version = "0.3", features = ["encryption"] }
-vta-sdk = { path = "../vta-sdk", version = "0.5", features = ["didcomm", "sealed-transfer"] }
+vta-sdk = { path = "../vta-sdk", version = "0.5", features = ["didcomm", "sealed-transfer", "provision-integration"] }
 affinidi-crypto = { workspace = true }
+# Low-level `Secret` type for loading the VTA's signing key at
+# provision time. Already transitively present via affinidi-tdk; made
+# direct so `vta-service::operations::provision_integration` can name
+# the type.
+affinidi-secrets-resolver = { workspace = true }
 hkdf = "0.12"
 affinidi-tdk = { workspace = true }
 affinidi-messaging-didcomm = "0.13"
