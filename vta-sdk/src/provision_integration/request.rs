@@ -95,6 +95,23 @@ pub struct TemplateBootstrapAsk {
     /// at the VTA; inline definitions are rejected.
     pub template: DidTemplateRef,
 
+    /// Optional admin-DID template. When present, the VTA renders it,
+    /// mints a fresh admin DID + keys, and binds the authorization VC
+    /// + ACL row to that DID — rolling the holder over from the
+    /// ephemeral `client_did` to a long-term VTA-minted admin identity
+    /// in a single bootstrap round-trip.
+    ///
+    /// When absent, the authorization VC's subject is `client_did` and
+    /// the ACL row is written for `client_did` (pre-rollover
+    /// behaviour).
+    ///
+    /// The admin template must declare `kind: "admin"` at the VTA and
+    /// be registered (built-in or operator-uploaded) just like the
+    /// integration template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "adminTemplate")]
+    pub admin_template: Option<DidTemplateRef>,
+
     /// Free-form operator note for audit logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -359,6 +376,25 @@ mod tests {
                     Value::String("https://mediator.example.com".into()),
                 )]),
             },
+            admin_template: None,
+            note: None,
+        })
+    }
+
+    fn sample_ask_with_admin_rollover() -> BootstrapAsk {
+        BootstrapAsk::TemplateBootstrap(TemplateBootstrapAsk {
+            context_hint: Some("prod-mediator".into()),
+            template: DidTemplateRef {
+                name: "didcomm-mediator".into(),
+                vars: BTreeMap::from([(
+                    "URL".to_string(),
+                    Value::String("https://mediator.example.com".into()),
+                )]),
+            },
+            admin_template: Some(DidTemplateRef {
+                name: "vta-admin".into(),
+                vars: BTreeMap::new(),
+            }),
             note: None,
         })
     }
@@ -466,6 +502,7 @@ mod tests {
                 name: "attacker-template".into(),
                 vars: BTreeMap::new(),
             },
+            admin_template: None,
             note: None,
         });
 
@@ -495,6 +532,100 @@ mod tests {
         assert!(
             matches!(err, ProvisionIntegrationError::Expired(_)),
             "expected Expired, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_template_round_trips_through_sign_verify() {
+        let (seed, client_did) = sample_client_did(11);
+        let vp = BootstrapRequest::sign(
+            &seed,
+            &client_did,
+            [12u8; 16],
+            Duration::hours(1),
+            Some("rollover".into()),
+            sample_ask_with_admin_rollover(),
+        )
+        .await
+        .unwrap();
+
+        // VP must serialize the new field with its `adminTemplate` JSON
+        // name, not the snake_case Rust name.
+        let json = serde_json::to_value(&vp).unwrap();
+        let admin_tpl = &json["ask"]["adminTemplate"];
+        assert!(!admin_tpl.is_null(), "adminTemplate must serialize");
+        assert_eq!(admin_tpl["name"], "vta-admin");
+
+        // Round-trip through deserialize + verify; field must survive.
+        let parsed: BootstrapRequest = serde_json::from_value(json).unwrap();
+        let verified = parsed.verify().expect("verify");
+        let BootstrapAsk::TemplateBootstrap(ask) = verified.ask();
+        let admin = ask
+            .admin_template
+            .as_ref()
+            .expect("admin_template preserved");
+        assert_eq!(admin.name, "vta-admin");
+    }
+
+    #[tokio::test]
+    async fn admin_template_omitted_is_backward_compatible() {
+        // Older callers built `TemplateBootstrapAsk` without the new
+        // field; their on-the-wire JSON has no `adminTemplate` key. That
+        // shape must still deserialize and verify.
+        let (seed, client_did) = sample_client_did(13);
+        let vp = BootstrapRequest::sign(
+            &seed,
+            &client_did,
+            [14u8; 16],
+            Duration::hours(1),
+            None,
+            sample_ask(),
+        )
+        .await
+        .unwrap();
+
+        let json = serde_json::to_value(&vp).unwrap();
+        // Confirm the field really is absent on the wire — `skip_serializing_if`
+        // keeps the legacy shape stable when callers don't set it.
+        assert!(
+            json["ask"].get("adminTemplate").is_none(),
+            "absent field must be omitted from wire JSON, got: {}",
+            json["ask"]
+        );
+
+        let parsed: BootstrapRequest = serde_json::from_value(json).unwrap();
+        let verified = parsed.verify().expect("verify legacy-shape VP");
+        let BootstrapAsk::TemplateBootstrap(ask) = verified.ask();
+        assert!(ask.admin_template.is_none());
+    }
+
+    #[tokio::test]
+    async fn tampered_admin_template_rejected() {
+        // Same threat model as `tampered_ask_rejected` but for the new
+        // field: an attacker editing the admin template name after
+        // signing must fail proof verification.
+        let (seed, client_did) = sample_client_did(15);
+        let mut vp = BootstrapRequest::sign(
+            &seed,
+            &client_did,
+            [16u8; 16],
+            Duration::hours(1),
+            None,
+            sample_ask_with_admin_rollover(),
+        )
+        .await
+        .unwrap();
+
+        let BootstrapAsk::TemplateBootstrap(ref mut ask) = vp.ask;
+        ask.admin_template = Some(DidTemplateRef {
+            name: "attacker-admin-template".into(),
+            vars: BTreeMap::new(),
+        });
+
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "expected BadProof, got {err:?}"
         );
     }
 

@@ -343,6 +343,34 @@ fn didcomm_mediator_builtin_renders_end_to_end() {
 }
 
 #[test]
+fn vta_admin_builtin_renders_end_to_end() {
+    // The vta-admin template is a did:key shape — no required vars beyond
+    // the ambient {DID} + {SIGNING_KEY_MB} the renderer / VTA always
+    // supplies. No service endpoints, no key-agreement VM (X25519 is
+    // derived on demand from the Ed25519 pub by did:key resolvers).
+    let tpl = load_embedded("vta-admin").unwrap();
+    assert_eq!(tpl.kind, "admin");
+    assert!(tpl.required_vars.is_empty());
+    assert!(tpl.optional_vars.is_empty());
+
+    let mut vars = TemplateVars::new();
+    vars.insert_string("DID", "did:key:z6MkAdminPub");
+    vars.insert_string("SIGNING_KEY_MB", "z6MkAdminPub");
+
+    let doc = tpl.render(&vars).unwrap();
+    assert_eq!(doc["id"], "did:key:z6MkAdminPub");
+    assert_eq!(
+        doc["verificationMethod"][0]["id"],
+        "did:key:z6MkAdminPub#z6MkAdminPub"
+    );
+    assert_eq!(
+        doc["verificationMethod"][0]["publicKeyMultibase"],
+        "z6MkAdminPub"
+    );
+    assert!(doc.get("service").is_none(), "admin DID has no service");
+}
+
+#[test]
 fn webvh_hosting_builtin_renders_end_to_end() {
     let tpl = load_embedded("webvh-hosting-server").unwrap();
     let mut vars = TemplateVars::new();

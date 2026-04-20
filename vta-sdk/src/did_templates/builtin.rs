@@ -8,9 +8,10 @@ use super::{DidTemplate, TemplateError};
 
 /// Names of every built-in template, in alphabetical order. Surfaced in
 /// `BuiltinNotFound` errors so callers see what's available.
-pub const BUILTIN_NAMES: &[&str] = &["didcomm-mediator", "webvh-hosting-server"];
+pub const BUILTIN_NAMES: &[&str] = &["didcomm-mediator", "vta-admin", "webvh-hosting-server"];
 
 const DIDCOMM_MEDIATOR: &str = include_str!("../../templates/didcomm-mediator.json");
+const VTA_ADMIN: &str = include_str!("../../templates/vta-admin.json");
 const WEBVH_HOSTING_SERVER: &str = include_str!("../../templates/webvh-hosting-server.json");
 
 /// Load a built-in template by name. Returns [`TemplateError::BuiltinNotFound`]
@@ -18,6 +19,7 @@ const WEBVH_HOSTING_SERVER: &str = include_str!("../../templates/webvh-hosting-s
 pub fn load_embedded(name: &str) -> Result<DidTemplate, TemplateError> {
     let raw = match name {
         "didcomm-mediator" => DIDCOMM_MEDIATOR,
+        "vta-admin" => VTA_ADMIN,
         "webvh-hosting-server" => WEBVH_HOSTING_SERVER,
         _ => return Err(TemplateError::BuiltinNotFound(name.to_string())),
     };

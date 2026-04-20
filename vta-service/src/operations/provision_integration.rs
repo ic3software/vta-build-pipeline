@@ -638,6 +638,7 @@ mod tests {
                 name: template_name.into(),
                 vars,
             },
+            admin_template: None,
             note: None,
         })
     }
