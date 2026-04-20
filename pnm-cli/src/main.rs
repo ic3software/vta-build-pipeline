@@ -942,6 +942,7 @@ fn resolve_admin_acl_options(
         did: admin_did,
         label: admin_label,
         expires_at,
+        expires_duration: admin_expires.map(str::to_string),
     })
 }
 

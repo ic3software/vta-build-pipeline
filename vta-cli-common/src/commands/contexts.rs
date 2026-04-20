@@ -183,6 +183,10 @@ pub struct AdminAclOptions {
     pub label: Option<String>,
     /// Unix-epoch seconds at which the entry auto-expires. `None` = permanent.
     pub expires_at: Option<u64>,
+    /// Raw `--admin-expires` input (e.g. `"1h"`). Preserved alongside the
+    /// resolved `expires_at` so conflict hints can re-emit the operator's
+    /// original duration verbatim instead of a drift-skewed seconds value.
+    pub expires_duration: Option<String>,
 }
 
 impl AdminAclOptions {
@@ -226,11 +230,16 @@ pub async fn cmd_context_create(
             if let Some(label) = admin.label.as_deref() {
                 hint.push_str(&format!(" --label '{label}'"));
             }
-            if let Some(expires_at) = admin.expires_at {
-                // Re-render the same duration the user supplied to --admin-expires
-                // so they can copy-paste without recomputing it.
-                let remaining = expires_at.saturating_sub(crate::duration::now_unix());
-                hint.push_str(&format!(" --expires {remaining}s"));
+            match (admin.expires_duration.as_deref(), admin.expires_at) {
+                // Prefer the raw duration the user typed — any latency between
+                // --admin-expires being parsed and the conflict firing would
+                // otherwise drift the re-rendered seconds (e.g. `1h` → `3599s`).
+                (Some(raw), _) => hint.push_str(&format!(" --expires {raw}")),
+                (None, Some(expires_at)) => {
+                    let remaining = expires_at.saturating_sub(crate::duration::now_unix());
+                    hint.push_str(&format!(" --expires {remaining}s"));
+                }
+                (None, None) => {}
             }
             eprintln!("{hint}");
             return Ok(());

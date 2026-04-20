@@ -930,6 +930,7 @@ async fn main() {
                     did: admin_did,
                     label: admin_label,
                     expires_at,
+                    expires_duration: admin_expires.clone(),
                 };
                 contexts::cmd_context_create(&client, &id, &name, description, admin).await
             }
