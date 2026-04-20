@@ -8,6 +8,7 @@ use affinidi_tdk::messaging::profiles::ATMProfile;
 use affinidi_tdk::secrets_resolver::SecretsResolver;
 use tracing::{debug, info, warn};
 
+use crate::error::VtaError;
 use crate::protocols::PROBLEM_REPORT_TYPE;
 
 /// Client-side DIDComm session for request-response messaging via ATM.
@@ -108,13 +109,17 @@ impl DIDCommSession {
     /// Packs the message, sends it to the mediator, then uses the WebSocket
     /// live stream to wait for the response. This handles asynchronous
     /// processing where the VTA takes time to respond.
+    ///
+    /// Problem-report responses are decoded into typed [`VtaError`] variants
+    /// based on their `e.p.msg.*` code so DIDComm and REST surface the same
+    /// error taxonomy (conflict, not-found, auth, validation, server).
     pub async fn send_and_wait<T: serde::de::DeserializeOwned>(
         &self,
         msg_type: &str,
         body: serde_json::Value,
         expected_result_type: &str,
         timeout_secs: u64,
-    ) -> Result<T, Box<dyn std::error::Error>> {
+    ) -> Result<T, VtaError> {
         let msg_id = uuid::Uuid::new_v4().to_string();
         let msg = Message::build(msg_id.clone(), msg_type.to_string(), body)
             .from(self.client_did.clone())
@@ -131,7 +136,7 @@ impl DIDCommSession {
                 Some(&self.client_did),
             )
             .await
-            .map_err(|e| format!("failed to pack message: {e}"))?;
+            .map_err(|e| VtaError::Protocol(format!("failed to pack message: {e}")))?;
 
         debug!(msg_type, msg_id, "sending via DIDComm");
 
@@ -139,7 +144,7 @@ impl DIDCommSession {
         self.atm
             .send_message(&self.profile, &packed, &msg_id, false, false)
             .await
-            .map_err(|e| format!("failed to send message: {e}"))?;
+            .map_err(|e| VtaError::Protocol(format!("failed to send message: {e}")))?;
 
         // Wait for the response via WebSocket live stream
         let timeout = std::time::Duration::from_secs(timeout_secs);
@@ -149,7 +154,9 @@ impl DIDCommSession {
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Err("timeout waiting for DIDComm response".into());
+                return Err(VtaError::Protocol(
+                    "timeout waiting for DIDComm response".into(),
+                ));
             }
             let wait = wait_duration.min(remaining);
 
@@ -158,7 +165,7 @@ impl DIDCommSession {
                 .message_pickup()
                 .live_stream_next(&self.profile, Some(wait), true)
                 .await
-                .map_err(|e| format!("message pickup error: {e}"))?;
+                .map_err(|e| VtaError::Protocol(format!("message pickup error: {e}")))?;
 
             let (response_msg, _meta) = match next {
                 Some(pair) => pair,
@@ -179,7 +186,9 @@ impl DIDCommSession {
 
             debug!(response_type = %response_msg.typ, "received DIDComm response");
 
-            // Check for problem report
+            // Check for problem report — map the `e.p.msg.*` code to the
+            // matching VtaError variant so callers can `match` on the same
+            // error shapes they get from REST (see `VtaError::from_http`).
             if response_msg.typ == PROBLEM_REPORT_TYPE
                 || response_msg.typ.contains("problem-report")
             {
@@ -192,27 +201,45 @@ impl DIDCommSession {
                     .body
                     .get("comment")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                return Err(format!("{code}: {comment}").into());
+                    .unwrap_or("")
+                    .to_string();
+                return Err(problem_report_to_vta_error(code, comment));
             }
 
             // Verify expected type
             if response_msg.typ != expected_result_type {
-                return Err(format!(
+                return Err(VtaError::Protocol(format!(
                     "unexpected response type: expected {expected_result_type}, got {}",
                     response_msg.typ
-                )
-                .into());
+                )));
             }
 
             // Deserialize response body
-            return serde_json::from_value(response_msg.body)
-                .map_err(|e| format!("failed to deserialize DIDComm response: {e}").into());
+            return serde_json::from_value(response_msg.body).map_err(VtaError::from);
         }
     }
 
     /// Gracefully shut down the DIDComm session.
     pub async fn shutdown(&self) {
         self.atm.graceful_shutdown().await;
+    }
+}
+
+/// Map a DIDComm problem-report `code` to the matching [`VtaError`] variant.
+///
+/// Mirrors the HTTP → VtaError mapping in [`VtaError::from_http`] so a caller
+/// can use the same `match` arms whether it talks REST or DIDComm.
+fn problem_report_to_vta_error(code: &str, comment: String) -> VtaError {
+    use crate::protocols::problem_report_codes as c;
+    match code {
+        c::CONFLICT => VtaError::Conflict(comment),
+        c::NOT_FOUND => VtaError::NotFound(comment),
+        c::UNAUTHORIZED => VtaError::Auth(comment),
+        c::BAD_REQUEST => VtaError::Validation(comment),
+        c::INTERNAL => VtaError::Server {
+            status: 500,
+            body: comment,
+        },
+        other => VtaError::Protocol(format!("{other}: {comment}")),
     }
 }

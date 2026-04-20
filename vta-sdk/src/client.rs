@@ -781,10 +781,11 @@ impl VtaClient {
                 Self::handle_response(resp).await
             }
             #[cfg(feature = "session")]
-            Transport::DIDComm { session, .. } => session
-                .send_and_wait(msg_type, body, result_type, timeout)
-                .await
-                .map_err(|e| VtaError::Protocol(e.to_string())),
+            Transport::DIDComm { session, .. } => {
+                session
+                    .send_and_wait(msg_type, body, result_type, timeout)
+                    .await
+            }
         }
     }
 
@@ -814,8 +815,7 @@ impl VtaClient {
             Transport::DIDComm { session, .. } => {
                 let _: serde_json::Value = session
                     .send_and_wait(msg_type, body, result_type, timeout)
-                    .await
-                    .map_err(|e| VtaError::Protocol(e.to_string()))?;
+                    .await?;
                 Ok(())
             }
         }
