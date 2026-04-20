@@ -18,25 +18,28 @@ use axum::response::IntoResponse;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use serde::{Deserialize, Serialize};
-use tracing::info;
 
 #[cfg(feature = "tee")]
 use sha2::{Digest, Sha256};
+#[cfg(feature = "tee")]
+use tracing::info;
+#[cfg(feature = "tee")]
 use vta_sdk::credentials::CredentialBundle;
 #[cfg(feature = "tee")]
-use vta_sdk::sealed_transfer::AttestationQuoteAssertion;
 use vta_sdk::sealed_transfer::{
-    AssertionProof, ProducerAssertion, SealedPayloadV1, armor, bundle_digest, generate_keypair,
-    seal_payload,
+    AssertionProof, AttestationQuoteAssertion, ProducerAssertion, SealedPayloadV1, armor,
+    bundle_digest, generate_keypair, seal_payload,
 };
 
 #[cfg(feature = "tee")]
 use crate::acl::store_acl_entry;
 #[cfg(feature = "tee")]
 use crate::acl::{AclEntry, Role};
+#[cfg(feature = "tee")]
 use crate::audit::audit;
 use crate::auth::session::now_epoch;
 use crate::error::AppError;
+#[cfg(feature = "tee")]
 use crate::sealed_nonce_store::PersistentNonceStore;
 use crate::server::AppState;
 
@@ -53,8 +56,11 @@ pub struct BootstrapRequestBody {
     /// Random 16-byte nonce, base64url-no-pad. Becomes the bundle_id.
     pub nonce: String,
     /// Optional human-readable label (operator-visible only). Echoed into
-    /// server-side audit logs.
+    /// server-side audit logs. Wire field stays present on non-TEE builds so
+    /// older clients keep deserializing; the value is only consumed by the
+    /// TEE first-boot path.
     #[serde(default)]
+    #[cfg_attr(not(feature = "tee"), allow(dead_code))]
     pub label: Option<String>,
 }
 

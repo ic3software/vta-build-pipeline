@@ -286,9 +286,12 @@ pub async fn preview_import(
 /// Apply an import: clears all keyspaces and writes the backup data.
 ///
 /// When `store` and TEE KMS config are provided, re-encrypts the imported
-/// seed and JWT key with KMS for the bootstrap keyspace.
+/// seed and JWT key with KMS for the bootstrap keyspace. The `store`
+/// parameter is therefore only consumed under `feature = "tee"`; non-TEE
+/// builds receive `None` and silently skip step 12.
 ///
 /// The caller is responsible for triggering a soft restart after this returns.
+#[cfg_attr(not(feature = "tee"), allow(unused_variables))]
 pub async fn apply_import(
     payload: &BackupPayload,
     ks: &super::Keyspaces<'_>,

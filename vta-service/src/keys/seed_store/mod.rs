@@ -26,7 +26,9 @@ pub use keyring::KeyringSeedStore;
 pub use kms_tee::KmsTeeSeedStore;
 pub use plaintext::PlaintextSeedStore;
 
+#[cfg(feature = "tee")]
 use std::future::Future;
+#[cfg(feature = "tee")]
 use std::pin::Pin;
 
 use crate::config::AppConfig;
@@ -34,6 +36,10 @@ use crate::error::AppError;
 
 pub use vti_common::seed_store::SeedStore;
 
+/// Local boxed-future alias mirroring `vti_common::seed_store::BoxFuture`,
+/// used by the in-crate `kms_tee` backend's trait impl. Only compiled when
+/// the `tee` feature pulls in that backend.
+#[cfg(feature = "tee")]
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Create a seed store backend based on compiled features and configuration.
