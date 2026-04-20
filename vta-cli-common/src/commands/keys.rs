@@ -6,7 +6,7 @@ use ratatui::{
 };
 use vta_sdk::prelude::*;
 
-use crate::render::print_widget;
+use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
 
 pub async fn cmd_key_create(
     client: &VtaClient,
@@ -257,6 +257,32 @@ pub async fn cmd_key_list(
     }
 
     let end = (offset + resp.keys.len() as u64).min(resp.total);
+
+    if is_full_display() {
+        print_full_list_title(
+            &format!("Keys (showing {}..{} of {}", offset + 1, end, resp.total),
+            resp.keys.len(),
+        );
+        for key in &resp.keys {
+            let label = key.label.as_deref().unwrap_or("—");
+            let created = key
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string();
+            let status = key.status.to_string();
+            let key_type = key.key_type.to_string();
+            print_full_entry(&[
+                ("Key ID", &key.key_id),
+                ("Label", label),
+                ("Type", &key_type),
+                ("Status", &status),
+                ("Derivation", &key.derivation_path),
+                ("Created", &created),
+            ]);
+        }
+        return Ok(());
+    }
 
     let dim = Style::default().fg(Color::DarkGray);
     let bold = Style::default()

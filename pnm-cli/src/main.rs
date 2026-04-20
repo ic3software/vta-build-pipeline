@@ -29,6 +29,12 @@ struct Cli {
     #[arg(short = 'V', long, global = true)]
     verbose: bool,
 
+    /// Show full identifiers (DIDs, key ids, template names, …) in
+    /// list output instead of the compact table view that may truncate
+    /// long values. Useful when you need to copy a complete ID.
+    #[arg(long, global = true)]
+    full_display: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -1073,6 +1079,12 @@ fn is_online_template_cmd(cmd: &DidTemplateCommands) -> bool {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // Propagate --full-display to the shared render module so any list
+    // command — including ones reached via the shared vta-cli-common
+    // handlers — picks up the setting without threading a bool through
+    // every signature.
+    vta_cli_common::render::set_full_display(cli.full_display);
 
     // Initialize tracing: --verbose sets pnm_cli=debug, or respect RUST_LOG
     let filter = if cli.verbose {

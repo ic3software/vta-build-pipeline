@@ -6,7 +6,7 @@ use ratatui::{
 use vta_sdk::client::{AddWebvhServerRequest, CreateDidWebvhRequest, UpdateWebvhServerRequest};
 use vta_sdk::prelude::*;
 
-use crate::render::print_widget;
+use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
 
 pub async fn cmd_webvh_server_add(
     client: &VtaClient,
@@ -30,6 +30,25 @@ pub async fn cmd_webvh_server_list(client: &VtaClient) -> Result<(), Box<dyn std
 
     if resp.servers.is_empty() {
         println!("No WebVH servers configured.");
+        return Ok(());
+    }
+
+    if is_full_display() {
+        print_full_list_title("WebVH Servers", resp.servers.len());
+        for s in &resp.servers {
+            let label = s.label.as_deref().unwrap_or("—");
+            let created = s
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string();
+            print_full_entry(&[
+                ("ID", &s.id),
+                ("DID", &s.did),
+                ("Label", label),
+                ("Created", &created),
+            ]);
+        }
         return Ok(());
     }
 
@@ -236,6 +255,27 @@ pub async fn cmd_webvh_did_list(
 
     if resp.dids.is_empty() {
         println!("No WebVH DIDs found.");
+        return Ok(());
+    }
+
+    if is_full_display() {
+        print_full_list_title("WebVH DIDs", resp.dids.len());
+        for d in &resp.dids {
+            let created = d
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string();
+            let portable = if d.portable { "yes" } else { "no" };
+            print_full_entry(&[
+                ("DID", &d.did),
+                ("Context", &d.context_id),
+                ("Server", &d.server_id),
+                ("SCID", &d.scid),
+                ("Portable", portable),
+                ("Created", &created),
+            ]);
+        }
         return Ok(());
     }
 

@@ -4,6 +4,52 @@ use ratatui::{
     style::{Color, Modifier},
     widgets::Widget,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ── Full-display toggle ─────────────────────────────────────────────
+//
+// CLI global `--full-display` flag. When enabled, list commands emit
+// every identifier in full (no ratatui-Table truncation) as a sequence
+// of key-value blocks. Default rendering stays as the compact table
+// for a readable overview; full display is the escape hatch for
+// copying complete DIDs, key ids, template names, etc.
+
+static FULL_DISPLAY: AtomicBool = AtomicBool::new(false);
+
+/// Enable or disable full-display output. Called once at CLI startup
+/// from the global flag.
+pub fn set_full_display(enabled: bool) {
+    FULL_DISPLAY.store(enabled, Ordering::Relaxed);
+}
+
+/// Current full-display mode. List commands check this to choose
+/// between table and full-form output.
+pub fn is_full_display() -> bool {
+    FULL_DISPLAY.load(Ordering::Relaxed)
+}
+
+/// Emit a list entry as aligned `label: value` lines. Used in
+/// full-display mode where ratatui-Table truncation would hide full
+/// identifiers.
+///
+/// `pairs` is `[(label, value)]`. Labels are padded to the widest so
+/// values line up vertically. A trailing blank line separates entries.
+pub fn print_full_entry(pairs: &[(&str, &str)]) {
+    let widest = pairs.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    for (label, value) in pairs {
+        let pad = " ".repeat(widest.saturating_sub(label.len()));
+        println!("  {label}:{pad}  {DIM}{value}{RESET}");
+    }
+    println!();
+}
+
+/// Print a bold section heading used above a list of full-display
+/// entries. Matches the title style of the table-mode block borders.
+pub fn print_full_list_title(title: &str, count: usize) {
+    println!();
+    println!("{BOLD}{title} ({count}){RESET}");
+    println!();
+}
 
 // ── ANSI constants ──────────────────────────────────────────────────
 

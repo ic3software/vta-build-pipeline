@@ -4,7 +4,7 @@ use ratatui::text::Span;
 use ratatui::widgets::{Cell, Row, Table};
 use vta_sdk::prelude::*;
 
-use crate::render::print_widget;
+use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
 
 /// Display audit logs with beautiful colored formatting.
 pub async fn cmd_list_audit_logs(
@@ -15,6 +15,33 @@ pub async fn cmd_list_audit_logs(
 
     if result.entries.is_empty() {
         println!("  No audit log entries found.");
+        return Ok(());
+    }
+
+    if is_full_display() {
+        print_full_list_title(
+            &format!(
+                "Audit Log (page {}/{}, {} total)",
+                result.page, result.total_pages, result.total
+            ),
+            result.entries.len(),
+        );
+        for entry in &result.entries {
+            let ts = crate::duration::format_local_time(entry.timestamp);
+            let resource = entry.resource.as_deref().unwrap_or("—");
+            let channel = entry.channel.as_deref().unwrap_or("—");
+            let context = entry.context_id.as_deref().unwrap_or("—");
+            print_full_entry(&[
+                ("ID", &entry.id),
+                ("Timestamp", &ts),
+                ("Action", &entry.action),
+                ("Actor", &entry.actor),
+                ("Resource", resource),
+                ("Channel", channel),
+                ("Context", context),
+                ("Outcome", &entry.outcome),
+            ]);
+        }
         return Ok(());
     }
 
@@ -111,12 +138,16 @@ pub async fn cmd_list_audit_logs(
 
     let row_count = result.entries.len();
 
+    // `Actor` holds DID strings that can run 50+ chars — use `Min` so
+    // the column expands on wide terminals rather than cutting off at
+    // a fixed 30 (operators still see the ellipsis-truncated DID on
+    // narrow screens, and can use `--full-display` for full values).
     let table = Table::new(
         rows,
         [
             Constraint::Length(25), // Timestamp (local tz with offset)
             Constraint::Length(22), // Action
-            Constraint::Length(30), // Actor
+            Constraint::Min(30),    // Actor
             Constraint::Min(16),    // Resource
             Constraint::Length(20), // Outcome
         ],

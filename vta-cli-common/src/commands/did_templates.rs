@@ -19,7 +19,10 @@ use vta_sdk::did_templates::{BUILTIN_NAMES, DidTemplate, load_embedded};
 use vta_sdk::prelude::*;
 
 use crate::duration::format_local_time;
-use crate::render::{CYAN, DIM, GREEN, RED, RESET, YELLOW, print_widget};
+use crate::render::{
+    CYAN, DIM, GREEN, RED, RESET, YELLOW, is_full_display, print_full_entry, print_full_list_title,
+    print_widget,
+};
 
 /// `pnm did-templates validate <file>` / `cnm did-templates validate <file>`.
 ///
@@ -126,6 +129,36 @@ pub async fn cmd_list(
             None => "pnm did-templates create --file tpl.json".into(),
         };
         println!("  {DIM}then{RESET} `{create_hint}`.");
+        return Ok(());
+    }
+
+    if is_full_display() {
+        let title = match context {
+            Some(ctx) => format!("DID templates in context '{ctx}'"),
+            None => "Stored DID templates (global)".to_string(),
+        };
+        print_full_list_title(&title, records.len());
+        for r in &records {
+            let required = if r.template.required_vars.is_empty() {
+                "—".to_string()
+            } else {
+                r.template.required_vars.join(", ")
+            };
+            let description = r
+                .template
+                .description
+                .clone()
+                .unwrap_or_else(|| "—".to_string());
+            let created = format_local_time(r.created_at);
+            print_full_entry(&[
+                ("Name", &r.template.name),
+                ("Kind", &r.template.kind),
+                ("Description", &description),
+                ("Required vars", &required),
+                ("Created", &created),
+                ("Created by", &r.created_by),
+            ]);
+        }
         return Ok(());
     }
 

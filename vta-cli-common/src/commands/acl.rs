@@ -5,7 +5,7 @@ use ratatui::{
 };
 use vta_sdk::prelude::*;
 
-use crate::render::print_widget;
+use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
 
 pub fn format_contexts(contexts: &[String]) -> String {
     if contexts.is_empty() {
@@ -44,6 +44,23 @@ pub async fn cmd_acl_list(
         return Ok(());
     }
 
+    if is_full_display() {
+        print_full_list_title("ACL Entries", resp.entries.len());
+        for entry in &resp.entries {
+            let label = entry.label.as_deref().unwrap_or("—");
+            let contexts = format_contexts(&entry.allowed_contexts);
+            let role = format_role(&entry.role, &entry.allowed_contexts);
+            print_full_entry(&[
+                ("DID", &entry.did),
+                ("Role", &role),
+                ("Label", label),
+                ("Contexts", &contexts),
+                ("Created By", &entry.created_by),
+            ]);
+        }
+        return Ok(());
+    }
+
     let header_style = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
@@ -70,6 +87,9 @@ pub async fn cmd_acl_list(
 
     let title = format!(" ACL Entries ({}) ", resp.entries.len());
 
+    // `Created By` and `DID` hold full did:key values (~57 chars); use
+    // `Min` rather than fixed `Length` so they expand on wide terminals
+    // instead of truncating. Role / Contexts are short and bounded.
     let table = Table::new(
         rows,
         [
@@ -77,7 +97,7 @@ pub async fn cmd_acl_list(
             Constraint::Length(12), // Role
             Constraint::Min(16),    // Label
             Constraint::Length(24), // Contexts
-            Constraint::Length(52), // Created By
+            Constraint::Min(52),    // Created By
         ],
     )
     .header(header)

@@ -10,7 +10,7 @@ use vta_sdk::context_provision::{ContextProvisionBundle, ProvisionedDid};
 use vta_sdk::prelude::*;
 use vta_sdk::sealed_transfer::SealedPayloadV1;
 
-use crate::render::print_widget;
+use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
 use crate::sealed_producer::{SealedRecipient, emit_sealed_output, seal_for_recipient};
 
 pub struct ProvisionDidOptions {
@@ -83,6 +83,26 @@ pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::err
         return Ok(());
     }
 
+    if is_full_display() {
+        print_full_list_title("Contexts", resp.contexts.len());
+        for ctx in &resp.contexts {
+            let did = ctx.did.as_deref().unwrap_or("—");
+            let created = ctx
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string();
+            print_full_entry(&[
+                ("ID", &ctx.id),
+                ("Name", &ctx.name),
+                ("DID", did),
+                ("Base Path", &ctx.base_path),
+                ("Created", &created),
+            ]);
+        }
+        return Ok(());
+    }
+
     let header_style = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
@@ -113,12 +133,15 @@ pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::err
 
     let title = format!(" Contexts ({}) ", resp.contexts.len());
 
+    // DID field carries full did:webvh / did:key values (40+ chars).
+    // Use `Min` so it expands on wide terminals rather than truncating
+    // at the former fixed 30-char width.
     let table = Table::new(
         rows,
         [
-            Constraint::Length(16), // ID
+            Constraint::Min(16),    // ID
             Constraint::Min(20),    // Name
-            Constraint::Length(30), // DID
+            Constraint::Min(40),    // DID
             Constraint::Length(16), // Base Path
             Constraint::Length(10), // Created
         ],
