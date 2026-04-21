@@ -176,8 +176,9 @@ pub async fn run_provision_integration(
         AssertionModeFlag::PinnedOnly => AssertionMode::PinnedOnly,
     };
 
+    let deps = crate::operations::provision_integration::ProvisionIntegrationDeps::from(&state);
     let output = provision_integration(
-        &state,
+        &deps,
         &auth,
         ProvisionIntegrationParams {
             request: verified,

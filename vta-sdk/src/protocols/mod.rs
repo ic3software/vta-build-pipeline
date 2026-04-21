@@ -8,6 +8,8 @@ pub mod did_management;
 pub mod did_template_management;
 pub mod discovery;
 pub mod key_management;
+#[cfg(feature = "provision-integration")]
+pub mod provision_integration_management;
 pub mod seed_management;
 pub mod vta_management;
 

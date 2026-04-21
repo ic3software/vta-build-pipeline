@@ -404,8 +404,9 @@ mod provision {
 
         let vc_validity = req.vc_validity_seconds.map(chrono::Duration::seconds);
 
+        let deps = crate::operations::provision_integration::ProvisionIntegrationDeps::from(&state);
         let output = provision_integration_lib(
-            &state,
+            &deps,
             &auth.0,
             ProvisionIntegrationParams {
                 request: verified,

@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use super::BootstrapRequest;
 
-/// Request body.
-#[derive(Debug, Serialize)]
+/// Request body. Used by both transports — REST clients serialize and
+/// the DIDComm provision-integration handler (`vta-service`) deserializes.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProvisionIntegrationRequest {
     /// The integration's VP-framed bootstrap request (signed by its
     /// ephemeral `client_did`). The caller sends it unverified — the
@@ -36,8 +37,10 @@ pub enum AssertionMode {
     PinnedOnly,
 }
 
-/// Response body.
-#[derive(Debug, Deserialize)]
+/// Response body. Used by both transports — REST handlers serialize
+/// and the DIDComm provision-integration client (`vta-sdk`)
+/// deserializes the result message body.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProvisionIntegrationResponse {
     /// Armored sealed bundle.
     pub bundle: String,
@@ -46,7 +49,7 @@ pub struct ProvisionIntegrationResponse {
     pub summary: ProvisionSummary,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProvisionSummary {
     /// Ephemeral DID that signed the VP and opens the sealed bundle.

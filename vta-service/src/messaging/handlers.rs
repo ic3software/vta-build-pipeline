@@ -1117,6 +1117,120 @@ pub async fn handle_discover_capabilities(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Provision-integration (DIDComm transport for the VP→sealed-bundle flow)
+// ---------------------------------------------------------------------------
+
+/// DIDComm equivalent of `POST /bootstrap/provision-integration`.
+///
+/// Inbound body shape mirrors the REST handler's JSON exactly
+/// (`vta_sdk::provision_integration::http::ProvisionIntegrationRequest`).
+/// Outbound body is `ProvisionIntegrationResponse`.
+///
+/// Auth model: dual-check.
+/// 1. `auth_from_message` — sender DID is authcrypt-authenticated and
+///    must hold admin role in the target context (same gate the REST
+///    handler runs inside the library fn's preconditions).
+/// 2. The VP's `DataIntegrityProof` is also verified by the library
+///    function. The DIDComm sender DID and the VP holder DID must
+///    agree — otherwise we'd accept a VP signed by someone else just
+///    because the DIDComm envelope was authcrypt'd from an
+///    ACL-registered admin. Holder substitution rejection.
+///
+/// On success, the body is the same `ProvisionIntegrationResponse`
+/// shape REST returns: armored bundle, sha256 digest, and summary
+/// (including `admin_did`/`admin_rolled_over` for rollover requests).
+pub async fn handle_provision_integration(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
+
+    let body: vta_sdk::protocols::provision_integration_management::request::ProvisionIntegrationRequest =
+        serde_json::from_value(message.body).map_err(handler_err)?;
+
+    let verified = match body.request.verify() {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(Some(app_err_to_response(AppError::Validation(format!(
+                "verify BootstrapRequest VP: {e}"
+            )))));
+        }
+    };
+
+    // Enforce DIDComm-sender == VP-holder. Without this check, an
+    // ACL-registered admin could relay a VP signed by anyone else
+    // and the VTA would issue a bundle binding the *VP holder* (not
+    // the relayer) to a fresh admin DID — a privilege-laundering vector.
+    if auth.did != verified.holder() {
+        return Ok(Some(app_err_to_response(AppError::Forbidden(format!(
+            "DIDComm sender '{}' does not match VP holder '{}'",
+            auth.did,
+            verified.holder()
+        )))));
+    }
+
+    let assertion_mode = body
+        .assertion
+        .map(|m| match m {
+            vta_sdk::provision_integration::http::AssertionMode::DidSigned => {
+                operations::provision_integration::AssertionMode::DidSigned
+            }
+            vta_sdk::provision_integration::http::AssertionMode::PinnedOnly => {
+                operations::provision_integration::AssertionMode::PinnedOnly
+            }
+        })
+        .unwrap_or_default();
+
+    let vc_validity = body.vc_validity_seconds.map(chrono::Duration::seconds);
+
+    let deps = operations::provision_integration::ProvisionIntegrationDeps::from(state.as_ref());
+    let output = app_try!(
+        operations::provision_integration::provision_integration(
+            &deps,
+            &auth,
+            operations::provision_integration::ProvisionIntegrationParams {
+                request: verified,
+                context: body.context,
+                assertion_mode,
+                vc_validity,
+            },
+        )
+        .await
+    );
+
+    let result = vta_sdk::provision_integration::http::ProvisionIntegrationResponse {
+        bundle: output.armored,
+        digest: output.digest,
+        summary: vta_sdk::provision_integration::http::ProvisionSummary {
+            client_did: output.summary.client_did,
+            admin_did: output.summary.admin_did,
+            admin_rolled_over: output.summary.admin_rolled_over,
+            integration_did: output.summary.integration_did,
+            template_name: output.summary.template_name,
+            template_kind: output.summary.template_kind,
+            admin_template_name: output.summary.admin_template_name,
+            bundle_id_hex: output.summary.bundle_id_hex,
+            secret_count: output.summary.secret_count,
+            output_count: output.summary.output_count,
+        },
+    };
+
+    info!(
+        from = %auth.did,
+        admin_did = %result.summary.admin_did,
+        admin_rolled_over = result.summary.admin_rolled_over,
+        bundle_id = %result.summary.bundle_id_hex,
+        "provision-integration completed via DIDComm"
+    );
+
+    response(
+        vta_sdk::protocols::provision_integration_management::PROVISION_INTEGRATION_RESULT,
+        &result,
+    )
+}
+
 pub async fn handle_unknown(_ctx: HandlerContext, message: Message) -> HandlerResult {
     let from = message.from.as_deref().unwrap_or("unknown");
     let thid = message.thid.as_deref().unwrap_or("none");

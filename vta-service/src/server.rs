@@ -298,6 +298,7 @@ pub async fn run(
                 imported_ks: imported_ks.clone(),
                 #[cfg(feature = "webvh")]
                 webvh_ks: webvh_ks.clone(),
+                sealed_nonces_ks: sealed_nonces_ks.clone(),
                 seed_store: seed_store.clone(),
                 config: Arc::new(RwLock::new(config.clone())),
                 did_resolver: did_resolver.clone(),

@@ -30,18 +30,25 @@
 //! rather than being a separate source of truth.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use affinidi_secrets_resolver::secrets::Secret;
 use chrono::Duration;
 use ed25519_dalek::{Signer as Ed25519Signer, SigningKey};
 use serde_json::Value;
+use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::acl::Role;
 use crate::auth::AuthClaims;
+use crate::config::AppConfig;
+use crate::didcomm_bridge::DIDCommBridge;
 use crate::error::AppError;
+use crate::keys::seed_store::SeedStore;
 use crate::sealed_nonce_store::PersistentNonceStore;
 use crate::server::AppState;
+use crate::store::KeyspaceHandle;
 use vta_sdk::did_key::decode_private_key_multibase;
 use vta_sdk::did_templates::TemplateVars;
 use vta_sdk::provision_integration::{
@@ -70,6 +77,50 @@ pub enum AssertionMode {
     /// digest to anchor trust. Dev/test escape hatch, not for
     /// production flows.
     PinnedOnly,
+}
+
+/// Cloned subset of every keystore + handle [`provision_integration`]
+/// needs. Both the REST [`AppState`] and the DIDComm
+/// [`crate::messaging::router::VtaState`] expose the underlying handles
+/// (all `Clone` and Arc-backed); this struct lets the library function
+/// be called from either transport without taking on a
+/// transport-specific `*State` dependency. Construction is cheap — every
+/// field is `Clone` and Arc-shared, so cloning is two pointer bumps per
+/// keyspace.
+#[derive(Clone)]
+pub struct ProvisionIntegrationDeps {
+    pub keys_ks: KeyspaceHandle,
+    pub acl_ks: KeyspaceHandle,
+    pub audit_ks: KeyspaceHandle,
+    pub contexts_ks: KeyspaceHandle,
+    pub did_templates_ks: KeyspaceHandle,
+    pub imported_ks: KeyspaceHandle,
+    pub webvh_ks: KeyspaceHandle,
+    /// Sealed-bundle nonce store, for replay protection.
+    pub sealed_nonces_ks: KeyspaceHandle,
+    pub seed_store: Arc<dyn SeedStore>,
+    pub config: Arc<RwLock<AppConfig>>,
+    pub did_resolver: Option<DIDCacheClient>,
+    pub didcomm_bridge: Arc<DIDCommBridge>,
+}
+
+impl From<&AppState> for ProvisionIntegrationDeps {
+    fn from(state: &AppState) -> Self {
+        Self {
+            keys_ks: state.keys_ks.clone(),
+            acl_ks: state.acl_ks.clone(),
+            audit_ks: state.audit_ks.clone(),
+            contexts_ks: state.contexts_ks.clone(),
+            did_templates_ks: state.did_templates_ks.clone(),
+            imported_ks: state.imported_ks.clone(),
+            webvh_ks: state.webvh_ks.clone(),
+            sealed_nonces_ks: state.sealed_nonces_ks.clone(),
+            seed_store: state.seed_store.clone(),
+            config: state.config.clone(),
+            did_resolver: state.did_resolver.clone(),
+            didcomm_bridge: state.didcomm_bridge.clone(),
+        }
+    }
 }
 
 /// Caller-supplied inputs to [`provision_integration`].
@@ -121,7 +172,7 @@ pub struct ProvisionSummary {
 
 /// Main entry point. See module docs for the flow.
 pub async fn provision_integration(
-    state: &AppState,
+    state: &ProvisionIntegrationDeps,
     auth: &AuthClaims,
     params: ProvisionIntegrationParams,
 ) -> Result<ProvisionIntegrationOutput, AppError> {
@@ -442,7 +493,7 @@ pub async fn provision_integration(
 // ── Preconditions ───────────────────────────────────────────────────
 
 async fn preconditions(
-    state: &AppState,
+    state: &ProvisionIntegrationDeps,
     auth: &AuthClaims,
     context: &str,
     request: &VerifiedBootstrapRequest,
@@ -550,7 +601,7 @@ struct MintedAdmin {
 /// works without the holder needing to know about the Ed25519→X25519
 /// derivation themselves.
 async fn mint_admin_via_template(
-    state: &AppState,
+    state: &ProvisionIntegrationDeps,
     context: &str,
     admin_template_ref: &DidTemplateRef,
 ) -> Result<MintedAdmin, AppError> {
@@ -692,7 +743,7 @@ async fn mint_admin_via_template(
 /// returns the parsed [`DidTemplate`] instead of just a registration
 /// boolean — we need to render it during the mint.
 async fn resolve_admin_template(
-    state: &AppState,
+    state: &ProvisionIntegrationDeps,
     context: &str,
     name: &str,
 ) -> Result<vta_sdk::did_templates::DidTemplate, AppError> {
@@ -736,7 +787,10 @@ async fn resolve_template_kind(
 /// `Secret`, ready for Data Integrity signing of the VC and the
 /// producer assertion. Relies on the keys_ks + seed_store to derive the
 /// private bytes the same way the runtime auth path does.
-async fn load_vta_signing_secret(state: &AppState, vta_did: &str) -> Result<Secret, AppError> {
+async fn load_vta_signing_secret(
+    state: &ProvisionIntegrationDeps,
+    vta_did: &str,
+) -> Result<Secret, AppError> {
     let key_id = format!("{vta_did}#key-0");
     // Internal-use synthesis of a super-admin AuthClaims. The caller of
     // `provision_integration` was already authorized as context admin
@@ -774,7 +828,7 @@ async fn load_vta_signing_secret(state: &AppState, vta_did: &str) -> Result<Secr
 /// one on disk (we should — the VTA's own DID was provisioned through
 /// the same webvh path).
 async fn load_vta_trust_bundle(
-    state: &AppState,
+    state: &ProvisionIntegrationDeps,
     vta_did: &str,
 ) -> Result<VtaTrustBundle, AppError> {
     let resolver = state

@@ -26,6 +26,9 @@ use super::handlers;
 use vta_sdk::protocols::attestation_management;
 #[cfg(feature = "webvh")]
 use vta_sdk::protocols::did_management;
+// `provision-integration` is unconditionally enabled via the
+// `vta-sdk` feature list in vta-service's Cargo.toml — no cfg gate.
+use vta_sdk::protocols::provision_integration_management;
 use vta_sdk::protocols::{
     self, acl_management, audit_management, context_management, key_management, seed_management,
     vta_management,
@@ -42,6 +45,10 @@ pub struct VtaState {
     pub imported_ks: KeyspaceHandle,
     #[cfg(feature = "webvh")]
     pub webvh_ks: KeyspaceHandle,
+    /// Anti-replay log for sealed-bootstrap `bundle_id`s — required by
+    /// the DIDComm provision-integration handler so it can drive the
+    /// same shared library function the REST handler does.
+    pub sealed_nonces_ks: KeyspaceHandle,
     pub seed_store: Arc<dyn SeedStore>,
     pub config: Arc<RwLock<AppConfig>>,
     pub did_resolver: Option<DIDCacheClient>,
@@ -51,6 +58,30 @@ pub struct VtaState {
     pub tee_state: Option<crate::tee::TeeState>,
     /// Send `true` to trigger a soft restart.
     pub restart_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl From<&VtaState> for crate::operations::provision_integration::ProvisionIntegrationDeps {
+    fn from(state: &VtaState) -> Self {
+        Self {
+            keys_ks: state.keys_ks.clone(),
+            acl_ks: state.acl_ks.clone(),
+            audit_ks: state.audit_ks.clone(),
+            contexts_ks: state.contexts_ks.clone(),
+            did_templates_ks: state.did_templates_ks.clone(),
+            imported_ks: state.imported_ks.clone(),
+            #[cfg(feature = "webvh")]
+            webvh_ks: state.webvh_ks.clone(),
+            #[cfg(not(feature = "webvh"))]
+            webvh_ks: panic!(
+                "provision-integration requires the webvh feature; rebuild vta-service with --features webvh"
+            ),
+            sealed_nonces_ks: state.sealed_nonces_ks.clone(),
+            seed_store: state.seed_store.clone(),
+            config: state.config.clone(),
+            did_resolver: state.did_resolver.clone(),
+            didcomm_bridge: state.didcomm_bridge.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +315,13 @@ pub fn build_handler(
                 handler_fn(handlers::handle_remove_webvh_server),
             )?;
     }
+
+    // Provision-integration — always available; vta-service depends
+    // on vta-sdk with the `provision-integration` feature enabled.
+    router = router.route(
+        provision_integration_management::PROVISION_INTEGRATION,
+        handler_fn(handlers::handle_provision_integration),
+    )?;
 
     // TEE attestation handlers (feature-gated)
     #[cfg(feature = "tee")]
