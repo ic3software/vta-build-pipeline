@@ -375,9 +375,13 @@ mod provision {
     #[derive(Debug, Serialize)]
     pub struct ProvisionSummaryWire {
         pub client_did: String,
+        pub admin_did: String,
+        pub admin_rolled_over: bool,
         pub integration_did: String,
         pub template_name: String,
         pub template_kind: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub admin_template_name: Option<String>,
         pub bundle_id_hex: String,
         pub secret_count: usize,
         pub output_count: usize,
@@ -417,9 +421,12 @@ mod provision {
             digest: output.digest,
             summary: ProvisionSummaryWire {
                 client_did: output.summary.client_did,
+                admin_did: output.summary.admin_did,
+                admin_rolled_over: output.summary.admin_rolled_over,
                 integration_did: output.summary.integration_did,
                 template_name: output.summary.template_name,
                 template_kind: output.summary.template_kind,
+                admin_template_name: output.summary.admin_template_name,
                 bundle_id_hex: output.summary.bundle_id_hex,
                 secret_count: output.summary.secret_count,
                 output_count: output.summary.output_count,

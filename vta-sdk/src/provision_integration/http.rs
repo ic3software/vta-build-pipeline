@@ -49,10 +49,25 @@ pub struct ProvisionIntegrationResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProvisionSummary {
+    /// Ephemeral DID that signed the VP and opens the sealed bundle.
     pub client_did: String,
+    /// Long-term admin DID — equals `client_did` when no rollover, or
+    /// the VTA-minted DID when the request carried an `adminTemplate`.
+    /// Older VTAs that pre-date admin rollover omit this field on the
+    /// wire; we default it to `client_did` for backward compat.
+    #[serde(default)]
+    pub admin_did: String,
+    /// True when the VTA minted a fresh long-term admin DID for this
+    /// provisioning. Defaults to `false` for backward compatibility
+    /// with VTAs that pre-date admin rollover.
+    #[serde(default)]
+    pub admin_rolled_over: bool,
     pub integration_did: String,
     pub template_name: String,
     pub template_kind: String,
+    /// Name of the admin template, when one was requested.
+    #[serde(default)]
+    pub admin_template_name: Option<String>,
     pub bundle_id_hex: String,
     pub secret_count: usize,
     pub output_count: usize,

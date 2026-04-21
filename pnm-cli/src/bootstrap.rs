@@ -417,6 +417,17 @@ pub async fn run_provision_integration(
     eprintln!("  Bundle-Id:       {}", resp.summary.bundle_id_hex);
     eprintln!("  Context:         {target_context}");
     eprintln!("  Client DID:      {}", resp.summary.client_did);
+    if resp.summary.admin_rolled_over {
+        eprintln!(
+            "  Admin DID:       {} (VTA-minted, rolled over from client)",
+            resp.summary.admin_did
+        );
+        if let Some(ref admin_tpl) = resp.summary.admin_template_name {
+            eprintln!("  Admin template:  {admin_tpl}");
+        }
+    } else {
+        eprintln!("  Admin DID:       {} (== client)", resp.summary.admin_did);
+    }
     eprintln!("  Integration DID: {}", resp.summary.integration_did);
     eprintln!(
         "  Template:        {} ({})",

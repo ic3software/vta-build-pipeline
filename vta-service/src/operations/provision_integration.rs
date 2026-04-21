@@ -43,8 +43,10 @@ use crate::error::AppError;
 use crate::sealed_nonce_store::PersistentNonceStore;
 use crate::server::AppState;
 use vta_sdk::did_key::decode_private_key_multibase;
+use vta_sdk::did_templates::TemplateVars;
 use vta_sdk::provision_integration::{
-    AdminOfClaim, BootstrapAsk, OperatorOfClaim, VerifiedBootstrapRequest, VtaAuthorizationClaim,
+    AdminOfClaim, BootstrapAsk, DidTemplateRef, OperatorOfClaim, VerifiedBootstrapRequest,
+    VtaAuthorizationClaim,
     credential::{VtaAuthorizationParams, issue_vta_authorization_credential},
 };
 use vta_sdk::sealed_transfer::{
@@ -96,12 +98,22 @@ pub struct ProvisionIntegrationOutput {
 
 #[derive(Debug)]
 pub struct ProvisionSummary {
+    /// Ephemeral DID that signed the VP and opens the sealed bundle.
     pub client_did: String,
+    /// Long-term admin DID — `client_did` when no rollover, or the
+    /// VTA-minted DID when the request carried an `adminTemplate`.
+    pub admin_did: String,
+    /// True when the VTA minted a fresh long-term admin DID for this
+    /// provisioning (i.e. `adminTemplate` was present in the VP).
+    pub admin_rolled_over: bool,
     pub integration_did: String,
     pub template_name: String,
     pub template_kind: String,
+    /// Name of the admin template, when one was requested.
+    pub admin_template_name: Option<String>,
     pub bundle_id_hex: String,
-    /// Number of minted secrets in the payload (signing + KA = 2 today).
+    /// Number of minted secrets in the payload — at least 1
+    /// (integration). +1 when the admin DID was minted by the VTA.
     pub secret_count: usize,
     /// Number of template-emitted side outputs (1 `WebvhLog` for now).
     pub output_count: usize,
@@ -131,8 +143,9 @@ pub async fn provision_integration(
     // ── 1. Preconditions ────────────────────────────────────────────
     preconditions(state, auth, &context, &request).await?;
 
-    // ── 2. Extract template + vars from the ask ─────────────────────
+    // ── 2. Extract templates + vars from the ask ────────────────────
     let (template_name, template_vars) = extract_template(request.ask())?;
+    let admin_template_ref = extract_admin_template(request.ask());
 
     // ── 3. Mint + render + publish via create_did_webvh ─────────────
     //
@@ -244,12 +257,35 @@ pub async fn provision_integration(
         },
     );
 
-    // ── 5. Register the holder as admin of the target context ───────
+    // ── 4.5. Optional admin-DID rollover ───────────────────────────
+    //
+    // When the request carries an `adminTemplate`, the VTA mints a
+    // long-term admin DID under its own key custody and binds the VC
+    // subject + ACL row to that DID instead of `client_did`. The
+    // ephemeral `client_did` then has no authority at the VTA — it
+    // only opened the bundle. See `docs/bootstrap-provision-integration.md`
+    // §"Admin-DID rollover" and CLAUDE.md "Use DID templates" /
+    // "Authorization claims … VC/VP".
+    let admin_did = if let Some(ref admin_ref) = admin_template_ref {
+        let minted = mint_admin_via_template(state, &context, admin_ref).await?;
+        secrets.insert(minted.material.did.clone(), minted.material.clone());
+        minted.material.did
+    } else {
+        client_did.clone()
+    };
+
+    // ── 5. Register the (possibly rolled-over) admin as admin ──────
+    //
+    // ACL principal is `admin_did`: equals `client_did` when no
+    // rollover, equals the freshly-minted VTA-derived DID when
+    // rollover. The ephemeral `client_did` is never written to the
+    // ACL when rollover is in effect — its only role is opening the
+    // bundle.
     match super::acl::create_acl(
         &state.acl_ks,
         &state.audit_ks,
         auth,
-        &client_did,
+        &admin_did,
         Role::Admin,
         request.label().map(str::to_string),
         vec![context.clone()],
@@ -259,14 +295,14 @@ pub async fn provision_integration(
     .await
     {
         Ok(_) => {}
-        // Re-running provision-integration against the same client_did
+        // Re-running provision-integration against the same admin_did
         // while the ACL row already exists is either a retry or an
         // operator-driven refresh. Either way the intent is harmless
         // — carry on without bumping the row, surface the conflict in
         // the returned summary if callers need to log.
         Err(AppError::Conflict(_)) => {
             info!(
-                client_did = %client_did,
+                admin_did = %admin_did,
                 context = %context,
                 "ACL row already exists — reusing for provision-integration"
             );
@@ -288,7 +324,11 @@ pub async fn provision_integration(
         .unwrap_or_else(|_| "integration".to_string());
 
     let claim = VtaAuthorizationClaim {
-        id: client_did.clone(),
+        // Subject is the long-term admin DID — `client_did` when no
+        // rollover, the VTA-minted DID when an `adminTemplate` was
+        // requested. Holders verify this VC offline at bundle open
+        // and install the matching keys from the `secrets` map.
+        id: admin_did.clone(),
         admin_of: AdminOfClaim {
             vta: vta_did.clone(),
             context: context.clone(),
@@ -364,14 +404,19 @@ pub async fn provision_integration(
     let digest = bundle_digest(&bundle);
     let bundle_id_hex = hex_lower(&bundle_id);
 
-    let secret_count = count_secrets_in_payload(&bundle);
+    let admin_rolled_over = admin_template_ref.is_some();
+    let admin_template_name = admin_template_ref.as_ref().map(|r| r.name.clone());
+    let secret_count = if admin_rolled_over { 2 } else { 1 };
     let output_count = count_outputs_in_payload(&bundle);
 
     info!(
         client_did = %client_did,
+        admin_did = %admin_did,
+        admin_rolled_over,
         integration_did = %integration_did,
         context = %context,
         template = %template_name,
+        admin_template = ?admin_template_name,
         bundle_id = %bundle_id_hex,
         "provision-integration bundle sealed"
     );
@@ -381,9 +426,12 @@ pub async fn provision_integration(
         digest,
         summary: ProvisionSummary {
             client_did,
+            admin_did,
+            admin_rolled_over,
             integration_did,
             template_name,
             template_kind,
+            admin_template_name,
             bundle_id_hex,
             secret_count,
             output_count,
@@ -426,8 +474,11 @@ async fn preconditions(
 
     // Template must be registered. Resolve order matches template-render:
     // context scope first, then global.
-    let template_name = match request.ask() {
-        BootstrapAsk::TemplateBootstrap(ask) => ask.template.name.clone(),
+    let (template_name, admin_template_name) = match request.ask() {
+        BootstrapAsk::TemplateBootstrap(ask) => (
+            ask.template.name.clone(),
+            ask.admin_template.as_ref().map(|t| t.name.clone()),
+        ),
     };
     let template_registered = crate::did_templates::get_context_template(
         &state.did_templates_ks,
@@ -446,6 +497,27 @@ async fn preconditions(
         )));
     }
 
+    // Same check for the admin template, when present. Built-ins
+    // (`vta-admin`) always resolve via the SDK's embedded loader; only
+    // operator-uploaded templates need a stored record.
+    if let Some(name) = admin_template_name {
+        let registered =
+            crate::did_templates::get_context_template(&state.did_templates_ks, context, &name)
+                .await?
+                .is_some()
+                || crate::did_templates::get_global_template(&state.did_templates_ks, &name)
+                    .await?
+                    .is_some()
+                || vta_sdk::did_templates::load_embedded(&name).is_ok();
+        if !registered {
+            return Err(AppError::Validation(format!(
+                "admin template '{name}' is not registered on this VTA. Register it via \
+                 'pnm did-templates upload {name} --file <path>' then retry, or use the \
+                 built-in 'vta-admin' template."
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -454,6 +526,194 @@ async fn preconditions(
 fn extract_template(ask: &BootstrapAsk) -> Result<(String, BTreeMap<String, Value>), AppError> {
     let BootstrapAsk::TemplateBootstrap(ask) = ask;
     Ok((ask.template.name.clone(), ask.template.vars.clone()))
+}
+
+fn extract_admin_template(ask: &BootstrapAsk) -> Option<DidTemplateRef> {
+    let BootstrapAsk::TemplateBootstrap(ask) = ask;
+    ask.admin_template.clone()
+}
+
+/// Result of minting a long-term admin DID for the holder via a
+/// `kind: "admin"` DID template. The minted key material is registered
+/// in the VTA's keystore and returned here so the caller can drop it
+/// into `payload.secrets` for the holder to install.
+struct MintedAdmin {
+    material: DidKeyMaterial,
+}
+
+/// Mint a fresh long-term admin DID under the VTA's key custody, using
+/// the operator-named admin template. Phase 1: did:key (Ed25519) only.
+///
+/// The signing key is a fresh BIP-32 derivation under the context's
+/// base path; the X25519 key-agreement view is derived from the same
+/// Ed25519 seed (canonical did:key derivation) so DIDComm authcrypt
+/// works without the holder needing to know about the Ed25519→X25519
+/// derivation themselves.
+async fn mint_admin_via_template(
+    state: &AppState,
+    context: &str,
+    admin_template_ref: &DidTemplateRef,
+) -> Result<MintedAdmin, AppError> {
+    use crate::keys::derive_and_store_did_key;
+    use crate::keys::seeds::{get_active_seed_id, load_seed_bytes};
+
+    // 1. Resolve the template (built-in / global / context-scoped).
+    let admin_tpl = resolve_admin_template(state, context, &admin_template_ref.name).await?;
+
+    // 2. The template must declare admin kind — otherwise the operator
+    //    pointed us at a non-admin shape (mediator, webvh-host, etc.)
+    //    and the resulting VC binding would be wrong. Fail loud.
+    if admin_tpl.kind != "admin" {
+        return Err(AppError::Validation(format!(
+            "template '{}' has kind '{}', not 'admin'. Admin-DID rollover \
+             requires a template that declares kind=\"admin\" (e.g. the \
+             built-in 'vta-admin' template).",
+            admin_template_ref.name, admin_tpl.kind
+        )));
+    }
+
+    // 3. Phase 1 only mints did:key admin DIDs. Templates targeting
+    //    other methods are accepted at registration time but we reject
+    //    them here until the corresponding mint path lands.
+    if !admin_tpl.methods.is_empty() && !admin_tpl.methods.iter().any(|m| m == "key") {
+        return Err(AppError::Validation(format!(
+            "admin template '{}' targets methods {:?}; phase 1 only \
+             supports 'key'. Use a did:key admin template (or omit \
+             `methods` in the template to accept any).",
+            admin_template_ref.name, admin_tpl.methods
+        )));
+    }
+
+    // 4. Mint the Ed25519 admin key + register a KeyRecord at
+    //    `{admin_did}#{multibase}` so the VTA can later look the
+    //    admin's signing key up by DID URL during steady-state auth.
+    let ctx = crate::contexts::get_context(&state.contexts_ks, context)
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "context '{context}' disappeared between precondition check and admin mint"
+            ))
+        })?;
+    let active_seed_id = get_active_seed_id(&state.keys_ks)
+        .await
+        .map_err(|e| AppError::Internal(format!("active seed id: {e}")))?;
+    let seed = load_seed_bytes(&state.keys_ks, &*state.seed_store, Some(active_seed_id))
+        .await
+        .map_err(|e| AppError::Internal(format!("load seed: {e}")))?;
+
+    let label = format!("admin DID for context {context} (provision-integration)");
+    let (admin_did, signing_priv_mb) = derive_and_store_did_key(
+        &seed,
+        &ctx.base_path,
+        context,
+        &label,
+        &state.keys_ks,
+        Some(active_seed_id),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("derive admin did:key: {e}")))?;
+
+    // 5. The did:key multibase IS the signing key's pub multibase by
+    //    construction — the prefix `did:key:` is purely structural.
+    let signing_pub_mb = admin_did
+        .strip_prefix("did:key:")
+        .ok_or_else(|| {
+            AppError::Internal("derive_and_store_did_key returned a non-did:key DID".into())
+        })?
+        .to_string();
+    let signing_key_id = format!("{admin_did}#{signing_pub_mb}");
+
+    // 6. Render the template (validates required vars + the rendered
+    //    document shape). For did:key the doc isn't published — the
+    //    DID is self-resolving — but the render validates the operator's
+    //    template is actually usable. The rendered doc is discarded
+    //    here; future webvh-admin support will keep it for publication.
+    let mut tpl_vars = TemplateVars::new();
+    tpl_vars.insert_string("DID", &admin_did);
+    tpl_vars.insert_string("SIGNING_KEY_MB", &signing_pub_mb);
+    for (k, v) in &admin_template_ref.vars {
+        tpl_vars.insert(k.clone(), v.clone());
+    }
+    let _rendered = admin_tpl.render(&tpl_vars).map_err(|e| {
+        AppError::Validation(format!(
+            "admin template '{}' render failed: {e}",
+            admin_template_ref.name
+        ))
+    })?;
+
+    // 7. Derive the X25519 KA view from the same Ed25519 seed. Holders
+    //    that DIDComm-authenticate as the admin DID install both the
+    //    signing key and this KA derivation — bundle is self-describing,
+    //    holder doesn't need to know the Ed25519→X25519 derivation.
+    let signing_seed: [u8; 32] = decode_private_key_multibase(&signing_priv_mb)
+        .map_err(|e| AppError::Internal(format!("decode admin signing seed: {e}")))?;
+    let signing_pub_bytes = affinidi_crypto::did_key::did_key_to_ed25519_pub(&admin_did)
+        .map_err(|e| AppError::Internal(format!("decode admin did:key pub: {e}")))?;
+    let ka_pub_bytes = affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&signing_pub_bytes)
+        .map_err(|e| AppError::Internal(format!("derive admin X25519 pub: {e}")))?;
+    let ka_priv_bytes = affinidi_crypto::ed25519::ed25519_private_to_x25519(&signing_seed);
+
+    let ka_pub_mb =
+        crate::keys::encode_public_multibase(&crate::keys::KeyType::X25519, &ka_pub_bytes);
+    let ka_priv_mb =
+        crate::keys::encode_private_multibase(&crate::keys::KeyType::X25519, &ka_priv_bytes);
+    // did:key Ed25519 resolvers use the X25519 multibase as the KA
+    // verification-method fragment. Mirror that convention so the
+    // installed key id matches what consumers expect to see in the
+    // resolved DID document.
+    let ka_key_id = format!("{admin_did}#{ka_pub_mb}");
+
+    info!(
+        admin_did = %admin_did,
+        context = %context,
+        template = %admin_template_ref.name,
+        "minted long-term admin DID for provision-integration rollover"
+    );
+
+    Ok(MintedAdmin {
+        material: DidKeyMaterial {
+            did: admin_did,
+            signing_key: KeyPair {
+                key_id: signing_key_id,
+                public_key_multibase: signing_pub_mb,
+                private_key_multibase: signing_priv_mb,
+            },
+            ka_key: KeyPair {
+                key_id: ka_key_id,
+                public_key_multibase: ka_pub_mb,
+                private_key_multibase: ka_priv_mb,
+            },
+        },
+    })
+}
+
+/// Resolve an admin template by name. Mirrors the integration template
+/// resolution in [`preconditions`] (context → global → built-in) but
+/// returns the parsed [`DidTemplate`] instead of just a registration
+/// boolean — we need to render it during the mint.
+async fn resolve_admin_template(
+    state: &AppState,
+    context: &str,
+    name: &str,
+) -> Result<vta_sdk::did_templates::DidTemplate, AppError> {
+    if let Some(rec) =
+        crate::did_templates::get_context_template(&state.did_templates_ks, context, name).await?
+    {
+        return Ok(rec.template);
+    }
+    if let Some(rec) =
+        crate::did_templates::get_global_template(&state.did_templates_ks, name).await?
+    {
+        return Ok(rec.template);
+    }
+    if let Ok(tpl) = vta_sdk::did_templates::load_embedded(name) {
+        return Ok(tpl);
+    }
+    Err(AppError::Validation(format!(
+        "admin template '{name}' is not registered on this VTA. Register it via \
+         'pnm did-templates upload {name} --file <path>' then retry, or use \
+         the built-in 'vta-admin' template."
+    )))
 }
 
 async fn resolve_template_kind(
@@ -591,17 +851,6 @@ fn build_did_signed_assertion(
     })
 }
 
-fn count_secrets_in_payload(bundle: &vta_sdk::sealed_transfer::SealedBundle) -> usize {
-    // The sealed-bundle CBOR carries SealedPayloadV1 only after open.
-    // For a summary at seal time we already have the info — return the
-    // real value via a separate path. This helper exists so the caller
-    // can report "n secrets" without re-decoding; since we don't
-    // decode here, return 1 (our phase 1 payload has exactly one
-    // DidKeyMaterial entry, keyed by the integration DID).
-    let _ = bundle;
-    1
-}
-
 fn count_outputs_in_payload(bundle: &vta_sdk::sealed_transfer::SealedBundle) -> usize {
     // Same rationale as count_secrets_in_payload — phase 1 emits 1
     // `WebvhLog` output per provisioning.
@@ -643,6 +892,26 @@ mod tests {
         })
     }
 
+    fn sample_ask_with_admin(template_name: &str, admin_template_name: &str) -> BootstrapAsk {
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "URL".to_string(),
+            Value::String("https://mediator.example.com".into()),
+        );
+        BootstrapAsk::TemplateBootstrap(TemplateBootstrapAsk {
+            context_hint: Some("prod-mediator".into()),
+            template: DidTemplateRef {
+                name: template_name.into(),
+                vars,
+            },
+            admin_template: Some(DidTemplateRef {
+                name: admin_template_name.into(),
+                vars: BTreeMap::new(),
+            }),
+            note: None,
+        })
+    }
+
     #[test]
     fn extract_template_pulls_name_and_vars() {
         let ask = sample_ask("didcomm-mediator", true);
@@ -652,6 +921,19 @@ mod tests {
             vars.get("URL").and_then(|v| v.as_str()),
             Some("https://mediator.example.com")
         );
+    }
+
+    #[test]
+    fn extract_admin_template_returns_none_when_absent() {
+        let ask = sample_ask("didcomm-mediator", true);
+        assert!(extract_admin_template(&ask).is_none());
+    }
+
+    #[test]
+    fn extract_admin_template_returns_some_when_present() {
+        let ask = sample_ask_with_admin("didcomm-mediator", "vta-admin");
+        let admin = extract_admin_template(&ask).expect("admin template");
+        assert_eq!(admin.name, "vta-admin");
     }
 
     #[test]
