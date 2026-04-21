@@ -629,6 +629,97 @@ impl SessionStore {
         Ok(token)
     }
 
+    /// Authenticate to a VTA over DIDComm and return a connected
+    /// [`crate::client::VtaClient`].
+    ///
+    /// DIDComm-preferred peer of [`Self::ensure_authenticated`]. Where
+    /// the REST path issues a JWT via challenge-response, this path
+    /// uses DIDComm authcrypt as the auth: every outbound message is
+    /// encrypted to the VTA's recipient key, the VTA decrypts and
+    /// reads `from` as the authenticated sender DID, then ACL-checks
+    /// it (see `vta-service/src/messaging/auth.rs::auth_from_message`).
+    /// No JWT changes hands; no token to expire.
+    ///
+    /// Pending-rotation parity with the REST path: when the loaded
+    /// session is flagged `needs_rotation`, the first successful
+    /// connection triggers a key roll over the same DIDComm transport
+    /// — read the temp DID's ACL entry, mint a fresh did:key, create
+    /// a new ACL entry mirroring the role + contexts, probe the new
+    /// DID by opening a second DIDComm session, then drop the temp
+    /// DID. The new session is persisted in place; the returned
+    /// client is connected as the new DID.
+    ///
+    /// Errors with a clear message if the VTA's DID document does not
+    /// advertise a DIDComm service endpoint — caller should fall back
+    /// to [`Self::ensure_authenticated`] for REST.
+    #[cfg(feature = "session")]
+    pub async fn ensure_authenticated_didcomm(
+        &self,
+        key: &str,
+    ) -> Result<crate::client::VtaClient, Box<dyn std::error::Error>> {
+        let session = self.load_session(key).ok_or(
+            "Not authenticated.\n\nRun `pnm setup` (or the equivalent) to provision an admin identity.",
+        )?;
+
+        debug!(
+            client_did = %session.client_did,
+            vta_did = %session.vta_did,
+            needs_rotation = session.needs_rotation,
+            "ensure_authenticated_didcomm: session loaded"
+        );
+
+        let (vta_did, mediator_did, rest_url) = match resolve_vta_endpoint(&session.vta_did).await?
+        {
+            VtaEndpoint::DIDComm {
+                vta_did,
+                mediator_did,
+                rest_url,
+            } => (vta_did, mediator_did, rest_url),
+            VtaEndpoint::Rest { .. } => {
+                return Err(format!(
+                    "VTA '{}' does not advertise a DIDComm service endpoint. \
+                     Use SessionStore::ensure_authenticated for REST, or \
+                     SessionStore::connect to auto-select.",
+                    session.vta_did
+                )
+                .into());
+            }
+        };
+
+        // Open the DIDComm session as the (possibly temp) DID.
+        let client = crate::client::VtaClient::connect_didcomm(
+            &session.client_did,
+            &session.private_key,
+            &vta_did,
+            &mediator_did,
+            rest_url.clone(),
+        )
+        .await?;
+
+        if !session.needs_rotation {
+            return Ok(client);
+        }
+
+        debug!("session is pending rotation, swapping to fresh did:key over DIDComm");
+        let rotated =
+            rotate_key_didcomm(&client, &session, &vta_did, &mediator_did, rest_url.clone())
+                .await?;
+        // Drop the temp client; the new client below is the
+        // authoritative connection going forward.
+        client.shutdown().await;
+        self.save_session(key, &rotated)?;
+
+        let new_client = crate::client::VtaClient::connect_didcomm(
+            &rotated.client_did,
+            &rotated.private_key,
+            &vta_did,
+            &mediator_did,
+            rest_url,
+        )
+        .await?;
+        Ok(new_client)
+    }
+
     /// Connect to a VTA using the preferred transport (DIDComm or REST).
     ///
     /// 1. Loads session from store (client DID, private key, VTA DID).
@@ -684,6 +775,101 @@ impl SessionStore {
 }
 
 // ── Temp-key rotation ───────────────────────────────────────────────
+
+/// DIDComm-transport peer of [`rotate_key`]. Drives the same
+/// read-ACL → mint → create-ACL → probe → delete-temp-ACL sequence,
+/// but every server interaction is an authcrypt'd DIDComm message
+/// rather than a REST call.
+///
+/// Probe semantics matches the REST path: opening a fresh DIDComm
+/// session as the new DID *is* the auth check. If the new ACL row is
+/// not yet visible to the listener, `connect_didcomm` will fail and
+/// we bail before touching the temp ACL — so the temp DID still works
+/// and the caller can retry.
+#[cfg(feature = "session")]
+async fn rotate_key_didcomm(
+    client: &crate::client::VtaClient,
+    session: &Session,
+    vta_did: &str,
+    mediator_did: &str,
+    rest_url: Option<String>,
+) -> Result<Session, Box<dyn std::error::Error>> {
+    // 1. Read the ACL entry the admin granted to the temp DID.
+    debug!(temp_did = %session.client_did, "fetching ACL entry for temp DID over DIDComm");
+    let acl_entry = client.get_acl(&session.client_did).await.map_err(|e| {
+        format!(
+            "rotate (DIDComm): cannot read temp DID's ACL entry: {e} — \
+             has your admin run `vta acl create --did {} --role admin` yet?",
+            session.client_did
+        )
+    })?;
+    let role = acl_entry.role.clone();
+    let contexts = acl_entry.allowed_contexts.clone();
+    let label = acl_entry.label.clone();
+
+    // 2. Mint a new did:key.
+    let (new_did, new_private_key) = generate_did_key()?;
+    debug!(%new_did, %role, "minted rotation DID, creating ACL entry over DIDComm");
+
+    // 3. Create an ACL entry for the new DID via DIDComm.
+    let mut create_req = crate::client::CreateAclRequest::new(&new_did, role).contexts(contexts);
+    if let Some(l) = label {
+        create_req = create_req.label(l);
+    }
+    client
+        .create_acl(create_req)
+        .await
+        .map_err(|e| format!("rotate (DIDComm): failed to create ACL entry for new DID: {e}"))?;
+
+    // 4. Probe — open a fresh DIDComm session as the new DID. Fails
+    //    *before* we delete the temp DID, so a probe-failure leaves
+    //    the temp authoritative and the caller can retry.
+    let probe = crate::client::VtaClient::connect_didcomm(
+        &new_did,
+        &new_private_key,
+        vta_did,
+        mediator_did,
+        rest_url,
+    )
+    .await
+    .map_err(|e| {
+        format!(
+            "rotate (DIDComm): new DID failed authcrypt probe (ACL entry present \
+             but DIDComm session refused): {e}"
+        )
+    })?;
+
+    // 5. Drop the temp DID from the ACL using the new DID's session.
+    //    Best-effort — if it fails, the new DID is already live, so
+    //    we log and continue rather than leave the caller unauthenticated.
+    match probe.delete_acl(&session.client_did).await {
+        Ok(_) => {
+            debug!(temp_did = %session.client_did, "temp DID removed from ACL over DIDComm");
+        }
+        Err(e) => {
+            tracing::warn!(
+                temp_did = %session.client_did,
+                error = %e,
+                "could not delete temp DID from ACL after rotation (DIDComm) — \
+                 manual cleanup may be required"
+            );
+        }
+    }
+    probe.shutdown().await;
+
+    let Session {
+        vta_did, vta_url, ..
+    } = session.clone();
+    Ok(Session {
+        client_did: new_did,
+        private_key: new_private_key,
+        vta_did,
+        vta_url,
+        access_token: None,
+        access_expires_at: None,
+        needs_rotation: false,
+    })
+}
 
 /// Generate a fresh Ed25519 did:key. Returns `(did, private_key_multibase)`.
 ///
