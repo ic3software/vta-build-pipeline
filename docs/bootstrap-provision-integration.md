@@ -58,7 +58,7 @@ are services with long-lived service identity.
 | 1 | DID ownership / caller-vs-VTA key custody | **DID templates always; VTA always mints keys** |
 | 2 | Payload variant shape | **Generic `SealedPayloadV1::TemplateBootstrap` with typed `TemplateOutput` enum** |
 | 3 | Request format | **VP (VC Data Model 2.0, `eddsa-jcs-2022`)** |
-| 4 | VC subject (admin authorization) | **`client_did` (ephemeral); no VC-v2 on rotation** |
+| 4 | VC subject (admin authorization) | **`client_did` by default; VTA-minted long-term admin DID when `ask.adminTemplate` is present (admin-DID rollover, §"Admin-DID rollover")** |
 | 5 | VC revocation | **Short-lived VC only (1h default); no StatusList; revocation = ACL removal** |
 | 6 | VTA issuer DID | **Reuse `vta_did`; template marks an `assertionMethod` key** |
 | 7 | VC claim shape | **`adminOf` always, `operatorOf` when template mints an integration DID** |
@@ -69,9 +69,97 @@ are services with long-lived service identity.
 | 12 | JSON-LD context hosting | **Bake locally; publishing at canonical URL is operational follow-up** |
 | 13 | VP `proofPurpose` | **`authentication`** (VC `proofPurpose` stays `assertionMethod`) |
 | 3a | Cryptosuite | **`eddsa-jcs-2022`** (library default for Ed25519; JCS avoids JSON-LD context resolution so offline verification needs no context loader — revised from `eddsa-rdfc-2022` during implementation; `@context` arrays still present but not processed during sign/verify) |
+| 14 | Transport for the VP→bundle round-trip | **File + REST + DIDComm** (same VP, same payload, shared library fn; see §"Transports") |
+| 15 | DIDComm steady-state auth | **Authcrypt-as-auth, no JWT** (`messaging/auth.rs::auth_from_message` reads `from` + checks ACL — same `AuthClaims` shape REST produces). `SessionStore::ensure_authenticated_didcomm` returns a connected `VtaClient` rather than a token string. |
+| 16 | Admin-DID mint method (phase 1) | **`did:key` only** — Ed25519 via BIP-32 under the context base path. Built-in template `vta-admin` (`kind: "admin"`, no required vars). Operator-registered admin templates accepted as long as `methods` contains `"key"` or is empty. |
 
 Full rationale for each is in the transcript of the design conversation.
 Short reminders live next to the decisions they shape below.
+
+## Admin-DID rollover (optional)
+
+The VP's `ask.adminTemplate` field is an **optional** second template
+reference that promotes the bootstrap from "issue a VC to the
+ephemeral `client_did`" to "mint a long-term admin DID under VTA key
+custody and bind the VC + ACL row to *that*". The ephemeral
+`client_did` keeps its role as the sealing recipient but gains no
+steady-state authority — it's purely a transport key.
+
+Motivation: the ephemeral `client_did` is a `did:key` the holder
+generated locally to author the VP. Making that DID the long-term
+admin principal ties the ACL row to a short-lived private key that
+may have been handled outside the VTA's custody. Rolling over to a
+VTA-minted admin DID at bootstrap time puts the admin identity under
+the same BIP-32 / keystore / audit infrastructure as every other DID
+the VTA manages.
+
+How it works:
+
+1. Request includes `"adminTemplate": { "name": "vta-admin", "vars": {} }`
+   (built-in) or a custom operator-registered template with
+   `kind: "admin"`.
+2. VTA's `provision_integration` library fn renders the admin template,
+   mints a fresh Ed25519 key via the normal BIP-32 derivation under the
+   target context's base path, registers a `KeyRecord` at
+   `{admin_did}#{multibase}`, and returns `(admin_did, priv_mb)`.
+3. Admin DID is added as a second entry in `payload.secrets`, keyed by
+   the admin DID. Both the Ed25519 signing key and the canonical
+   X25519 key-agreement derivation are populated so holders that
+   DIDComm-authenticate as the admin DID don't need to derive X25519
+   themselves.
+4. The authorization VC's `credentialSubject.id` is set to the
+   VTA-minted admin DID, not `client_did`.
+5. The ACL row is written for the VTA-minted admin DID. No transient
+   ACL row is created for `client_did` — if bundle open fails, there's
+   nothing to clean up.
+
+Absent `adminTemplate`, behaviour is unchanged: VC subject =
+`client_did`, ACL row for `client_did`.
+
+Phase 1 only supports `did:key` admin DIDs. Templates that target
+other methods are accepted at registration time but rejected by the
+mint path until the corresponding mint code lands. Templates with
+`methods: []` (no restriction) are accepted.
+
+The holder's install glue (typically an integration setup wizard,
+e.g. the mediator tool in `affinidi-tdk-rs`) reads the VC's
+`credentialSubject.id`, looks up that DID in `secrets`, installs the
+signing + KA keys, and discards `client_did` after the first
+successful call to the VTA as the new admin DID.
+
+## Transports
+
+The VP → sealed-bundle exchange is transport-neutral. Three carriers
+ship today:
+
+1. **File** (offline / air-gapped). Operator hands the VP JSON to the
+   VTA admin via any out-of-band channel; admin runs
+   `vta bootstrap provision-integration --request <file>` on the VTA
+   host; armored bundle is written to a local path. Use when the VTA
+   is not reachable over the network from the integration host.
+2. **REST** (PNM-bridged). `pnm bootstrap provision-integration --vta
+   <slug>` posts the same VP to `POST /bootstrap/provision-integration`.
+   The PNM operator is authenticated via their session token; they
+   are relaying a VP that was signed by the integration's `client_did`.
+3. **DIDComm** (holder-driven). The integration itself opens an
+   authcrypt'd DIDComm session to the VTA via its mediator and calls
+   `vta_sdk::provision_integration::didcomm::provision_integration_didcomm`.
+   Protocol URI:
+   `https://firstperson.network/protocols/provision-integration/1.0/provision-integration`.
+   The VTA's DIDComm handler enforces a dual check — `auth_from_message`
+   verifies the authcrypt sender + ACL entry, AND the library fn
+   verifies the VP's `DataIntegrityProof`. The DIDComm sender DID and
+   the VP holder DID must agree; mismatch is rejected as `Forbidden`
+   (privilege-laundering guard).
+
+   Precondition for DIDComm: `client_did` must already hold admin role
+   in the target context (ACL). This is the expected shape when an
+   admin DID from a prior provision-integration rollover is
+   provisioning further integrations in the same context over its own
+   DIDComm session.
+
+The sealed bundle returned is identical across all three transports —
+same CBOR/armor/digest. The only difference is how the bytes move.
 
 ## Wire format
 
@@ -95,6 +183,7 @@ via PNM). Signed by the ephemeral key behind `client_did`.
   "ask": {
     "type": "TemplateBootstrap",
     "template": { "name": "didcomm-mediator", "vars": { "URL": "..." } },
+    "adminTemplate": { "name": "vta-admin", "vars": {} },
     "contextHint": "prod-mediator",
     "note": "optional human-readable hint"
   },
@@ -205,7 +294,7 @@ pub struct VtaTrustBundle {
   "validFrom": "2026-04-20T11:00:00Z",
   "validUntil": "2026-04-20T12:00:00Z",
   "credentialSubject": {
-    "id": "did:key:z6Mk...",
+    "id": "did:key:z6MkVtaMintedAdminDid...",
     "adminOf": {
       "vta": "did:webvh:vta.example.com",
       "context": "prod-mediator",
@@ -229,6 +318,13 @@ pub struct VtaTrustBundle {
 
 `credentialStatus` is deliberately absent — this VC is not revocable via a
 status list. Lifecycle is entirely expiry-based.
+
+`credentialSubject.id` is **the long-term admin DID** — equal to
+`client_did` when no rollover was requested, or to the VTA-minted DID
+when the request carried `adminTemplate`. The two cases are
+distinguishable from the response summary (`admin_rolled_over`,
+`admin_did`) but indistinguishable on the VC itself: holders simply
+look up `secrets[credentialSubject.id]` to find the matching keys.
 
 ## Verification at integration first-boot (offline)
 
@@ -425,35 +521,51 @@ follow-up. No code change required when it happens.
 
 ## Implementation sequencing
 
-Suggested PR order. Each is independently shippable and reviewable.
+Original PR order. All landed on `sealed-bootstrap`; the
+implementation diverged from the rough plan as the existing
+infrastructure was understood — annotated below.
 
-1. **`vta-sdk`: types + verify logic.** `BootstrapRequest` (VP),
-   `VerifiedBootstrapRequest`, `VtaAuthorizationCredential`,
-   `TemplateBootstrap*`, `TemplateOutput`, JSON-LD context loader.
-   Round-trip tests, tampered-proof rejection, expired rejection,
-   offline-verification test. No wiring into server/CLI yet.
-2. **`vta-service`: shared `provision_integration` library fn.**
-   Extracts the mint-admin + render-template + build-VC + seal logic.
-   Unit tests against a fake `AppState`. Not yet reachable from any
-   surface.
-3. **`vta-service`: CLI command.** `vta bootstrap provision-integration`
-   calls the library fn. Replaces the mediator-specific flow if any
-   exists today.
-4. **`vta-service`: HTTP endpoint.** `POST /bootstrap/provision-integration`
-   calls the library fn. ACL check via existing middleware.
+1. **`vta-sdk`: types + verify logic.** ✅ Landed.
+2. **`vta-service`: shared `provision_integration` library fn.** ✅
+   Landed. Took `&AppState` initially; refactored to
+   `ProvisionIntegrationDeps` (with `From<&AppState>` and
+   `From<&VtaState>`) when the DIDComm handler arrived in step 9.
+3. **`vta-service`: CLI command.** ✅ Landed.
+4. **`vta-service`: HTTP endpoint.** ✅ Landed.
 5. **`vta-service`: `vta did log` CLI + `GET /did/{did}/log` endpoint.**
-   Public, rate-limited, returns raw `did.jsonl`.
-6. **`pnm-cli`: bridge commands.** `pnm bootstrap provision-integration`
-   and `pnm did log` as thin HTTP clients.
-7. **Docs.** Update `cold-start-guide.md` to show the one-shot
-   provision-integration recipe. Add `docs/bootstrap-provision-integration.md`
-   operator-facing companion (this doc is internal/design).
+   ✅ Landed (REST). DIDComm equivalent fulfilled by the existing
+   `did_management::GET_DID_WEBVH_LOG` protocol — see "DIDComm
+   transport" notes below.
+6. **`pnm-cli`: bridge commands.** ✅ Landed.
+7. **Docs.** ✅ This file.
 
-Steps 3 and 4 share the library function from step 2 and could land in
-one PR. The split here is for review-size, not dependency — each adds a
-distinct user-facing surface that's independently testable. Implementing
-agent's judgement whether to combine or keep separate. Steps 5 and 6 are
-independent follow-ups that don't block each other.
+Follow-up work landed alongside (admin-DID rollover + DIDComm carrier):
+
+8. **`vta-sdk`: `adminTemplate` field + `vta-admin` builtin.** ✅
+   Optional second template ref on `TemplateBootstrapAsk`; backward-
+   compatible (omitting it preserves pre-rollover behaviour).
+9. **`vta-service`: ACL handoff for VTA-minted admin DID.** ✅
+   `mint_admin_via_template` helper, ACL row written for the minted
+   admin DID, VC subject set to the minted DID, both keys (Ed25519
+   signing + canonical X25519 KA) populated in `payload.secrets`.
+10. **`vta-sdk`: `SessionStore::ensure_authenticated_didcomm`.** ✅
+    Returns a connected `VtaClient` (no JWT — DIDComm authcrypt is
+    the auth). Mirrors REST `rotate_key` over DIDComm for sessions
+    flagged `needs_rotation`.
+11. **`vta-service`: DIDComm provision-integration handler.** ✅
+    New protocol `firstperson.network/protocols/provision-integration/1.0`,
+    handler in `messaging/handlers.rs`, wired through
+    `messaging/router.rs`. Dual-check: authcrypt sender + VP holder
+    must agree.
+12. **`vta-sdk`: `provision_integration_didcomm` SDK helper.** ✅
+    Holder-side wrapper over `DIDCommSession::send_and_wait`. No
+    standalone CLI in this workspace — integration setup wizards
+    (e.g. `affinidi-tdk-rs` mediator tool) consume the SDK directly.
+
+DIDComm steady-state auth (`messaging/auth.rs::auth_from_message`)
+was already in place before this work — no new code needed for the
+"DIDComm auth handler" PR; the existing router already authcrypt-
+authenticates every inbound message and ACL-gates by `from`.
 
 ## Non-goals (out of scope for this PR)
 
@@ -470,7 +582,13 @@ independent follow-ups that don't block each other.
 - **StatusList2021 or any VC revocation infrastructure.** Revocation is
   ACL removal.
 - **VC-v2 post-rotation on the admin side.** Admin auth rotation updates
-  the ACL entry's DID; no new VC issued.
+  the ACL entry's DID; no new VC issued. The admin-DID rollover at
+  bootstrap time (§"Admin-DID rollover") is a single VC issuance with
+  the rolled DID as subject — not a post-rotation re-issuance.
+- **`webvh` admin-DID templates in phase 1.** The admin mint path
+  rejects templates whose `methods` list excludes `"key"`. Adding
+  webvh-hosted admin DIDs is a follow-up (the template authoring is
+  already supported; the mint-path branch needs to be wired).
 - **Custom `TemplateOutput` variants without a workspace PR.** Phase 1 has
   `WebvhLog` and `DidCommService` only; new variants require core change.
 
