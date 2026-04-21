@@ -24,6 +24,8 @@
 //! verification under this cryptosuite.
 
 pub mod credential;
+#[cfg(feature = "session")]
+pub mod didcomm;
 pub mod http;
 pub mod payload;
 pub mod request;
