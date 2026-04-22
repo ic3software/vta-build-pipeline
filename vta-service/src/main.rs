@@ -45,8 +45,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the interactive setup wizard
-    Setup,
+    /// Run the setup wizard.
+    ///
+    /// Without arguments, prompts interactively. With `--from <file>`, reads
+    /// a TOML setup-inputs file and runs end-to-end without prompts —
+    /// suitable for CI, immutable images, or any unattended provisioning.
+    /// See `vta_service::setup::WizardInputs` for the schema.
+    Setup {
+        /// Path to a TOML setup-inputs file. When set, setup runs
+        /// non-interactively. The file format mirrors the on-disk
+        /// `config.toml` plus a few one-shot fields (`admin_did`,
+        /// `data_dir_exists`, etc.) that the interactive wizard normally
+        /// collects via prompts.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
     /// Bootstrap the first admin and seal the VTA against offline CLI modifications.
     ///
     /// This is a ONE-TIME operation. After sealing, all CLI commands that modify
@@ -414,16 +427,21 @@ async fn main() {
     print_banner();
 
     match cli.command {
-        Some(Commands::Setup) => {
+        Some(Commands::Setup { from }) => {
             #[cfg(feature = "setup")]
             {
-                if let Err(e) = setup::run_setup_wizard(cli.config).await {
+                let result = match from {
+                    Some(path) => setup::run_setup_from_file(path).await,
+                    None => setup::run_setup_wizard(cli.config).await,
+                };
+                if let Err(e) = result {
                     eprintln!("Setup failed: {e}");
                     std::process::exit(1);
                 }
             }
             #[cfg(not(feature = "setup"))]
             {
+                let _ = from;
                 eprintln!("Setup wizard not available (compiled without 'setup' feature)");
                 std::process::exit(1);
             }
