@@ -94,16 +94,27 @@ The setup wizard bootstraps a new VTA instance. It is behind the `setup`
 feature flag:
 
 ```sh
+# Interactive
 cargo run --package vta-service --features setup -- setup
+
+# Non-interactive (CI / sealed images / unattended bootstrap)
+cargo run --package vta-service --features setup -- setup --from setup.toml
 ```
+
+See [`docs/non-interactive-setup.md`](docs/non-interactive-setup.md) and
+[`docs/examples/vta-setup.example.toml`](docs/examples/vta-setup.example.toml)
+for the `--from` schema.
 
 The wizard walks through these steps:
 
 1. **Server configuration** -- host, port, log level, data directory.
 2. **Seed context** -- creates the `vta` context (and `mediator` if DIDComm
    is enabled).
-3. **Mnemonic** -- generate a new BIP-39 mnemonic or import an existing one.
-   The derived seed is stored in the OS keyring.
+3. **Mnemonic** -- generates a fresh BIP-39 mnemonic; the derived seed is
+   stored in the chosen backend (OS keyring by default). Pasting an
+   existing mnemonic is intentionally not offered -- run
+   `vta keys rotate-seed --mnemonic "<your 24 words>"` after setup if you
+   need to import a known seed.
 4. **JWT signing key** -- a random Ed25519 key for signing access tokens.
 5. **Mediator DID** -- creates a `did:webvh` with signing and key-agreement
    keys.
@@ -114,8 +125,10 @@ The wizard walks through these steps:
 8. **ACL bootstrap** -- registers the admin in the access-control list.
 9. **Persist** -- writes `config.toml` and flushes the store.
 
-> **Save the mnemonic and admin credential.** The mnemonic is the root of all
-> key material; the admin credential is required to authenticate the CLI.
+> **Save the mnemonic and admin credential.** The mnemonic is the root of
+> all key material; the admin credential is required to authenticate the
+> CLI. After the first admin connects, run `pnm backup export` to capture
+> an encrypted backup of both.
 
 ### Start the VTA Service
 
@@ -190,6 +203,7 @@ See [PNM CLI](pnm-cli/README.md) and [CNM CLI](cnm-cli/README.md) for command re
 - [Security Architecture](docs/security.md) -- defense-in-depth model and threat model
 - [TEE Enclave Security](docs/design/tee-enclave-security.md) -- Nitro Enclave KMS bootstrap and encrypted storage design
 - [Cold-Start Guide](docs/cold-start-guide.md) -- bootstrapping a VTA + WebVH + mediator from scratch
+- [Non-Interactive Setup](docs/non-interactive-setup.md) -- scripted VTA provisioning via TOML for CI / sealed images / unattended bootstrap
 - [Integration Guide](docs/integration-guide.md) -- integrating a 3rd-party application with the VTA
 - [DIDComm Protocol](docs/didcomm_protocol.md) -- message types, schemas, and authorization
 - [BIP-32 Path Specification](docs/bip32_paths.md) -- hierarchical key derivation paths

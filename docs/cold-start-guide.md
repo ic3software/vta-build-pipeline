@@ -265,11 +265,25 @@ vta keys rotate-seed [--mnemonic <phrase>]
 # DID creation (offline, no server required)
 vta create-did-key    --context <id> [--admin] [--label <text>]
 vta create-did-webvh  --context <id> [--label <text>]
+
+# Sealed-transfer bootstrap (consumer side — cold-start hosts that don't
+# have pnm installed). Mints an ephemeral did:key, persists the seed
+# under ~/.config/vta/bootstrap-secrets/, opens the returned bundle.
+# Same wire format and same on-disk seed cache shape as `pnm bootstrap`.
+vta bootstrap request --out request.json [--label <text>] [--seed-dir <path>]
+vta bootstrap open    --bundle <armor>   --expect-digest <hex> [--seed-dir <path>]
+
+# Sealed-transfer bootstrap (producer side — VTA host).
+vta bootstrap seal                  --request <req.json> --payload <payload.json> --out <armor>
+vta bootstrap provision-integration --request <req.vp.json> --context <id>        --out <armor>
 ```
 
-`vta bootstrap seal` is a producer-side command for sealing a payload
-to a complex client's bootstrap request — used in the "Provisioning
-complex clients" section below.
+`vta bootstrap request` / `open` are the consumer-side commands a
+cold-start integration uses when `pnm` is not yet available — for
+example, when the integration *is* the mediator that pnm would normally
+rely on. Both delegate to the same shared `vta_cli_common::sealed_consumer`
+layer that pnm uses, so on-disk seed format and HPKE handling are
+byte-identical.
 
 ---
 
@@ -381,6 +395,15 @@ pnm bootstrap request --out request.json [--label "my-mediator"]
 #   ~/.config/pnm/bootstrap-secrets/
 ```
 
+If the client's host doesn't have `pnm` installed (e.g. cold-start of
+the very mediator pnm would otherwise rely on), use the equivalent
+`vta` subcommand — same wire format, seeds cached under
+`~/.config/vta/bootstrap-secrets/`:
+
+```bash
+vta bootstrap request --out request.json [--label "my-mediator"]
+```
+
 **On a PNM-authenticated workstation** (admin):
 
 ```bash
@@ -400,6 +423,9 @@ pnm bootstrap open --bundle myservice.armor --expect-digest <hex>
 # → decrypts the bundle, surfaces DID + keys + VTA info for the client
 #   to install
 ```
+
+`vta bootstrap open --bundle myservice.armor --expect-digest <hex>` is
+the equivalent for hosts without `pnm`.
 
 The complex client rotates its VTA-admin credential on first successful
 VTA connect using the same `needs_rotation` flag the PNM flow uses

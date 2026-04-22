@@ -513,12 +513,19 @@ Configuration loads from a TOML file with environment variable overrides:
 
 ## Setup Wizard
 
-Running `vta setup` launches an interactive wizard that bootstraps the
-service:
+Running `vta setup` launches the wizard. Interactive by default;
+`vta setup --from <file>` reads a TOML inputs file and runs end-to-end
+without prompts (CI / sealed images / unattended bootstrap — see
+[`non-interactive-setup.md`](non-interactive-setup.md)).
 
 1. Collect server, logging, and storage configuration.
 2. Create the `vta` seed context (and `mediator` if DIDComm is enabled).
-3. Generate or import a BIP-39 mnemonic; store seed in OS keyring.
+3. Generate a fresh BIP-39 mnemonic; store seed in the chosen backend
+   (OS keyring by default). The wizard does not accept an
+   operator-supplied mnemonic — pasting one into a terminal exposes it
+   to history, scrollback, and clipboard. Use
+   `vta keys rotate-seed --mnemonic "<phrase>"` post-setup if a known
+   seed is required.
 4. Generate a random JWT signing key.
 5. Create mediator did:webvh (signing + key-agreement keys, DID log file).
 6. Create VTA did:webvh with DIDComm service pointing to the mediator.
@@ -527,7 +534,8 @@ service:
 9. Persist store and write `config.toml`.
 
 The wizard is feature-gated behind `"setup"` so production builds can
-exclude the dialoguer dependency.
+exclude the dialoguer dependency. Both interactive and `--from` paths
+share the gate.
 
 ## Storage Layout
 
@@ -551,9 +559,11 @@ and a set of offline management commands that operate directly on the store:
 
 ```
 vta                                     Start the HTTP service
-vta setup                               Interactive setup wizard
+vta setup [--from FILE]                 Setup wizard (interactive or TOML-driven)
 vta status                              Show config, contexts, keys, ACL, sessions
+vta config show                         Print VTA identity / service settings
 vta export-admin                        Export admin DID and credential
+vta bootstrap-admin --did DID           Seed first super-admin and seal the VTA
 vta create-did-key --context ID         Create a did:key in a context
 vta create-did-webvh --context ID       Create a did:webvh interactively
 vta import-did --did DID [--role ...]   Import external DID into ACL
@@ -561,6 +571,16 @@ vta acl list [--context ...] [--role ...] List ACL entries
 vta acl get <did>                       Show ACL entry details
 vta acl update <did> [--role ...]       Update ACL entry
 vta acl delete <did> [--yes]            Delete ACL entry
+vta keys list / secrets / seeds / rotate-seed [--mnemonic PHRASE]
+                                        Key + seed management
+
+# Sealed-transfer bootstrap (consumer side — cold-start without pnm)
+vta bootstrap request --out FILE [--label TEXT] [--seed-dir PATH]
+vta bootstrap open    --bundle FILE --expect-digest HEX [--seed-dir PATH]
+
+# Sealed-transfer bootstrap (producer side — VTA host)
+vta bootstrap seal                  --request REQ --payload PAYLOAD --out BUNDLE
+vta bootstrap provision-integration --request REQ --context ID      --out BUNDLE
 ```
 
 ## CLI References
