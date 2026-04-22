@@ -1,0 +1,142 @@
+# vta-setup.example.toml — full reference for `vta setup --from <file>`.
+#
+# Copy, edit, then run:
+#   vta setup --from /path/to/your-setup.toml
+#
+# The schema is defined by `vta_service::setup::WizardInputs` in
+# vta-service/src/setup.rs. Field-level rustdoc on that struct is the
+# authoritative reference if anything here looks stale.
+#
+# Required fields are marked (required); everything else has a default.
+
+# ---------------------------------------------------------------------------
+# Top-level
+# ---------------------------------------------------------------------------
+
+# Where to write the produced config.toml. The wizard refuses to overwrite
+# an existing file — delete it first to re-run. (required)
+config_path = "/srv/vta/config.toml"
+
+# Where the on-disk fjall store lives. (required)
+data_dir    = "/srv/vta/data"
+
+# Optional human-readable name for this VTA. Surfaced in `vta config show`.
+vta_name    = "trust-prod-1"
+
+# Public URL the VTA will advertise. Used as the `VTARest` service endpoint
+# when `vta_did.kind = "create_webvh"` mints a DID. Optional — omit for
+# DIDComm-only or private-network deployments.
+public_url  = "https://trust.example.com"
+
+# What to do if `data_dir` already exists.
+#   "error"  (default) — refuse and exit
+#   "delete" — recursively wipe and re-init (CI re-run pattern)
+data_dir_exists = "error"
+
+# Seed an initial super-admin and seal the VTA atomically with the rest of
+# setup. Equivalent to running `vta bootstrap-admin --did <X>` after
+# setup. Omit if you want to seed admin(s) later via the interactive
+# `pnm setup` flow. The DID must start with `did:`.
+admin_did   = "did:key:z6MkABCDEFGHIJKLMNOPQRSTUVWXYZ"
+admin_label = "ops-bootstrap"
+
+# ---------------------------------------------------------------------------
+# Services and server bind
+# ---------------------------------------------------------------------------
+
+[services]
+# Defaults: both true. Disable one if you only need the other.
+rest    = true
+didcomm = true
+
+[server]
+host = "0.0.0.0"
+port = 8100
+
+[log]
+level  = "info"   # "trace" | "debug" | "info" | "warn" | "error"
+format = "json"   # "text" | "json"
+
+# ---------------------------------------------------------------------------
+# Seed-store backend (required — there is no implicit default)
+#
+# The `backend` discriminator picks the variant; per-variant fields below.
+# ---------------------------------------------------------------------------
+
+# OS keyring (libsecret / Keychain / Credential Vault). Recommended for
+# single-host deployments where the host has a real user session.
+[secrets]
+backend = "keyring"
+service = "vta-prod"   # default "vta"; use a unique name per VTA on the same host
+
+# AWS Secrets Manager. Recommended for cloud / headless deployments.
+# [secrets]
+# backend     = "aws"
+# region      = "us-east-1"   # optional; falls back to SDK default chain
+# secret_name = "vta/prod/seed"
+
+# GCP Secret Manager.
+# [secrets]
+# backend     = "gcp"
+# project     = "my-gcp-project"
+# secret_name = "vta-prod-seed"
+
+# Azure Key Vault.
+# [secrets]
+# backend     = "azure"
+# vault_url   = "https://my-vault.vault.azure.net"
+# secret_name = "vta-prod-seed"
+
+# Hex-encoded seed inside config.toml. NOT recommended — the config file
+# becomes a secret. Compiled in only when the `config-seed` feature is
+# enabled.
+# [secrets]
+# backend = "config_seed"
+
+# Plaintext file under `data_dir`. Dev only.
+# [secrets]
+# backend = "plaintext"
+
+# ---------------------------------------------------------------------------
+# DIDComm mediator (optional; default = skip)
+# ---------------------------------------------------------------------------
+
+# Skip — no DIDComm mediator. The VTA will not participate in DIDComm flows.
+# [messaging]
+# kind = "skip"
+
+# Point at an existing mediator DID. ATM resolves the endpoint from the DID
+# document at runtime.
+# [messaging]
+# kind = "existing"
+# did  = "did:webvh:.../mediator"
+
+# Mint a new mediator DID using the built-in `didcomm-mediator` template.
+[messaging]
+kind    = "create_mediator"
+context = "mediator"   # default "mediator"; trust context the mediator's keys live in
+url     = "https://mediator.example.com"
+
+# ---------------------------------------------------------------------------
+# VTA DID (optional; default = skip)
+# ---------------------------------------------------------------------------
+
+# Skip — VTA runs without its own DID. REST works; DIDComm and VC issuance
+# do not.
+# [vta_did]
+# kind = "skip"
+
+# Use a DID that already exists.
+# [vta_did]
+# kind = "existing"
+# did  = "did:webvh:.../vta"
+
+# Mint a new did:webvh for the VTA. Always uses the operations layer's
+# "simple mode" (VTA generates keys + document). Operators who need
+# advanced options (template-from-file, pre-signed log import,
+# user-specified key IDs) should use interactive setup instead.
+[vta_did]
+kind               = "create_webvh"
+url                = "https://trust.example.com/dids/vta"
+portable           = true   # default true — DID can move to a different domain later
+pre_rotation_count = 2      # default 1; recommended 1–3

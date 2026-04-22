@@ -2099,6 +2099,18 @@ mod tests {
         assert!(err.to_string().contains("admin_did"), "got: {err}");
     }
 
+    /// Catch drift between `WizardInputs` and the operator-facing example
+    /// file at `docs/examples/vta-setup.example.toml`. If you change the
+    /// schema and forget to update the example, this test fails.
+    #[test]
+    fn shipped_example_parses() {
+        let raw = include_str!("../../docs/examples/vta-setup.example.toml");
+        let inputs = parse(raw)
+            .expect("docs/examples/vta-setup.example.toml must be valid against WizardInputs");
+        validate_inputs(&inputs)
+            .expect("docs/examples/vta-setup.example.toml must pass cross-field validation");
+    }
+
     #[test]
     fn full_inputs_parse() {
         let raw = r#"
