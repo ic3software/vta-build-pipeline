@@ -137,13 +137,60 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum BootstrapCommands {
+    /// Generate a fresh BootstrapRequest (consumer side).
+    ///
+    /// Mints an ephemeral Ed25519 keypair, persists the seed under
+    /// `<seed-dir>/bootstrap-secrets/<bundle_id>.key`, and writes the
+    /// `BootstrapRequest` JSON. Hand the JSON to the VTA operator; they
+    /// return an armored sealed bundle which `vta bootstrap open` decrypts
+    /// using the persisted seed.
+    ///
+    /// Used in cold-start scenarios where `pnm bootstrap request` isn't
+    /// available — same wire format, different binary.
+    Request {
+        /// Output path for the BootstrapRequest JSON.
+        #[arg(long)]
+        out: PathBuf,
+        /// Optional human-readable label echoed back in the request.
+        #[arg(long)]
+        label: Option<String>,
+        /// Override the default seed cache directory
+        /// (`~/.config/vta/bootstrap-secrets/`). Useful in CI or sealed
+        /// images where `$HOME` isn't writable.
+        #[arg(long)]
+        seed_dir: Option<PathBuf>,
+    },
+    /// Open an armored sealed bundle returned by the producer (consumer side).
+    ///
+    /// Looks up the seed by `bundle_id` under `<seed-dir>/bootstrap-secrets/`,
+    /// derives the X25519 HPKE secret, decrypts, and prints the payload.
+    /// Counterpart to `vta bootstrap request`.
+    Open {
+        /// Path to the armored sealed bundle.
+        #[arg(long)]
+        bundle: PathBuf,
+        /// Expected SHA-256 digest, communicated by the producer
+        /// out-of-band. Required unless `--no-verify-digest` is set.
+        #[arg(long)]
+        expect_digest: Option<String>,
+        /// Skip out-of-band digest verification. Prints a warning;
+        /// intended for testing only.
+        #[arg(long, default_value_t = false)]
+        no_verify_digest: bool,
+        /// Override the default seed cache directory
+        /// (`~/.config/vta/bootstrap-secrets/`). Must match the value
+        /// passed to `vta bootstrap request`.
+        #[arg(long)]
+        seed_dir: Option<PathBuf>,
+    },
     /// Seal a payload for a consumer's BootstrapRequest (offline / Mode C).
     ///
     /// Reads the consumer's request (containing their ephemeral X25519 pubkey
     /// and a nonce), seals the supplied payload to that pubkey using HPKE,
     /// and writes an armored bundle. Prints the canonical SHA-256 digest the
     /// operator must communicate to the consumer out-of-band so they can
-    /// pass it to `pnm bootstrap open --expect-digest`.
+    /// pass it to `vta bootstrap open --expect-digest` (or
+    /// `pnm bootstrap open` if the consumer has pnm installed).
     ///
     /// Producer authenticity in this mode is `PinnedOnly`: the consumer
     /// trusts the producer pubkey embedded in the bundle because they
@@ -605,6 +652,19 @@ async fn main() {
                     payload,
                     out,
                 } => bootstrap_cli::run_seal(cli.config.clone(), request, payload, out).await,
+                BootstrapCommands::Request {
+                    out,
+                    label,
+                    seed_dir,
+                } => bootstrap_cli::run_request(out, label, seed_dir).await,
+                BootstrapCommands::Open {
+                    bundle,
+                    expect_digest,
+                    no_verify_digest,
+                    seed_dir,
+                } => {
+                    bootstrap_cli::run_open(bundle, expect_digest, no_verify_digest, seed_dir).await
+                }
                 #[cfg(feature = "webvh")]
                 BootstrapCommands::ProvisionIntegration {
                     request,

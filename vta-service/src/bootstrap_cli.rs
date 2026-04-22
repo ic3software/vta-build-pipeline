@@ -1,14 +1,14 @@
-//! `vta bootstrap seal` — offline Mode C sealed-transfer producer.
+//! `vta bootstrap` — sealed-transfer subcommands.
 //!
-//! Reads a consumer's `BootstrapRequest` JSON and an arbitrary
-//! `SealedPayloadV1` payload, seals the payload to the consumer's ephemeral
-//! X25519 pubkey using HPKE, and writes an armored bundle plus prints the
-//! canonical SHA-256 digest for out-of-band verification.
+//! Producer-side commands (`seal`, `provision-integration`) live alongside
+//! consumer-side commands (`request`, `open`) so the same `vta` binary can
+//! drive both ends of an offline round-trip in cold-start scenarios where
+//! `pnm` is not yet available (e.g. the mediator or webvh hosting service
+//! the integration would normally rely on does not exist yet).
 //!
-//! Mode A (online token-gated bootstrap) was removed in favour of the
-//! unified temp-did:key + ACL + rotation flow in `pnm setup`. This CLI is
-//! retained for complex-client provisioning (mediator, webvh server) where
-//! the consumer genuinely needs an offline-delivered pre-minted identity.
+//! Consumer commands delegate to `vta_cli_common::sealed_consumer`, which
+//! is the same shared layer `pnm` and `cnm` use — the only per-CLI concern
+//! is which seed directory to default to.
 
 use std::path::PathBuf;
 
@@ -20,6 +20,26 @@ use vta_sdk::sealed_transfer::{
 use crate::config::AppConfig;
 use crate::sealed_nonce_store::PersistentNonceStore;
 use crate::store::Store;
+
+/// Default per-user seed cache for `vta bootstrap request` / `open`.
+///
+/// Mirrors the `~/.config/pnm/bootstrap-secrets/` convention used by `pnm`,
+/// but lives under `vta/` so the two tools can coexist on the same host
+/// without colliding. `--seed-dir` overrides this for portable / sandboxed
+/// use (CI, sealed images with no `$HOME`).
+fn default_seed_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = dirs::config_dir()
+        .ok_or("could not determine config directory (set --seed-dir to override)")?
+        .join("vta");
+    Ok(dir)
+}
+
+fn resolve_seed_dir(override_dir: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match override_dir {
+        Some(d) => Ok(d),
+        None => default_seed_dir(),
+    }
+}
 
 /// Seal a payload to a consumer's BootstrapRequest (Mode C, offline).
 pub async fn run_seal(
@@ -77,9 +97,123 @@ pub async fn run_seal(
     eprintln!();
     eprintln!(
         "Communicate the digest to the consumer out-of-band so they can run\n  \
-         pnm bootstrap open --bundle <file> --expect-digest {digest}"
+         vta bootstrap open --bundle <file> --expect-digest {digest}\n  \
+         (or `pnm bootstrap open` if the consumer has pnm installed)"
     );
     Ok(())
+}
+
+/// `vta bootstrap request` — consumer-side. Generate an ephemeral Ed25519
+/// keypair, persist the seed under `<seed-dir>/bootstrap-secrets/<bundle_id>.key`,
+/// and write a `BootstrapRequest` JSON the producer can hand to
+/// `vta bootstrap seal` or `vta bootstrap provision-integration`.
+///
+/// Used in cold-start scenarios where `pnm bootstrap request` isn't
+/// available — same wire shape, same on-disk format, different binary.
+pub async fn run_request(
+    out_path: PathBuf,
+    label: Option<String>,
+    seed_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let seed_dir = resolve_seed_dir(seed_dir)?;
+    let created = vta_cli_common::sealed_consumer::create_bootstrap_request(&seed_dir, label)?;
+
+    let json = serde_json::to_string_pretty(&created.request)?;
+    std::fs::write(&out_path, json.as_bytes())
+        .map_err(|e| format!("write {}: {e}", out_path.display()))?;
+
+    eprintln!("Bootstrap request written to {}", out_path.display());
+    eprintln!();
+    eprintln!("  Bundle-Id:  {}", created.bundle_id_hex);
+    eprintln!("  Client DID: {}", created.request.client_did);
+    eprintln!("  Seed saved: {}", created.secret_path.display());
+    eprintln!();
+    eprintln!("Hand the request to the VTA operator. They will return an armored bundle.");
+    eprintln!("Verify the SHA-256 digest they print to you out-of-band, then run:");
+    eprintln!("  vta bootstrap open --bundle <file> --expect-digest <hex>");
+    Ok(())
+}
+
+/// `vta bootstrap open` — consumer-side. Read an armored sealed bundle,
+/// look up the matching seed under `<seed-dir>/bootstrap-secrets/`, derive
+/// the X25519 HPKE secret, decrypt, verify the digest, and print the
+/// payload contents.
+///
+/// `--expect-digest` is required by default; `--no-verify-digest` is an
+/// opt-out that prints a warning. There is no silent TOFU.
+pub async fn run_open(
+    bundle_path: PathBuf,
+    expect_digest: Option<String>,
+    no_verify_digest: bool,
+    seed_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if no_verify_digest {
+        eprintln!(
+            "WARNING: --no-verify-digest disables out-of-band integrity verification.\n\
+             You are trusting the producer pubkey embedded in the bundle without\n\
+             any external anchor. Use only for testing."
+        );
+    }
+
+    let seed_dir = resolve_seed_dir(seed_dir)?;
+    let opened = vta_cli_common::sealed_consumer::open_armored_bundle(
+        &bundle_path,
+        &seed_dir,
+        expect_digest.as_deref(),
+        no_verify_digest,
+    )?;
+
+    print_opened(&opened);
+    Ok(())
+}
+
+fn print_opened(opened: &vta_cli_common::sealed_consumer::OpenedArmored) {
+    println!("Sealed bundle opened.");
+    println!();
+    println!("  Bundle-Id:       {}", opened.bundle_id_hex);
+    println!("  Digest (sha256): {}", opened.digest);
+    println!("  Producer DID:    {}", opened.producer.producer_did);
+    println!("  Producer proof:  {:?}", opened.producer.proof);
+    println!();
+    match &opened.payload {
+        SealedPayloadV1::AdminCredential(c) => {
+            println!("Payload: AdminCredential");
+            println!("  DID:     {}", c.did);
+            println!("  VTA DID: {}", c.vta_did);
+            if let Some(ref u) = c.vta_url {
+                println!("  VTA URL: {u}");
+            }
+        }
+        SealedPayloadV1::ContextProvision(p) => {
+            println!("Payload: ContextProvision");
+            println!("  Context:   {} ({})", p.context_id, p.context_name);
+            println!("  Admin DID: {}", p.admin_did);
+        }
+        SealedPayloadV1::DidSecrets(s) => {
+            println!("Payload: DidSecrets");
+            println!("  DID:     {}", s.did);
+            println!("  Secrets: {}", s.secrets.len());
+        }
+        SealedPayloadV1::AdminKeySet(keys) => {
+            println!("Payload: AdminKeySet ({} keys)", keys.len());
+            for k in keys {
+                println!("  - {}", k.label);
+            }
+        }
+        SealedPayloadV1::RawPrivateKey(k) => {
+            println!("Payload: RawPrivateKey ({})", k.key_type);
+        }
+        SealedPayloadV1::TemplateBootstrap(p) => {
+            println!("Payload: TemplateBootstrap");
+            println!("  Template:     {}", p.config.template_name);
+            println!("  Kind:         {}", p.config.template_kind);
+            println!("  Secrets for:  {} DID(s)", p.secrets.len());
+            println!("  Outputs:      {}", p.config.outputs.len());
+            if let Some(ref u) = p.config.vta_url {
+                println!("  VTA URL:      {u}");
+            }
+        }
+    }
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
