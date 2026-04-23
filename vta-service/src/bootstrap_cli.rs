@@ -589,14 +589,20 @@ pub async fn run_keys_bundle(
 }
 
 /// `vta context reprovision` — offline equivalent of
-/// `pnm context reprovision` (explicit `--key` required; no
-/// interactive prompt in the first cut — run `vta keys list
-/// --context <id>` to see options).
+/// `pnm context reprovision`.
+///
+/// The DID's operational keys (signing, KA, any pre-rotation) are
+/// auto-included — the operator does not need to enumerate them.
+/// `--admin-key` picks which existing keystore entry's seed backs the
+/// **admin credential** (a separate `did:key` identity the mediator
+/// operator uses to authenticate to the VTA afterwards). When omitted,
+/// a fresh Ed25519 admin key is minted in the context and the derived
+/// `did:key` is granted admin access automatically.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_context_reprovision(
     config_path: Option<PathBuf>,
     id: String,
-    key: Option<String>,
+    admin_key: Option<String>,
     admin_label: Option<String>,
     recipient: Option<PathBuf>,
     recipient_did: Option<String>,
@@ -605,25 +611,19 @@ pub async fn run_context_reprovision(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::acl::Role;
     use crate::auth::AuthClaims;
+    use crate::keys::KeyType;
     use crate::operations::export::{
         ContextReprovisionInputs, ExportDeps, build_context_provision_bundle,
     };
+    use crate::operations::keys::{CreateKeyParams, create_key};
     use crate::server::build_app_state;
     use tokio::sync::watch;
-
-    let _ = admin_label; // reserved for interactive create-new-key path (see TODO)
 
     let recipient = vta_cli_common::sealed_producer::resolve_recipient(
         recipient.as_deref(),
         recipient_did.as_deref(),
         recipient_nonce.as_deref(),
     )?;
-
-    // First cut: require --key. Interactive prompt + create-new-key
-    // support lands next; the offline CLI is most useful in scripts
-    // where an explicit key id is natural anyway.
-    let key_id = key
-        .ok_or("--key <KEY_ID> is required (run `vta keys list --context <id>` to see choices)")?;
 
     let app_config = AppConfig::load(config_path)?;
     let store = Store::open(&app_config.store)?;
@@ -650,6 +650,41 @@ pub async fn run_context_reprovision(
         did: "vta:cli:context-reprovision".into(),
         role: Role::Admin,
         allowed_contexts: Vec::new(),
+    };
+
+    // Resolve the admin key: reuse an existing keystore entry when
+    // `--admin-key` was passed, otherwise mint a fresh one scoped to
+    // this context. The derived `did:key` gets an ACL row written
+    // further down if one doesn't already exist.
+    let key_id = match admin_key {
+        Some(kid) => kid,
+        None => {
+            let label = admin_label
+                .clone()
+                .unwrap_or_else(|| "admin-reprovision".to_string());
+            let result = create_key(
+                &state.keys_ks,
+                &state.contexts_ks,
+                &state.seed_store,
+                &state.audit_ks,
+                &auth,
+                CreateKeyParams {
+                    key_type: KeyType::Ed25519,
+                    derivation_path: None,
+                    key_id: None,
+                    mnemonic: None,
+                    label: Some(label),
+                    context_id: Some(id.clone()),
+                },
+                "vta-context-reprovision",
+            )
+            .await?;
+            eprintln!(
+                "Minted fresh admin key '{}' in context '{id}'",
+                result.key_id
+            );
+            result.key_id
+        }
     };
 
     let deps = ExportDeps {

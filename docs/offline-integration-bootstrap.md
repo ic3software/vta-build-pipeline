@@ -317,15 +317,17 @@ Two commands, direct parallels of their `pnm` counterparts but
 reading the local on-disk keystore (no running VTA, no network):
 
 ```bash
-# Export a context's admin credential + DID material. Consumer imports
-# the bundle and is set up as admin of that context.
+# Export a context's admin credential + all DID keys + DID document +
+# log. Consumer imports the bundle and is set up as admin of that
+# context. The DID's operational keys (signing, KA, pre-rotation) are
+# auto-included — the operator doesn't name them.
 vta context reprovision \
     --id             mediator-prod \
-    --key            did:webvh:...#key-0 \
     --recipient      new-admin-request.json \
     --out            mediator-prod-handoff.armor
 
-# Export all active keys in a context as a portable DID secrets bundle.
+# Export all active keys in a context as a portable DID secrets bundle
+# (DID + keys only, no admin credential).
 vta keys bundle \
     --context        mediator-prod \
     --recipient      backup-admin-request.json \
@@ -344,11 +346,21 @@ binary that matches your transport: `vta` on the VTA host when the
 admin has shell access and the VTA is air-gapped; `pnm` on an
 authenticated workstation when the VTA is reachable over HTTPS.
 
-`vta context reprovision` requires `--key` in the first cut (pass an
-existing Ed25519 key id whose seed backs the admin credential). Use
-`vta keys list --context <id>` to see available choices. Interactive
-selection + create-new-key parity with `pnm context reprovision` is
-planned as a follow-up.
+`vta context reprovision`'s `--admin-key` is optional. When omitted
+(recommended default), the VTA mints a fresh Ed25519 key scoped to
+the context, derives its `did:key`, writes an admin ACL row for it,
+and packs the resulting `CredentialBundle` into the sealed output.
+The consumer installs the new admin identity and can immediately
+authenticate to the VTA. Pass `--admin-key <existing-key-id>` only
+when reusing a specific already-stored identity — rotation, backup
+recovery, or a deliberate multi-admin setup. `--key` is accepted as a
+deprecated alias of `--admin-key`. `pnm context reprovision` uses the
+same flag name and accepts the same alias.
+
+The DID's operational keys (signing, KA, any pre-rotation) are
+always included in the bundle regardless — the operator never has to
+enumerate them. `--admin-key` only affects the separate admin
+credential slot.
 
 The ACL entry for the derived admin DID is written on the VTA side
 automatically if it doesn't already exist, so the consumer can

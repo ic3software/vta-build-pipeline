@@ -373,25 +373,35 @@ enum KeyCliCommands {
 
 #[derive(Subcommand)]
 enum ContextCommands {
-    /// Export an existing context — its admin credential + any
-    /// provisioned DID material — as a sealed ContextProvision bundle
-    /// for a new/backup admin to import.
+    /// Export an existing context — its admin credential + all DID
+    /// keys (signing + KA + any pre-rotation) + DID document + log —
+    /// as a sealed ContextProvision bundle for a new/backup admin to
+    /// import.
     ///
     /// Reads the local keystore directly — no running VTA or network
     /// required. Mirrors `pnm context reprovision` but works in
     /// cold-start / air-gapped environments where PNM cannot reach the
     /// VTA.
+    ///
+    /// The bundle always contains every key tied to the context's DID
+    /// document (operational keys are auto-included). `--admin-key`
+    /// separately names the existing Ed25519 seed that becomes the
+    /// **admin credential** — the `did:key` the mediator operator uses
+    /// to authenticate back to the VTA for ACL-gated operations.
+    /// When omitted, a fresh admin key is minted in the context and
+    /// the derived `did:key` is granted admin access automatically.
     Reprovision {
         /// Context ID to export.
         #[arg(long)]
         id: String,
-        /// Existing Ed25519 key to use as the admin credential. Its
-        /// seed backs the `did:key` the ContextProvision bundle binds
-        /// to. Interactive prompt if omitted.
-        #[arg(long)]
-        key: Option<String>,
-        /// Label for a freshly-minted admin key when `--key` is
-        /// omitted and the interactive prompt selects "create new".
+        /// Existing Ed25519 key whose seed backs the exported admin
+        /// credential. When omitted, a fresh admin key is minted in
+        /// the context. Kept as `--key` for backward compatibility.
+        #[arg(long = "admin-key", alias = "key")]
+        admin_key: Option<String>,
+        /// Label applied to the freshly-minted admin key when
+        /// `--admin-key` is omitted. Defaults to
+        /// `"admin-reprovision"`.
         #[arg(long)]
         admin_label: Option<String>,
         /// Path to the consumer's BootstrapRequest JSON (v1). Mutually
@@ -732,7 +742,7 @@ async fn main() {
             let result = match command {
                 ContextCommands::Reprovision {
                     id,
-                    key,
+                    admin_key,
                     admin_label,
                     recipient,
                     recipient_did,
@@ -742,7 +752,7 @@ async fn main() {
                     bootstrap_cli::run_context_reprovision(
                         cli.config,
                         id,
-                        key,
+                        admin_key,
                         admin_label,
                         recipient,
                         recipient_did,

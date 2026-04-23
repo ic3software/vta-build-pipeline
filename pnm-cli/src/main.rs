@@ -715,20 +715,26 @@ enum ContextCommands {
         #[arg(long, requires = "recipient_did", conflicts_with = "recipient")]
         recipient_nonce: Option<String>,
     },
-    /// Regenerate a provision bundle for an existing context
+    /// Regenerate a provision bundle for an existing context.
     ///
-    /// Builds a new provision bundle using a VTA-stored key as the admin
-    /// credential and seals it to the given recipient. Pass --key to specify a
-    /// key ID directly, or omit it to interactively select from existing keys
-    /// or create a new one.
+    /// The DID's operational keys (signing, KA, any pre-rotation) are
+    /// auto-included in the bundle. `--admin-key` separately picks which
+    /// existing VTA-stored Ed25519 key's seed backs the admin credential
+    /// — the `did:key` the mediator operator uses to authenticate back
+    /// to the VTA for ACL-gated operations. Omit to interactively select
+    /// from existing keys or create a new one.
     Reprovision {
         /// Context ID to reprovision
         #[arg(long)]
         id: String,
-        /// Key ID of an existing VTA-stored Ed25519 key to use as admin credential
-        #[arg(long)]
-        key: Option<String>,
-        /// Label for a newly created admin key (used when no --key is provided)
+        /// Key ID of an existing VTA-stored Ed25519 key whose seed backs
+        /// the exported admin credential. Kept as `--key` for backward
+        /// compatibility.
+        #[arg(long = "admin-key", alias = "key")]
+        admin_key: Option<String>,
+        /// Label for a newly created admin key (used when no
+        /// `--admin-key` is provided and the interactive prompt selects
+        /// "create new").
         #[arg(long)]
         admin_label: Option<String>,
         /// Path to a BootstrapRequest JSON file produced by `pnm bootstrap request`.
@@ -1546,7 +1552,7 @@ async fn main() {
             }
             ContextCommands::Reprovision {
                 id,
-                key,
+                admin_key,
                 admin_label,
                 recipient,
                 recipient_did,
@@ -1557,8 +1563,14 @@ async fn main() {
                 recipient_nonce.as_deref(),
             ) {
                 Ok(recipient) => {
-                    contexts::cmd_context_reprovision(&client, &id, key, admin_label, recipient)
-                        .await
+                    contexts::cmd_context_reprovision(
+                        &client,
+                        &id,
+                        admin_key,
+                        admin_label,
+                        recipient,
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             },
