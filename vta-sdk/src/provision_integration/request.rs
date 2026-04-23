@@ -1064,6 +1064,224 @@ mod tests {
         assert_ne!(a.client_did, b.client_did);
     }
 
+    // ── Mutation coverage for `verify()` — item 19 ──────────────────
+    //
+    // Enumerate every way a middlebox could try to alter a signed VP
+    // and assert `verify()` rejects it. Table-driven rather than
+    // `proptest`-random: the attack surface is specific, finite, and
+    // better expressed as "one test per thing-that-must-not-happen"
+    // than as a fuzzer that may or may not happen to flip the right
+    // bit. Each case includes a matching error variant to prevent
+    // regressions where the VP fails for *some* reason (not the
+    // intended one) — a false negative we'd have missed with a loose
+    // `unwrap_err()`.
+    async fn build_valid_vp() -> (BootstrapRequest, String) {
+        let (seed, client_did) = sample_client_did(0xAA);
+        let vp = BootstrapRequest::sign(
+            &seed,
+            &client_did,
+            [0xBB; 16],
+            Duration::hours(1),
+            Some("item-19-fixture".into()),
+            sample_ask(),
+        )
+        .await
+        .expect("sign fixture VP");
+        (vp, client_did)
+    }
+
+    #[tokio::test]
+    async fn verify_fixture_round_trips() {
+        // Sanity: the fixture itself must verify, otherwise every
+        // mutation test below trivially "passes" by hitting an
+        // unrelated structural bug.
+        let (vp, _) = build_valid_vp().await;
+        vp.verify().expect("fixture VP verifies");
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_holder_mutation() {
+        let (mut vp, _) = build_valid_vp().await;
+        let (_other_seed, other_did) = sample_client_did(0xCC);
+        vp.holder = other_did;
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::HolderMismatch(_)),
+            "swapping holder must yield HolderMismatch, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_nonce_mutation() {
+        // Nonce is inside the signed body — changing any byte
+        // invalidates the signature. Should fail at proof-verify, not
+        // earlier structural checks.
+        let (mut vp, _) = build_valid_vp().await;
+        vp.nonce = "CCCCCCCCCCCCCCCCCCCCCC".to_string();
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "nonce mutation must yield BadProof, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_ask_mutation() {
+        // Fields inside `ask` are also signed — tampering with the
+        // template name, vars, or admin_template must invalidate.
+        let (mut vp, _) = build_valid_vp().await;
+        let BootstrapAsk::TemplateBootstrap(ref mut ask) = vp.ask;
+        ask.template.name = "swapped-template".into();
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "ask.template.name mutation must yield BadProof, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_valid_until_mutation() {
+        // Mutating validUntil to a different but still-valid timestamp
+        // (not "in the past", just different from signed) — still
+        // signed bytes, so the proof must fail.
+        let (mut vp, _) = build_valid_vp().await;
+        vp.valid_until = "2099-01-01T00:00:00Z".to_string();
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "validUntil mutation must yield BadProof, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_id_mutation() {
+        let (mut vp, _) = build_valid_vp().await;
+        vp.id = "urn:uuid:11111111-1111-1111-1111-111111111111".to_string();
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "id mutation must yield BadProof, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_label_mutation() {
+        let (mut vp, _) = build_valid_vp().await;
+        vp.label = Some("attacker-controlled-label".into());
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "label mutation must yield BadProof, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_missing_vp_type() {
+        // Structural precondition: if a middlebox strips
+        // "VerifiablePresentation" from the type array, the early
+        // InvalidClaim check fires before we ever look at the proof.
+        let (mut vp, _) = build_valid_vp().await;
+        vp.types.retain(|t| t != "VerifiablePresentation");
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::InvalidClaim(_)),
+            "missing VerifiablePresentation must yield InvalidClaim, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_missing_bootstrap_request_type() {
+        let (mut vp, _) = build_valid_vp().await;
+        vp.types.retain(|t| t != "BootstrapRequest");
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::InvalidClaim(_)),
+            "missing BootstrapRequest must yield InvalidClaim, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_cryptosuite_downgrade() {
+        // Swap eddsa-jcs-2022 → eddsa-rdfc-2022. Even if RDFC is
+        // a "valid" DI suite in general, we don't accept it here —
+        // the allowlist is tight so a future signer-side bug or
+        // downgrade attack can't sneak through a different suite.
+        let (mut vp, _) = build_valid_vp().await;
+        let mut proof_obj = vp.proof.as_object().expect("proof is an object").clone();
+        proof_obj.insert(
+            "cryptosuite".to_string(),
+            Value::String("eddsa-rdfc-2022".into()),
+        );
+        vp.proof = Value::Object(proof_obj);
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "cryptosuite downgrade must yield BadProof, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_verification_method_did_swap() {
+        // `verificationMethod` DID (pre-`#`) must match `holder`.
+        // Swapping only the VM (leaving the signature bytes valid
+        // over the *original* holder) is exactly the "forged holder"
+        // attack the check guards against.
+        let (mut vp, _) = build_valid_vp().await;
+        let (_other_seed, other_did) = sample_client_did(0xDD);
+        let mut proof_obj = vp.proof.as_object().expect("proof is an object").clone();
+        // Preserve a fragment (#key) so the `split_once('#')` check
+        // doesn't short-circuit first — the DID-mismatch path is what
+        // we want to exercise.
+        proof_obj.insert(
+            "verificationMethod".into(),
+            Value::String(format!("{other_did}#key")),
+        );
+        vp.proof = Value::Object(proof_obj);
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::HolderMismatch(_)),
+            "VM DID swap must yield HolderMismatch, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_signature_byte_flip() {
+        // Flip one byte in the proofValue (base58btc of the signature).
+        // The mutated signature must fail Ed25519 verification.
+        let (mut vp, _) = build_valid_vp().await;
+        let mut proof_obj = vp.proof.as_object().expect("proof is an object").clone();
+        let original_pv = proof_obj
+            .get("proofValue")
+            .and_then(|v| v.as_str())
+            .expect("proofValue present")
+            .to_string();
+        // Flip the last char to a different base58btc-valid char.
+        // (Avoid '0' / 'O' / 'I' / 'l' which aren't in the alphabet.)
+        let last = original_pv.chars().next_back().unwrap();
+        let replacement = if last == '1' { '2' } else { '1' };
+        let mut mutated: String = original_pv.chars().take(original_pv.len() - 1).collect();
+        mutated.push(replacement);
+        proof_obj.insert("proofValue".into(), Value::String(mutated));
+        vp.proof = Value::Object(proof_obj);
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "signature byte-flip must yield BadProof, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_malformed_proof_object() {
+        // Proof isn't a proper DataIntegrityProof shape at all.
+        let (mut vp, _) = build_valid_vp().await;
+        vp.proof = Value::String("not-a-proof".into());
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "malformed proof must yield BadProof, got {err:?}"
+        );
+    }
+
     #[test]
     fn deserialize_rejects_unknown_top_level_field() {
         // `deny_unknown_fields` must reject a VP body that tries to
