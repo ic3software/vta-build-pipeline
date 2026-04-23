@@ -3,7 +3,10 @@
 //! Provides a single startup pattern for any service that manages its DID and
 //! secrets through a VTA:
 //!
-//! 1. Authenticate to the VTA (lightweight REST, with session-based fallback).
+//! 1. Authenticate to the VTA. Tier order is determined by
+//!    [`TransportPreference`]: DIDComm first when a mediator is available
+//!    (identity-native, no separate auth round-trip), with lightweight REST
+//!    + session-REST as fallbacks.
 //! 2. Fetch the latest [`DidSecretsBundle`] from the VTA context.
 //! 3. Cache the bundle locally for offline resilience.
 //! 4. If the VTA is unreachable, load the last cached bundle.
@@ -22,6 +25,10 @@
 //!     context: "my-service".into(),
 //!     url_override: None,
 //!     timeout: None,
+//!     // Set a mediator_did to prefer the DIDComm transport on startup.
+//!     // Leave as None (with Auto) to go straight to REST.
+//!     mediator_did: Some("did:key:zMediator".into()),
+//!     transport_preference: Default::default(), // Auto
 //! };
 //! let cache = MyCache::new();
 //!
@@ -62,6 +69,49 @@ pub struct VtaServiceConfig {
     /// Timeout for the VTA startup flow (auth + secret fetch).
     /// Defaults to 30 seconds if `None`.
     pub timeout: Option<Duration>,
+    /// Mediator DID to route DIDComm traffic through, when the DIDComm
+    /// transport tier is selected.
+    ///
+    /// When set, the integration layer can establish a DIDComm channel to
+    /// the VTA via this mediator — identity-native auth, no separate
+    /// challenge-response HTTP round-trip. Leave `None` to force the REST
+    /// tiers (or combine with [`TransportPreference::DidCommOnly`] to fail
+    /// loud if a DIDComm channel can't be established).
+    ///
+    /// Auto-resolution of the mediator DID from the VTA's DID document
+    /// (walking `service[].type == "DIDCommMessaging"`) is not wired yet;
+    /// supply it explicitly for now.
+    #[cfg(feature = "session")]
+    pub mediator_did: Option<String>,
+    /// Which transport the integration layer should try first, and whether
+    /// it may fall back. Default is [`TransportPreference::Auto`].
+    #[cfg(feature = "session")]
+    pub transport_preference: TransportPreference,
+}
+
+/// Transport selection policy for [`authenticate`].
+///
+/// The actual tier sequence is derived from this preference plus whether
+/// [`VtaServiceConfig::mediator_did`] is set — see
+/// [`decide_transport`](auth::decide_transport) for the matrix.
+#[cfg(feature = "session")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TransportPreference {
+    /// Try DIDComm first when a `mediator_did` is configured; fall back to
+    /// REST on DIDComm failure. When `mediator_did` is unset, go straight
+    /// to REST. The sensible default for integrations that already speak
+    /// DIDComm for their primary workload (mediators) while keeping REST
+    /// as a safety net for pure-consumer deployments.
+    #[default]
+    Auto,
+    /// Skip DIDComm entirely; use REST. For integrations whose workload
+    /// is occasional / boot-time and who don't want the cost of a
+    /// persistent DIDComm channel.
+    PreferRest,
+    /// Require DIDComm. Error when `mediator_did` is unset or the DIDComm
+    /// channel fails — do **not** fall back to REST. For environments
+    /// that intentionally don't expose the REST endpoint publicly.
+    DidCommOnly,
 }
 
 /// Whether secrets were loaded live from the VTA or from the local cache.
