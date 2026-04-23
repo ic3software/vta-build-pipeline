@@ -1418,6 +1418,14 @@ mod tests {
     }
 
     async fn signed_request(template_name: &str, context_hint: &str) -> VerifiedBootstrapRequest {
+        signed_request_with_vars(template_name, context_hint, BTreeMap::new()).await
+    }
+
+    async fn signed_request_with_vars(
+        template_name: &str,
+        context_hint: &str,
+        vars: BTreeMap<String, Value>,
+    ) -> VerifiedBootstrapRequest {
         let seed = [7u8; 32];
         let signing = SigningKey::from_bytes(&seed);
         let pub_bytes: [u8; 32] = signing.verifying_key().to_bytes();
@@ -1427,7 +1435,7 @@ mod tests {
             context_hint: Some(context_hint.into()),
             template: DidTemplateRef {
                 name: template_name.into(),
-                vars: BTreeMap::new(),
+                vars,
             },
             admin_template: None,
             note: None,
@@ -1444,6 +1452,104 @@ mod tests {
         .await
         .expect("sign bootstrap request");
         req.verify().expect("verify bootstrap request")
+    }
+
+    /// Bootstrap the minimum VTA state a full `provision_integration()`
+    /// call needs: an active seed, the VTA's `{vta_did}#key-0` signing
+    /// key saved in the keystore, a DID resolver that can resolve the
+    /// VTA's own `did:key`, and an `AppConfig` with `vta_did` populated.
+    ///
+    /// Returns `(vta_did, deps_with_resolver)` — the caller plugs the
+    /// returned deps into `provision_integration()` instead of `test_deps()`.
+    async fn bootstrap_test_vta(ts: &TestStore) -> (String, ProvisionIntegrationDeps) {
+        use crate::keys::KeyType as SdkKeyType;
+        use crate::keys::save_key_record;
+        use crate::keys::seeds::{SeedRecord, save_seed_record, set_active_seed_id};
+        use affinidi_did_resolver_cache_sdk::{DIDCacheClient, config::DIDCacheConfigBuilder};
+        use ed25519_dalek_bip32::{DerivationPath, ExtendedSigningKey};
+        use vta_sdk::did_key::ed25519_multibase_pubkey;
+
+        // Deterministic 64-byte seed (BIP-32 wants ≥16 bytes; 64 mirrors
+        // the mnemonic-derived seed shape used in production setup).
+        let raw_seed = [0xC5u8; 64];
+        let seed_store = PlaintextSeedStore::new(&ts.data_dir);
+        seed_store
+            .set(&raw_seed)
+            .await
+            .expect("write test seed to plaintext store");
+
+        let now = chrono::Utc::now();
+        save_seed_record(
+            &ts.keys_ks,
+            &SeedRecord {
+                id: 0,
+                seed_hex: None,
+                created_at: now,
+                retired_at: None,
+            },
+        )
+        .await
+        .expect("save seed record");
+        set_active_seed_id(&ts.keys_ks, 0)
+            .await
+            .expect("set active seed id");
+
+        // Derive a fresh Ed25519 key at a canonical VTA path, convert to
+        // did:key, save a keystore record whose id matches the
+        // `{vta_did}#key-0` convention `load_vta_signing_secret` looks up.
+        let vta_base_path = "m/26'/1'/0'";
+        let root = ExtendedSigningKey::from_seed(&raw_seed).expect("bip-32 root");
+        let dp: DerivationPath = vta_base_path.parse().expect("derivation path");
+        let derived = root.derive(&dp).expect("derive VTA key");
+        let signing = ed25519_dalek::SigningKey::from_bytes(derived.signing_key.as_bytes());
+        let pub_bytes = signing.verifying_key().to_bytes();
+        let multibase = ed25519_multibase_pubkey(&pub_bytes);
+        let vta_did = format!("did:key:{multibase}");
+        let key_id = format!("{vta_did}#key-0");
+
+        save_key_record(
+            &ts.keys_ks,
+            &key_id,
+            vta_base_path,
+            SdkKeyType::Ed25519,
+            &multibase,
+            "VTA signing key",
+            None,
+            Some(0),
+        )
+        .await
+        .expect("save VTA key record");
+
+        let mut config = test_app_config(ts.data_dir.clone());
+        config.vta_did = Some(vta_did.clone());
+        config.public_url = Some("https://vta.test".into());
+
+        let resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
+            .await
+            .expect("DID resolver");
+
+        let deps = ProvisionIntegrationDeps {
+            keys_ks: ts.keys_ks.clone(),
+            acl_ks: ts.acl_ks.clone(),
+            audit_ks: ts.audit_ks.clone(),
+            contexts_ks: ts.contexts_ks.clone(),
+            did_templates_ks: ts.did_templates_ks.clone(),
+            imported_ks: ts.imported_ks.clone(),
+            webvh_ks: ts.webvh_ks.clone(),
+            sealed_nonces_ks: ts.sealed_nonces_ks.clone(),
+            seed_store: Arc::new(PlaintextSeedStore::new(&ts.data_dir)),
+            config: Arc::new(RwLock::new(config)),
+            did_resolver: Some(resolver),
+            didcomm_bridge: Arc::new(DIDCommBridge::placeholder()),
+        };
+        (vta_did, deps)
+    }
+
+    fn mediator_template_vars() -> BTreeMap<String, Value> {
+        let mut vars = BTreeMap::new();
+        vars.insert("URL".into(), Value::String("https://mediator.test".into()));
+        vars.insert("ROUTING_KEYS".into(), Value::Array(vec![]));
+        vars
     }
 
     #[tokio::test]
@@ -1525,5 +1631,175 @@ mod tests {
             .await
             .expect("stored record resolves");
         assert_eq!(kind, "shadowed-kind");
+    }
+
+    // ── Full-flow E2E tests ─────────────────────────────────────────
+    //
+    // Exercise the whole `provision_integration()` orchestration, not
+    // just individual helpers. These are the tests that would have
+    // caught the 3f4d832 regression (set_primary=false leaving ctx.did
+    // unset) and the recent count-bug fix (secret_count/output_count
+    // hardcoded instead of computed from the payload).
+
+    #[tokio::test]
+    async fn provision_integration_binds_minted_did_when_context_has_none() {
+        // This is the direct regression test for 3f4d832. Fresh context
+        // with ctx.did = None → after provision_integration, ctx.did
+        // must be populated with the newly-minted integration DID.
+        let ts = open_test_store().await;
+        let (_vta_did, deps) = bootstrap_test_vta(&ts).await;
+        crate::contexts::create_context(&ts.contexts_ks, "prod-mediator", "Prod Mediator")
+            .await
+            .expect("create context");
+
+        let ctx_before = crate::contexts::get_context(&ts.contexts_ks, "prod-mediator")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            ctx_before.did.is_none(),
+            "precondition: fresh context has no DID"
+        );
+
+        let auth = super_admin_claims();
+        let request = signed_request_with_vars(
+            "didcomm-mediator",
+            "prod-mediator",
+            mediator_template_vars(),
+        )
+        .await;
+
+        let output = provision_integration(
+            &deps,
+            &auth,
+            ProvisionIntegrationParams {
+                request,
+                context: "prod-mediator".into(),
+                assertion_mode: AssertionMode::PinnedOnly,
+                vc_validity: None,
+            },
+        )
+        .await
+        .expect("provision_integration");
+
+        let ctx_after = crate::contexts::get_context(&ts.contexts_ks, "prod-mediator")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            ctx_after.did.is_some(),
+            "context DID must be populated after provisioning a fresh context"
+        );
+        assert_eq!(
+            ctx_after.did.as_deref(),
+            Some(output.summary.integration_did.as_str()),
+            "bound DID must match the minted integration DID returned in the summary"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_integration_preserves_existing_context_did() {
+        // The "first integration wins" invariant: a second provisioning
+        // into a context that already has a primary DID must NOT
+        // overwrite it. Without this guard a second mediator silently
+        // displaces the first.
+        let ts = open_test_store().await;
+        let (_vta_did, deps) = bootstrap_test_vta(&ts).await;
+        let mut ctx = crate::contexts::create_context(&ts.contexts_ks, "prod-mediator", "Prod")
+            .await
+            .expect("create context");
+        let pre_existing_did = "did:webvh:pre-existing.example".to_string();
+        ctx.did = Some(pre_existing_did.clone());
+        crate::contexts::store_context(&ts.contexts_ks, &ctx)
+            .await
+            .expect("pre-populate context DID");
+
+        let auth = super_admin_claims();
+        let request = signed_request_with_vars(
+            "didcomm-mediator",
+            "prod-mediator",
+            mediator_template_vars(),
+        )
+        .await;
+
+        provision_integration(
+            &deps,
+            &auth,
+            ProvisionIntegrationParams {
+                request,
+                context: "prod-mediator".into(),
+                assertion_mode: AssertionMode::PinnedOnly,
+                vc_validity: None,
+            },
+        )
+        .await
+        .expect("provision_integration");
+
+        let ctx_after = crate::contexts::get_context(&ts.contexts_ks, "prod-mediator")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ctx_after.did.as_deref(),
+            Some(pre_existing_did.as_str()),
+            "existing primary DID must not be displaced by a later integration"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_integration_summary_counts_match_payload() {
+        // Regression test for the hardcoded `secret_count = if admin { 2 } else { 1 }`
+        // and `count_outputs_in_payload` = 1 bugs. The summary must
+        // report the actual counts derived from the sealed payload's
+        // contents.
+        let ts = open_test_store().await;
+        let (_vta_did, deps) = bootstrap_test_vta(&ts).await;
+        crate::contexts::create_context(&ts.contexts_ks, "prod-mediator", "Prod")
+            .await
+            .expect("create context");
+
+        let auth = super_admin_claims();
+        let request = signed_request_with_vars(
+            "didcomm-mediator",
+            "prod-mediator",
+            mediator_template_vars(),
+        )
+        .await;
+
+        let output = provision_integration(
+            &deps,
+            &auth,
+            ProvisionIntegrationParams {
+                request,
+                context: "prod-mediator".into(),
+                assertion_mode: AssertionMode::PinnedOnly,
+                vc_validity: None,
+            },
+        )
+        .await
+        .expect("provision_integration");
+
+        // Without admin_template rollover, exactly one DID's key material
+        // is sealed in (integration DID: signing + KA keys).
+        assert!(
+            !output.summary.admin_rolled_over,
+            "no admin rollover requested"
+        );
+        assert_eq!(
+            output.summary.secret_count, 1,
+            "exactly one minted integration DID should be in the payload's secrets map"
+        );
+        // Serverless webvh mint produces exactly one WebvhLog output.
+        assert_eq!(
+            output.summary.output_count, 1,
+            "exactly one webvh log output"
+        );
+        // And the armored bundle + OOB digest are present.
+        assert!(!output.armored.is_empty(), "armored bundle populated");
+        assert_eq!(
+            output.digest.len(),
+            64,
+            "SHA-256 digest is 32 bytes hex-encoded"
+        );
     }
 }

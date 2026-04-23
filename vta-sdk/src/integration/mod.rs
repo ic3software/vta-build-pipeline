@@ -318,3 +318,144 @@ async fn load_from_cache(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::did_secrets::{DidSecretsBundle, SecretEntry};
+    use crate::keys::KeyType;
+    use std::sync::Mutex;
+
+    /// In-memory `SecretCache` for tests. Records the last-stored bundle
+    /// and lets the test script arbitrary `load()` / `store()`
+    /// behaviours via pre-seeded slots. Intentionally unassuming — no
+    /// tracking of store-count, no clear() semantics — each test
+    /// constructs a fresh instance.
+    struct MockSecretCache {
+        load_result: Mutex<Option<LoadOutcome>>,
+        last_stored: Mutex<Option<DidSecretsBundle>>,
+    }
+
+    enum LoadOutcome {
+        Some(DidSecretsBundle),
+        None,
+        Err(String),
+    }
+
+    impl MockSecretCache {
+        fn with_cached(bundle: DidSecretsBundle) -> Self {
+            Self {
+                load_result: Mutex::new(Some(LoadOutcome::Some(bundle))),
+                last_stored: Mutex::new(None),
+            }
+        }
+        fn empty() -> Self {
+            Self {
+                load_result: Mutex::new(Some(LoadOutcome::None)),
+                last_stored: Mutex::new(None),
+            }
+        }
+        fn failing(msg: &str) -> Self {
+            Self {
+                load_result: Mutex::new(Some(LoadOutcome::Err(msg.into()))),
+                last_stored: Mutex::new(None),
+            }
+        }
+    }
+
+    impl SecretCache for MockSecretCache {
+        fn store(
+            &self,
+            bundle: &DidSecretsBundle,
+        ) -> impl std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send
+        {
+            let mut slot = self.last_stored.lock().unwrap();
+            *slot = Some(bundle.clone());
+            async { Ok(()) }
+        }
+        fn load(
+            &self,
+        ) -> impl std::future::Future<
+            Output = Result<Option<DidSecretsBundle>, Box<dyn std::error::Error + Send + Sync>>,
+        > + Send {
+            let taken = self.load_result.lock().unwrap().take();
+            async move {
+                match taken {
+                    Some(LoadOutcome::Some(b)) => Ok(Some(b)),
+                    Some(LoadOutcome::None) => Ok(None),
+                    Some(LoadOutcome::Err(m)) => Err(m.into()),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    fn sample_bundle() -> DidSecretsBundle {
+        DidSecretsBundle {
+            did: "did:key:z6MkSampleIntegration".into(),
+            secrets: vec![SecretEntry {
+                key_id: "did:key:z6MkSampleIntegration#z6MkSampleIntegration".into(),
+                key_type: KeyType::Ed25519,
+                private_key_multibase: "z3weSampleSecret".into(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn load_from_cache_returns_fresh_bundle_when_present() {
+        let cache = MockSecretCache::with_cached(sample_bundle());
+        let result = load_from_cache(&cache, "prod-mediator")
+            .await
+            .expect("cache hit returns StartupResult");
+        assert_eq!(result.source, SecretSource::Cache);
+        assert_eq!(result.did, "did:key:z6MkSampleIntegration");
+        assert_eq!(result.bundle.secrets.len(), 1);
+        assert!(
+            result.client.is_none(),
+            "Cache-source startup never carries a live VtaClient",
+        );
+    }
+
+    #[tokio::test]
+    async fn load_from_cache_empty_returns_no_cached_secrets() {
+        let cache = MockSecretCache::empty();
+        let result = load_from_cache(&cache, "prod-mediator").await;
+        match result {
+            Err(VtaIntegrationError::NoCachedSecrets) => {}
+            Err(other) => panic!("expected NoCachedSecrets, got {other:?}"),
+            Ok(_) => panic!("empty cache must be an error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_from_cache_io_error_becomes_cache_error() {
+        let cache = MockSecretCache::failing("keyring unavailable");
+        let result = load_from_cache(&cache, "prod-mediator").await;
+        match result {
+            Err(VtaIntegrationError::CacheError(msg)) => {
+                assert!(msg.contains("keyring unavailable"), "got: {msg}")
+            }
+            Err(other) => panic!("expected CacheError, got {other:?}"),
+            Ok(_) => panic!("cache read error must propagate"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_from_cache_rejects_empty_bundle() {
+        // A cached bundle with no secrets is structurally-valid on the
+        // wire but useless at boot — reject loudly rather than silently
+        // return an unusable StartupResult.
+        let cache = MockSecretCache::with_cached(DidSecretsBundle {
+            did: "did:key:zEmpty".into(),
+            secrets: vec![],
+        });
+        let result = load_from_cache(&cache, "prod-mediator").await;
+        match result {
+            Err(VtaIntegrationError::EmptySecretsBundle(ctx)) => {
+                assert_eq!(ctx, "prod-mediator")
+            }
+            Err(other) => panic!("expected EmptySecretsBundle, got {other:?}"),
+            Ok(_) => panic!("empty-secrets bundle must be rejected"),
+        }
+    }
+}
