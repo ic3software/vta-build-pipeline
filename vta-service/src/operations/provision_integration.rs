@@ -260,123 +260,187 @@ pub async fn provision_integration(
         })?;
     let set_primary = ctx_before_mint.did.is_none();
 
-    // `create_did_webvh` takes exactly one of `server_id` / `url`.
-    // - WEBVH_SERVER set → `server_id` wins; `url` is unused by that
-    //   path, so we drop it even if supplied.
-    // - WEBVH_SERVER unset → serverless mode; we need a `url`. This is
-    //   the only path where an absent URL is a hard error; surface it
-    //   with guidance naming the `WEBVH_SERVER` alternative.
-    let (params_server_id, params_url) = match &webvh_server_id {
-        Some(id) => (Some(id.clone()), None),
-        None => {
-            let url = integration_url.clone().ok_or_else(|| {
-                AppError::Validation(
-                    "serverless provisioning requires the template to supply a 'URL' variable \
-                     (the integration's webvh host URL). Either add it to the template's \
-                     `requiredVars` and pass it in `template_vars`, or set `WEBVH_SERVER` to \
-                     route publication through a registered webvh hosting server instead."
-                        .into(),
-                )
-            })?;
-            (None, Some(url))
-        }
+    // Peek at the template's `methods` field. Templates declaring only
+    // `["key"]` want a did:key integration (ephemeral / headless /
+    // signing-only — no hosted did.jsonl log); everything else stays
+    // on the webvh path. An empty `methods` list keeps the did:webvh
+    // default — `methods` is advisory, and most templates omit it.
+    let integration_template = resolve_template_by_name(state, &context, &template_name)
+        .await
+        .map_err(|e| match e {
+            AppError::NotFound(_) => AppError::Validation(format!(
+                "integration template '{template_name}' is not registered on this VTA. \
+                 Register it via 'pnm did-templates upload {template_name} --file <path>' \
+                 then retry."
+            )),
+            other => other,
+        })?;
+    let use_did_key = template_targets_did_key_only(&integration_template);
+
+    // When the did:key path runs, we already hold the full
+    // `DidKeyMaterial` (signing + KA public/private) from the mint
+    // helper — there's no keystore round-trip for the KA key because
+    // X25519 is derived from the Ed25519 seed, not BIP-32 derived at
+    // its own path. Capture it here so the readback section below can
+    // skip `get_key_secret` on this branch.
+    let mut did_key_material: Option<DidKeyMaterial> = None;
+
+    let (integration_did, signing_key_id, ka_key_id, did_document, did_log) = if use_did_key {
+        // did:key path — no webvh publication. `WEBVH_SERVER` /
+        // `WEBVH_PATH` / `URL` are all irrelevant here; the template's
+        // `methods: ["key"]` is load-bearing metadata, not the URL.
+        let (did, skid, kkid, doc, log, material) = mint_integration_via_did_key_template(
+            state,
+            &context,
+            &client_did,
+            &template_name,
+            &template_vars,
+        )
+        .await?;
+        did_key_material = Some(material);
+        (did, skid, kkid, doc, log)
+    } else {
+        // did:webvh path — `create_did_webvh` takes exactly one of
+        // `server_id` / `url`.
+        // - WEBVH_SERVER set → `server_id` wins; `url` is unused by that
+        //   path, so we drop it even if supplied.
+        // - WEBVH_SERVER unset → serverless mode; we need a `url`. This is
+        //   the only path where an absent URL is a hard error; surface it
+        //   with guidance naming the `WEBVH_SERVER` alternative.
+        let (params_server_id, params_url) = match &webvh_server_id {
+            Some(id) => (Some(id.clone()), None),
+            None => {
+                let url = integration_url.clone().ok_or_else(|| {
+                    AppError::Validation(
+                        "serverless provisioning requires the template to supply a 'URL' variable \
+                         (the integration's webvh host URL). Either add it to the template's \
+                         `requiredVars` and pass it in `template_vars`, or set `WEBVH_SERVER` to \
+                         route publication through a registered webvh hosting server instead."
+                            .into(),
+                    )
+                })?;
+                (None, Some(url))
+            }
+        };
+
+        let template_vars_hashmap: std::collections::HashMap<String, Value> =
+            template_vars.clone().into_iter().collect();
+
+        let create_result = super::did_webvh::create_did_webvh(
+            &state.keys_ks,
+            &state.imported_ks,
+            &state.contexts_ks,
+            &state.webvh_ks,
+            &state.did_templates_ks,
+            &*state.seed_store,
+            &*state.config.read().await,
+            auth,
+            super::did_webvh::CreateDidWebvhParams {
+                context_id: context.clone(),
+                server_id: params_server_id,
+                url: params_url,
+                path: webvh_path,
+                label: Some(client_did.clone()),
+                portable: true,
+                add_mediator_service: false,
+                additional_services: None,
+                pre_rotation_count: 0,
+                did_document: None,
+                did_log: None,
+                set_primary,
+                signing_key_id: None,
+                ka_key_id: None,
+                template: Some(template_name.clone()),
+                template_context: None,
+                template_vars: template_vars_hashmap,
+                // provision-integration always creates an integration DID,
+                // never the VTA's own identity.
+                is_vta_identity: false,
+            },
+            state
+                .did_resolver
+                .as_ref()
+                .ok_or_else(|| AppError::Internal("DID resolver not initialized".into()))?,
+            &state.didcomm_bridge,
+            "provision-integration",
+        )
+        .await?;
+
+        let did_document = create_result.did_document.clone().ok_or_else(|| {
+            AppError::Internal("create_did_webvh did not return did_document".into())
+        })?;
+        (
+            create_result.did.clone(),
+            create_result.signing_key_id.clone(),
+            create_result.ka_key_id.clone(),
+            did_document,
+            create_result.log_entry.clone(),
+        )
     };
 
-    let template_vars_hashmap: std::collections::HashMap<String, Value> =
-        template_vars.clone().into_iter().collect();
-
-    let create_result = super::did_webvh::create_did_webvh(
-        &state.keys_ks,
-        &state.imported_ks,
-        &state.contexts_ks,
-        &state.webvh_ks,
-        &state.did_templates_ks,
-        &*state.seed_store,
-        &*state.config.read().await,
-        auth,
-        super::did_webvh::CreateDidWebvhParams {
-            context_id: context.clone(),
-            server_id: params_server_id,
-            url: params_url,
-            path: webvh_path,
-            label: Some(client_did.clone()),
-            portable: true,
-            add_mediator_service: false,
-            additional_services: None,
-            pre_rotation_count: 0,
-            did_document: None,
-            did_log: None,
-            set_primary,
-            signing_key_id: None,
-            ka_key_id: None,
-            template: Some(template_name.clone()),
-            template_context: None,
-            template_vars: template_vars_hashmap,
-            // provision-integration always creates an integration DID,
-            // never the VTA's own identity.
-            is_vta_identity: false,
-        },
-        state
-            .did_resolver
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("DID resolver not initialized".into()))?,
-        &state.didcomm_bridge,
-        "provision-integration",
-    )
-    .await?;
-
-    let integration_did = create_result.did.clone();
-    let signing_key_id = create_result.signing_key_id.clone();
-    let ka_key_id = create_result.ka_key_id.clone();
-    let did_document = create_result
-        .did_document
-        .clone()
-        .ok_or_else(|| AppError::Internal("create_did_webvh did not return did_document".into()))?;
-    let did_log = create_result.log_entry.clone();
+    // did:key path: set the minted DID as primary when the context has
+    // none. The webvh path already handles this inside create_did_webvh
+    // via `set_primary`.
+    if use_did_key && set_primary {
+        let mut ctx = ctx_before_mint.clone();
+        ctx.did = Some(integration_did.clone());
+        ctx.updated_at = chrono::Utc::now();
+        crate::contexts::store_context(&state.contexts_ks, &ctx)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("set integration did:key as context primary: {e}"))
+            })?;
+    }
 
     // ── 4. Read back minted secrets ─────────────────────────────────
     //
-    // `get_key_secret` applies the same context-access gating as we
-    // enforced at precondition time, so this is a straightforward
-    // server-side read.
-    let signing_secret_resp = super::keys::get_key_secret(
-        &state.keys_ks,
-        &state.imported_ks,
-        &state.seed_store,
-        &state.audit_ks,
-        auth,
-        &signing_key_id,
-        "provision-integration",
-    )
-    .await?;
-    let ka_secret_resp = super::keys::get_key_secret(
-        &state.keys_ks,
-        &state.imported_ks,
-        &state.seed_store,
-        &state.audit_ks,
-        auth,
-        &ka_key_id,
-        "provision-integration",
-    )
-    .await?;
-
+    // The did:key branch above already captured the full `DidKeyMaterial`
+    // at mint time (X25519 KA isn't BIP-32 derived at its own path, so
+    // `get_key_secret` can't recompute it). Skip the readback in that
+    // case; the webvh branch still goes through `get_key_secret` so it
+    // exercises the same authz surface as any admin-triggered read.
     let mut secrets = BTreeMap::new();
-    secrets.insert(
-        integration_did.clone(),
-        DidKeyMaterial {
-            did: integration_did.clone(),
-            signing_key: KeyPair {
-                key_id: signing_key_id.clone(),
-                public_key_multibase: signing_secret_resp.public_key_multibase.clone(),
-                private_key_multibase: signing_secret_resp.private_key_multibase.clone(),
+    if let Some(material) = did_key_material {
+        secrets.insert(material.did.clone(), material);
+    } else {
+        let signing_secret_resp = super::keys::get_key_secret(
+            &state.keys_ks,
+            &state.imported_ks,
+            &state.seed_store,
+            &state.audit_ks,
+            auth,
+            &signing_key_id,
+            "provision-integration",
+        )
+        .await?;
+        let ka_secret_resp = super::keys::get_key_secret(
+            &state.keys_ks,
+            &state.imported_ks,
+            &state.seed_store,
+            &state.audit_ks,
+            auth,
+            &ka_key_id,
+            "provision-integration",
+        )
+        .await?;
+
+        secrets.insert(
+            integration_did.clone(),
+            DidKeyMaterial {
+                did: integration_did.clone(),
+                signing_key: KeyPair {
+                    key_id: signing_key_id.clone(),
+                    public_key_multibase: signing_secret_resp.public_key_multibase.clone(),
+                    private_key_multibase: signing_secret_resp.private_key_multibase.clone(),
+                },
+                ka_key: KeyPair {
+                    key_id: ka_key_id.clone(),
+                    public_key_multibase: ka_secret_resp.public_key_multibase.clone(),
+                    private_key_multibase: ka_secret_resp.private_key_multibase.clone(),
+                },
             },
-            ka_key: KeyPair {
-                key_id: ka_key_id.clone(),
-                public_key_multibase: ka_secret_resp.public_key_multibase.clone(),
-                private_key_multibase: ka_secret_resp.private_key_multibase.clone(),
-            },
-        },
-    );
+        );
+    }
 
     // ── 4.5. Optional admin-DID rollover ───────────────────────────
     //
@@ -756,6 +820,131 @@ struct MintedAdmin {
     material: DidKeyMaterial,
 }
 
+/// Combined output of [`mint_did_key_from_template`]: key material for
+/// installation at the holder plus the rendered DID document (kept for
+/// the integration path, discarded for admin rollover).
+struct MintedDidKey {
+    material: DidKeyMaterial,
+    rendered_document: Value,
+}
+
+/// Shared did:key mint: derive Ed25519, register keystore records,
+/// derive the X25519 KA view, and render the template's DID document.
+///
+/// Caller is responsible for resolving + validating the template (kind
+/// check, methods check). This helper only handles the derivation + save
+/// flow — separating that concern lets admin and integration paths
+/// share one implementation with role-specific error messages.
+async fn mint_did_key_from_template(
+    state: &ProvisionIntegrationDeps,
+    context: &str,
+    template: &vta_sdk::did_templates::DidTemplate,
+    template_ref: &DidTemplateRef,
+    label: String,
+    purpose: &str, // logged — "admin" / "integration"
+) -> Result<MintedDidKey, AppError> {
+    use crate::keys::derive_and_store_did_key;
+    use crate::keys::seeds::{get_active_seed_id, load_seed_bytes};
+
+    let ctx = crate::contexts::get_context(&state.contexts_ks, context)
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "context '{context}' disappeared between precondition check and did:key mint"
+            ))
+        })?;
+    let active_seed_id = get_active_seed_id(&state.keys_ks)
+        .await
+        .map_err(|e| AppError::Internal(format!("active seed id: {e}")))?;
+    let seed = load_seed_bytes(&state.keys_ks, &*state.seed_store, Some(active_seed_id))
+        .await
+        .map_err(|e| AppError::Internal(format!("load seed: {e}")))?;
+
+    let (minted_did, signing_priv_mb) = derive_and_store_did_key(
+        &seed,
+        &ctx.base_path,
+        context,
+        &label,
+        &state.keys_ks,
+        Some(active_seed_id),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("derive did:key: {e}")))?;
+
+    // The did:key multibase IS the signing key's pub multibase by
+    // construction — the prefix `did:key:` is purely structural.
+    let signing_pub_mb = minted_did
+        .strip_prefix("did:key:")
+        .ok_or_else(|| {
+            AppError::Internal("derive_and_store_did_key returned a non-did:key DID".into())
+        })?
+        .to_string();
+    let signing_key_id = format!("{minted_did}#{signing_pub_mb}");
+
+    // Render the template — validates required vars + the rendered
+    // document shape. For did:key the doc isn't published (the DID is
+    // self-resolving), but the render still validates the template.
+    let mut tpl_vars = TemplateVars::new();
+    tpl_vars.insert_string("DID", &minted_did);
+    tpl_vars.insert_string("SIGNING_KEY_MB", &signing_pub_mb);
+    for (k, v) in &template_ref.vars {
+        tpl_vars.insert(k.clone(), v.clone());
+    }
+    let rendered_document = template.render(&tpl_vars).map_err(|e| {
+        AppError::Validation(format!(
+            "template '{}' render failed: {e}",
+            template_ref.name
+        ))
+    })?;
+
+    // Derive the X25519 KA view from the same Ed25519 seed. Holders
+    // that DIDComm-authenticate as this DID install both the signing
+    // key and the KA derivation — bundle is self-describing, holder
+    // doesn't need to know the Ed25519→X25519 derivation.
+    let signing_seed: [u8; 32] = decode_private_key_multibase(&signing_priv_mb)
+        .map_err(|e| AppError::Internal(format!("decode signing seed: {e}")))?;
+    let signing_pub_bytes = affinidi_crypto::did_key::did_key_to_ed25519_pub(&minted_did)
+        .map_err(|e| AppError::Internal(format!("decode did:key pub: {e}")))?;
+    let ka_pub_bytes = affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&signing_pub_bytes)
+        .map_err(|e| AppError::Internal(format!("derive X25519 pub: {e}")))?;
+    let ka_priv_bytes = affinidi_crypto::ed25519::ed25519_private_to_x25519(&signing_seed);
+
+    let ka_pub_mb =
+        crate::keys::encode_public_multibase(&crate::keys::KeyType::X25519, &ka_pub_bytes);
+    let ka_priv_mb =
+        crate::keys::encode_private_multibase(&crate::keys::KeyType::X25519, &ka_priv_bytes);
+    // did:key Ed25519 resolvers use the X25519 multibase as the KA
+    // verification-method fragment. Mirror that convention so the
+    // installed key id matches what consumers expect to see in the
+    // resolved DID document.
+    let ka_key_id = format!("{minted_did}#{ka_pub_mb}");
+
+    info!(
+        did = %minted_did,
+        context = %context,
+        template = %template_ref.name,
+        purpose,
+        "minted did:key via template"
+    );
+
+    Ok(MintedDidKey {
+        material: DidKeyMaterial {
+            did: minted_did,
+            signing_key: KeyPair {
+                key_id: signing_key_id,
+                public_key_multibase: signing_pub_mb,
+                private_key_multibase: signing_priv_mb,
+            },
+            ka_key: KeyPair {
+                key_id: ka_key_id,
+                public_key_multibase: ka_pub_mb,
+                private_key_multibase: ka_priv_mb,
+            },
+        },
+        rendered_document,
+    })
+}
+
 /// Mint a fresh long-term admin DID under the VTA's key custody, using
 /// the operator-named admin template. Phase 1: did:key (Ed25519) only.
 ///
@@ -769,9 +958,6 @@ async fn mint_admin_via_template(
     context: &str,
     admin_template_ref: &DidTemplateRef,
 ) -> Result<MintedAdmin, AppError> {
-    use crate::keys::derive_and_store_did_key;
-    use crate::keys::seeds::{get_active_seed_id, load_seed_bytes};
-
     // 1. Resolve the template (built-in / global / context-scoped).
     let admin_tpl = resolve_admin_template(state, context, &admin_template_ref.name).await?;
 
@@ -799,107 +985,86 @@ async fn mint_admin_via_template(
         )));
     }
 
-    // 4. Mint the Ed25519 admin key + register a KeyRecord at
-    //    `{admin_did}#{multibase}` so the VTA can later look the
-    //    admin's signing key up by DID URL during steady-state auth.
-    let ctx = crate::contexts::get_context(&state.contexts_ks, context)
-        .await?
-        .ok_or_else(|| {
-            AppError::Internal(format!(
-                "context '{context}' disappeared between precondition check and admin mint"
-            ))
-        })?;
-    let active_seed_id = get_active_seed_id(&state.keys_ks)
-        .await
-        .map_err(|e| AppError::Internal(format!("active seed id: {e}")))?;
-    let seed = load_seed_bytes(&state.keys_ks, &*state.seed_store, Some(active_seed_id))
-        .await
-        .map_err(|e| AppError::Internal(format!("load seed: {e}")))?;
-
-    let label = format!("admin DID for context {context} (provision-integration)");
-    let (admin_did, signing_priv_mb) = derive_and_store_did_key(
-        &seed,
-        &ctx.base_path,
+    // 4-7. Delegate the derive + save + render + KA-derive work to the
+    //      shared helper. Admin path discards the rendered document —
+    //      did:key is self-resolving.
+    let minted = mint_did_key_from_template(
+        state,
         context,
-        &label,
-        &state.keys_ks,
-        Some(active_seed_id),
+        &admin_tpl,
+        admin_template_ref,
+        format!("admin DID for context {context} (provision-integration)"),
+        "admin",
     )
-    .await
-    .map_err(|e| AppError::Internal(format!("derive admin did:key: {e}")))?;
-
-    // 5. The did:key multibase IS the signing key's pub multibase by
-    //    construction — the prefix `did:key:` is purely structural.
-    let signing_pub_mb = admin_did
-        .strip_prefix("did:key:")
-        .ok_or_else(|| {
-            AppError::Internal("derive_and_store_did_key returned a non-did:key DID".into())
-        })?
-        .to_string();
-    let signing_key_id = format!("{admin_did}#{signing_pub_mb}");
-
-    // 6. Render the template (validates required vars + the rendered
-    //    document shape). For did:key the doc isn't published — the
-    //    DID is self-resolving — but the render validates the operator's
-    //    template is actually usable. The rendered doc is discarded
-    //    here; future webvh-admin support will keep it for publication.
-    let mut tpl_vars = TemplateVars::new();
-    tpl_vars.insert_string("DID", &admin_did);
-    tpl_vars.insert_string("SIGNING_KEY_MB", &signing_pub_mb);
-    for (k, v) in &admin_template_ref.vars {
-        tpl_vars.insert(k.clone(), v.clone());
-    }
-    let _rendered = admin_tpl.render(&tpl_vars).map_err(|e| {
-        AppError::Validation(format!(
-            "admin template '{}' render failed: {e}",
-            admin_template_ref.name
-        ))
-    })?;
-
-    // 7. Derive the X25519 KA view from the same Ed25519 seed. Holders
-    //    that DIDComm-authenticate as the admin DID install both the
-    //    signing key and this KA derivation — bundle is self-describing,
-    //    holder doesn't need to know the Ed25519→X25519 derivation.
-    let signing_seed: [u8; 32] = decode_private_key_multibase(&signing_priv_mb)
-        .map_err(|e| AppError::Internal(format!("decode admin signing seed: {e}")))?;
-    let signing_pub_bytes = affinidi_crypto::did_key::did_key_to_ed25519_pub(&admin_did)
-        .map_err(|e| AppError::Internal(format!("decode admin did:key pub: {e}")))?;
-    let ka_pub_bytes = affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&signing_pub_bytes)
-        .map_err(|e| AppError::Internal(format!("derive admin X25519 pub: {e}")))?;
-    let ka_priv_bytes = affinidi_crypto::ed25519::ed25519_private_to_x25519(&signing_seed);
-
-    let ka_pub_mb =
-        crate::keys::encode_public_multibase(&crate::keys::KeyType::X25519, &ka_pub_bytes);
-    let ka_priv_mb =
-        crate::keys::encode_private_multibase(&crate::keys::KeyType::X25519, &ka_priv_bytes);
-    // did:key Ed25519 resolvers use the X25519 multibase as the KA
-    // verification-method fragment. Mirror that convention so the
-    // installed key id matches what consumers expect to see in the
-    // resolved DID document.
-    let ka_key_id = format!("{admin_did}#{ka_pub_mb}");
-
-    info!(
-        admin_did = %admin_did,
-        context = %context,
-        template = %admin_template_ref.name,
-        "minted long-term admin DID for provision-integration rollover"
-    );
+    .await?;
 
     Ok(MintedAdmin {
-        material: DidKeyMaterial {
-            did: admin_did,
-            signing_key: KeyPair {
-                key_id: signing_key_id,
-                public_key_multibase: signing_pub_mb,
-                private_key_multibase: signing_priv_mb,
-            },
-            ka_key: KeyPair {
-                key_id: ka_key_id,
-                public_key_multibase: ka_pub_mb,
-                private_key_multibase: ka_priv_mb,
-            },
-        },
+        material: minted.material,
     })
+}
+
+/// Mint a fresh integration DID as a `did:key` via the operator-named
+/// template. Selected automatically when the template's `methods`
+/// declares `["key"]` only — otherwise provision-integration stays on
+/// the webvh path.
+///
+/// Shape of the returned tuple mirrors the fields of
+/// [`did_webvh::CreateDidWebvhResultBody`] that `provision_integration`
+/// actually reads, so the downstream code that builds secrets / VC /
+/// payload doesn't branch on "webvh vs key".
+async fn mint_integration_via_did_key_template(
+    state: &ProvisionIntegrationDeps,
+    context: &str,
+    client_did: &str,
+    template_name: &str,
+    template_vars: &BTreeMap<String, Value>,
+) -> Result<
+    (
+        String,
+        String,
+        String,
+        Value,
+        Option<String>,
+        DidKeyMaterial,
+    ),
+    AppError,
+> {
+    let template = resolve_template_by_name(state, context, template_name)
+        .await
+        .map_err(|e| match e {
+            AppError::NotFound(_) => AppError::Validation(format!(
+                "integration template '{template_name}' is not registered on this VTA. \
+                 Register it via 'pnm did-templates upload {template_name} --file <path>' \
+                 then retry."
+            )),
+            other => other,
+        })?;
+
+    let template_ref = DidTemplateRef {
+        name: template_name.to_string(),
+        vars: template_vars.clone(),
+    };
+    let label = format!(
+        "integration DID for context {context} (provision-integration, did:key, holder {client_did})"
+    );
+    let minted = mint_did_key_from_template(
+        state,
+        context,
+        &template,
+        &template_ref,
+        label,
+        "integration",
+    )
+    .await?;
+
+    Ok((
+        minted.material.did.clone(),
+        minted.material.signing_key.key_id.clone(),
+        minted.material.ka_key.key_id.clone(),
+        minted.rendered_document,
+        None, // did:key has no did.jsonl log
+        minted.material,
+    ))
 }
 
 /// Resolve an admin template by name. Mirrors the integration template
@@ -907,6 +1072,26 @@ async fn mint_admin_via_template(
 /// returns the parsed [`DidTemplate`] instead of just a registration
 /// boolean — we need to render it during the mint.
 async fn resolve_admin_template(
+    state: &ProvisionIntegrationDeps,
+    context: &str,
+    name: &str,
+) -> Result<vta_sdk::did_templates::DidTemplate, AppError> {
+    resolve_template_by_name(state, context, name)
+        .await
+        .map_err(|e| match e {
+            AppError::NotFound(_) => AppError::Validation(format!(
+                "admin template '{name}' is not registered on this VTA. Register it via \
+             'pnm did-templates upload {name} --file <path>' then retry, or use \
+             the built-in 'vta-admin' template."
+            )),
+            other => other,
+        })
+}
+
+/// Resolve a DID template by name (context → global → builtin). Returns
+/// `NotFound` if no scope matches — caller re-wraps as a role-specific
+/// Validation error (see [`resolve_admin_template`]).
+async fn resolve_template_by_name(
     state: &ProvisionIntegrationDeps,
     context: &str,
     name: &str,
@@ -924,11 +1109,16 @@ async fn resolve_admin_template(
     if let Ok(tpl) = vta_sdk::did_templates::load_embedded(name) {
         return Ok(tpl);
     }
-    Err(AppError::Validation(format!(
-        "admin template '{name}' is not registered on this VTA. Register it via \
-         'pnm did-templates upload {name} --file <path>' then retry, or use \
-         the built-in 'vta-admin' template."
-    )))
+    Err(AppError::NotFound(format!("template '{name}' not found")))
+}
+
+/// Returns `true` when the template declares `methods` containing only
+/// `"key"` — i.e. the operator intends a did:key integration (ephemeral
+/// / headless / signing-only), not a webvh-hosted one. An empty
+/// `methods` list keeps the did:webvh path (back-compat default, since
+/// `methods` is advisory).
+fn template_targets_did_key_only(template: &vta_sdk::did_templates::DidTemplate) -> bool {
+    !template.methods.is_empty() && template.methods.iter().all(|m| m == "key")
 }
 
 async fn resolve_template_kind(
@@ -1879,6 +2069,106 @@ mod tests {
             output.digest.len(),
             64,
             "SHA-256 digest is 32 bytes hex-encoded"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_integration_mints_did_key_when_template_methods_is_key() {
+        // Item 11b: a template declaring `methods: ["key"]` selects the
+        // did:key mint path — no webvh log, no WEBVH_SERVER / URL
+        // required, and the returned integration DID is self-resolving.
+        //
+        // Uses a context-scoped custom template (no built-in
+        // integration template with methods=["key"] exists today — the
+        // built-in `vta-admin` is kind="admin", used for rollover only).
+        let ts = open_test_store().await;
+        let (_vta_did, deps) = bootstrap_test_vta(&ts).await;
+        crate::contexts::create_context(&ts.contexts_ks, "signer-ctx", "Local signers")
+            .await
+            .expect("create context");
+
+        // Register a minimal did:key integration template scoped to
+        // this context. Only `methods: ["key"]` is load-bearing for the
+        // branch; the document shape is the canonical did:key minimal
+        // VM (one signing key).
+        let tpl_json = serde_json::json!({
+            "schemaVersion": 1,
+            "name": "local-signer",
+            "kind": "signer",
+            "description": "Test: did:key integration template",
+            "methods": ["key"],
+            "requiredVars": [],
+            "optionalVars": {},
+            "defaults": {},
+            "document": {
+                "@context": [
+                    "https://www.w3.org/ns/did/v1",
+                    "https://w3id.org/security/multikey/v1"
+                ],
+                "id": "{DID}",
+                "verificationMethod": [{
+                    "id": "{DID}#{SIGNING_KEY_MB}",
+                    "type": "Multikey",
+                    "controller": "{DID}",
+                    "publicKeyMultibase": "{SIGNING_KEY_MB}"
+                }],
+                "authentication": ["{DID}#{SIGNING_KEY_MB}"],
+                "assertionMethod": ["{DID}#{SIGNING_KEY_MB}"]
+            }
+        });
+        let tpl = DidTemplate::from_json(tpl_json).expect("valid template");
+        let record = DidTemplateRecord {
+            template: tpl,
+            scope: Scope::Context {
+                context_id: "signer-ctx".into(),
+            },
+            created_at: 0,
+            updated_at: 0,
+            created_by: "test".into(),
+        };
+        crate::did_templates::store_context_template(&ts.did_templates_ks, "signer-ctx", &record)
+            .await
+            .expect("store context template");
+
+        let auth = super_admin_claims();
+        let request = signed_request_with_vars("local-signer", "signer-ctx", BTreeMap::new()).await;
+
+        let output = provision_integration(
+            &deps,
+            &auth,
+            ProvisionIntegrationParams {
+                request,
+                context: "signer-ctx".into(),
+                assertion_mode: AssertionMode::PinnedOnly,
+                vc_validity: None,
+            },
+        )
+        .await
+        .expect("provision_integration");
+
+        assert!(
+            output.summary.integration_did.starts_with("did:key:"),
+            "integration DID must be a did:key for templates with methods=[\"key\"], got {}",
+            output.summary.integration_did
+        );
+        assert_eq!(
+            output.summary.output_count, 0,
+            "did:key path emits no webvh log — outputs should be empty"
+        );
+        assert_eq!(
+            output.summary.secret_count, 1,
+            "one minted integration DID in secrets (signing + KA keys for that DID)"
+        );
+
+        // Context's primary DID should be bound to the minted did:key.
+        let ctx_after = crate::contexts::get_context(&ts.contexts_ks, "signer-ctx")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ctx_after.did.as_deref(),
+            Some(output.summary.integration_did.as_str()),
+            "did:key path must set context primary when ctx.did was None"
         );
     }
 }
