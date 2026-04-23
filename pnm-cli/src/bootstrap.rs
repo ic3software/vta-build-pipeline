@@ -297,8 +297,10 @@ pub async fn run_open(
 
     // Best-effort cleanup of the now-used secret. The bundle_id is single-use
     // by design; keeping the secret around offers no value and slightly
-    // expands the blast radius if the host is later compromised.
-    if let Err(e) = fs::remove_file(&secret_path) {
+    // expands the blast radius if the host is later compromised. Overwrite
+    // the bytes with zeros before unlink so a casual forensic read can't
+    // recover the seed from the freed blocks.
+    if let Err(e) = vta_cli_common::sealed_consumer::zero_overwrite_and_remove(&secret_path) {
         eprintln!(
             "warning: could not remove used secret {}: {e}",
             secret_path.display()

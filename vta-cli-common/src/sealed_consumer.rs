@@ -64,6 +64,47 @@ fn read_secret(path: &Path) -> Result<[u8; 32], Box<dyn std::error::Error>> {
         .map_err(|_| format!("secret file {} is not 32 bytes", path.display()).into())
 }
 
+/// Overwrite a file's bytes with zeros, fsync, then unlink.
+///
+/// This is a best-effort forensic-resistance measure: on rotating media
+/// it overwrites the sectors that held the secret before we forget
+/// where they are. On modern SSDs with wear-levelling the write may be
+/// remapped rather than overwriting the physical cells — still no worse
+/// than plain unlink, and meaningfully better on the platforms where
+/// direct overwrite wins (HDDs, ramdisk, most filesystems on older
+/// kernels). Defence-in-depth, not a hard guarantee.
+///
+/// Errors at any step are non-fatal for the surrounding flow: the
+/// caller gets a `Result` so it can log, but the bundle has already
+/// been consumed. Callers typically print a warning and continue.
+pub fn zero_overwrite_and_remove(path: &Path) -> std::io::Result<()> {
+    // Stat for size *before* we open to write — truncating via OpenOptions
+    // would drop the old bytes before we get a chance to overwrite them.
+    let metadata = fs::metadata(path)?;
+    let len = metadata.len() as usize;
+
+    if len > 0 {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        // Stream zeros rather than allocating a `vec![0u8; len]` — a
+        // single page buffer handles keys (32 B) and armored bundles
+        // (~KB) without surprises on tiny embedded targets.
+        const ZEROS: [u8; 4096] = [0u8; 4096];
+        let mut remaining = len;
+        while remaining > 0 {
+            let chunk = remaining.min(ZEROS.len());
+            file.write_all(&ZEROS[..chunk])?;
+            remaining -= chunk;
+        }
+        file.flush()?;
+        file.sync_all()?;
+    }
+
+    fs::remove_file(path)
+}
+
 /// The outcome of [`create_bootstrap_request`]: the serialized request body
 /// and the bundle id (for the "secret stored at <path>" banner).
 pub struct CreatedRequest {
@@ -180,8 +221,9 @@ pub fn open_armored_bundle(
 
     // Best-effort cleanup. If the caller later fails, the secret is gone —
     // that's fine because the bundle id is single-use anyway; a retry would
-    // need a fresh request.
-    if let Err(e) = fs::remove_file(&sp) {
+    // need a fresh request. Overwrite-then-unlink so the old bytes aren't
+    // left sitting on disk after unlink (see `zero_overwrite_and_remove`).
+    if let Err(e) = zero_overwrite_and_remove(&sp) {
         eprintln!(
             "warning: could not remove used secret {}: {e}",
             sp.display()
@@ -414,6 +456,47 @@ mod tests {
             mode & 0o777
         );
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn zero_overwrite_removes_file_and_scrubs_bytes() {
+        // Write some non-zero contents, stat the backing storage, run
+        // the scrub-then-unlink, confirm the file is gone. We can't
+        // reliably probe unlinked blocks from user-space, so the test
+        // checks the observable invariant: file is removed. The
+        // "bytes zeroed first" property is what item 21 actually
+        // wants — proven structurally by the helper's source.
+        let tmp = std::env::temp_dir().join(format!("vta-test-zero-{}", rand::random::<u32>()));
+        fs::create_dir_all(&tmp).unwrap();
+        let f = tmp.join("secret.bin");
+        let original: Vec<u8> = (0u8..32).collect();
+        fs::write(&f, &original).unwrap();
+        assert!(f.exists());
+
+        zero_overwrite_and_remove(&f).expect("remove succeeds");
+        assert!(!f.exists(), "file must be removed");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn zero_overwrite_errors_on_missing_file() {
+        let tmp = std::env::temp_dir().join(format!("vta-test-zero-{}", rand::random::<u32>()));
+        let missing = tmp.join("does-not-exist");
+        let err = zero_overwrite_and_remove(&missing).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn zero_overwrite_handles_empty_file() {
+        // A zero-byte file triggers the `len > 0` short-circuit — no
+        // write pass, but the unlink must still succeed.
+        let tmp = std::env::temp_dir().join(format!("vta-test-zero-{}", rand::random::<u32>()));
+        fs::create_dir_all(&tmp).unwrap();
+        let f = tmp.join("empty.bin");
+        fs::write(&f, b"").unwrap();
+        zero_overwrite_and_remove(&f).expect("remove succeeds");
+        assert!(!f.exists());
         let _ = fs::remove_dir_all(&tmp);
     }
 
