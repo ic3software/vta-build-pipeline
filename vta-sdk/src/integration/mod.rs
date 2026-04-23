@@ -20,20 +20,20 @@
 //! struct MyCache { /* ... */ }
 //! impl SecretCache for MyCache { /* ... */ }
 //!
-//! let config = VtaServiceConfig {
-//!     credential: loaded_credential_bundle,
-//!     context: "my-service".into(),
-//!     url_override: None,
-//!     timeout: None,
-//!     // Leave mediator_did = None to let the SDK auto-resolve from the
-//!     // VTA's DID document (walks service[].type == "DIDCommMessaging").
-//!     // Supply an explicit did:key / did:webvh to override.
-//!     mediator_did: None,
-//!     transport_preference: Default::default(), // Auto
-//!     // Share an existing DID resolver if you already have one; `None`
-//!     // makes the SDK create a one-shot resolver on demand.
-//!     did_resolver: None,
-//! };
+//! // Quick path — defaults everywhere:
+//! let config = VtaServiceConfig::new(loaded_credential_bundle, "my-service");
+//!
+//! // Or build explicitly when you need to tweak specific fields:
+//! // let config = VtaServiceConfig {
+//! //     auth: VtaAuthConfig { credential, url_override: None, timeout: None },
+//! //     context: VtaContextConfig {
+//! //         id: "my-service".into(),
+//! //         mediator_did: None,        // auto-resolve from VTA DID doc
+//! //         transport_preference: Default::default(), // Auto
+//! //         did_resolver: None,        // SDK makes a one-shot on demand
+//! //     },
+//! // };
+//!
 //! let cache = MyCache::new();
 //!
 //! let result = startup(&config, &cache).await?;
@@ -55,24 +55,46 @@ use std::time::Duration;
 /// Default timeout for the entire VTA startup flow (auth + secret fetch).
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Configuration for connecting a service to its VTA context.
-///
-/// The `credential` field holds the already-decoded [`CredentialBundle`]. How
-/// the credential is obtained (opened from a sealed bundle, read from a
-/// keyring, loaded from AWS Secrets Manager, etc.) is left to the calling
-/// service.
-#[derive(Clone)]
-pub struct VtaServiceConfig {
+/// "Who am I talking to" — credential + REST endpoint + overall
+/// timeout. Shape every integration needs regardless of whether it
+/// operates in a single context or many.
+#[derive(Clone, Debug)]
+pub struct VtaAuthConfig {
     /// VTA credential bundle (identity + signing key + VTA DID/URL).
     pub credential: crate::credentials::CredentialBundle,
-    /// VTA context ID that holds this service's DID and keys.
-    pub context: String,
-    /// Optional REST URL override. When set, bypasses the URL embedded in the
-    /// credential (useful for VTARest service discovery or dev/testing).
+    /// Optional REST URL override. When set, bypasses the URL embedded
+    /// in the credential (useful for VTARest service discovery or
+    /// dev/testing).
     pub url_override: Option<String>,
     /// Timeout for the VTA startup flow (auth + secret fetch).
     /// Defaults to 30 seconds if `None`.
     pub timeout: Option<Duration>,
+}
+
+impl VtaAuthConfig {
+    /// Minimal constructor — just a credential, everything else left
+    /// as defaults.
+    pub fn new(credential: crate::credentials::CredentialBundle) -> Self {
+        Self {
+            credential,
+            url_override: None,
+            timeout: None,
+        }
+    }
+}
+
+/// "Where in that VTA am I operating" — context id + transport
+/// preferences + DID-lookup resolver. Mediator-flavoured defaults are
+/// fine for the common single-tenant integration; operators who host
+/// multiple tenants carry multiple `VtaContextConfig` values and
+/// share a `VtaAuthConfig`.
+#[derive(Clone)]
+pub struct VtaContextConfig {
+    /// VTA context ID that holds this service's DID and keys. The
+    /// field is named `id` (not `context`) so the combined
+    /// [`VtaServiceConfig`] doesn't force callers to read
+    /// `config.context.context`.
+    pub id: String,
     /// Mediator DID to route DIDComm traffic through, when the DIDComm
     /// transport tier is selected.
     ///
@@ -80,38 +102,48 @@ pub struct VtaServiceConfig {
     /// the integration layer attempts to auto-resolve the mediator DID
     /// from the VTA's DID document (walking `service[].type ==
     /// "DIDCommMessaging"`) using [`Self::did_resolver`] if supplied,
-    /// or a one-shot default resolver otherwise. When no mediator DID is
-    /// ultimately available (unset + auto-resolve returned `None` or
-    /// failed), the tier sequence falls through to REST — unless
+    /// or a one-shot default resolver otherwise. When no mediator DID
+    /// is ultimately available (unset + auto-resolve returned `None`
+    /// or failed), the tier sequence falls through to REST — unless
     /// [`TransportPreference::DidCommOnly`] forces an error.
     #[cfg(feature = "session")]
     pub mediator_did: Option<String>,
-    /// Which transport the integration layer should try first, and whether
-    /// it may fall back. Default is [`TransportPreference::Auto`].
+    /// Which transport the integration layer should try first, and
+    /// whether it may fall back. Default is
+    /// [`TransportPreference::Auto`].
     #[cfg(feature = "session")]
     pub transport_preference: TransportPreference,
-    /// Optional shared DID resolver for mediator auto-resolution and other
-    /// DID-lookup paths. When `None`, the integration layer creates a
-    /// one-shot [`DIDCacheClient`] on demand — fine for first-run use but
-    /// wasteful if the host already has a resolver. Supply an `Arc` for
-    /// deployments that resolve DIDs elsewhere too (e.g. the mediator's
-    /// own DIDComm stack) so cache warming is shared.
+    /// Optional shared DID resolver for mediator auto-resolution and
+    /// other DID-lookup paths. When `None`, the integration layer
+    /// creates a one-shot [`DIDCacheClient`] on demand — fine for
+    /// first-run use but wasteful if the host already has a resolver.
     ///
     /// [`DIDCacheClient`]: affinidi_did_resolver_cache_sdk::DIDCacheClient
     #[cfg(feature = "session")]
     pub did_resolver: Option<std::sync::Arc<affinidi_did_resolver_cache_sdk::DIDCacheClient>>,
 }
 
-// `DIDCacheClient` doesn't implement `Debug`, so we derive `Clone` only
-// and supply a manual `Debug` that renders the resolver opaquely while
-// preserving the existing `{:?}` formatting for every other field.
-impl std::fmt::Debug for VtaServiceConfig {
+impl VtaContextConfig {
+    /// Minimal constructor — just a context id, everything else left
+    /// as defaults (auto transport, no pinned mediator, no shared
+    /// resolver).
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            #[cfg(feature = "session")]
+            mediator_did: None,
+            #[cfg(feature = "session")]
+            transport_preference: TransportPreference::Auto,
+            #[cfg(feature = "session")]
+            did_resolver: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for VtaContextConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut dbg = f.debug_struct("VtaServiceConfig");
-        dbg.field("credential", &self.credential)
-            .field("context", &self.context)
-            .field("url_override", &self.url_override)
-            .field("timeout", &self.timeout);
+        let mut dbg = f.debug_struct("VtaContextConfig");
+        dbg.field("id", &self.id);
         #[cfg(feature = "session")]
         {
             dbg.field("mediator_did", &self.mediator_did)
@@ -122,6 +154,37 @@ impl std::fmt::Debug for VtaServiceConfig {
                 );
         }
         dbg.finish()
+    }
+}
+
+/// Full configuration for [`startup`] — composition of an
+/// [`VtaAuthConfig`] (who to talk to) and a [`VtaContextConfig`]
+/// (where to operate). Kept as a combined struct so the common
+/// single-tenant case stays a one-struct-literal affair; multi-tenant
+/// integrations hold `VtaAuthConfig` once and rebuild `VtaContextConfig`
+/// per tenant.
+///
+/// The `credential` field holds the already-decoded [`CredentialBundle`].
+/// How the credential is obtained (opened from a sealed bundle, read
+/// from a keyring, loaded from AWS Secrets Manager, etc.) is left to
+/// the calling service.
+#[derive(Clone, Debug)]
+pub struct VtaServiceConfig {
+    pub auth: VtaAuthConfig,
+    pub context: VtaContextConfig,
+}
+
+impl VtaServiceConfig {
+    /// Convenience constructor for the single-tenant happy path:
+    /// credential + context id, everything else defaults.
+    pub fn new(
+        credential: crate::credentials::CredentialBundle,
+        context: impl Into<String>,
+    ) -> Self {
+        Self {
+            auth: VtaAuthConfig::new(credential),
+            context: VtaContextConfig::new(context),
+        }
     }
 }
 
@@ -226,12 +289,13 @@ pub async fn startup(
     config: &VtaServiceConfig,
     cache: &(impl SecretCache + ?Sized),
 ) -> Result<StartupResult, VtaIntegrationError> {
-    let timeout = config.timeout.unwrap_or(DEFAULT_STARTUP_TIMEOUT);
+    let timeout = config.auth.timeout.unwrap_or(DEFAULT_STARTUP_TIMEOUT);
+    let context_id = &config.context.id;
 
     let vta_result = tokio::time::timeout(timeout, async {
         let client = authenticate(config).await?;
         let bundle = client
-            .fetch_did_secrets_bundle(&config.context)
+            .fetch_did_secrets_bundle(context_id)
             .await
             .map_err(VtaIntegrationError::from)?;
         Ok::<_, VtaIntegrationError>((client, bundle))
@@ -241,15 +305,13 @@ pub async fn startup(
     match vta_result {
         Ok(Ok((client, bundle))) => {
             if bundle.secrets.is_empty() {
-                return Err(VtaIntegrationError::EmptySecretsBundle(
-                    config.context.clone(),
-                ));
+                return Err(VtaIntegrationError::EmptySecretsBundle(context_id.clone()));
             }
             if let Err(e) = cache.store(&bundle).await {
                 tracing::warn!("Failed to cache VTA secrets locally: {e}");
             }
             tracing::info!(
-                context = config.context,
+                context = context_id,
                 secrets = bundle.secrets.len(),
                 "Loaded fresh secrets from VTA",
             );
@@ -262,19 +324,19 @@ pub async fn startup(
         }
         Ok(Err(e)) => {
             tracing::warn!(
-                context = config.context,
+                context = context_id,
                 error = %e,
                 "VTA call failed; attempting fallback to last-known cached bundle",
             );
-            load_from_cache(cache, &config.context).await
+            load_from_cache(cache, context_id).await
         }
         Err(_elapsed) => {
             tracing::warn!(
-                context = config.context,
+                context = context_id,
                 timeout_secs = timeout.as_secs(),
                 "VTA startup timed out; attempting fallback to last-known cached bundle",
             );
-            load_from_cache(cache, &config.context).await
+            load_from_cache(cache, context_id).await
         }
     }
 }

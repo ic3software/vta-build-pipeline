@@ -82,12 +82,16 @@ pub(crate) fn decide_transport(
 ///
 /// See the module-level doc for the tier policy.
 pub async fn authenticate(config: &VtaServiceConfig) -> Result<VtaClient, VtaError> {
-    let url_override = config.url_override.as_deref();
+    let url_override = config.auth.url_override.as_deref();
 
     #[cfg(feature = "session")]
     {
         let effective_mediator = resolve_effective_mediator_did(config).await?;
-        let plan = decide_transport(config.transport_preference, effective_mediator.as_deref());
+        let plan = decide_transport(
+            config.context.transport_preference,
+            effective_mediator.as_deref(),
+        );
+        let context_id = &config.context.id;
         match plan {
             TransportPlan::DidCommThenRest { mediator_did } => {
                 match try_didcomm(config, &mediator_did).await {
@@ -103,7 +107,7 @@ pub async fn authenticate(config: &VtaServiceConfig) -> Result<VtaClient, VtaErr
                             event = "transport_downgrade",
                             from = "didcomm",
                             to = "rest",
-                            context = config.context,
+                            context = context_id,
                             mediator_did = %mediator_did,
                             error = %e,
                             "DIDComm connect failed; falling back to REST tiers",
@@ -115,7 +119,7 @@ pub async fn authenticate(config: &VtaServiceConfig) -> Result<VtaClient, VtaErr
                 return try_didcomm(config, &mediator_did).await.map_err(|e| {
                     tracing::error!(
                         event = "transport_didcomm_only_failed",
-                        context = config.context,
+                        context = context_id,
                         mediator_did = %mediator_did,
                         error = %e,
                         "DIDComm connect failed and transport_preference is DidCommOnly; \
@@ -127,7 +131,7 @@ pub async fn authenticate(config: &VtaServiceConfig) -> Result<VtaClient, VtaErr
             TransportPlan::DidCommUnavailable => {
                 return Err(VtaError::Validation(
                     "transport_preference is DidCommOnly but no mediator_did is configured — \
-                     set VtaServiceConfig::mediator_did or relax to TransportPreference::Auto"
+                     set VtaContextConfig::mediator_did or relax to TransportPreference::Auto"
                         .into(),
                 ));
             }
@@ -163,18 +167,22 @@ async fn resolve_effective_mediator_did(
     config: &VtaServiceConfig,
 ) -> Result<Option<String>, VtaError> {
     // (1) Explicit always wins.
-    if let Some(m) = config.mediator_did.as_deref() {
+    if let Some(m) = config.context.mediator_did.as_deref() {
         return Ok(Some(m.to_string()));
     }
     // (2) PreferRest short-circuit — don't pay for a resolver call we
     //     won't use.
-    if matches!(config.transport_preference, TransportPreference::PreferRest) {
+    if matches!(
+        config.context.transport_preference,
+        TransportPreference::PreferRest
+    ) {
         return Ok(None);
     }
 
     // (3) Resolver call. Reuse caller-supplied resolver when provided.
-    let vta_did = &config.credential.vta_did;
-    let result = match config.did_resolver.as_ref() {
+    let vta_did = &config.auth.credential.vta_did;
+    let context_id = &config.context.id;
+    let result = match config.context.did_resolver.as_ref() {
         Some(resolver) => {
             crate::session::resolve_mediator_did_with_resolver(vta_did, resolver.as_ref()).await
         }
@@ -184,7 +192,7 @@ async fn resolve_effective_mediator_did(
     match result {
         Ok(Some(mediator)) => {
             tracing::info!(
-                context = config.context,
+                context = context_id,
                 vta_did = %vta_did,
                 mediator_did = %mediator,
                 "Auto-resolved mediator DID from VTA DID document",
@@ -193,20 +201,20 @@ async fn resolve_effective_mediator_did(
         }
         Ok(None) => {
             tracing::debug!(
-                context = config.context,
+                context = context_id,
                 vta_did = %vta_did,
                 "VTA DID document has no DIDCommMessaging service; DIDComm tier unavailable",
             );
             Ok(None)
         }
-        Err(e) => match config.transport_preference {
+        Err(e) => match config.context.transport_preference {
             TransportPreference::DidCommOnly => Err(VtaError::Other(format!(
                 "mediator DID auto-resolve failed and transport_preference is DidCommOnly \
                  (no REST fallback): {e}"
             ))),
             _ => {
                 tracing::warn!(
-                    context = config.context,
+                    context = context_id,
                     vta_did = %vta_did,
                     error = %e,
                     "Mediator DID auto-resolve failed; will try REST tiers",
@@ -221,7 +229,7 @@ async fn resolve_effective_mediator_did(
 /// bearer token.
 #[cfg(feature = "session")]
 async fn try_didcomm(config: &VtaServiceConfig, mediator_did: &str) -> Result<VtaClient, VtaError> {
-    let credential = &config.credential;
+    let credential = &config.auth.credential;
     let client = VtaClient::connect_didcomm(
         &credential.did,
         &credential.private_key_multibase,
@@ -231,7 +239,7 @@ async fn try_didcomm(config: &VtaServiceConfig, mediator_did: &str) -> Result<Vt
     )
     .await?;
     tracing::info!(
-        context = config.context,
+        context = config.context.id,
         mediator_did = %mediator_did,
         vta_did = %credential.vta_did,
         "Connected to VTA (DIDComm)",
@@ -247,10 +255,11 @@ async fn try_rest(
     config: &VtaServiceConfig,
     url_override: Option<&str>,
 ) -> Result<VtaClient, VtaError> {
-    match VtaClient::from_credential(&config.credential, url_override).await {
+    let context_id = &config.context.id;
+    match VtaClient::from_credential(&config.auth.credential, url_override).await {
         Ok(client) => {
             tracing::info!(
-                context = config.context,
+                context = context_id,
                 vta_url = client.base_url(),
                 "Connected to VTA (REST, auto-refresh enabled)",
             );
@@ -259,12 +268,12 @@ async fn try_rest(
         Err(e) if e.is_network() => Err(e),
         Err(e) => {
             tracing::debug!(
-                context = config.context,
+                context = context_id,
                 error = %e,
                 "Lightweight REST auth failed (non-network); trying session REST",
             );
 
-            let credential = &config.credential;
+            let credential = &config.auth.credential;
             let vta_url = url_override
                 .or(credential.vta_url.as_deref())
                 .ok_or_else(|| {
@@ -283,7 +292,7 @@ async fn try_rest(
             client.set_token_async(token_result.access_token).await;
 
             tracing::info!(
-                context = config.context,
+                context = context_id,
                 vta_url = vta_url,
                 "Connected to VTA (REST, session auth)",
             );
