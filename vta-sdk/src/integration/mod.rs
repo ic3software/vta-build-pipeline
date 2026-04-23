@@ -175,13 +175,18 @@ pub async fn startup(
             })
         }
         Ok(Err(e)) => {
-            tracing::warn!("VTA startup failed: {e}");
+            tracing::warn!(
+                context = config.context,
+                error = %e,
+                "VTA call failed; attempting fallback to last-known cached bundle",
+            );
             load_from_cache(cache, &config.context).await
         }
         Err(_elapsed) => {
             tracing::warn!(
-                "VTA startup timed out after {}s, falling back to cached secrets",
-                timeout.as_secs()
+                context = config.context,
+                timeout_secs = timeout.as_secs(),
+                "VTA startup timed out; attempting fallback to last-known cached bundle",
             );
             load_from_cache(cache, &config.context).await
         }
@@ -200,7 +205,8 @@ async fn load_from_cache(
             tracing::warn!(
                 context = context,
                 secrets = bundle.secrets.len(),
-                "Using CACHED secrets — keys may be stale",
+                "Booted from last-known cached bundle; keys may be stale. \
+                 Will refresh on next successful VTA contact",
             );
             Ok(StartupResult {
                 did: bundle.did.clone(),
@@ -209,7 +215,20 @@ async fn load_from_cache(
                 client: None,
             })
         }
-        Ok(None) => Err(VtaIntegrationError::NoCachedSecrets),
-        Err(e) => Err(VtaIntegrationError::CacheError(e.to_string())),
+        Ok(None) => {
+            tracing::warn!(
+                context = context,
+                "No cached bundle found in local cache; returning NoCachedSecrets",
+            );
+            Err(VtaIntegrationError::NoCachedSecrets)
+        }
+        Err(e) => {
+            tracing::error!(
+                context = context,
+                error = %e,
+                "Failed to read cached bundle from local cache",
+            );
+            Err(VtaIntegrationError::CacheError(e.to_string()))
+        }
     }
 }
