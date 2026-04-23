@@ -44,6 +44,14 @@ admin separately:
 vta bootstrap-admin --did did:key:z6Mk... --label ops
 ```
 
+To add an integration (mediator, webvh hosting server, etc.) **after**
+setup — offline, file-based, no running VTA required — see
+[`offline-integration-bootstrap.md`](offline-integration-bootstrap.md).
+The integration emits a signed VP, the VTA runs
+`vta bootstrap provision-integration` locally, the integration opens
+the returned sealed bundle. Same three-phase flow for every template-
+driven integration.
+
 ## Full example with admin seeding and DID minting
 
 ```toml

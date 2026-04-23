@@ -108,6 +108,86 @@ pub async fn run_request(
     Ok(())
 }
 
+/// `pnm bootstrap provision-request` — consumer-side. Generate a
+/// VP-framed `BootstrapRequest` for the provision-integration flow.
+///
+/// Mints an ephemeral Ed25519 keypair, persists the seed under
+/// `~/.config/pnm/bootstrap-secrets/<bundle_id>.key`, and writes a
+/// signed VP naming the target DID template + variables. Hand the JSON
+/// to the VTA operator's `vta bootstrap provision-integration` or
+/// `pnm bootstrap provision-integration` (authed bridge) and decrypt
+/// the returned bundle with `pnm bootstrap open`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_provision_request(
+    template: String,
+    vars: Vec<String>,
+    context_hint: Option<String>,
+    admin_template: Option<String>,
+    validity_hours: f64,
+    label: Option<String>,
+    out: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use vta_sdk::provision_integration::ProvisionRequestBuilder;
+
+    if !validity_hours.is_finite() || validity_hours <= 0.0 {
+        return Err(format!(
+            "--validity-hours must be a positive finite number, got {validity_hours}"
+        )
+        .into());
+    }
+    let validity = chrono::Duration::seconds((validity_hours * 3600.0) as i64);
+
+    let mut builder = ProvisionRequestBuilder::new(template).validity(validity);
+    for raw in &vars {
+        let (k, v) = parse_var(raw)?;
+        builder = builder.var(k, v);
+    }
+    if let Some(ctx) = context_hint {
+        builder = builder.context_hint(ctx);
+    }
+    if let Some(admin) = admin_template {
+        builder = builder.admin_template(admin);
+    }
+    if let Some(l) = label {
+        builder = builder.label(l);
+    }
+
+    let config_dir = config::config_dir()?;
+    let created =
+        vta_cli_common::sealed_consumer::create_provision_request(&config_dir, builder).await?;
+
+    let json = serde_json::to_string_pretty(&created.request)?;
+    fs::write(&out, json.as_bytes())?;
+
+    println!("Provision bootstrap request written to {}", out.display());
+    println!();
+    println!("  Bundle-Id:  {}", created.bundle_id_hex);
+    println!("  Client DID: {}", created.client_did);
+    println!("  Seed saved: {}", created.secret_path.display());
+    println!();
+    println!("Hand the request to the VTA operator. They will run:");
+    println!("  vta bootstrap provision-integration --request <file> --out <bundle>");
+    println!("(or `pnm bootstrap provision-integration` over REST against a live VTA).");
+    println!();
+    println!("Verify the returned digest out-of-band, then:");
+    println!("  pnm bootstrap open --bundle <file> --expect-digest <hex>");
+    Ok(())
+}
+
+/// Parse a single `--var KEY=VALUE` argument. Value is tried as JSON
+/// first; falls back to a plain string for unquoted values.
+fn parse_var(raw: &str) -> Result<(String, serde_json::Value), Box<dyn std::error::Error>> {
+    let (key, value) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("invalid --var '{raw}': expected KEY=VALUE"))?;
+    if key.is_empty() {
+        return Err(format!("invalid --var '{raw}': empty key").into());
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(value)
+        .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+    Ok((key.to_string(), parsed))
+}
+
 /// `pnm bootstrap open --bundle <PATH> [--expect-digest <HEX>] [--no-verify-digest]`
 pub async fn run_open(
     bundle_path: PathBuf,
@@ -483,4 +563,40 @@ fn variant_name(p: &SealedPayloadV1) -> &'static str {
 
 fn default_slug(vta_did: &str) -> String {
     vta_did.rsplit(':').next().unwrap_or("vta").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_var;
+    use serde_json::Value;
+
+    #[test]
+    fn parse_var_plain_string() {
+        let (k, v) = parse_var("URL=https://mediator.example.com").unwrap();
+        assert_eq!(k, "URL");
+        assert_eq!(v, Value::String("https://mediator.example.com".into()));
+    }
+
+    #[test]
+    fn parse_var_json_types_round_trip() {
+        assert_eq!(parse_var("N=42").unwrap().1, Value::Number(42.into()));
+        assert_eq!(parse_var("B=true").unwrap().1, Value::Bool(true));
+        assert!(parse_var(r#"A=[1,2]"#).unwrap().1.is_array());
+    }
+
+    #[test]
+    fn parse_var_value_may_contain_equals() {
+        let (_, v) = parse_var("URL=https://m.example.com?x=1").unwrap();
+        assert_eq!(v.as_str(), Some("https://m.example.com?x=1"));
+    }
+
+    #[test]
+    fn parse_var_missing_equals_errors() {
+        assert!(parse_var("LONELY").is_err());
+    }
+
+    #[test]
+    fn parse_var_empty_key_errors() {
+        assert!(parse_var("=value").is_err());
+    }
 }

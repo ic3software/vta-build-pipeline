@@ -3,6 +3,12 @@
 Status: design-locked, implementation pending. This doc is the brief for the
 implementing agent. It captures what was decided and why.
 
+> **Operator how-to:** for the end-to-end greenfield walkthrough (generate
+> request → provision → open + install), see
+> [`offline-integration-bootstrap.md`](offline-integration-bootstrap.md).
+> This doc covers the wire format and design decisions; that one covers
+> how to drive the CLI.
+
 ## What this is
 
 A single path for standing up any VTA-managed integration — DIDComm
@@ -382,6 +388,23 @@ vta bootstrap provision-integration \
 The VTA's admin CLI. Uses `vta_did` (assertion key) to sign both the VC and
 the sealed-transfer producer assertion. Mint key material, render template,
 write bundle to disk, print digest + summary.
+
+The integration operator generates the request side with:
+
+```
+vta bootstrap provision-request \
+    --template      <name>               # didcomm-mediator | webvh-hosting-server | …
+    --var KEY=VALUE                      # repeat for each template variable
+    --context-hint  <id>                 # recommended
+    --admin-template vta-admin           # recommended (long-term admin rollover)
+    --validity-hours 168                 # default: 7 days
+    --out           <request.vp.json>
+```
+
+Also available as `pnm bootstrap provision-request …` with identical
+flags. Integration wizards built in Rust can call
+[`vta_sdk::provision_integration::ProvisionRequestBuilder`] directly
+instead of shelling out.
 
 `--assertion pinned-only` is a dev/test-only escape hatch for
 environments where `vta_did` is not yet configured (early integration

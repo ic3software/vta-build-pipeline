@@ -314,17 +314,27 @@ Two transports, same operation:
 
 Full design: [`bootstrap-provision-integration.md`].
 
+For the operator-focused end-to-end walkthrough (including the
+WEBVH_PATH/WEBVH_SERVER knobs and SDK-level integration), see
+[`offline-integration-bootstrap.md`].
+
 ### Example: provision a DIDComm mediator
 
-1. On the **mediator host**, run the mediator's setup to mint an
-   ephemeral `client_did` (Ed25519) and emit a VP-framed bootstrap
-   request:
+1. On the **mediator host**, run the mediator's setup wizard (or the
+   generic CLI) to mint an ephemeral `client_did` (Ed25519) and emit a
+   VP-framed bootstrap request naming the target template:
    ```
-   pnm bootstrap request --out mediator-request.vp.json
+   vta bootstrap provision-request \
+       --template     didcomm-mediator \
+       --var          URL=https://mediator.example.com \
+       --context-hint prod-mediator \
+       --admin-template vta-admin \
+       --out          mediator-request.vp.json
    ```
-   Ship `mediator-request.vp.json` to whoever will drive provisioning
-   on the VTA side. The JSON is signed by `client_did`; any tamper
-   rejects at verification.
+   (`pnm bootstrap provision-request` is identical; different default
+   seed directory.) Ship `mediator-request.vp.json` to whoever will
+   drive provisioning on the VTA side. The JSON is signed by
+   `client_did`; any tamper rejects at verification.
 
 2. On the **VTA host** (offline / air-gapped):
    ```
@@ -500,3 +510,7 @@ cargo run --package vta-service \
   derivation paths.
 - [`feature-flags.md`](feature-flags.md) — compile-time feature matrix
   (TEE mode, secret backends, REST vs DIDComm, etc.).
+- [`offline-integration-bootstrap.md`](offline-integration-bootstrap.md) —
+  operator walkthrough for the three-phase provision flow
+  (generate VP request → provision → open+install), covering mediator
+  and webvh-hosting-server greenfield setup.

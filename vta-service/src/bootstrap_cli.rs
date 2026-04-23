@@ -134,6 +134,94 @@ pub async fn run_request(
     Ok(())
 }
 
+/// `vta bootstrap provision-request` — consumer-side. Generate a
+/// VP-framed `BootstrapRequest` for the provision-integration flow.
+///
+/// Mints an ephemeral Ed25519 keypair, persists the seed under
+/// `<seed-dir>/bootstrap-secrets/<bundle_id>.key`, and writes a signed
+/// VP naming the target DID template (e.g. `didcomm-mediator`,
+/// `webvh-hosting-server`) + variables. Hand the JSON to the VTA
+/// operator; they run `vta bootstrap provision-integration --request
+/// <file>` and return an armored sealed bundle + SHA-256 digest.
+/// Decrypt with `vta bootstrap open` on this host.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_provision_request(
+    template: String,
+    vars: Vec<String>,
+    context_hint: Option<String>,
+    admin_template: Option<String>,
+    validity_hours: f64,
+    label: Option<String>,
+    seed_dir: Option<PathBuf>,
+    out_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use vta_sdk::provision_integration::ProvisionRequestBuilder;
+
+    if !validity_hours.is_finite() || validity_hours <= 0.0 {
+        return Err(format!(
+            "--validity-hours must be a positive finite number, got {validity_hours}"
+        )
+        .into());
+    }
+    let validity = chrono::Duration::seconds((validity_hours * 3600.0) as i64);
+
+    let mut builder = ProvisionRequestBuilder::new(template).validity(validity);
+    for raw in &vars {
+        let (k, v) = parse_var(raw)?;
+        builder = builder.var(k, v);
+    }
+    if let Some(ctx) = context_hint {
+        builder = builder.context_hint(ctx);
+    }
+    if let Some(admin) = admin_template {
+        builder = builder.admin_template(admin);
+    }
+    if let Some(l) = label {
+        builder = builder.label(l);
+    }
+
+    let seed_dir = resolve_seed_dir(seed_dir)?;
+    let created =
+        vta_cli_common::sealed_consumer::create_provision_request(&seed_dir, builder).await?;
+
+    let json = serde_json::to_string_pretty(&created.request)?;
+    std::fs::write(&out_path, json.as_bytes())
+        .map_err(|e| format!("write {}: {e}", out_path.display()))?;
+
+    eprintln!(
+        "Provision bootstrap request written to {}",
+        out_path.display()
+    );
+    eprintln!();
+    eprintln!("  Bundle-Id:  {}", created.bundle_id_hex);
+    eprintln!("  Client DID: {}", created.client_did);
+    eprintln!("  Seed saved: {}", created.secret_path.display());
+    eprintln!();
+    eprintln!("Hand the request to the VTA operator. They will run:");
+    eprintln!("  vta bootstrap provision-integration --request <file> --out <bundle>");
+    eprintln!("and return an armored sealed bundle + SHA-256 digest.");
+    eprintln!();
+    eprintln!("Verify the digest out-of-band, then:");
+    eprintln!("  vta bootstrap open --bundle <file> --expect-digest <hex>");
+    Ok(())
+}
+
+/// Parse a single `--var KEY=VALUE` argument. Value is tried as JSON
+/// first (handles numbers, booleans, null, arrays, objects, quoted
+/// strings); falls back to a plain string for unquoted values like
+/// `URL=https://mediator.example.com`.
+fn parse_var(raw: &str) -> Result<(String, serde_json::Value), Box<dyn std::error::Error>> {
+    let (key, value) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("invalid --var '{raw}': expected KEY=VALUE"))?;
+    if key.is_empty() {
+        return Err(format!("invalid --var '{raw}': empty key").into());
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(value)
+        .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+    Ok((key.to_string(), parsed))
+}
+
 /// `vta bootstrap open` — consumer-side. Read an armored sealed bundle,
 /// look up the matching seed under `<seed-dir>/bootstrap-secrets/`, derive
 /// the X25519 HPKE secret, decrypt, verify the digest, and print the
@@ -428,5 +516,66 @@ impl std::str::FromStr for AssertionModeFlag {
                 "invalid --assertion value '{other}' — use 'did-signed' or 'pinned-only'"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_var;
+    use serde_json::Value;
+
+    #[test]
+    fn parse_var_plain_string() {
+        let (k, v) = parse_var("URL=https://mediator.example.com").unwrap();
+        assert_eq!(k, "URL");
+        assert_eq!(v, Value::String("https://mediator.example.com".into()));
+    }
+
+    #[test]
+    fn parse_var_quoted_string_is_json() {
+        let (k, v) = parse_var(r#"LABEL="hello world""#).unwrap();
+        assert_eq!(k, "LABEL");
+        assert_eq!(v, Value::String("hello world".into()));
+    }
+
+    #[test]
+    fn parse_var_number_is_json() {
+        let (k, v) = parse_var("COUNT=42").unwrap();
+        assert_eq!(k, "COUNT");
+        assert_eq!(v, Value::Number(42.into()));
+    }
+
+    #[test]
+    fn parse_var_bool_is_json() {
+        let (_, v) = parse_var("ENABLED=true").unwrap();
+        assert_eq!(v, Value::Bool(true));
+    }
+
+    #[test]
+    fn parse_var_array_is_json() {
+        let (_, v) = parse_var(r#"ROUTING_KEYS=["did:key:z1"]"#).unwrap();
+        assert!(v.is_array());
+        assert_eq!(v.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_var_value_may_contain_equals() {
+        // URLs with query strings include '=' — the first '=' is the
+        // delimiter, rest of the string is the value.
+        let (k, v) = parse_var("URL=https://m.example.com?x=1&y=2").unwrap();
+        assert_eq!(k, "URL");
+        assert_eq!(v, Value::String("https://m.example.com?x=1&y=2".into()));
+    }
+
+    #[test]
+    fn parse_var_missing_equals_errors() {
+        let err = parse_var("LONELY").unwrap_err();
+        assert!(err.to_string().contains("KEY=VALUE"));
+    }
+
+    #[test]
+    fn parse_var_empty_key_errors() {
+        let err = parse_var("=value").unwrap_err();
+        assert!(err.to_string().contains("empty key"));
     }
 }

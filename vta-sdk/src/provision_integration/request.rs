@@ -19,6 +19,7 @@ use affinidi_secrets_resolver::secrets::Secret;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::sealed_transfer::SealedTransferError;
 
@@ -346,6 +347,249 @@ impl VerifiedBootstrapRequest {
     pub fn into_wire(self) -> BootstrapRequest {
         self.inner
     }
+}
+
+// Builder ---------------------------------------------------------------
+
+/// Ergonomic builder for VP-framed provision bootstrap requests.
+///
+/// Wraps [`BootstrapRequest::sign`] with a typed interface for the common
+/// `TemplateBootstrap` ask shape, so callers don't have to assemble
+/// [`BootstrapAsk`] / [`TemplateBootstrapAsk`] / [`DidTemplateRef`] by hand.
+///
+/// Two sign entry points:
+///
+/// - [`sign_with`](Self::sign_with) — reuse an existing long-lived
+///   Ed25519 identity (the integration already has a keypair in its
+///   keystore and wants the signed VP to bind to it).
+///
+/// - [`sign_ephemeral`](Self::sign_ephemeral) — mint a fresh keypair
+///   scoped to this one bootstrap round-trip. Returns the seed so the
+///   caller can persist it however they like (keyring, keystore,
+///   plaintext file under 0600, etc.) and later match it to the
+///   returned sealed bundle at open time.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use chrono::Duration;
+/// use vta_sdk::provision_integration::ProvisionRequestBuilder;
+///
+/// let signed = ProvisionRequestBuilder::new("didcomm-mediator")
+///     .var("URL", "https://mediator.example.com")
+///     .context_hint("mediator-prod")
+///     .admin_template("vta-admin")
+///     .validity(Duration::days(7))
+///     .label("mediator-prod-bootstrap")
+///     .sign_ephemeral()
+///     .await?;
+///
+/// // Persist `signed.seed` under `bundle_id_hex` so the matching
+/// // `bootstrap open` can retrieve it. Hand `signed.request` (JSON)
+/// // to the VTA operator.
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ProvisionRequestBuilder {
+    template: String,
+    vars: BTreeMap<String, Value>,
+    context_hint: Option<String>,
+    admin_template_name: Option<String>,
+    admin_template_vars: BTreeMap<String, Value>,
+    validity: Duration,
+    label: Option<String>,
+    note: Option<String>,
+}
+
+impl ProvisionRequestBuilder {
+    /// Start a new builder targeting the named DID template (e.g.
+    /// `"didcomm-mediator"`, `"webvh-hosting-server"`, or an
+    /// operator-uploaded custom template).
+    pub fn new(template_name: impl Into<String>) -> Self {
+        Self {
+            template: template_name.into(),
+            vars: BTreeMap::new(),
+            context_hint: None,
+            admin_template_name: None,
+            admin_template_vars: BTreeMap::new(),
+            validity: Duration::hours(1),
+            label: None,
+            note: None,
+        }
+    }
+
+    /// Insert a single template variable. Later calls with the same key
+    /// overwrite earlier ones.
+    pub fn var(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.vars.insert(key.into(), value.into());
+        self
+    }
+
+    /// Bulk-insert template variables from any iterable.
+    pub fn vars<I, K, V>(mut self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<Value>,
+    {
+        for (k, v) in entries {
+            self.vars.insert(k.into(), v.into());
+        }
+        self
+    }
+
+    /// Hint the target context on the VTA. The VTA operator may override
+    /// this at provision time; when they do and the hint disagrees, the
+    /// request is rejected rather than silently normalised.
+    pub fn context_hint(mut self, ctx: impl Into<String>) -> Self {
+        self.context_hint = Some(ctx.into());
+        self
+    }
+
+    /// Opt into long-term admin-DID rollover: the VTA mints a fresh
+    /// admin DID under its own key custody using the named template
+    /// (typically the built-in `"vta-admin"`), binds the authorization
+    /// VC + ACL row to that DID instead of the ephemeral `client_did`,
+    /// and ships the private keys sealed alongside the integration's
+    /// own keys.
+    pub fn admin_template(mut self, name: impl Into<String>) -> Self {
+        self.admin_template_name = Some(name.into());
+        self
+    }
+
+    /// Add a variable to the admin-template render. No-op unless
+    /// [`admin_template`](Self::admin_template) has been set.
+    pub fn admin_template_var(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.admin_template_vars.insert(key.into(), value.into());
+        self
+    }
+
+    /// Freshness window for the VP's `validUntil`. Default is 1h. Widen
+    /// to days for setup flows where the request is shuttled between
+    /// hosts offline.
+    pub fn validity(mut self, d: Duration) -> Self {
+        self.validity = d;
+        self
+    }
+
+    /// Free-form human label echoed back in audit logs.
+    pub fn label(mut self, l: impl Into<String>) -> Self {
+        self.label = Some(l.into());
+        self
+    }
+
+    /// Operator note attached to the ask (shows up in provision-time
+    /// audit records).
+    pub fn note(mut self, n: impl Into<String>) -> Self {
+        self.note = Some(n.into());
+        self
+    }
+
+    fn build_ask(&self) -> BootstrapAsk {
+        BootstrapAsk::TemplateBootstrap(TemplateBootstrapAsk {
+            context_hint: self.context_hint.clone(),
+            template: DidTemplateRef {
+                name: self.template.clone(),
+                vars: self.vars.clone(),
+            },
+            admin_template: self
+                .admin_template_name
+                .as_ref()
+                .map(|name| DidTemplateRef {
+                    name: name.clone(),
+                    vars: self.admin_template_vars.clone(),
+                }),
+            note: self.note.clone(),
+        })
+    }
+
+    /// Sign with a caller-supplied Ed25519 seed plus its corresponding
+    /// `did:key`. The caller is responsible for keeping the pair matched
+    /// — the VP's `holder` is `client_did`, and the Data Integrity proof
+    /// is verified against the key encoded in that DID.
+    ///
+    /// Use this when the integration already has a long-lived keypair
+    /// (stored in its own keystore, keyring, TEE, etc.) that it wants
+    /// to reuse as the bootstrap identity.
+    pub async fn sign_with(
+        self,
+        ed25519_seed: &[u8; 32],
+        client_did: &str,
+    ) -> Result<BootstrapRequest, ProvisionIntegrationError> {
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce)
+            .map_err(|e| ProvisionIntegrationError::Parse(format!("random nonce: {e}")))?;
+        let ask = self.build_ask();
+        BootstrapRequest::sign(
+            ed25519_seed,
+            client_did,
+            nonce,
+            self.validity,
+            self.label,
+            ask,
+        )
+        .await
+    }
+
+    /// Mint a fresh ephemeral Ed25519 keypair, derive its `did:key`, and
+    /// sign the VP with it. Returns the VP plus the seed + derived
+    /// `client_did` + `bundle_id` — the caller must persist the seed
+    /// (addressed by `bundle_id`) somewhere retrievable at bundle-open
+    /// time.
+    ///
+    /// The HPKE recipient secret used by [`sealed_transfer::open_bundle`]
+    /// derives from this seed via
+    /// [`sealed_transfer::ed25519_seed_to_x25519_secret`][crate::sealed_transfer::ed25519_seed_to_x25519_secret].
+    pub async fn sign_ephemeral(self) -> Result<SignedEphemeralRequest, ProvisionIntegrationError> {
+        let (seed, pub_bytes) = crate::sealed_transfer::generate_ed25519_keypair();
+        let client_did = did_key_helpers::ed25519_pub_to_did_key(&pub_bytes);
+        let mut bundle_id = [0u8; 16];
+        getrandom::fill(&mut bundle_id)
+            .map_err(|e| ProvisionIntegrationError::Parse(format!("random nonce: {e}")))?;
+        let ask = self.build_ask();
+        let request = BootstrapRequest::sign(
+            &seed,
+            &client_did,
+            bundle_id,
+            self.validity,
+            self.label,
+            ask,
+        )
+        .await?;
+        Ok(SignedEphemeralRequest {
+            request,
+            client_did,
+            seed,
+            bundle_id,
+        })
+    }
+}
+
+/// Output of [`ProvisionRequestBuilder::sign_ephemeral`].
+///
+/// Carries the signed VP plus the private material the caller needs to
+/// (a) persist the seed for bundle-open time, and (b) correlate the
+/// returned sealed bundle back to this request by `bundle_id`.
+///
+/// `seed` is wrapped in [`Zeroizing`] so the in-memory copy is scrubbed
+/// on drop. Clone before persisting if you need the bytes after this
+/// struct goes out of scope.
+#[derive(Debug)]
+pub struct SignedEphemeralRequest {
+    /// The signed VP — serialize with serde_json and hand to the VTA
+    /// operator, or write to disk.
+    pub request: BootstrapRequest,
+    /// The `did:key:z6Mk...` derived from the ephemeral public key.
+    /// Mirrors `request.holder`.
+    pub client_did: String,
+    /// 32-byte Ed25519 seed. Persist under `bundle_id` (hex-encoded) and
+    /// retrieve at `bootstrap open` time to derive the HPKE secret.
+    pub seed: Zeroizing<[u8; 32]>,
+    /// 16-byte nonce used both as the VP's `nonce` field and as the
+    /// sealed-bundle id. Lookup key for the persisted seed.
+    pub bundle_id: [u8; 16],
 }
 
 // Helpers ---------------------------------------------------------------
@@ -694,5 +938,122 @@ mod tests {
         let x_secret = ed25519_seed_to_x25519_secret(&seed);
         let opened = open(&x_secret, &sealed, b"aad").unwrap();
         assert_eq!(opened, b"hello");
+    }
+
+    // ── ProvisionRequestBuilder ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn builder_sign_ephemeral_verifies_and_carries_ask() {
+        let signed = ProvisionRequestBuilder::new("didcomm-mediator")
+            .var("URL", "https://mediator.example.com")
+            .context_hint("mediator-prod")
+            .validity(Duration::hours(2))
+            .label("builder-smoke-test")
+            .sign_ephemeral()
+            .await
+            .expect("sign_ephemeral");
+
+        // client_did is the derivation of the ephemeral pubkey; the VP's
+        // holder must match.
+        assert_eq!(signed.request.holder, signed.client_did);
+        assert!(signed.client_did.starts_with("did:key:z6Mk"));
+
+        // bundle_id round-trips through the VP's nonce field.
+        let verified = signed.request.clone().verify().expect("verify VP");
+        assert_eq!(verified.decode_nonce().unwrap(), signed.bundle_id);
+
+        // Ask preserves the TemplateBootstrap shape + caller vars.
+        match verified.ask() {
+            BootstrapAsk::TemplateBootstrap(ask) => {
+                assert_eq!(ask.template.name, "didcomm-mediator");
+                assert_eq!(
+                    ask.template.vars.get("URL").and_then(|v| v.as_str()),
+                    Some("https://mediator.example.com")
+                );
+                assert_eq!(ask.context_hint.as_deref(), Some("mediator-prod"));
+                assert!(ask.admin_template.is_none());
+            }
+        }
+        assert_eq!(verified.label(), Some("builder-smoke-test"));
+    }
+
+    #[tokio::test]
+    async fn builder_admin_template_attaches_rollover_ref() {
+        let signed = ProvisionRequestBuilder::new("didcomm-mediator")
+            .var("URL", "https://mediator.example.com")
+            .admin_template("vta-admin")
+            .sign_ephemeral()
+            .await
+            .expect("sign_ephemeral");
+
+        let verified = signed.request.clone().verify().expect("verify VP");
+        match verified.ask() {
+            BootstrapAsk::TemplateBootstrap(ask) => {
+                let admin = ask.admin_template.as_ref().expect("admin template set");
+                assert_eq!(admin.name, "vta-admin");
+                assert!(admin.vars.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_bulk_vars_preserved() {
+        let signed = ProvisionRequestBuilder::new("didcomm-mediator")
+            .vars([
+                ("URL", Value::String("https://m.example.com".into())),
+                ("ROUTING_KEYS", Value::Array(vec![])),
+            ])
+            .sign_ephemeral()
+            .await
+            .expect("sign_ephemeral");
+
+        let verified = signed.request.clone().verify().expect("verify VP");
+        match verified.ask() {
+            BootstrapAsk::TemplateBootstrap(ask) => {
+                assert_eq!(
+                    ask.template.vars.get("URL").and_then(|v| v.as_str()),
+                    Some("https://m.example.com")
+                );
+                assert!(ask.template.vars.get("ROUTING_KEYS").unwrap().is_array());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_sign_with_reuses_caller_identity() {
+        // Pre-mint a "long-lived" identity the caller already has.
+        let (seed, pub_bytes) = {
+            let (s, p) = crate::sealed_transfer::generate_ed25519_keypair();
+            (*s, p)
+        };
+        let client_did = affinidi_crypto::did_key::ed25519_pub_to_did_key(&pub_bytes);
+
+        let vp = ProvisionRequestBuilder::new("didcomm-mediator")
+            .var("URL", "https://m.example.com")
+            .sign_with(&seed, &client_did)
+            .await
+            .expect("sign_with");
+
+        assert_eq!(vp.holder, client_did);
+        let verified = vp.verify().expect("verify VP");
+        assert_eq!(verified.holder(), client_did);
+    }
+
+    #[tokio::test]
+    async fn builder_distinct_bundle_ids_per_call() {
+        // Two back-to-back ephemeral requests must not collide on
+        // bundle_id / nonce — the seed cache is addressed by that id.
+        let a = ProvisionRequestBuilder::new("didcomm-mediator")
+            .var("URL", "https://m.example.com")
+            .sign_ephemeral()
+            .await
+            .unwrap();
+        let b = ProvisionRequestBuilder::new("didcomm-mediator")
+            .var("URL", "https://m.example.com")
+            .sign_ephemeral()
+            .await
+            .unwrap();
+        assert_ne!(a.bundle_id, b.bundle_id);
+        assert_ne!(a.client_did, b.client_did);
     }
 }

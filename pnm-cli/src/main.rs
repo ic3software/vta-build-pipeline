@@ -181,6 +181,47 @@ enum BootstrapCommands {
         slug: Option<String>,
     },
 
+    /// Generate a VP-framed BootstrapRequest for the provision-integration
+    /// flow (consumer side).
+    ///
+    /// Mints an ephemeral Ed25519 keypair, persists the seed under
+    /// `~/.config/pnm/bootstrap-secrets/<bundle_id>.key`, and writes a
+    /// signed VP naming the target DID template (e.g.
+    /// `didcomm-mediator`, `webvh-hosting-server`) + variables. Hand the
+    /// JSON to the VTA operator. Counterpart to `vta bootstrap
+    /// provision-request` — same wire shape, same on-disk layout,
+    /// different default seed directory.
+    ///
+    /// See `docs/offline-integration-bootstrap.md` for the flow.
+    ProvisionRequest {
+        /// DID template name the VTA should render (e.g.
+        /// `didcomm-mediator`, `webvh-hosting-server`, or an
+        /// operator-uploaded custom template).
+        #[arg(long)]
+        template: String,
+        /// Template variable, repeat for each binding. Format `KEY=VALUE`.
+        /// Values are parsed as JSON when possible; otherwise treated as
+        /// a string.
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        vars: Vec<String>,
+        /// Hint the target VTA context.
+        #[arg(long)]
+        context_hint: Option<String>,
+        /// Opt into long-term admin-DID rollover (typically
+        /// `--admin-template vta-admin`).
+        #[arg(long)]
+        admin_template: Option<String>,
+        /// Freshness window in hours for the VP's `validUntil`. Default
+        /// 168 (7 days).
+        #[arg(long, value_name = "HOURS", default_value_t = 168.0)]
+        validity_hours: f64,
+        /// Free-form human label echoed back in audit logs.
+        #[arg(long)]
+        label: Option<String>,
+        /// Output path for the signed BootstrapRequest JSON.
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
     /// Bridge a VP-framed BootstrapRequest to `POST /bootstrap/provision-integration`
     /// on the configured VTA, writing the returned armored sealed bundle to disk.
     ///
@@ -1153,6 +1194,26 @@ async fn main() {
                     )
                     .await,
                 ),
+                BootstrapCommands::ProvisionRequest {
+                    template,
+                    vars,
+                    context_hint,
+                    admin_template,
+                    validity_hours,
+                    label,
+                    out,
+                } => Some(
+                    bootstrap::run_provision_request(
+                        template.clone(),
+                        vars.clone(),
+                        context_hint.clone(),
+                        admin_template.clone(),
+                        *validity_hours,
+                        label.clone(),
+                        out.clone(),
+                    )
+                    .await,
+                ),
                 // Authed — handled in the main dispatch below.
                 BootstrapCommands::ProvisionIntegration { .. } => None,
             };
@@ -1332,7 +1393,8 @@ async fn main() {
             // above (they don't need an authed VtaClient).
             BootstrapCommands::Request { .. }
             | BootstrapCommands::Open { .. }
-            | BootstrapCommands::Connect { .. } => unreachable!(),
+            | BootstrapCommands::Connect { .. }
+            | BootstrapCommands::ProvisionRequest { .. } => unreachable!(),
         },
         Commands::DidTemplates { command } => match command {
             DidTemplateCommands::Validate { .. }

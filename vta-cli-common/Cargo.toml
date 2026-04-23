@@ -11,7 +11,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-vta-sdk = { path = "../vta-sdk", version = "0.5", features = ["client", "sealed-transfer"] }
+vta-sdk = { path = "../vta-sdk", version = "0.5", features = [
+  "client",
+  "sealed-transfer",
+  "provision-integration",
+] }
 affinidi-crypto = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }

@@ -219,6 +219,62 @@ enum BootstrapCommands {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Generate a VP-framed BootstrapRequest for the provision-integration
+    /// flow (consumer side).
+    ///
+    /// Mints an ephemeral Ed25519 keypair, persists the seed under
+    /// `<seed-dir>/bootstrap-secrets/<bundle_id>.key`, and writes a signed
+    /// VP (VC Data Model 2.0 `VerifiablePresentation` + `BootstrapRequest`
+    /// types) carrying a `TemplateBootstrap` ask naming the target
+    /// template and variables. Hand the JSON to the VTA operator; they
+    /// return an armored sealed bundle which `vta bootstrap open`
+    /// decrypts using the persisted seed.
+    ///
+    /// Used by integration operators (mediator, webvh-hosting-server,
+    /// etc.) to request enrollment from a VTA that may not yet be
+    /// network-reachable. See `docs/offline-integration-bootstrap.md`
+    /// for the end-to-end flow.
+    ProvisionRequest {
+        /// DID template name the VTA should render (e.g.
+        /// `didcomm-mediator`, `webvh-hosting-server`, or an
+        /// operator-uploaded custom template).
+        #[arg(long)]
+        template: String,
+        /// Template variable, repeat for each binding. Format `KEY=VALUE`.
+        /// Values are parsed as JSON when the value starts with `{`, `[`,
+        /// `"`, digit, `true`, `false`, or `null`; otherwise treated as a
+        /// string.
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        vars: Vec<String>,
+        /// Hint the target VTA context. The VTA operator may override
+        /// but if they do and the hint disagrees, the request is
+        /// rejected rather than silently normalised.
+        #[arg(long)]
+        context_hint: Option<String>,
+        /// Opt into long-term admin-DID rollover: the VTA mints a
+        /// fresh admin DID under its own key custody (default template
+        /// `vta-admin`) and binds authorization to that DID instead
+        /// of the ephemeral `client_did`. Recommended for any
+        /// integration that stays up long-term.
+        #[arg(long)]
+        admin_template: Option<String>,
+        /// Freshness window in hours for the VP's `validUntil`.
+        /// Default 168 (7 days) — setup-file shuffling between hosts
+        /// is slow.
+        #[arg(long, value_name = "HOURS", default_value_t = 168.0)]
+        validity_hours: f64,
+        /// Free-form human label echoed back in audit logs.
+        #[arg(long)]
+        label: Option<String>,
+        /// Override the default seed cache directory
+        /// (`~/.config/vta/bootstrap-secrets/`). Must match the
+        /// `--seed-dir` passed to `vta bootstrap open` on the same host.
+        #[arg(long)]
+        seed_dir: Option<PathBuf>,
+        /// Output path for the signed BootstrapRequest JSON.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Provision a template-driven integration (mediator, webvh-host,
     /// future kinds) for a consumer's VP-framed BootstrapRequest.
     ///
@@ -682,6 +738,28 @@ async fn main() {
                     seed_dir,
                 } => {
                     bootstrap_cli::run_open(bundle, expect_digest, no_verify_digest, seed_dir).await
+                }
+                BootstrapCommands::ProvisionRequest {
+                    template,
+                    vars,
+                    context_hint,
+                    admin_template,
+                    validity_hours,
+                    label,
+                    seed_dir,
+                    out,
+                } => {
+                    bootstrap_cli::run_provision_request(
+                        template,
+                        vars,
+                        context_hint,
+                        admin_template,
+                        validity_hours,
+                        label,
+                        seed_dir,
+                        out,
+                    )
+                    .await
                 }
                 #[cfg(feature = "webvh")]
                 BootstrapCommands::ProvisionIntegration {

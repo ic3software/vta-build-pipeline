@@ -173,6 +173,53 @@ pub fn open_armored_bundle(
     })
 }
 
+/// The outcome of [`create_provision_request`]: the signed VP plus the
+/// bookkeeping fields callers need to hand to the operator / match the
+/// returned sealed bundle.
+pub struct CreatedProvisionRequest {
+    /// Signed VP (VC Data Model 2.0 `VerifiablePresentation` +
+    /// `BootstrapRequest` types) — serialize and hand to the VTA
+    /// operator for `vta bootstrap provision-integration --request ...`.
+    pub request: vta_sdk::provision_integration::BootstrapRequest,
+    /// `did:key:z6Mk...` derived from the ephemeral keypair; mirrors
+    /// `request.holder`.
+    pub client_did: String,
+    /// Hex-encoded 16-byte bundle id (== the VP's `nonce`). Also the
+    /// filename stem under which the seed was persisted.
+    pub bundle_id_hex: String,
+    /// Absolute path to the persisted Ed25519 seed. Read-restricted to
+    /// the owner (0600 on Unix).
+    pub secret_path: PathBuf,
+}
+
+/// Generate a fresh ephemeral Ed25519 keypair, persist the seed under
+/// `<config_dir>/bootstrap-secrets/<bundle_id_hex>.key`, and return a
+/// signed VP-framed [`vta_sdk::provision_integration::BootstrapRequest`]
+/// ready to hand to the VTA operator's
+/// `vta bootstrap provision-integration` CLI.
+///
+/// Thin wrapper over
+/// [`vta_sdk::provision_integration::ProvisionRequestBuilder::sign_ephemeral`]
+/// that adds the CLI-common seed-persistence convention — matching the
+/// layout used by the v1 [`create_bootstrap_request`] path, so the same
+/// `<config_dir>` lets [`open_armored_bundle`] find the secret at
+/// open-time regardless of which request flavour produced it.
+pub async fn create_provision_request(
+    config_dir: &Path,
+    builder: vta_sdk::provision_integration::ProvisionRequestBuilder,
+) -> Result<CreatedProvisionRequest, Box<dyn std::error::Error>> {
+    let signed = builder.sign_ephemeral().await?;
+    let bundle_id_hex = hex_lower(&signed.bundle_id);
+    let sp = secret_path(config_dir, &bundle_id_hex)?;
+    write_secret(&sp, &signed.seed)?;
+    Ok(CreatedProvisionRequest {
+        request: signed.request,
+        client_did: signed.client_did,
+        bundle_id_hex,
+        secret_path: sp,
+    })
+}
+
 /// Extract the [`CredentialBundle`] from an opened payload.
 ///
 /// Accepts `AdminCredential` directly and `ContextProvision` (unwrapping the
@@ -272,6 +319,83 @@ mod tests {
 
         // Secret file is removed after successful open.
         assert!(!created.secret_path.exists());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn create_provision_request_persists_seed_and_signs() {
+        use vta_sdk::provision_integration::{BootstrapAsk, ProvisionRequestBuilder};
+
+        let tmp = std::env::temp_dir().join(format!("vta-test-{}", rand::random::<u32>()));
+
+        let builder = ProvisionRequestBuilder::new("didcomm-mediator")
+            .var("URL", "https://mediator.example.com")
+            .context_hint("mediator-prod")
+            .admin_template("vta-admin")
+            .label("cli-common-test");
+
+        let created = create_provision_request(&tmp, builder).await.unwrap();
+
+        // Seed persisted under bootstrap-secrets/<bundle_id>.key, 32 bytes.
+        assert!(created.secret_path.exists(), "secret must be persisted");
+        let stem = created.secret_path.file_stem().unwrap().to_str().unwrap();
+        assert_eq!(stem, created.bundle_id_hex);
+        let bytes = fs::read(&created.secret_path).unwrap();
+        assert_eq!(bytes.len(), 32);
+
+        // Bundle id matches the VP nonce (what the producer will use as
+        // the sealed-bundle id).
+        let verified = created.request.clone().verify().expect("verify VP");
+        assert_eq!(
+            hex_lower(&verified.decode_nonce().unwrap()),
+            created.bundle_id_hex
+        );
+
+        // Ask shape preserved through the SDK builder.
+        match verified.ask() {
+            BootstrapAsk::TemplateBootstrap(ask) => {
+                assert_eq!(ask.template.name, "didcomm-mediator");
+                assert_eq!(
+                    ask.template.vars.get("URL").and_then(|v| v.as_str()),
+                    Some("https://mediator.example.com")
+                );
+                assert_eq!(ask.context_hint.as_deref(), Some("mediator-prod"));
+                assert_eq!(
+                    ask.admin_template.as_ref().map(|t| t.name.as_str()),
+                    Some("vta-admin")
+                );
+            }
+        }
+
+        // client_did returned matches the VP holder.
+        assert_eq!(created.client_did, verified.holder());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_provision_request_seed_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        use vta_sdk::provision_integration::ProvisionRequestBuilder;
+
+        let tmp = std::env::temp_dir().join(format!("vta-test-{}", rand::random::<u32>()));
+        let builder =
+            ProvisionRequestBuilder::new("didcomm-mediator").var("URL", "https://m.example.com");
+        let created = create_provision_request(&tmp, builder).await.unwrap();
+
+        let mode = fs::metadata(&created.secret_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        // mode & 0o777 isolates the permission bits; must be 0o600.
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "seed file must be 0600, got {:o}",
+            mode & 0o777
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
