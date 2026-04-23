@@ -18,6 +18,7 @@ pub mod hpke;
 pub mod nonce;
 pub mod request;
 pub mod template_bootstrap;
+pub mod verify;
 
 pub use bundle::{
     ArmoredChunk, AssertionProof, AttestationQuoteAssertion, DidSignedAssertion, LabeledKey,

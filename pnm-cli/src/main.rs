@@ -155,6 +155,13 @@ enum BootstrapCommands {
         /// Skip out-of-band digest verification (testing only — prints a warning).
         #[arg(long)]
         no_verify_digest: bool,
+        /// Pin the VTA DID out-of-band. When supplied and the payload
+        /// is `TemplateBootstrap`, the VC is verified end-to-end
+        /// against this DID (pinned-DID check + issuer-pubkey
+        /// extraction + Data Integrity verify + validity window).
+        /// Without this flag, verification is digest-only.
+        #[arg(long)]
+        expect_vta_did: Option<String>,
     },
 
     /// One-command TEE first-boot bootstrap against a running VTA.
@@ -1161,9 +1168,15 @@ async fn main() {
                     bundle,
                     expect_digest,
                     no_verify_digest,
+                    expect_vta_did,
                 } => Some(
-                    bootstrap::run_open(bundle.clone(), expect_digest.clone(), *no_verify_digest)
-                        .await,
+                    bootstrap::run_open(
+                        bundle.clone(),
+                        expect_digest.clone(),
+                        *no_verify_digest,
+                        expect_vta_did.clone(),
+                    )
+                    .await,
                 ),
                 BootstrapCommands::Connect {
                     vta_url,

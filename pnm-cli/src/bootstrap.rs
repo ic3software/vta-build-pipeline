@@ -185,6 +185,7 @@ pub async fn run_open(
     bundle_path: PathBuf,
     expect_digest: Option<String>,
     no_verify_digest: bool,
+    expect_vta_did: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if expect_digest.is_none() && !no_verify_digest {
         return Err(
@@ -273,6 +274,21 @@ pub async fn run_open(
             println!("  Outputs:      {}", p.config.outputs.len());
             if let Some(ref u) = p.config.vta_url {
                 println!("  VTA URL:      {u}");
+            }
+            match expect_vta_did.as_deref() {
+                Some(pinned) => {
+                    use vta_sdk::provision_integration::template_verify::verify_template_bootstrap;
+                    verify_template_bootstrap((**p).clone(), pinned, chrono::Duration::minutes(5))?;
+                    println!();
+                    println!("  \x1b[1;32m✓ VC verified against pinned VTA DID\x1b[0m");
+                }
+                None => {
+                    println!();
+                    println!("  \x1b[1;33m⚠ VC NOT verified — digest-only trust anchor.\x1b[0m");
+                    println!(
+                        "    Re-run with --expect-vta-did <did> to verify the authorization VC."
+                    );
+                }
             }
             println!();
             println!("Install via the provision-integration flow on the integration host.");

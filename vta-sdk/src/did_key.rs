@@ -6,6 +6,24 @@ pub fn ed25519_multibase_pubkey(public_key_bytes: &[u8; 32]) -> String {
     multibase::encode(multibase::Base::Base58Btc, &buf)
 }
 
+/// Known 2-byte multicodec varint prefix for Ed25519 public keys.
+const ED25519_PUB_CODEC: [u8; 2] = [0xed, 0x01];
+
+/// Decode an Ed25519 public key from its multibase form. Inverse of
+/// [`ed25519_multibase_pubkey`]. Accepts both multicodec-prefixed
+/// (`0xed01`) and raw-bytes encodings; returns the 32-byte key.
+pub fn decode_ed25519_public_key_multibase(mb: &str) -> Result<[u8; 32], DidKeyError> {
+    let (_, raw) = multibase::decode(mb).map_err(|e| DidKeyError::Multibase(e.to_string()))?;
+    let key_bytes = if raw.len() >= 2 && [raw[0], raw[1]] == ED25519_PUB_CODEC {
+        &raw[2..]
+    } else {
+        &raw[..]
+    };
+    key_bytes
+        .try_into()
+        .map_err(|_| DidKeyError::InvalidSeedLength)
+}
+
 /// Known 2-byte multicodec varint prefixes for private keys.
 const ED25519_PRIV_CODEC: [u8; 2] = [0x80, 0x26]; // 0x1300
 const X25519_PRIV_CODEC: [u8; 2] = [0x82, 0x26]; // 0x1302

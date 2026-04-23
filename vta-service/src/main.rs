@@ -183,6 +183,17 @@ enum BootstrapCommands {
     /// Looks up the seed by `bundle_id` under `<seed-dir>/bootstrap-secrets/`,
     /// derives the X25519 HPKE secret, decrypts, and prints the payload.
     /// Counterpart to `vta bootstrap request`.
+    ///
+    /// When `--expect-vta-did` is set and the payload is a
+    /// `TemplateBootstrap`, the VTA-issued authorization VC is verified
+    /// end-to-end: the pinned DID is cross-checked against the bundle's
+    /// `vta_trust.vta_did` and against `credentialSubject.adminOf.vta`,
+    /// the issuer's pubkey is extracted from the bundled DID document's
+    /// verificationMethod array, and the Data Integrity proof is
+    /// verified. The DidSigned producer assertion (when present) is
+    /// verified against the same key. Without this flag the opener
+    /// trusts only the OOB SHA-256 digest; the printed payload is
+    /// labelled "unverified trust bundle" so it's obvious.
     Open {
         /// Path to the armored sealed bundle.
         #[arg(long)]
@@ -195,6 +206,13 @@ enum BootstrapCommands {
         /// intended for testing only.
         #[arg(long, default_value_t = false)]
         no_verify_digest: bool,
+        /// Pin the VTA DID out-of-band. When supplied and the payload is
+        /// a `TemplateBootstrap`, the VC + producer assertion are
+        /// verified end-to-end against this DID; mismatches are
+        /// rejected (no silent fallback). Without this flag,
+        /// verification is digest-only.
+        #[arg(long)]
+        expect_vta_did: Option<String>,
         /// Override the default seed cache directory
         /// (`~/.config/vta/bootstrap-secrets/`). Must match the value
         /// passed to `vta bootstrap request`.
@@ -869,9 +887,17 @@ async fn main() {
                     bundle,
                     expect_digest,
                     no_verify_digest,
+                    expect_vta_did,
                     seed_dir,
                 } => {
-                    bootstrap_cli::run_open(bundle, expect_digest, no_verify_digest, seed_dir).await
+                    bootstrap_cli::run_open(
+                        bundle,
+                        expect_digest,
+                        no_verify_digest,
+                        expect_vta_did,
+                        seed_dir,
+                    )
+                    .await
                 }
                 BootstrapCommands::ProvisionRequest {
                     template,

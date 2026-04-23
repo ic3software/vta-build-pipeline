@@ -53,6 +53,9 @@ pub enum SealedTransferError {
     #[error("producer pubkey mismatch (chunk 0 declared {declared}, expected {expected})")]
     ProducerMismatch { declared: String, expected: String },
 
+    #[error("assertion verification failed: {0}")]
+    AssertionVerification(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

@@ -29,6 +29,7 @@ pub mod didcomm;
 pub mod http;
 pub mod payload;
 pub mod request;
+pub mod template_verify;
 
 use thiserror::Error;
 

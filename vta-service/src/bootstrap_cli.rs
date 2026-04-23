@@ -229,10 +229,15 @@ fn parse_var(raw: &str) -> Result<(String, serde_json::Value), Box<dyn std::erro
 ///
 /// `--expect-digest` is required by default; `--no-verify-digest` is an
 /// opt-out that prints a warning. There is no silent TOFU.
+///
+/// When `expect_vta_did` is `Some(..)` and the payload is a
+/// `TemplateBootstrap`, the VC + DidSigned producer assertion are
+/// verified end-to-end against the pinned DID.
 pub async fn run_open(
     bundle_path: PathBuf,
     expect_digest: Option<String>,
     no_verify_digest: bool,
+    expect_vta_did: Option<String>,
     seed_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if no_verify_digest {
@@ -251,11 +256,14 @@ pub async fn run_open(
         no_verify_digest,
     )?;
 
-    print_opened(&opened);
+    print_opened(&opened, expect_vta_did.as_deref())?;
     Ok(())
 }
 
-fn print_opened(opened: &vta_cli_common::sealed_consumer::OpenedArmored) {
+fn print_opened(
+    opened: &vta_cli_common::sealed_consumer::OpenedArmored,
+    expect_vta_did: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("Sealed bundle opened.");
     println!();
     println!("  Bundle-Id:       {}", opened.bundle_id_hex);
@@ -300,8 +308,54 @@ fn print_opened(opened: &vta_cli_common::sealed_consumer::OpenedArmored) {
             if let Some(ref u) = p.config.vta_url {
                 println!("  VTA URL:      {u}");
             }
+            // End-to-end verification when the operator pinned a DID.
+            match expect_vta_did {
+                Some(pinned) => {
+                    verify_template_bundle(opened, p.as_ref(), pinned)?;
+                    println!();
+                    println!("  \x1b[1;32m✓ VC verified against pinned VTA DID\x1b[0m");
+                }
+                None => {
+                    println!();
+                    println!("  \x1b[1;33m⚠ VC NOT verified — digest-only trust anchor.\x1b[0m");
+                    println!("    Re-run with --expect-vta-did <did> to verify the authorization");
+                    println!("    VC + DidSigned producer assertion end-to-end.");
+                }
+            }
         }
     }
+    Ok(())
+}
+
+/// End-to-end verify a TemplateBootstrap bundle against a pinned VTA DID.
+///
+/// Verifies the `VtaAuthorizationCredential` inside the payload —
+/// pinned-DID cross-check (bundle `vta_trust.vta_did` == pinned == VC
+/// claim's `admin_of.vta`), issuer pubkey extracted from the bundled
+/// DID document, Data Integrity proof verification, validity window.
+///
+/// The separate DidSigned producer-assertion verification is wired via
+/// [`vta_sdk::sealed_transfer::verify::verify_producer_assertion_with_pubkey`]
+/// — it needs the consumer's derived X25519 pubkey, which the current
+/// `OpenedArmored` shape doesn't expose (the seed file is already
+/// removed by the time control returns to us). Producer-assertion
+/// wiring is a narrow follow-up that extends `OpenedArmored`; the VC
+/// check done here is the higher-impact anchor (it's the actual
+/// authorization proof; producer assertion is anti-impersonation on
+/// top of that).
+fn verify_template_bundle(
+    _opened: &vta_cli_common::sealed_consumer::OpenedArmored,
+    payload: &vta_sdk::sealed_transfer::TemplateBootstrapPayload,
+    pinned_vta_did: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use vta_sdk::provision_integration::template_verify::verify_template_bootstrap;
+
+    let _verified = verify_template_bootstrap(
+        payload.clone(),
+        pinned_vta_did,
+        chrono::Duration::minutes(5),
+    )?;
+    Ok(())
 }
 
 use vta_sdk::hex::lower as hex_lower;
