@@ -2330,6 +2330,138 @@ async fn did_templates_export_round_trips_through_sdk_loader() {
     assert_eq!(tpl.kind, "custom");
 }
 
+// ── Provision-integration REST surface ────────────────────────────
+//
+// Item 18: exercise the HTTP-specific concerns — auth gate, payload
+// deserialization, and VP validation — in isolation from the happy-
+// path library flow that the `operations::provision_integration`
+// unit tests already cover end-to-end.
+
+#[cfg(feature = "webvh")]
+async fn sign_sample_bootstrap_request() -> vta_sdk::provision_integration::BootstrapRequest {
+    use std::collections::BTreeMap;
+    use vta_sdk::provision_integration::{BootstrapAsk, DidTemplateRef, TemplateBootstrapAsk};
+
+    let (seed_box, pub_bytes) = vta_sdk::sealed_transfer::generate_ed25519_keypair();
+    let client_did = affinidi_crypto::did_key::ed25519_pub_to_did_key(&pub_bytes);
+
+    let ask = BootstrapAsk::TemplateBootstrap(TemplateBootstrapAsk {
+        context_hint: Some("prod-mediator".into()),
+        template: DidTemplateRef {
+            name: "didcomm-mediator".into(),
+            vars: BTreeMap::from([(
+                "URL".into(),
+                Value::String("https://mediator.example.com".into()),
+            )]),
+        },
+        admin_template: None,
+        note: None,
+    });
+
+    vta_sdk::provision_integration::BootstrapRequest::sign(
+        &seed_box,
+        &client_did,
+        [0xAAu8; 16],
+        chrono::Duration::hours(1),
+        Some("item-18-rest-test".into()),
+        ask,
+    )
+    .await
+    .expect("sign sample VP")
+}
+
+#[cfg(feature = "webvh")]
+#[tokio::test]
+async fn provision_integration_requires_auth() {
+    // No Bearer token → the AdminAuth extractor rejects before any
+    // validation runs.
+    let (app, _ctx) = TestApp::new().await;
+    let vp = sign_sample_bootstrap_request().await;
+    let body = json!({
+        "request": vp,
+        "context": "prod-mediator",
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/bootstrap/provision-integration")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let (status, _) = app.request(req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[cfg(feature = "webvh")]
+#[tokio::test]
+async fn provision_integration_rejects_non_admin_token() {
+    // Caller authenticates as role "reader" — AdminAuth must reject.
+    let (app, ctx) = TestApp::new().await;
+    let token = ctx
+        .auth_token("did:key:z6MkReader", "reader", vec!["prod-mediator".into()])
+        .await;
+    let vp = sign_sample_bootstrap_request().await;
+    let body = json!({
+        "request": vp,
+        "context": "prod-mediator",
+    });
+    let (status, _) = app
+        .request(post_auth("/bootstrap/provision-integration", &token, body))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[cfg(feature = "webvh")]
+#[tokio::test]
+async fn provision_integration_rejects_tampered_vp() {
+    // Admin token + structurally valid body, but the VP's nonce has
+    // been mutated after signing — the handler calls `.verify()` on
+    // the request and returns 400.
+    let (app, ctx) = TestApp::new().await;
+    let token = ctx
+        .auth_token("did:key:z6MkAdmin", "admin", vec!["prod-mediator".into()])
+        .await;
+    let mut vp = sign_sample_bootstrap_request().await;
+    // Swap the nonce — same length, different bytes → signature
+    // over the mutated body is now invalid.
+    vp.nonce = "BBBBBBBBBBBBBBBBBBBBBB".to_string();
+    let body = json!({
+        "request": vp,
+        "context": "prod-mediator",
+    });
+    let (status, _) = app
+        .request(post_auth("/bootstrap/provision-integration", &token, body))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[cfg(feature = "webvh")]
+#[tokio::test]
+async fn provision_integration_rejects_unknown_field_in_body() {
+    // `deny_unknown_fields` on BootstrapRequest (item 22 hardening)
+    // kicks in at deserialize time for any field the verifier doesn't
+    // know about. The handler surfaces this as a Deserialize error
+    // → 400 via axum's default JSON extractor rejection.
+    let (app, ctx) = TestApp::new().await;
+    let token = ctx
+        .auth_token("did:key:z6MkAdmin", "admin", vec!["prod-mediator".into()])
+        .await;
+    let mut vp_value =
+        serde_json::to_value(sign_sample_bootstrap_request().await).expect("serialize VP");
+    // Inject an attacker-chosen field — item-22 guard must reject.
+    vp_value["smugglerField"] = json!("malicious");
+    let body = json!({
+        "request": vp_value,
+        "context": "prod-mediator",
+    });
+    let (status, _) = app
+        .request(post_auth("/bootstrap/provision-integration", &token, body))
+        .await;
+    assert!(
+        status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+        "expected 4xx rejection for unknown field, got {status}"
+    );
+}
+
 #[cfg(feature = "webvh")]
 #[tokio::test]
 async fn create_did_webvh_context_scoped_template_shadows_global() {
