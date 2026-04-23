@@ -222,15 +222,16 @@ pub async fn provision_integration(
     // The id is validated against the registered-server catalogue
     // before any state mutation so a typo or stale id fails fast,
     // before key minting writes anything.
+    //
+    // `URL` is optional at this layer — templates that need it declare
+    // it in `requiredVars` and the renderer enforces presence. Keeping
+    // it mandatory here would block templates (e.g. non-webvh
+    // integrations, tests, internal tooling) that legitimately don't
+    // ship a URL as document content.
     let integration_url = template_vars
         .get("URL")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            AppError::Validation(
-                "template requires a 'URL' variable naming the integration's webvh host".into(),
-            )
-        })?
-        .to_string();
+        .map(|s| s.to_string());
 
     let webvh_server_id = resolve_webvh_server(&template_vars, &state.webvh_ks).await?;
 
@@ -257,9 +258,26 @@ pub async fn provision_integration(
         })?;
     let set_primary = ctx_before_mint.did.is_none();
 
+    // `create_did_webvh` takes exactly one of `server_id` / `url`.
+    // - WEBVH_SERVER set → `server_id` wins; `url` is unused by that
+    //   path, so we drop it even if supplied.
+    // - WEBVH_SERVER unset → serverless mode; we need a `url`. This is
+    //   the only path where an absent URL is a hard error; surface it
+    //   with guidance naming the `WEBVH_SERVER` alternative.
     let (params_server_id, params_url) = match &webvh_server_id {
         Some(id) => (Some(id.clone()), None),
-        None => (None, Some(integration_url.clone())),
+        None => {
+            let url = integration_url.clone().ok_or_else(|| {
+                AppError::Validation(
+                    "serverless provisioning requires the template to supply a 'URL' variable \
+                     (the integration's webvh host URL). Either add it to the template's \
+                     `requiredVars` and pass it in `template_vars`, or set `WEBVH_SERVER` to \
+                     route publication through a registered webvh hosting server instead."
+                        .into(),
+                )
+            })?;
+            (None, Some(url))
+        }
     };
 
     let template_vars_hashmap: std::collections::HashMap<String, Value> =

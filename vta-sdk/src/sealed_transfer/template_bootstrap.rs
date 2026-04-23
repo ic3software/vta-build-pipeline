@@ -103,9 +103,17 @@ pub struct TemplateBootstrapConfig {
 
 /// Side outputs a template renderer emits alongside the DID document.
 ///
-/// Closed enum: new output kinds require a workspace change. Operator-
-/// uploaded templates that don't emit side outputs work as-is; ones that
-/// need a novel output kind motivate a typed variant here.
+/// Typed variants exist for output kinds every VTA deployment knows
+/// about; a catch-all [`Self::Generic`] variant carries arbitrary
+/// template-declared outputs so operator-uploaded templates that need
+/// novel first-boot artefacts (status-list URLs, OOB invitations, TLS
+/// CSRs, webhook configs, …) work without an SDK change.
+///
+/// Downstream consumers that understand a specific `kind` string match
+/// on `Generic { kind, payload }` for that kind; everything else they
+/// forward to a default handler or log-and-ignore. Preserves the
+/// "uploading a template is the whole author surface for new
+/// integrations" invariant from `CLAUDE.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TemplateOutput {
@@ -127,6 +135,27 @@ pub enum TemplateOutput {
         url: String,
         accept: Vec<String>,
         routing_keys: Vec<String>,
+    },
+    /// Extensibility escape hatch for template-declared outputs the SDK
+    /// doesn't know about. `kind` is a short string the template author
+    /// picks (lowercase kebab-case by convention — e.g. `status-list`,
+    /// `oob-invitation`, `tls-csr`). `payload` is whatever JSON the
+    /// template emitted; consumers dispatch on `kind` and parse
+    /// `payload` as their expected shape.
+    Generic {
+        /// Caller-chosen tag identifying the output kind. Must not
+        /// collide with the snake_case discriminant of an existing
+        /// typed variant (`webvh_log`, `didcomm_service`) — consumers
+        /// match typed variants first, so a `Generic { kind:
+        /// "webvh_log", … }` would still deserialize as
+        /// `Generic` but shadow nothing, just confuse readers. Enforce
+        /// naming elsewhere (template validator) rather than in the
+        /// wire shape.
+        kind: String,
+        /// Free-form JSON the template author produced. Consumers that
+        /// understand `kind` parse this into a typed shape of their
+        /// own; consumers that don't log + skip.
+        payload: serde_json::Value,
     },
 }
 
@@ -229,5 +258,62 @@ mod tests {
         };
         let v = serde_json::to_value(&out).unwrap();
         assert_eq!(v["type"], "webvh_log");
+    }
+
+    #[test]
+    fn template_output_generic_round_trips_arbitrary_payload() {
+        // Generic extensibility: a template author who needs a novel
+        // first-boot artefact (e.g. a status-list URL, OOB invitation,
+        // TLS CSR) embeds it via TemplateOutput::Generic without an
+        // SDK change. Wire shape preserves the kind tag + free-form
+        // JSON payload verbatim through serialize → deserialize.
+        let original = TemplateOutput::Generic {
+            kind: "status-list".into(),
+            payload: json!({
+                "statusListUrl": "https://issuer.example.com/status",
+                "expires": "2026-12-31T00:00:00Z",
+            }),
+        };
+        let wire = serde_json::to_value(&original).unwrap();
+        assert_eq!(wire["type"], "generic");
+        assert_eq!(wire["kind"], "status-list");
+        assert_eq!(
+            wire["payload"]["statusListUrl"],
+            "https://issuer.example.com/status"
+        );
+
+        let parsed: TemplateOutput = serde_json::from_value(wire).unwrap();
+        match parsed {
+            TemplateOutput::Generic { kind, payload } => {
+                assert_eq!(kind, "status-list");
+                assert_eq!(payload["expires"], "2026-12-31T00:00:00Z");
+            }
+            other => panic!("expected Generic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_output_generic_coexists_with_typed_variants() {
+        // An outputs vec can mix typed + generic entries — simulates
+        // a template that emits both a standard WebvhLog and a
+        // novel side output.
+        let outputs = vec![
+            TemplateOutput::WebvhLog {
+                did: "did:webvh:mediator.example".into(),
+                log: "one\ntwo\n".into(),
+            },
+            TemplateOutput::Generic {
+                kind: "oob-invitation".into(),
+                payload: json!({"url": "https://mediator.example/oob?c=abc"}),
+            },
+        ];
+        let wire = serde_json::to_string(&outputs).unwrap();
+        let parsed: Vec<TemplateOutput> = serde_json::from_str(&wire).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(matches!(parsed[0], TemplateOutput::WebvhLog { .. }));
+        match &parsed[1] {
+            TemplateOutput::Generic { kind, .. } => assert_eq!(kind, "oob-invitation"),
+            other => panic!("expected Generic at index 1, got {other:?}"),
+        }
     }
 }
