@@ -36,6 +36,12 @@ tee = [
   "dep:aes",
 ]
 vsock-store = ["vti-common/vsock-store"]
+# Exposes the test-harness helpers (in-memory keyspaces, VTA bootstrap
+# for provision-integration) as `pub` items so integration tests under
+# `tests/` can build complete VTA state the same way the lib unit tests
+# do. Enable via a `[dev-dependencies]` `features = ["test-support"]`
+# entry in the downstream crate. Not meant for production builds.
+test-support = ["webvh", "dep:tempfile"]
 
 [lib]
 name = "vta_service"

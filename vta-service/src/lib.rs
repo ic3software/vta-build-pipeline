@@ -37,6 +37,12 @@ pub mod webvh_didcomm;
 #[cfg(feature = "webvh")]
 pub mod webvh_store;
 
+// `test_support` is gated internally on `any(test, feature = "test-support")`.
+// `#[cfg(...)]` here would hide the module from the test builds that
+// don't pass `--features test-support` explicitly; the module header
+// handles that itself.
+pub mod test_support;
+
 /// Initialize tracing/logging from config. Call once at startup before any
 /// log output. Shared by all VTA front-end binaries.
 pub fn init_tracing(config: &config::AppConfig) {
