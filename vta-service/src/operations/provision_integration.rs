@@ -241,6 +241,22 @@ pub async fn provision_integration(
     // metadata, not document content.
     let webvh_path = take_webvh_path(&mut template_vars)?;
 
+    // Decide whether the minted DID should become the context's primary
+    // DID. First-integration wins: when the context has no DID yet, bind
+    // the newly-minted one so downstream operations (fetch_did_secrets_bundle,
+    // build_did_secrets_bundle) resolve without a separate update step.
+    // When the context already has a primary (e.g. provisioning a second
+    // mediator into the same context), leave it alone — we don't want a
+    // later integration silently displacing the first.
+    let ctx_before_mint = crate::contexts::get_context(&state.contexts_ks, &context)
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal(format!(
+                "context '{context}' disappeared between precondition check and DID mint"
+            ))
+        })?;
+    let set_primary = ctx_before_mint.did.is_none();
+
     let (params_server_id, params_url) = match &webvh_server_id {
         Some(id) => (Some(id.clone()), None),
         None => (None, Some(integration_url.clone())),
@@ -270,7 +286,7 @@ pub async fn provision_integration(
             pre_rotation_count: 0,
             did_document: None,
             did_log: None,
-            set_primary: false,
+            set_primary,
             signing_key_id: None,
             ka_key_id: None,
             template: Some(template_name.clone()),
