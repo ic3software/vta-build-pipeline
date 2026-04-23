@@ -96,6 +96,31 @@ impl SealedRecipient {
     }
 }
 
+/// Resolve CLI `--recipient` / `--recipient-did` / `--recipient-nonce`
+/// arguments into a [`SealedRecipient`].
+///
+/// Clap's `conflicts_with` + `requires` already enforce at most one mode
+/// is populated; this helper enforces that at least one is and produces
+/// a consistent error message. Shared between `pnm` (admin workstation)
+/// and `vta` (on-host offline admin) CLIs — both accept the same
+/// recipient-specification shape.
+pub fn resolve_recipient(
+    recipient: Option<&std::path::Path>,
+    recipient_did: Option<&str>,
+    recipient_nonce: Option<&str>,
+) -> Result<SealedRecipient, Box<dyn std::error::Error>> {
+    if let Some(path) = recipient {
+        SealedRecipient::from_file(path)
+    } else if let (Some(did), Some(nonce)) = (recipient_did, recipient_nonce) {
+        SealedRecipient::from_inline(did, nonce)
+    } else {
+        Err(
+            "a recipient is required: pass --recipient <file> or both --recipient-did and --recipient-nonce"
+                .into(),
+        )
+    }
+}
+
 /// Output of a successful [`seal_for_recipient`] call.
 pub struct SealedOutput {
     /// The armored sealed bundle (caller writes to stdout or file).
@@ -143,6 +168,72 @@ pub async fn seal_for_recipient(
         producer_did,
         bundle_id: recipient.bundle_id,
     })
+}
+
+/// Seal a [`vta_sdk::did_secrets::DidSecretsBundle`] to the given recipient
+/// and emit the armored output + stderr banner. Shared between
+/// `pnm keys bundle` (online admin, reads state over REST) and
+/// `vta keys bundle` (offline admin, reads state from the local store) —
+/// both produce the same bundle shape, this helper handles seal + print.
+pub async fn emit_did_secrets_bundle(
+    bundle: vta_sdk::did_secrets::DidSecretsBundle,
+    recipient: &SealedRecipient,
+    context_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let did = bundle.did.clone();
+    let secret_count = bundle.secrets.len();
+    let payload = SealedPayloadV1::DidSecrets(Box::new(bundle));
+    let sealed = seal_for_recipient(recipient, &payload).await?;
+
+    eprintln!();
+    eprintln!("\x1b[1;33m╔══════════════════════════════════════════════════════════╗");
+    eprintln!("║  DID secrets bundle (sealed — armored to the recipient)  ║");
+    eprintln!("╚══════════════════════════════════════════════════════════╝\x1b[0m");
+    eprintln!();
+    eprintln!("  Context: {context_id}");
+    eprintln!("  DID:     {did}");
+    eprintln!("  Secrets: {secret_count}");
+    if let Some(ref label) = recipient.label {
+        eprintln!("  Recipient: {label}");
+    }
+    eprintln!();
+
+    emit_sealed_output(&sealed);
+    Ok(())
+}
+
+/// Seal a [`vta_sdk::context_provision::ContextProvisionBundle`] to the
+/// given recipient and emit the armored output + stderr banner. Shared
+/// between `pnm context reprovision` and `vta context reprovision` —
+/// both produce the same bundle shape from different transports.
+pub async fn emit_context_provision_bundle(
+    bundle: vta_sdk::context_provision::ContextProvisionBundle,
+    recipient: &SealedRecipient,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let context_id = bundle.context_id.clone();
+    let context_name = bundle.context_name.clone();
+    let admin_did = bundle.admin_did.clone();
+    let did = bundle.did.as_ref().map(|d| d.id.clone());
+    let payload = SealedPayloadV1::ContextProvision(Box::new(bundle));
+    let sealed = seal_for_recipient(recipient, &payload).await?;
+
+    eprintln!();
+    eprintln!("\x1b[1;33m╔══════════════════════════════════════════════════════════════╗");
+    eprintln!("║  Context provision bundle (sealed — hand off armored output) ║");
+    eprintln!("╚══════════════════════════════════════════════════════════════╝\x1b[0m");
+    eprintln!();
+    eprintln!("  Context:   {context_id} ({context_name})");
+    eprintln!("  Admin DID: {admin_did}");
+    if let Some(ref d) = did {
+        eprintln!("  DID:       {d}");
+    }
+    if let Some(ref label) = recipient.label {
+        eprintln!("  Recipient: {label}");
+    }
+    eprintln!();
+
+    emit_sealed_output(&sealed);
+    Ok(())
 }
 
 /// Print a standard "sealed output emitted" banner to stderr alongside the

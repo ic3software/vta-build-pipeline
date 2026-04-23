@@ -9,6 +9,13 @@ pub mod contexts;
 pub mod did_templates;
 #[cfg(feature = "webvh")]
 pub mod did_webvh;
+/// Offline state-assembly helpers: read the VTA's local store and
+/// produce the same wire-shape bundles (`DidSecretsBundle`,
+/// `ContextProvisionBundle`) that the equivalent `VtaClient` flows
+/// build over REST. Used by the on-host `vta context reprovision` /
+/// `vta keys bundle` CLIs for cold-start environments where PNM can't
+/// reach the VTA over the network.
+pub mod export;
 pub mod keys;
 /// Generic template-driven integration bootstrap. See
 /// `docs/bootstrap-provision-integration.md`. Feature-gated on `webvh`

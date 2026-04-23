@@ -393,31 +393,8 @@ pub async fn cmd_key_bundle(
     context: &str,
     recipient: crate::sealed_producer::SealedRecipient,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use vta_sdk::sealed_transfer::SealedPayloadV1;
-
-    // Fetch all secrets for this context as a portable bundle
     let bundle = client.fetch_did_secrets_bundle(context).await?;
-
-    let payload = SealedPayloadV1::DidSecrets(Box::new(bundle));
-    let sealed = crate::sealed_producer::seal_for_recipient(&recipient, &payload).await?;
-
-    eprintln!();
-    eprintln!("\x1b[1;33m╔══════════════════════════════════════════════════════════╗");
-    eprintln!("║  DID secrets bundle (sealed — armored to the recipient)  ║");
-    eprintln!("╚══════════════════════════════════════════════════════════╝\x1b[0m");
-    eprintln!();
-    if let SealedPayloadV1::DidSecrets(ref b) = payload {
-        eprintln!("  Context: {context}");
-        eprintln!("  DID:     {}", b.did);
-        eprintln!("  Secrets: {}", b.secrets.len());
-    }
-    if let Some(ref label) = recipient.label {
-        eprintln!("  Recipient: {label}");
-    }
-    eprintln!();
-
-    crate::sealed_producer::emit_sealed_output(&sealed);
-    Ok(())
+    crate::sealed_producer::emit_did_secrets_bundle(bundle, &recipient, context).await
 }
 
 pub async fn cmd_key_secrets(

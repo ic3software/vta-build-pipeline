@@ -1053,29 +1053,7 @@ fn resolve_expires_at(expires: Option<&str>) -> Result<Option<u64>, Box<dyn std:
     }
 }
 
-/// Resolve CLI `--recipient` / `--recipient-did` / `--recipient-nonce`
-/// arguments into a [`vta_cli_common::sealed_producer::SealedRecipient`].
-///
-/// Clap's `conflicts_with` + `requires` already guarantee at most one mode is
-/// populated; this function enforces that at least one is, and produces a
-/// consistent error message.
-fn resolve_recipient(
-    recipient: Option<&std::path::Path>,
-    recipient_did: Option<&str>,
-    recipient_nonce: Option<&str>,
-) -> Result<vta_cli_common::sealed_producer::SealedRecipient, Box<dyn std::error::Error>> {
-    use vta_cli_common::sealed_producer::SealedRecipient;
-    if let Some(path) = recipient {
-        SealedRecipient::from_file(path)
-    } else if let (Some(did), Some(nonce)) = (recipient_did, recipient_nonce) {
-        SealedRecipient::from_inline(did, nonce)
-    } else {
-        Err(
-            "a recipient is required: pass --recipient <file> or both --recipient-did and --recipient-nonce"
-                .into(),
-        )
-    }
-}
+use vta_cli_common::sealed_producer::resolve_recipient;
 
 fn requires_auth(cmd: &Commands) -> bool {
     // VTA restart requires auth; other VTA subcommands don't

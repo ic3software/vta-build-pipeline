@@ -134,6 +134,11 @@ enum Commands {
         #[command(subcommand)]
         command: KeyCliCommands,
     },
+    /// Manage application contexts (offline, no server required)
+    Context {
+        #[command(subcommand)]
+        command: ContextCommands,
+    },
     /// Manage WebVH servers and DIDs (offline, no server required)
     #[cfg(feature = "webvh")]
     Webvh {
@@ -338,6 +343,72 @@ enum KeyCliCommands {
         /// BIP-39 mnemonic for the new seed (generates random if omitted)
         #[arg(long)]
         mnemonic: Option<String>,
+    },
+    /// Export all active keys in a context as a sealed DidSecrets bundle.
+    ///
+    /// Reads the local keystore directly — no running VTA or network
+    /// required. Mirrors `pnm keys bundle` but works in cold-start /
+    /// air-gapped environments where PNM cannot reach the VTA.
+    Bundle {
+        /// Context ID whose active keys should be exported.
+        #[arg(long)]
+        context: String,
+        /// Path to the consumer's BootstrapRequest JSON (v1). Mutually
+        /// exclusive with `--recipient-did` / `--recipient-nonce`.
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
+        recipient: Option<PathBuf>,
+        /// Inline consumer DID (`did:key:z6Mk...`). Requires `--recipient-nonce`.
+        #[arg(long, requires = "recipient_nonce")]
+        recipient_did: Option<String>,
+        /// Inline consumer nonce (32 hex chars == 16 bytes). Requires
+        /// `--recipient-did`.
+        #[arg(long, requires = "recipient_did")]
+        recipient_nonce: Option<String>,
+        /// Output path for the armored sealed bundle. If omitted, the
+        /// armor is written to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContextCommands {
+    /// Export an existing context — its admin credential + any
+    /// provisioned DID material — as a sealed ContextProvision bundle
+    /// for a new/backup admin to import.
+    ///
+    /// Reads the local keystore directly — no running VTA or network
+    /// required. Mirrors `pnm context reprovision` but works in
+    /// cold-start / air-gapped environments where PNM cannot reach the
+    /// VTA.
+    Reprovision {
+        /// Context ID to export.
+        #[arg(long)]
+        id: String,
+        /// Existing Ed25519 key to use as the admin credential. Its
+        /// seed backs the `did:key` the ContextProvision bundle binds
+        /// to. Interactive prompt if omitted.
+        #[arg(long)]
+        key: Option<String>,
+        /// Label for a freshly-minted admin key when `--key` is
+        /// omitted and the interactive prompt selects "create new".
+        #[arg(long)]
+        admin_label: Option<String>,
+        /// Path to the consumer's BootstrapRequest JSON (v1). Mutually
+        /// exclusive with `--recipient-did` / `--recipient-nonce`.
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
+        recipient: Option<PathBuf>,
+        /// Inline consumer DID (`did:key:z6Mk...`). Requires `--recipient-nonce`.
+        #[arg(long, requires = "recipient_nonce")]
+        recipient_did: Option<String>,
+        /// Inline consumer nonce (32 hex chars == 16 bytes). Requires
+        /// `--recipient-did`.
+        #[arg(long, requires = "recipient_did")]
+        recipient_nonce: Option<String>,
+        /// Output path for the armored sealed bundle. If omitted, the
+        /// armor is written to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -612,7 +683,9 @@ async fn main() {
             // SEALED CHECK: secrets export and seed rotation
             match &command {
                 KeyCliCommands::List { .. } | KeyCliCommands::Seeds => {}
-                KeyCliCommands::Secrets { .. } | KeyCliCommands::RotateSeed { .. } => {
+                KeyCliCommands::Secrets { .. }
+                | KeyCliCommands::RotateSeed { .. }
+                | KeyCliCommands::Bundle { .. } => {
                     check_seal(&cli.config).await;
                 }
             }
@@ -626,6 +699,57 @@ async fn main() {
                 KeyCliCommands::Seeds => keys_cli::run_keys_seeds_list(cli.config).await,
                 KeyCliCommands::RotateSeed { mnemonic } => {
                     keys_cli::run_rotate_seed(cli.config, mnemonic).await
+                }
+                KeyCliCommands::Bundle {
+                    context,
+                    recipient,
+                    recipient_did,
+                    recipient_nonce,
+                    out,
+                } => {
+                    bootstrap_cli::run_keys_bundle(
+                        cli.config,
+                        context,
+                        recipient,
+                        recipient_did,
+                        recipient_nonce,
+                        out,
+                    )
+                    .await
+                }
+            };
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Context { command }) => {
+            match &command {
+                ContextCommands::Reprovision { .. } => {
+                    check_seal(&cli.config).await;
+                }
+            }
+            let result = match command {
+                ContextCommands::Reprovision {
+                    id,
+                    key,
+                    admin_label,
+                    recipient,
+                    recipient_did,
+                    recipient_nonce,
+                    out,
+                } => {
+                    bootstrap_cli::run_context_reprovision(
+                        cli.config,
+                        id,
+                        key,
+                        admin_label,
+                        recipient,
+                        recipient_did,
+                        recipient_nonce,
+                        out,
+                    )
+                    .await
                 }
             };
             if let Err(e) = result {

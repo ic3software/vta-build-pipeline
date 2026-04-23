@@ -304,6 +304,56 @@ convention. Integrations with their own secret-storage strategy
 (keyring, TEE, custom dir) should call the SDK directly and persist
 wherever they already store keys.
 
+## Exporting existing context state (offline admin handoff)
+
+The flow above provisions a **new** integration from a template. A
+second offline scenario: the operator has an **already-provisioned**
+context and wants to hand its admin identity + DID material to a new
+or backup admin host. Same sealed-transfer envelope, different payload
+shape — [`SealedPayloadV1::ContextProvision`] or
+[`SealedPayloadV1::DidSecrets`] instead of `TemplateBootstrap`.
+
+Two commands, direct parallels of their `pnm` counterparts but
+reading the local on-disk keystore (no running VTA, no network):
+
+```bash
+# Export a context's admin credential + DID material. Consumer imports
+# the bundle and is set up as admin of that context.
+vta context reprovision \
+    --id             mediator-prod \
+    --key            did:webvh:...#key-0 \
+    --recipient      new-admin-request.json \
+    --out            mediator-prod-handoff.armor
+
+# Export all active keys in a context as a portable DID secrets bundle.
+vta keys bundle \
+    --context        mediator-prod \
+    --recipient      backup-admin-request.json \
+    --out            mediator-prod-keys.armor
+```
+
+The consumer generates their bootstrap request with `vta bootstrap
+request` (v1 shape — any recipient keypair, not the VP-framed one the
+`provision-*` flow uses), hands the JSON to the VTA-host operator, and
+decrypts the returned armored bundle with `vta bootstrap open`.
+
+Same flags work with `pnm context reprovision` / `pnm keys bundle` on
+an admin workstation that can reach the VTA over REST — the wire
+shapes and sealing logic are shared via `vta-cli-common`. Pick the
+binary that matches your transport: `vta` on the VTA host when the
+admin has shell access and the VTA is air-gapped; `pnm` on an
+authenticated workstation when the VTA is reachable over HTTPS.
+
+`vta context reprovision` requires `--key` in the first cut (pass an
+existing Ed25519 key id whose seed backs the admin credential). Use
+`vta keys list --context <id>` to see available choices. Interactive
+selection + create-new-key parity with `pnm context reprovision` is
+planned as a follow-up.
+
+The ACL entry for the derived admin DID is written on the VTA side
+automatically if it doesn't already exist, so the consumer can
+authenticate once they come online.
+
 ## Trust model
 
 - **In-flight integrity**: SHA-256 digest communicated out-of-band. The

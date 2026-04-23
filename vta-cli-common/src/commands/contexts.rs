@@ -11,7 +11,7 @@ use vta_sdk::prelude::*;
 use vta_sdk::sealed_transfer::SealedPayloadV1;
 
 use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
-use crate::sealed_producer::{SealedRecipient, emit_sealed_output, seal_for_recipient};
+use crate::sealed_producer::{SealedRecipient, seal_for_recipient};
 
 pub struct ProvisionDidOptions {
     pub server_id: Option<String>,
@@ -546,32 +546,8 @@ pub async fn cmd_context_provision(
         did: provisioned_did,
     };
 
-    // 6. Seal and emit
-    let payload = SealedPayloadV1::ContextProvision(Box::new(bundle));
-    let sealed = seal_for_recipient(&recipient, &payload).await?;
-
-    eprintln!();
-    eprintln!("\x1b[1;33m╔══════════════════════════════════════════════════════════════╗");
-    eprintln!("║  Context provision bundle (sealed — hand off armored output) ║");
-    eprintln!("╚══════════════════════════════════════════════════════════════╝\x1b[0m");
-    eprintln!();
-    eprintln!("  Context:   {id} ({name})");
-    if let SealedPayloadV1::ContextProvision(ref p) = payload {
-        eprintln!("  Admin DID: {}", p.admin_did);
-        if let Some(ref did) = p.did {
-            eprintln!("  DID:       {}", did.id);
-            if did.log_entry.is_some() {
-                eprintln!("             (includes log entry for self-hosting)");
-            }
-        }
-    }
-    if let Some(ref label) = recipient.label {
-        eprintln!("  Recipient: {label}");
-    }
-    eprintln!();
-
-    emit_sealed_output(&sealed);
-    Ok(())
+    // 6. Seal and emit via the shared helper
+    crate::sealed_producer::emit_context_provision_bundle(bundle, &recipient).await
 }
 
 /// Build a `CredentialBundle` from a VTA-stored key, deriving its `did:key`.
@@ -745,28 +721,6 @@ pub async fn cmd_context_reprovision(
         did: provisioned_did,
     };
 
-    // 7. Seal and emit
-    let payload = SealedPayloadV1::ContextProvision(Box::new(bundle));
-    let sealed = seal_for_recipient(&recipient, &payload).await?;
-
-    eprintln!();
-    eprintln!("\x1b[1;33m╔══════════════════════════════════════════════════════════════╗");
-    eprintln!("║  Context provision bundle (sealed — hand off armored output) ║");
-    eprintln!("╚══════════════════════════════════════════════════════════════╝\x1b[0m");
-    eprintln!();
-    eprintln!("  Context:   {} ({})", id, ctx.name);
-    if let SealedPayloadV1::ContextProvision(ref p) = payload {
-        eprintln!("  Admin DID: {}", p.admin_did);
-        if let Some(ref did) = p.did {
-            eprintln!("  DID:       {}", did.id);
-        }
-    }
-    if let Some(ref label) = recipient.label {
-        eprintln!("  Recipient: {label}");
-    }
-    eprintln!();
-
-    emit_sealed_output(&sealed);
-
-    Ok(())
+    // 7. Seal and emit via the shared helper
+    crate::sealed_producer::emit_context_provision_bundle(bundle, &recipient).await
 }
