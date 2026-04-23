@@ -17,7 +17,7 @@
 use std::fs;
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -36,13 +36,15 @@ fn secrets_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let dir = config::config_dir()?.join(SECRETS_SUBDIR);
     if !dir.exists() {
         fs::create_dir_all(&dir)?;
-        // Restrict to owner; the directory itself reveals nothing but the
-        // files inside contain raw 32-byte X25519 secrets.
-        #[cfg(unix)]
-        {
-            let mut perm = fs::metadata(&dir)?.permissions();
-            perm.set_mode(0o700);
-            fs::set_permissions(&dir, perm)?;
+        // Restrict to owner on every supported platform — the directory
+        // itself reveals nothing, but the files inside contain raw
+        // 32-byte Ed25519 seeds.
+        if let Err(e) = vta_cli_common::secure_file::restrict_dir_to_owner(&dir) {
+            eprintln!(
+                "warning: could not restrict {} to owner ({e}) — secrets may be \
+                 accessible to other local users",
+                dir.display()
+            );
         }
     }
     Ok(dir)
@@ -55,10 +57,21 @@ fn secret_path(bundle_id_hex: &str) -> Result<PathBuf, Box<dyn std::error::Error
 fn write_secret(path: &Path, secret: &[u8; 32]) -> Result<(), Box<dyn std::error::Error>> {
     let mut opts = fs::OpenOptions::new();
     opts.create(true).write(true).truncate(true);
+    // Unix: open atomically with 0600 so the file is never publicly
+    // readable between create and chmod. Windows: post-open DACL via
+    // `restrict_file_to_owner` (see `secure_file` for details).
     #[cfg(unix)]
     opts.mode(0o600);
     let mut file = opts.open(path)?;
     file.write_all(secret)?;
+    drop(file);
+    if let Err(e) = vta_cli_common::secure_file::restrict_file_to_owner(path) {
+        eprintln!(
+            "warning: could not restrict {} to owner ({e}) — secret may be readable \
+             by other local users",
+            path.display()
+        );
+    }
     Ok(())
 }
 

@@ -12,7 +12,7 @@
 use std::fs;
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use vta_sdk::credentials::CredentialBundle;
@@ -24,16 +24,18 @@ use vta_sdk::sealed_transfer::{
 const SECRETS_SUBDIR: &str = "bootstrap-secrets";
 
 /// Resolve the per-config bootstrap secrets directory, creating it on first
-/// use with 0700 permissions on Unix.
+/// use with owner-only permissions (0700 on Unix, user-only DACL on
+/// Windows via `icacls`). See [`crate::secure_file::restrict_dir_to_owner`].
 pub fn secrets_dir(config_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let dir = config_dir.join(SECRETS_SUBDIR);
     if !dir.exists() {
         fs::create_dir_all(&dir)?;
-        #[cfg(unix)]
-        {
-            let mut perm = fs::metadata(&dir)?.permissions();
-            perm.set_mode(0o700);
-            fs::set_permissions(&dir, perm)?;
+        if let Err(e) = crate::secure_file::restrict_dir_to_owner(&dir) {
+            eprintln!(
+                "warning: could not restrict {} to owner ({e}) — contents may be \
+                 accessible to other local users",
+                dir.display()
+            );
         }
     }
     Ok(dir)
@@ -49,10 +51,23 @@ fn secret_path(
 fn write_secret(path: &Path, secret: &[u8; 32]) -> Result<(), Box<dyn std::error::Error>> {
     let mut opts = fs::OpenOptions::new();
     opts.create(true).write(true).truncate(true);
+    // Unix: open with 0600 atomically so the file is never publicly
+    // readable between create and chmod. Windows: we can't set a DACL
+    // at open time via `OpenOptions`, so the file briefly exists with
+    // the directory's inherited ACL (already owner-only courtesy of
+    // `secrets_dir`). Post-open we tighten via `restrict_file_to_owner`.
     #[cfg(unix)]
     opts.mode(0o600);
     let mut file = opts.open(path)?;
     file.write_all(secret)?;
+    drop(file);
+    if let Err(e) = crate::secure_file::restrict_file_to_owner(path) {
+        eprintln!(
+            "warning: could not restrict {} to owner ({e}) — secret may be readable by \
+             other local users",
+            path.display()
+        );
+    }
     Ok(())
 }
 
