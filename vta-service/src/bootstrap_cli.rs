@@ -304,15 +304,7 @@ fn print_opened(opened: &vta_cli_common::sealed_consumer::OpenedArmored) {
     }
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    const T: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(T[(b >> 4) as usize] as char);
-        s.push(T[(b & 0xf) as usize] as char);
-    }
-    s
-}
+use vta_sdk::hex::lower as hex_lower;
 
 /// `vta bootstrap provision-integration` — offline provisioning from
 /// the VTA host.

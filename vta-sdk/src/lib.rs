@@ -1,4 +1,5 @@
 pub mod error;
+pub mod hex;
 
 #[cfg(feature = "attest-verify")]
 pub mod attestation;

@@ -1681,8 +1681,18 @@ pub async fn apply_inputs(inputs: WizardInputs) -> Result<(), Box<dyn std::error
         eprintln!("  Admin:    {admin} (sealed)");
     } else {
         eprintln!();
-        eprintln!("  ACL is empty. Seed the first admin with:");
-        eprintln!("    vta bootstrap-admin --did <did:...> [--label <name>]");
+        eprintln!("  ACL is empty. Seed the first admin:");
+        eprintln!();
+        eprintln!("    Option A (recommended, reversible) — grant admin access to an");
+        eprintln!("    existing DID without sealing the VTA. Lets you add more admins");
+        eprintln!("    later and re-run offline CLI commands:");
+        eprintln!("      vta import-did --did <did:...> --role admin [--label <name>]");
+        eprintln!();
+        eprintln!("    Option B (one-time, seals the VTA) — for immutable-image");
+        eprintln!("    deployments that should refuse any further offline CLI writes");
+        eprintln!("    after first admin. Disables `acl`, `keys`, `import-did`,");
+        eprintln!("    `export-admin` until you run `vta unseal`:");
+        eprintln!("      vta bootstrap-admin --did <did:...> [--label <name>]");
     }
     eprintln!();
     eprintln!("  Mnemonic was generated and stored in the configured backend.");

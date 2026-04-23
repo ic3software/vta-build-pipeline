@@ -463,6 +463,14 @@ pub async fn provision_integration(
         });
     }
 
+    // Snapshot counts before the payload is moved into the seal. The
+    // summary at the bottom of this fn (`secret_count`, `output_count`)
+    // must reflect what is actually in the bundle — hard-coding "1 or 2"
+    // based on `admin_rolled_over` silently lies when a future template
+    // mints pre-rotation keys or emits multiple side outputs.
+    let secret_count = secrets.len();
+    let output_count = outputs.len();
+
     let payload = TemplateBootstrapPayload {
         authorization: vc_value,
         secrets,
@@ -504,8 +512,6 @@ pub async fn provision_integration(
 
     let admin_rolled_over = admin_template_ref.is_some();
     let admin_template_name = admin_template_ref.as_ref().map(|r| r.name.clone());
-    let secret_count = if admin_rolled_over { 2 } else { 1 };
-    let output_count = count_outputs_in_payload(&bundle);
 
     info!(
         client_did = %client_did,
@@ -1038,22 +1044,7 @@ fn build_did_signed_assertion(
     })
 }
 
-fn count_outputs_in_payload(bundle: &vta_sdk::sealed_transfer::SealedBundle) -> usize {
-    // Same rationale as count_secrets_in_payload — phase 1 emits 1
-    // `WebvhLog` output per provisioning.
-    let _ = bundle;
-    1
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const T: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(T[(b >> 4) as usize] as char);
-        s.push(T[(b & 0xf) as usize] as char);
-    }
-    s
-}
+use vta_sdk::hex::lower as hex_lower;
 
 #[cfg(test)]
 mod tests {
@@ -1126,11 +1117,6 @@ mod tests {
     #[test]
     fn assertion_mode_default_is_did_signed() {
         assert_eq!(AssertionMode::default(), AssertionMode::DidSigned);
-    }
-
-    #[test]
-    fn hex_lower_formats_bytes() {
-        assert_eq!(hex_lower(&[0x0a, 0xff, 0x00]), "0aff00");
     }
 
     // ── resolve_webvh_server ────────────────────────────────────────

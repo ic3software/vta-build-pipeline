@@ -70,15 +70,7 @@ fn read_secret(path: &Path) -> Result<[u8; 32], Box<dyn std::error::Error>> {
         .map_err(|_| format!("secret file {} is not 32 bytes", path.display()).into())
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    const T: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(T[(b >> 4) as usize] as char);
-        s.push(T[(b & 0xf) as usize] as char);
-    }
-    s
-}
+use vta_sdk::hex::lower as hex_lower;
 
 /// `pnm bootstrap request --out <PATH> [--label <NAME>]`
 pub async fn run_request(

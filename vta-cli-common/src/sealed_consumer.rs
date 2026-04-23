@@ -251,15 +251,7 @@ pub fn extract_admin_credential(
     }
 }
 
-pub fn hex_lower(bytes: &[u8]) -> String {
-    const T: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(T[(b >> 4) as usize] as char);
-        s.push(T[(b & 0xf) as usize] as char);
-    }
-    s
-}
+pub use vta_sdk::hex::lower as hex_lower;
 
 #[cfg(test)]
 mod tests {
