@@ -957,11 +957,7 @@ async fn load_vta_signing_secret(
     // satisfy the `get_key_secret` authz check, which is parameterized
     // on the key's `context_id` — keys at `{vta_did}#key-0` have no
     // context, so super-admin is required.
-    let internal_auth = AuthClaims {
-        did: "vta:provision-integration".into(),
-        role: Role::Admin,
-        allowed_contexts: Vec::new(),
-    };
+    let internal_auth = AuthClaims::local_cli("provision-integration-internal");
     let resp = super::keys::get_key_secret(
         &state.keys_ks,
         &state.imported_ks,

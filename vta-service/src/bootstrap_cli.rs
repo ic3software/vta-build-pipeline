@@ -418,7 +418,6 @@ pub async fn run_provision_integration(
     vc_validity_hours: Option<f64>,
     out_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::acl::Role;
     use crate::auth::AuthClaims;
     use crate::operations::provision_integration::{
         AssertionMode, ProvisionIntegrationParams, provision_integration,
@@ -465,11 +464,7 @@ pub async fn run_provision_integration(
     //    access to the keyspace; there is no over-the-wire authn to
     //    delegate through. Production-grade gating happens on the HTTP
     //    endpoint (step 4) which extracts a real session-backed claim.
-    let auth = AuthClaims {
-        did: "vta:cli:provision-integration".into(),
-        role: Role::Admin,
-        allowed_contexts: Vec::new(),
-    };
+    let auth = AuthClaims::local_cli("provision-integration");
 
     // 5. Call the shared library fn.
     let vc_validity = vc_validity_hours.map(|hrs| {
@@ -618,7 +613,6 @@ pub async fn run_keys_bundle(
     recipient_nonce: Option<String>,
     out: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::acl::Role;
     use crate::auth::AuthClaims;
     use crate::operations::export::{ExportDeps, build_did_secrets_bundle};
     use crate::server::build_app_state;
@@ -646,11 +640,7 @@ pub async fn run_keys_bundle(
     .await
     .map_err(|e| format!("build app state: {e}"))?;
 
-    let auth = AuthClaims {
-        did: "vta:cli:keys-bundle".into(),
-        role: Role::Admin,
-        allowed_contexts: Vec::new(),
-    };
+    let auth = AuthClaims::local_cli("keys-bundle");
 
     let deps = ExportDeps {
         keys_ks: &state.keys_ks,
@@ -731,11 +721,7 @@ pub async fn run_context_reprovision(
     .await
     .map_err(|e| format!("build app state: {e}"))?;
 
-    let auth = AuthClaims {
-        did: "vta:cli:context-reprovision".into(),
-        role: Role::Admin,
-        allowed_contexts: Vec::new(),
-    };
+    let auth = AuthClaims::local_cli("context-reprovision");
 
     // Resolve the admin key: reuse an existing keystore entry when
     // `--admin-key` was passed, otherwise mint a fresh one scoped to

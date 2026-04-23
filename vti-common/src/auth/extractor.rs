@@ -79,6 +79,37 @@ impl<S: AuthState> FromRequestParts<S> for AuthClaims {
 }
 
 impl AuthClaims {
+    /// Synthesize a super-admin claim for an **on-host offline CLI**
+    /// invocation.
+    ///
+    /// The trust boundary here is filesystem-level: a process that can
+    /// execute the VTA binary AND read the keystore + seed store is
+    /// already trusted by the OS to act as the VTA itself. Offline
+    /// CLIs that mutate state (mint keys, seal bundles, export
+    /// admin credentials) pre-date any over-the-wire authentication,
+    /// so wire-level claims can't gate them. What the trust boundary
+    /// **does** demand is an audit trail — every synthesis records
+    /// the caller-supplied `channel` in the audit log so compromise
+    /// or misuse can be traced back to the specific CLI path.
+    ///
+    /// Downstream hardening (tracked as review item 9 follow-up):
+    /// - Require an operator-side credential (env var / local config
+    ///   pointing at a key in the ACL) before synthesizing.
+    /// - Audit-log process identity (`uid`, `pid`, `cwd`) alongside
+    ///   `channel` so a forensic investigator can distinguish
+    ///   operator-intentional runs from lateral-movement abuse.
+    ///
+    /// The sentinel DID format `"cli:<channel>"` (not `did:*`) is
+    /// deliberate — it doesn't round-trip through DID resolution and
+    /// can't be confused with a real caller DID in log correlation.
+    pub fn local_cli(channel: &str) -> Self {
+        Self {
+            did: format!("cli:{channel}"),
+            role: Role::Admin,
+            allowed_contexts: Vec::new(),
+        }
+    }
+
     /// Returns `true` if the caller is an admin with unrestricted access
     /// (empty `allowed_contexts`).
     pub fn is_super_admin(&self) -> bool {
@@ -267,5 +298,52 @@ impl<S: AuthState> FromRequestParts<S> for WriteAuth {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_cli_synthesizes_super_admin_with_channel_sentinel() {
+        let claims = AuthClaims::local_cli("provision-integration");
+        assert_eq!(claims.did, "cli:provision-integration");
+        assert_eq!(claims.role, Role::Admin);
+        assert!(claims.allowed_contexts.is_empty());
+        assert!(claims.is_super_admin());
+    }
+
+    #[test]
+    fn local_cli_grants_any_context_access() {
+        let claims = AuthClaims::local_cli("keys-bundle");
+        // Super-admin has access to every context — enforced elsewhere
+        // but assert it explicitly here so a future refactor that
+        // breaks the invariant gets caught.
+        assert!(claims.has_context_access("any-context"));
+        assert!(claims.has_context_access("another"));
+        claims
+            .require_context("prod-mediator")
+            .expect("super-admin passes require_context");
+    }
+
+    #[test]
+    fn local_cli_did_sentinel_cannot_be_confused_with_real_did() {
+        // The `cli:<channel>` format must not round-trip as a
+        // `did:*` URI — otherwise audit-log correlation would muddle
+        // CLI-synthesized claims with real caller identities.
+        let claims = AuthClaims::local_cli("context-reprovision");
+        assert!(!claims.did.starts_with("did:"));
+        assert!(claims.did.starts_with("cli:"));
+    }
+
+    #[test]
+    fn local_cli_channel_embedded_in_did() {
+        // Audit-log grep'ability: each synthesis records its `channel`
+        // distinctly so forensic investigation can attribute CLI
+        // actions to the specific code path that ran them.
+        let a = AuthClaims::local_cli("provision-integration");
+        let b = AuthClaims::local_cli("keys-bundle");
+        assert_ne!(a.did, b.did);
     }
 }
