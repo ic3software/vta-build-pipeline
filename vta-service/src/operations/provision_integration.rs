@@ -16,11 +16,12 @@
 //! 4. Register the holder (`client_did`) as admin of the target context
 //!    via [`super::acl::create_acl`].
 //! 5. Build + sign a [`VtaAuthorizationCredential`] using the VTA's
-//!    existing `{vta_did}#key-0` signing key.
+//!    `{vta_did}#key-0` signing key (see [`load_vta_vc_issuance_secret`]).
 //! 6. Assemble the [`TemplateBootstrapPayload`] and seal it to the
 //!    holder's X25519 (derived from `client_did`) via
 //!    `sealed_transfer::seal_payload`. Producer assertion is
-//!    `DidSigned` by `vta_did` unless the caller overrides to
+//!    `DidSigned` by `{vta_did}#sealed-transfer-0` (a purpose-specific
+//!    key, distinct from `#key-0`) unless the caller overrides to
 //!    `PinnedOnly` via [`AssertionMode`] (dev-only escape hatch).
 //! 7. Armor and return, plus a summary for the CLI/HTTP response.
 //!
@@ -69,8 +70,9 @@ use vta_sdk::sealed_transfer::{
 /// constructed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AssertionMode {
-    /// Sign the producer assertion with the VTA's `{vta_did}#key-0`
-    /// signing key. Default for production.
+    /// Sign the producer assertion with the VTA's purpose-specific
+    /// `{vta_did}#sealed-transfer-0` key. Default for production.
+    /// See [`load_vta_sealed_transfer_secret`].
     #[default]
     DidSigned,
     /// No in-band signature — consumer relies purely on the out-of-band
@@ -310,6 +312,9 @@ pub async fn provision_integration(
             template: Some(template_name.clone()),
             template_context: None,
             template_vars: template_vars_hashmap,
+            // provision-integration always creates an integration DID,
+            // never the VTA's own identity.
+            is_vta_identity: false,
         },
         state
             .did_resolver
@@ -460,8 +465,12 @@ pub async fn provision_integration(
         vc_params = vc_params.with_validity(validity);
     }
 
-    let issuer_secret = load_vta_signing_secret(state, &vta_did).await?;
-    let vc = issue_vta_authorization_credential(&issuer_secret, vc_params)
+    // Split key-use: `#key-0` issues the VC's Data-Integrity proof;
+    // `#sealed-transfer-0` signs the sealed-transfer producer assertion
+    // below. Keeping them disjoint means a leak of one doesn't void the
+    // other and each can rotate independently.
+    let vc_issuer_secret = load_vta_vc_issuance_secret(state, &vta_did).await?;
+    let vc = issue_vta_authorization_credential(&vc_issuer_secret, vc_params)
         .await
         .map_err(|e| AppError::Internal(format!("issue VTA authorization VC: {e}")))?;
     let vc_value =
@@ -505,7 +514,8 @@ pub async fn provision_integration(
     // ── 8. Seal ─────────────────────────────────────────────────────
     let producer_assertion = match assertion_mode {
         AssertionMode::DidSigned => {
-            build_did_signed_assertion(&issuer_secret, &client_x25519_pub, bundle_id)?
+            let sealed_transfer_secret = load_vta_sealed_transfer_secret(state, &vta_did).await?;
+            build_did_signed_assertion(&sealed_transfer_secret, &client_x25519_pub, bundle_id)?
         }
         AssertionMode::PinnedOnly => ProducerAssertion {
             producer_did: vta_did.clone(),
@@ -940,23 +950,21 @@ async fn resolve_template_kind(
     Err(AppError::NotFound(format!("template '{name}' not found")))
 }
 
-/// Load the VTA's Ed25519 signing key (`{vta_did}#key-0`) as a
-/// `Secret`, ready for Data Integrity signing of the VC and the
-/// producer assertion. Relies on the keys_ks + seed_store to derive the
-/// private bytes the same way the runtime auth path does.
-async fn load_vta_signing_secret(
+/// Load one of the VTA's Ed25519 keys as a `Secret` suitable for
+/// signing. Used to fetch both the VC-issuance key (`#key-0`, see
+/// [`load_vta_vc_issuance_secret`]) and the sealed-transfer
+/// producer-assertion key (`#sealed-transfer-0`, see
+/// [`load_vta_sealed_transfer_secret`]).
+///
+/// Internal-use: synthesises a super-admin `AuthClaims` to satisfy the
+/// `get_key_secret` authz check. The real caller was already authorised
+/// as a context admin at precondition time — loading the VTA's own
+/// signing material here is a server-internal step, not an action
+/// attributable to the user caller.
+async fn load_vta_key_as_secret(
     state: &ProvisionIntegrationDeps,
-    vta_did: &str,
+    key_id: String,
 ) -> Result<Secret, AppError> {
-    let key_id = format!("{vta_did}#key-0");
-    // Internal-use synthesis of a super-admin AuthClaims. The caller of
-    // `provision_integration` was already authorized as context admin
-    // at precondition time; loading the VTA's own signing key here is a
-    // server-internal operation, not an action attributable to the
-    // user caller. We synthesize a local super-admin claim only to
-    // satisfy the `get_key_secret` authz check, which is parameterized
-    // on the key's `context_id` — keys at `{vta_did}#key-0` have no
-    // context, so super-admin is required.
     let internal_auth = AuthClaims::local_cli("provision-integration-internal");
     let resp = super::keys::get_key_secret(
         &state.keys_ks,
@@ -969,11 +977,41 @@ async fn load_vta_signing_secret(
     )
     .await?;
     let _seed: [u8; 32] = decode_private_key_multibase(&resp.private_key_multibase)
-        .map_err(|e| AppError::Internal(format!("decode VTA signing secret: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("decode VTA key secret for {key_id}: {e}")))?;
     let mut secret = Secret::from_multibase(&resp.private_key_multibase, None)
-        .map_err(|e| AppError::Internal(format!("construct Secret from VTA signing key: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("construct Secret for {key_id}: {e}")))?;
     secret.id = key_id;
     Ok(secret)
+}
+
+/// Load `{vta_did}#key-0` for issuing the VtaAuthorization VC's
+/// Data-Integrity proof.
+async fn load_vta_vc_issuance_secret(
+    state: &ProvisionIntegrationDeps,
+    vta_did: &str,
+) -> Result<Secret, AppError> {
+    load_vta_key_as_secret(state, format!("{vta_did}#key-0")).await
+}
+
+/// Load `{vta_did}#sealed-transfer-0` for signing the sealed-transfer
+/// producer assertion. The key is minted at VTA DID creation
+/// (see `operations::did_webvh::create_did_webvh` + `is_vta_identity`).
+/// A VTA missing this key is mis-provisioned — surface the error rather
+/// than silently falling back to `#key-0`, which would hide the defect
+/// and re-introduce the key-reuse we split out.
+async fn load_vta_sealed_transfer_secret(
+    state: &ProvisionIntegrationDeps,
+    vta_did: &str,
+) -> Result<Secret, AppError> {
+    load_vta_key_as_secret(state, format!("{vta_did}#sealed-transfer-0"))
+        .await
+        .map_err(|e| match e {
+            AppError::NotFound(_) => AppError::Internal(format!(
+                "VTA missing '{vta_did}#sealed-transfer-0' — re-bootstrap required (this VTA was \
+                 provisioned before key-use split, see review item 12)"
+            )),
+            other => other,
+        })
 }
 
 /// Assemble the trust bundle shipped alongside every provisioning
@@ -1008,14 +1046,18 @@ async fn load_vta_trust_bundle(
     })
 }
 
-/// Sign the sealed-transfer producer assertion with the VTA's Ed25519
-/// signing key (`{vta_did}#key-0`).
+/// Sign the sealed-transfer producer assertion with the VTA's
+/// purpose-specific Ed25519 key (`{vta_did}#sealed-transfer-0`).
 ///
 /// Signed target: domain-tagged `client_x25519_pub || bundle_id`. The
-/// domain tag (`"vta-sealed-transfer/v1\0"`) ensures the signature
-/// cannot be replayed into any other signing context `vta_did`'s key
-/// is used for (VC issuance, DIDComm, etc.) — structural disjointness
-/// per CLAUDE.md's key-reuse note.
+/// domain tag (`"vta-sealed-transfer/v1\0"`) alone already prevents
+/// signature replay into other signing contexts; separating this key
+/// from `#key-0` adds defence-in-depth:
+///   - a leak of one key doesn't void the other (VC issuance vs
+///     producer assertion), and
+///   - each can rotate independently (e.g. VC issuance eventually
+///     moves to an HSM while sealed-transfer stays local for
+///     throughput).
 fn build_did_signed_assertion(
     vta_signing_secret: &Secret,
     client_x25519_pub: &[u8; 32],
@@ -1510,7 +1552,7 @@ mod tests {
 
         // Derive a fresh Ed25519 key at a canonical VTA path, convert to
         // did:key, save a keystore record whose id matches the
-        // `{vta_did}#key-0` convention `load_vta_signing_secret` looks up.
+        // `{vta_did}#key-0` convention `load_vta_vc_issuance_secret` looks up.
         let vta_base_path = "m/26'/1'/0'";
         let root = ExtendedSigningKey::from_seed(&raw_seed).expect("bip-32 root");
         let dp: DerivationPath = vta_base_path.parse().expect("derivation path");
@@ -1533,6 +1575,29 @@ mod tests {
         )
         .await
         .expect("save VTA key record");
+
+        // Mirror the real VTA bootstrap: provision `#sealed-transfer-0`
+        // (separate from `#key-0`) so `provision_integration` can sign
+        // the producer assertion without hitting the "re-bootstrap
+        // required" guard in `load_vta_sealed_transfer_secret`.
+        let st_base_path = "m/26'/1'/1'";
+        let st_dp: DerivationPath = st_base_path.parse().expect("st derivation path");
+        let st_derived = root.derive(&st_dp).expect("derive VTA sealed-transfer key");
+        let st_signing = ed25519_dalek::SigningKey::from_bytes(st_derived.signing_key.as_bytes());
+        let st_pub_bytes = st_signing.verifying_key().to_bytes();
+        let st_multibase = ed25519_multibase_pubkey(&st_pub_bytes);
+        save_key_record(
+            &ts.keys_ks,
+            &format!("{vta_did}#sealed-transfer-0"),
+            st_base_path,
+            SdkKeyType::Ed25519,
+            &st_multibase,
+            "VTA sealed-transfer producer-assertion key",
+            None,
+            Some(0),
+        )
+        .await
+        .expect("save VTA sealed-transfer key record");
 
         let mut config = test_app_config(ts.data_dir.clone());
         config.vta_did = Some(vta_did.clone());

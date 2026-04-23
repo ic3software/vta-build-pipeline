@@ -761,6 +761,7 @@ async fn build_wizard_did(
     add_mediator_service: bool,
     template: Option<String>,
     template_vars: std::collections::HashMap<String, serde_json::Value>,
+    is_vta_identity: bool,
     keys_ks: &KeyspaceHandle,
     imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
@@ -884,6 +885,7 @@ async fn build_wizard_did(
         template,
         template_context: None,
         template_vars,
+        is_vta_identity,
     };
 
     let result = operations::did_webvh::create_did_webvh(
@@ -988,6 +990,7 @@ async fn create_vta_did(
                 add_mediator,
                 None,
                 std::collections::HashMap::new(),
+                true, // is_vta_identity — mint `#sealed-transfer-0` alongside `#key-0`
                 keys_ks,
                 imported_ks,
                 contexts_ks,
@@ -1097,6 +1100,7 @@ async fn configure_messaging(
                 false,
                 Some("didcomm-mediator".into()),
                 template_vars,
+                false, // mediator DID, not the VTA's own identity
                 keys_ks,
                 imported_ks,
                 contexts_ks,
@@ -1544,6 +1548,7 @@ pub async fn apply_inputs(inputs: WizardInputs) -> Result<(), Box<dyn std::error
                 /* add_mediator_service */ false,
                 /* template */ Some("didcomm-mediator".into()),
                 template_vars,
+                /* is_vta_identity */ false,
                 &keys_ks,
                 &imported_ks,
                 &contexts_ks,
@@ -1594,6 +1599,7 @@ pub async fn apply_inputs(inputs: WizardInputs) -> Result<(), Box<dyn std::error
                 /* add_mediator_service */ messaging.is_some(),
                 /* template */ None,
                 HashMap::new(),
+                /* is_vta_identity */ true,
                 &keys_ks,
                 &imported_ks,
                 &contexts_ks,
@@ -1896,6 +1902,7 @@ async fn create_simple_webvh_did(
     add_mediator_service: bool,
     template: Option<String>,
     template_vars: HashMap<String, serde_json::Value>,
+    is_vta_identity: bool,
     keys_ks: &KeyspaceHandle,
     imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
@@ -1935,6 +1942,7 @@ async fn create_simple_webvh_did(
         template,
         template_context: None,
         template_vars,
+        is_vta_identity,
     };
 
     let result = operations::did_webvh::create_did_webvh(

@@ -162,6 +162,10 @@ pub async fn run_create_did_webvh(
         template: None,
         template_context: None,
         template_vars: std::collections::HashMap::new(),
+        // `vta create-did-webvh` is the runtime integration-DID CLI — not
+        // used to mint the VTA's own identity (that's setup wizard /
+        // setup --from / TEE autogen).
+        is_vta_identity: false,
     };
 
     let result = operations::did_webvh::create_did_webvh(

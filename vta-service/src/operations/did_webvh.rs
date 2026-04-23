@@ -123,6 +123,14 @@ pub struct CreateDidWebvhParams {
     /// `SIGNING_KEY_MB`, `KA_KEY_MB`, `VTA_DID`, `VTA_URL`, `CONTEXT_ID`,
     /// `CONTEXT_DID`, `NOW` automatically.
     pub template_vars: std::collections::HashMap<String, serde_json::Value>,
+    /// When `true`, this DID *is* the VTA's own identity — mint a third
+    /// key (`{did}#sealed-transfer-0`) and add it to the DID document.
+    /// The operator uses this key only to sign sealed-transfer producer
+    /// assertions, keeping it disjoint from `#key-0` (VC issuance) so
+    /// the two can rotate / leak independently. Ignored when
+    /// `did_document` is caller-supplied or `did_log` is pre-signed —
+    /// templates that need the key must declare it themselves.
+    pub is_vta_identity: bool,
 }
 
 impl From<CreateDidWebvhBody> for CreateDidWebvhParams {
@@ -145,6 +153,11 @@ impl From<CreateDidWebvhBody> for CreateDidWebvhParams {
             template: body.template,
             template_context: body.template_context,
             template_vars: body.template_vars.unwrap_or_default(),
+            // Wire callers never mint the VTA's own identity — that happens
+            // only during first-boot setup (setup wizard / TEE autogen /
+            // non-interactive --from). An admin hitting create-did-webvh at
+            // runtime is always creating an integration DID.
+            is_vta_identity: false,
         }
     }
 }
@@ -500,6 +513,37 @@ pub async fn create_did_webvh(
         (derived, Some(active_seed_id))
     };
 
+    // ── VTA identity: derive the `#sealed-transfer-0` key ──────────
+    //
+    // Minting this key here (before the DID doc is built) means it can
+    // be embedded as a verificationMethod from the start — no DID doc
+    // rev needed later. Only applies to the VTA's own identity; every
+    // other webvh DID (integrations, mediators) doesn't need it.
+    let sealed_transfer = if params.is_vta_identity && !user_specified_keys {
+        let seed_for_st = if let Some(sid) = active_seed_id {
+            load_seed_bytes(keys_ks, seed_store, Some(sid))
+                .await
+                .map_err(|e| AppError::Internal(format!("{e}")))?
+        } else {
+            return Err(AppError::Internal(
+                "is_vta_identity set but no active seed — VTA identity requires seed-derived keys"
+                    .into(),
+            ));
+        };
+        Some(
+            keys::derive_sealed_transfer_key(
+                &seed_for_st,
+                &ctx.base_path,
+                &format!("{label} sealed-transfer producer-assertion key"),
+                keys_ks,
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("{e}")))?,
+        )
+    } else {
+        None
+    };
+
     // Resolve URL: serverless uses user-provided URL, server-managed requests from server
     let (url_str, mnemonic) = if serverless {
         let url_str = params.url.as_ref().unwrap().clone();
@@ -585,6 +629,13 @@ pub async fn create_did_webvh(
                 &params.additional_services,
             )
         }
+        None if sealed_transfer.is_some() => build_vta_did_document_with_sealed_transfer(
+            &derived,
+            sealed_transfer.as_ref().unwrap(),
+            config,
+            params.add_mediator_service,
+            &params.additional_services,
+        ),
         None => build_did_document(
             &derived,
             config,
@@ -677,6 +728,21 @@ pub async fn create_did_webvh(
         )
         .await
         .map_err(|e| AppError::Internal(format!("{e}")))?;
+
+        // Persist `#sealed-transfer-0` alongside `#key-0`/`#key-1`. Only
+        // populated when this DID is the VTA's own identity (see the
+        // derivation block above).
+        if let Some(ref st) = sealed_transfer {
+            keys::save_sealed_transfer_key_record(
+                &final_did,
+                st,
+                keys_ks,
+                Some(&params.context_id),
+                active_seed_id,
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("{e}")))?;
+        }
     } else {
         // User-specified: save key records referencing the user's keys
         keys::save_key_record(
@@ -1180,6 +1246,29 @@ pub fn build_did_document(
 ) -> serde_json::Value {
     build_did_document_inner(
         derived,
+        None,
+        config,
+        true,
+        add_mediator_service,
+        additional_services,
+    )
+}
+
+/// Build a DID document for the VTA's own DID, which additionally
+/// exposes `#sealed-transfer-0` as a distinct verification method.
+///
+/// Use this only when minting the VTA's own did:webvh — template-
+/// provisioned integration DIDs should use [`build_did_document`].
+pub fn build_vta_did_document_with_sealed_transfer(
+    derived: &keys::DerivedEntityKeys,
+    sealed_transfer: &keys::DerivedSealedTransferKey,
+    config: &AppConfig,
+    add_mediator_service: bool,
+    additional_services: &Option<Vec<serde_json::Value>>,
+) -> serde_json::Value {
+    build_did_document_inner(
+        derived,
+        Some(sealed_transfer),
         config,
         true,
         add_mediator_service,
@@ -1197,6 +1286,7 @@ pub(crate) fn build_did_document_with_options(
 ) -> serde_json::Value {
     build_did_document_inner(
         derived,
+        None,
         config,
         include_ka,
         add_mediator_service,
@@ -1206,6 +1296,7 @@ pub(crate) fn build_did_document_with_options(
 
 fn build_did_document_inner(
     derived: &keys::DerivedEntityKeys,
+    sealed_transfer: Option<&keys::DerivedSealedTransferKey>,
     config: &AppConfig,
     include_ka: bool,
     add_mediator_service: bool,
@@ -1218,14 +1309,15 @@ fn build_did_document_inner(
         "publicKeyMultibase": &derived.signing_pub
     })];
 
+    let mut assertion_method = vec![json!("{DID}#key-0")];
+
     let mut did_document = json!({
         "@context": [
             "https://www.w3.org/ns/did/v1",
             "https://www.w3.org/ns/cid/v1"
         ],
         "id": "{DID}",
-        "authentication": ["{DID}#key-0"],
-        "assertionMethod": ["{DID}#key-0"]
+        "authentication": ["{DID}#key-0"]
     });
 
     if include_ka {
@@ -1238,6 +1330,20 @@ fn build_did_document_inner(
         did_document["keyAgreement"] = json!(["{DID}#key-1"]);
     }
 
+    if let Some(st) = sealed_transfer {
+        vm.push(json!({
+            "id": "{DID}#sealed-transfer-0",
+            "type": "Multikey",
+            "controller": "{DID}",
+            "publicKeyMultibase": &st.public_key
+        }));
+        // Sealed-transfer signatures are assertion-flavoured (the VTA
+        // asserting "I produced this bundle"), so the key appears in
+        // assertionMethod alongside `#key-0`.
+        assertion_method.push(json!("{DID}#sealed-transfer-0"));
+    }
+
+    did_document["assertionMethod"] = json!(assertion_method);
     did_document["verificationMethod"] = json!(vm);
 
     // Optionally add mediator DIDComm service

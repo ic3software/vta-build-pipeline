@@ -98,6 +98,20 @@ pub async fn maybe_generate_vta_did(
     .await
     .map_err(|e| AppError::Internal(format!("{e}")))?;
 
+    // Derive the VTA's third key — `{vta_did}#sealed-transfer-0` — used
+    // only for sealed-transfer producer assertions. Kept separate from
+    // `#key-0` (VC issuance) so a compromise of one doesn't void the
+    // other and each can rotate independently. See
+    // `operations::provision_integration::build_did_signed_assertion`.
+    let sealed_transfer = keys::derive_sealed_transfer_key(
+        &seed,
+        &ctx.base_path,
+        "VTA sealed-transfer producer-assertion key",
+        &keys_ks,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("{e}")))?;
+
     // Convert signing key ID to did:key format (required by didwebvh-rs)
     let signing_pub_mb = derived
         .signing_secret
@@ -111,7 +125,7 @@ pub async fn maybe_generate_vta_did(
     let url_str = template_to_url(template)?;
 
     // Build DID document (inline — avoids dependency on webvh feature-gated modules)
-    let did_document = build_vta_did_document(&derived, config);
+    let did_document = build_vta_did_document(&derived, &sealed_transfer, config);
 
     // Generate pre-rotation keys (default: 1)
     let (next_key_hashes, pre_rotation_keys) =
@@ -164,6 +178,17 @@ pub async fn maybe_generate_vta_did(
     keys::save_entity_key_records(
         &final_did,
         &derived,
+        &keys_ks,
+        Some("vta"),
+        Some(active_seed_id),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("{e}")))?;
+
+    // Save the sealed-transfer key at `{vta_did}#sealed-transfer-0`.
+    keys::save_sealed_transfer_key_record(
+        &final_did,
+        &sealed_transfer,
         &keys_ks,
         Some("vta"),
         Some(active_seed_id),
@@ -231,6 +256,7 @@ pub async fn maybe_generate_vta_did(
 /// Self-contained to avoid depending on webvh feature-gated modules.
 fn build_vta_did_document(
     derived: &keys::DerivedEntityKeys,
+    sealed_transfer: &keys::DerivedSealedTransferKey,
     config: &AppConfig,
 ) -> serde_json::Value {
     let mut did_document = json!({
@@ -251,10 +277,20 @@ fn build_vta_did_document(
                 "type": "Multikey",
                 "controller": "{DID}",
                 "publicKeyMultibase": &derived.ka_pub
+            },
+            {
+                "id": "{DID}#sealed-transfer-0",
+                "type": "Multikey",
+                "controller": "{DID}",
+                "publicKeyMultibase": &sealed_transfer.public_key
             }
         ],
         "authentication": ["{DID}#key-0"],
-        "assertionMethod": ["{DID}#key-0"],
+        // `#key-0` issues VC Data-Integrity proofs; `#sealed-transfer-0`
+        // signs the sealed-transfer producer assertion. Both are
+        // assertion-flavoured but keyed separately — see
+        // `operations::provision_integration::build_did_signed_assertion`.
+        "assertionMethod": ["{DID}#key-0", "{DID}#sealed-transfer-0"],
         "keyAgreement": ["{DID}#key-1"]
     });
 
