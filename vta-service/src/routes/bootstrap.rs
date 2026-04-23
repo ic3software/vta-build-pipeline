@@ -109,7 +109,15 @@ pub async fn request(
         let digest = bundle_digest(&bundle);
         let armored = armor::encode(&bundle);
 
-        info!(client_label = ?req.label, "TEE first-boot bootstrap completed");
+        // Log a SHA-256 prefix of the operator-supplied label rather than
+        // the raw string. Labels are free-form and often carry PII
+        // ("glenn's iphone", "alice@example.com") — a hash preserves
+        // "same label → same identifier" for operational correlation
+        // without leaking the plaintext into log aggregators.
+        info!(
+            client_label_hash = %label_hash_prefix(req.label.as_deref()),
+            "TEE first-boot bootstrap completed"
+        );
         audit!(
             "bootstrap.swap",
             actor = "bootstrap-endpoint",
@@ -271,6 +279,30 @@ fn decode_client_did(did: &str) -> Result<[u8; 32], AppError> {
         .map_err(|e| AppError::Validation(format!("invalid client_did: {e}")))
 }
 
+/// SHA-256 the operator-supplied label, return the first 16 hex chars
+/// (64 bits — enough to tell distinct labels apart in practice). When
+/// no label is supplied, return `"none"` so the log field is always
+/// populated.
+///
+/// The point is to keep free-form strings (potentially carrying PII
+/// like "alice@example.com" or a device name) out of the log
+/// aggregator while preserving "same label → same hash" for operator
+/// correlation across requests.
+#[cfg(feature = "tee")]
+fn label_hash_prefix(label: Option<&str>) -> String {
+    match label {
+        Some(s) => {
+            let digest = Sha256::digest(s.as_bytes());
+            let mut hex = String::with_capacity(16);
+            for b in &digest[..8] {
+                hex.push_str(&format!("{b:02x}"));
+            }
+            hex
+        }
+        None => "none".to_string(),
+    }
+}
+
 #[cfg(feature = "tee")]
 fn decode_nonce(s: &str) -> Result<[u8; 16], AppError> {
     let raw = B64URL
@@ -293,6 +325,48 @@ fn decode_nonce(_s: &str) -> Result<[u8; 16], AppError> {
 impl IntoResponse for BootstrapResponseBody {
     fn into_response(self) -> axum::response::Response {
         Json(self).into_response()
+    }
+}
+
+#[cfg(all(test, feature = "tee"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_hash_prefix_is_stable_and_truncated() {
+        // Same label → same hash. Different labels → different hashes
+        // (collision at 16 hex chars is 1-in-2^64, not worth guarding).
+        // None → "none" so the log field is never empty.
+        let a1 = label_hash_prefix(Some("alice@example.com"));
+        let a2 = label_hash_prefix(Some("alice@example.com"));
+        let b = label_hash_prefix(Some("bob@example.com"));
+        assert_eq!(a1, a2, "same label produces same hash");
+        assert_ne!(a1, b, "different labels produce different hashes");
+        assert_eq!(a1.len(), 16, "prefix is 16 hex chars (64 bits)");
+        assert!(
+            a1.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash prefix is hex"
+        );
+        assert_eq!(label_hash_prefix(None), "none");
+    }
+
+    #[test]
+    fn label_hash_prefix_does_not_leak_raw_label() {
+        // Defence-in-depth: the returned string should not contain any
+        // substring of the original label. A regression here would mean
+        // the hash helper got replaced with an echo / truncation by
+        // someone not thinking about PII.
+        let raw = "glenn's iphone";
+        let hashed = label_hash_prefix(Some(raw));
+        for substr_len in 3..=raw.len() {
+            for start in 0..=(raw.len() - substr_len) {
+                let needle = &raw[start..start + substr_len];
+                assert!(
+                    !hashed.contains(needle),
+                    "hashed output '{hashed}' must not contain raw substring '{needle}'"
+                );
+            }
+        }
     }
 }
 
