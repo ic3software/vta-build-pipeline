@@ -551,6 +551,11 @@ pub async fn cmd_context_provision(
 }
 
 /// Build a `CredentialBundle` from a VTA-stored key, deriving its `did:key`.
+///
+/// The REST fetch is transport-specific; the derivation is shared via
+/// [`CredentialBundle::from_ed25519_seed_multibase`] with the offline
+/// path in `vta-service::operations::export::credential_from_key_offline`
+/// so the `did:key` encoding and bundle shape can't drift.
 async fn credential_from_key(
     client: &VtaClient,
     key_id: &str,
@@ -558,20 +563,8 @@ async fn credential_from_key(
     vta_url: Option<&str>,
 ) -> Result<(CredentialBundle, String), Box<dyn std::error::Error>> {
     let secret = client.get_key_secret(key_id).await?;
-    let seed = decode_private_key_multibase(&secret.private_key_multibase)
-        .map_err(|e| format!("Cannot decode key secret: {e}"))?;
-    let public_key = ed25519_dalek::SigningKey::from_bytes(&seed)
-        .verifying_key()
-        .to_bytes();
-    let did = format!("did:key:{}", ed25519_multibase_pubkey(&public_key));
-
-    let bundle = CredentialBundle {
-        did: did.clone(),
-        private_key_multibase: secret.private_key_multibase,
-        vta_did: vta_did.to_string(),
-        vta_url: vta_url.map(String::from),
-    };
-    Ok((bundle, did))
+    CredentialBundle::from_ed25519_seed_multibase(&secret.private_key_multibase, vta_did, vta_url)
+        .map_err(|e| format!("Cannot decode key secret: {e}").into())
 }
 
 pub async fn cmd_context_reprovision(

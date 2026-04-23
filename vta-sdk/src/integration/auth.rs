@@ -93,7 +93,16 @@ pub async fn authenticate(config: &VtaServiceConfig) -> Result<VtaClient, VtaErr
                 match try_didcomm(config, &mediator_did).await {
                     Ok(client) => return Ok(client),
                     Err(e) => {
+                        // `event = "transport_downgrade"` is a stable,
+                        // machine-grep-able tag ops dashboards can count
+                        // without parsing the human-readable message.
+                        // A rising rate of this event on an otherwise-
+                        // healthy DIDComm deployment is a DoS / routing
+                        // signal worth paging on.
                         tracing::warn!(
+                            event = "transport_downgrade",
+                            from = "didcomm",
+                            to = "rest",
                             context = config.context,
                             mediator_did = %mediator_did,
                             error = %e,
@@ -105,6 +114,7 @@ pub async fn authenticate(config: &VtaServiceConfig) -> Result<VtaClient, VtaErr
             TransportPlan::DidCommOnly { mediator_did } => {
                 return try_didcomm(config, &mediator_did).await.map_err(|e| {
                     tracing::error!(
+                        event = "transport_didcomm_only_failed",
                         context = config.context,
                         mediator_did = %mediator_did,
                         error = %e,

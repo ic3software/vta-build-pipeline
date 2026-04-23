@@ -39,6 +39,46 @@ impl CredentialBundle {
         self.vta_url = Some(url.into());
         self
     }
+
+    /// Build a [`CredentialBundle`] from a private-key multibase by
+    /// deriving its `did:key`.
+    ///
+    /// Shared between the online path (`vta-cli-common::commands::contexts::credential_from_key`
+    /// → `client.get_key_secret` → this helper) and the offline path
+    /// (`vta-service::operations::export::credential_from_key_offline`
+    /// → local keystore read → this helper). Previously each side had
+    /// its own byte-for-byte copy; keeping the derivation in one place
+    /// prevents drift if the `did:key` encoding ever changes (e.g.
+    /// different multicodec, different multibase alphabet).
+    ///
+    /// `private_key_multibase` must be an Ed25519 seed (32 raw bytes,
+    /// multicodec-prefixed `0x1300` or naked) — the shape every
+    /// `get_key_secret` path returns for admin-role keys.
+    ///
+    /// Returns `(bundle, admin_did)` so the caller can reuse the
+    /// derived DID for ACL / audit without re-deriving.
+    #[cfg(feature = "sealed-transfer")]
+    pub fn from_ed25519_seed_multibase(
+        private_key_multibase: &str,
+        vta_did: &str,
+        vta_url: Option<&str>,
+    ) -> Result<(Self, String), crate::did_key::DidKeyError> {
+        let seed = crate::did_key::decode_private_key_multibase(private_key_multibase)?;
+        let public_key = ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
+        let admin_did = format!(
+            "did:key:{}",
+            crate::did_key::ed25519_multibase_pubkey(&public_key)
+        );
+        let bundle = Self {
+            did: admin_did.clone(),
+            private_key_multibase: private_key_multibase.to_string(),
+            vta_did: vta_did.to_string(),
+            vta_url: vta_url.map(String::from),
+        };
+        Ok((bundle, admin_did))
+    }
 }
 
 #[cfg(test)]

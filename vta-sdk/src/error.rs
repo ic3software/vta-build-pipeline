@@ -95,11 +95,20 @@ impl From<&str> for VtaError {
 // Backward-compat conversion from `Box<dyn Error>` (legacy CLI handler
 // return type) into a typed `VtaError`.
 //
-// **Discouraged for new code.** This conversion collapses the error into
+// **Deprecated for new code.** This conversion collapses the error into
 // `Other(String)`, dropping the `source()` chain — fine for call sites that
-// only surface `Display`, but it breaks programmatic error handling. For
-// new integrations, return a `VtaError` directly or add a typed variant
-// with `#[from]` on the underlying cause so the source chain is preserved.
+// only surface `Display`, but it breaks programmatic error handling:
+// a caller who sees `VtaError::Other(String)` cannot distinguish a
+// `Conflict` from a `NotFound` from an `Auth` problem, and so cannot
+// emit the CLI-level operator guidance the workspace's CLAUDE.md
+// "operator errors should suggest the fix" principle demands.
+//
+// For new integrations, return a `VtaError` directly or add a typed
+// variant with `#[from]` on the underlying cause so the source chain is
+// preserved. A `#[deprecated]` marker is not applied to this impl
+// because rust-analyzer fires it on every legacy `?` through a
+// `Box<dyn Error>` — too noisy during the incremental migration. The
+// contract is documented here and in the workspace review tracking.
 impl From<Box<dyn std::error::Error>> for VtaError {
     fn from(e: Box<dyn std::error::Error>) -> Self {
         Self::Other(e.to_string())

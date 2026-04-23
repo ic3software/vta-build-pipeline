@@ -27,7 +27,6 @@ use crate::keys::seed_store::SeedStore;
 use crate::store::KeyspaceHandle;
 use vta_sdk::context_provision::{ContextProvisionBundle, ProvisionedDid};
 use vta_sdk::credentials::CredentialBundle;
-use vta_sdk::did_key::{decode_private_key_multibase, ed25519_multibase_pubkey};
 use vta_sdk::did_secrets::{DidSecretsBundle, SecretEntry};
 use vta_sdk::keys::KeyStatus;
 
@@ -128,8 +127,12 @@ pub async fn build_did_secrets_bundle(
 }
 
 /// Derive an admin [`CredentialBundle`] from an existing key in the
-/// store. The key's private seed is loaded, its `did:key` derivation
-/// is computed, and the bundle is wrapped with VTA identity metadata.
+/// store. The key's private seed is loaded; the bundle + derived
+/// `did:key` come from the shared
+/// [`CredentialBundle::from_ed25519_seed_multibase`] helper so this
+/// and the online path in
+/// `vta-cli-common::commands::contexts::credential_from_key` can't
+/// drift in their encoding choices.
 ///
 /// Returns `(credential, admin_did)` where `admin_did` is the derived
 /// `did:key:z6Mk...` string.
@@ -151,19 +154,8 @@ pub async fn credential_from_key_offline(
         channel,
     )
     .await?;
-    let seed = decode_private_key_multibase(&secret.private_key_multibase)
-        .map_err(|e| AppError::Internal(format!("decode admin key secret: {e}")))?;
-    let public_key = ed25519_dalek::SigningKey::from_bytes(&seed)
-        .verifying_key()
-        .to_bytes();
-    let admin_did = format!("did:key:{}", ed25519_multibase_pubkey(&public_key));
-    let credential = CredentialBundle {
-        did: admin_did.clone(),
-        private_key_multibase: secret.private_key_multibase,
-        vta_did: vta_did.to_string(),
-        vta_url: vta_url.map(String::from),
-    };
-    Ok((credential, admin_did))
+    CredentialBundle::from_ed25519_seed_multibase(&secret.private_key_multibase, vta_did, vta_url)
+        .map_err(|e| AppError::Internal(format!("decode admin key secret: {e}")))
 }
 
 /// Inputs to [`build_context_provision_bundle`].
