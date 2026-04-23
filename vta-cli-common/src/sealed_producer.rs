@@ -175,10 +175,15 @@ pub async fn seal_for_recipient(
 /// `pnm keys bundle` (online admin, reads state over REST) and
 /// `vta keys bundle` (offline admin, reads state from the local store) —
 /// both produce the same bundle shape, this helper handles seal + print.
+///
+/// When `out` is `Some(path)`, the armor is written to that file; when
+/// `None`, it is printed to stdout. Either way the banner + digest +
+/// producer DID go to stderr.
 pub async fn emit_did_secrets_bundle(
     bundle: vta_sdk::did_secrets::DidSecretsBundle,
     recipient: &SealedRecipient,
     context_id: &str,
+    out: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let did = bundle.did.clone();
     let secret_count = bundle.secrets.len();
@@ -198,17 +203,21 @@ pub async fn emit_did_secrets_bundle(
     }
     eprintln!();
 
-    emit_sealed_output(&sealed);
-    Ok(())
+    emit_sealed_output(&sealed, out)
 }
 
 /// Seal a [`vta_sdk::context_provision::ContextProvisionBundle`] to the
 /// given recipient and emit the armored output + stderr banner. Shared
 /// between `pnm context reprovision` and `vta context reprovision` —
 /// both produce the same bundle shape from different transports.
+///
+/// When `out` is `Some(path)`, the armor is written to that file; when
+/// `None`, it is printed to stdout. Either way the banner + digest +
+/// producer DID go to stderr.
 pub async fn emit_context_provision_bundle(
     bundle: vta_sdk::context_provision::ContextProvisionBundle,
     recipient: &SealedRecipient,
+    out: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let context_id = bundle.context_id.clone();
     let context_name = bundle.context_name.clone();
@@ -232,15 +241,30 @@ pub async fn emit_context_provision_bundle(
     }
     eprintln!();
 
-    emit_sealed_output(&sealed);
-    Ok(())
+    emit_sealed_output(&sealed, out)
 }
 
-/// Print a standard "sealed output emitted" banner to stderr alongside the
-/// digest + producer DID. Armor goes to stdout via `println!`.
-pub fn emit_sealed_output(sealed: &SealedOutput) {
+/// Emit a sealed bundle. When `out` is `Some`, the armor is written to
+/// that path; when `None`, it goes to stdout. The banner + digest +
+/// producer DID always go to stderr so they don't contaminate a
+/// redirected armor file.
+pub fn emit_sealed_output(
+    sealed: &SealedOutput,
+    out: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let bundle_id_hex = hex_lower(&sealed.bundle_id);
-    println!("{}", sealed.armored);
+
+    match out {
+        Some(path) => {
+            std::fs::write(path, sealed.armored.as_bytes())
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+            eprintln!("Armored bundle written to {}", path.display());
+        }
+        None => {
+            println!("{}", sealed.armored);
+        }
+    }
+
     eprintln!();
     eprintln!("  Bundle-Id:       {bundle_id_hex}");
     eprintln!("  Producer DID:    {}", sealed.producer_did);
@@ -251,6 +275,7 @@ pub fn emit_sealed_output(sealed: &SealedOutput) {
          pnm bootstrap open --bundle <file> --expect-digest {}",
         sealed.digest
     );
+    Ok(())
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

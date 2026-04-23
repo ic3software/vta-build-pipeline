@@ -49,6 +49,6 @@ pub async fn cmd_auth_credential_create(
         println!("  Recipient: {rlabel}");
     }
     println!();
-    emit_sealed_output(&sealed);
+    emit_sealed_output(&sealed, None)?;
     Ok(())
 }

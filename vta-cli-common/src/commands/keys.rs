@@ -394,7 +394,7 @@ pub async fn cmd_key_bundle(
     recipient: crate::sealed_producer::SealedRecipient,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bundle = client.fetch_did_secrets_bundle(context).await?;
-    crate::sealed_producer::emit_did_secrets_bundle(bundle, &recipient, context).await
+    crate::sealed_producer::emit_did_secrets_bundle(bundle, &recipient, context, None).await
 }
 
 pub async fn cmd_key_secrets(

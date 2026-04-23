@@ -71,7 +71,7 @@ pub async fn cmd_context_bootstrap(
     }
     println!();
 
-    crate::sealed_producer::emit_sealed_output(&sealed);
+    crate::sealed_producer::emit_sealed_output(&sealed, None)?;
     Ok(())
 }
 
@@ -547,7 +547,7 @@ pub async fn cmd_context_provision(
     };
 
     // 6. Seal and emit via the shared helper
-    crate::sealed_producer::emit_context_provision_bundle(bundle, &recipient).await
+    crate::sealed_producer::emit_context_provision_bundle(bundle, &recipient, None).await
 }
 
 /// Build a `CredentialBundle` from a VTA-stored key, deriving its `did:key`.
@@ -722,5 +722,5 @@ pub async fn cmd_context_reprovision(
     };
 
     // 7. Seal and emit via the shared helper
-    crate::sealed_producer::emit_context_provision_bundle(bundle, &recipient).await
+    crate::sealed_producer::emit_context_provision_bundle(bundle, &recipient, None).await
 }

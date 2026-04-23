@@ -580,11 +580,12 @@ pub async fn run_keys_bundle(
     };
     let bundle = build_did_secrets_bundle(&deps, &auth, &context, "vta-keys-bundle").await?;
 
-    // Capture the armored output to either stdout (default) or a file
-    // via a lightweight redirect around the shared emit helper.
-    capture_stdout_to_file(out, async move {
-        vta_cli_common::sealed_producer::emit_did_secrets_bundle(bundle, &recipient, &context).await
-    })
+    vta_cli_common::sealed_producer::emit_did_secrets_bundle(
+        bundle,
+        &recipient,
+        &context,
+        out.as_deref(),
+    )
     .await
 }
 
@@ -734,53 +735,12 @@ pub async fn run_context_reprovision(
         eprintln!("Created ACL entry for {admin_did} in context '{id}'");
     }
 
-    capture_stdout_to_file(out, async move {
-        vta_cli_common::sealed_producer::emit_context_provision_bundle(bundle, &recipient).await
-    })
+    vta_cli_common::sealed_producer::emit_context_provision_bundle(
+        bundle,
+        &recipient,
+        out.as_deref(),
+    )
     .await
-}
-
-/// If `out` is set, redirect the shared emit helper's stdout to that
-/// file; otherwise let it write to stdout as usual. Stderr (banner +
-/// digest + producer DID) always goes to the terminal.
-///
-/// Implementation: the shared helpers write armored output via
-/// `println!` (stdout). When a file is requested, capture via a
-/// `std::io::BufferedStdout` replacement would be intrusive; simpler to
-/// post-process by running the helper, capturing its stdout-targeted
-/// `println!` calls via a pipe is also awkward. Instead we skip the
-/// redirection for now and document: pass `--out` and we `tee` the
-/// output manually.
-async fn capture_stdout_to_file<F>(
-    out: Option<PathBuf>,
-    fut: F,
-) -> Result<(), Box<dyn std::error::Error>>
-where
-    F: std::future::Future<Output = Result<(), Box<dyn std::error::Error>>>,
-{
-    // First cut: armored output always goes to stdout; if `--out` is
-    // set, tee to the file after the fact. The shared `emit_*` helpers
-    // println! the armor to stdout directly, so we capture via piping
-    // would require restructuring them. Simplest path: run the helper,
-    // and when `--out` is given also write a copy to that file via a
-    // second seal/write round-trip would double-seal. Instead we keep
-    // it simple: if `--out` is set, warn that stdout is still used and
-    // save to file by reading back — but simplest is to just inform the
-    // user.
-    //
-    // Practical approach taken here: run the emit helper (stdout); if
-    // `--out` was requested, emit a stderr note telling the operator to
-    // redirect stdout next time. Armor-to-file routing is a UX nicety,
-    // not a correctness issue — the bundle is in stdout either way.
-    if let Some(path) = out.as_ref() {
-        eprintln!(
-            "Note: armored bundle is emitted to stdout. Redirect to {} or pipe through `tee`:",
-            path.display()
-        );
-        eprintln!("  vta ... > {}", path.display());
-        eprintln!();
-    }
-    fut.await
 }
 
 #[cfg(test)]
