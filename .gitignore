@@ -8,6 +8,7 @@ target/
 
 # Sealed-bootstrap test artifacts left in repo roots by local wizard runs
 request.json
+bootstrap-request.json
 *.armor
 admin-credential.*
 
