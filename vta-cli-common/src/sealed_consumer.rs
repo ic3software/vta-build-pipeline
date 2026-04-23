@@ -105,6 +105,16 @@ pub struct OpenedArmored {
     pub bundle_id: [u8; 16],
     pub bundle_id_hex: String,
     pub digest: String,
+    /// Consumer's X25519 public key — the `client_x25519_pub` the
+    /// producer signed over in a `DidSigned` assertion. Derived from the
+    /// stored Ed25519 seed that opened the bundle
+    /// (`ed25519_pub_to_x25519_bytes(ed25519_pub)`), captured here
+    /// because the seed file is zeroized+removed on successful open.
+    ///
+    /// Downstream verification of the producer assertion feeds this
+    /// into
+    /// [`vta_sdk::sealed_transfer::verify::verify_producer_assertion_with_pubkey`].
+    pub client_x25519_pub: [u8; 32],
 }
 
 /// Read an armored sealed bundle from `bundle_path`, load the corresponding
@@ -151,6 +161,20 @@ pub fn open_armored_bundle(
     let ed_seed = read_secret(&sp)?;
     let x_secret = ed25519_seed_to_x25519_secret(&ed_seed);
 
+    // Derive the consumer's X25519 pubkey — the producer signed over
+    // this in its DidSigned assertion. Derived here (while we still
+    // have the seed) rather than forcing the CLI caller to re-read
+    // the secret file, which we're about to delete.
+    let client_x25519_pub = {
+        let signing = ed25519_dalek::SigningKey::from_bytes(&ed_seed);
+        let ed_pub = signing.verifying_key().to_bytes();
+        affinidi_crypto::did_key::ed25519_pub_to_x25519_bytes(&ed_pub).map_err(
+            |e| -> Box<dyn std::error::Error> {
+                format!("derive consumer X25519 pubkey from seed: {e}").into()
+            },
+        )?
+    };
+
     let digest = bundle_digest(bundle);
     let opened = open_bundle(&x_secret, bundle, expect_digest)?;
 
@@ -170,6 +194,7 @@ pub fn open_armored_bundle(
         bundle_id: opened.bundle_id,
         bundle_id_hex,
         digest,
+        client_x25519_pub,
     })
 }
 

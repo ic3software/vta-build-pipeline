@@ -329,32 +329,70 @@ fn print_opened(
 
 /// End-to-end verify a TemplateBootstrap bundle against a pinned VTA DID.
 ///
-/// Verifies the `VtaAuthorizationCredential` inside the payload —
-/// pinned-DID cross-check (bundle `vta_trust.vta_did` == pinned == VC
-/// claim's `admin_of.vta`), issuer pubkey extracted from the bundled
-/// DID document, Data Integrity proof verification, validity window.
+/// Two checks, both fail-closed:
 ///
-/// The separate DidSigned producer-assertion verification is wired via
-/// [`vta_sdk::sealed_transfer::verify::verify_producer_assertion_with_pubkey`]
-/// — it needs the consumer's derived X25519 pubkey, which the current
-/// `OpenedArmored` shape doesn't expose (the seed file is already
-/// removed by the time control returns to us). Producer-assertion
-/// wiring is a narrow follow-up that extends `OpenedArmored`; the VC
-/// check done here is the higher-impact anchor (it's the actual
-/// authorization proof; producer assertion is anti-impersonation on
-/// top of that).
+/// 1. **VC verification** — the `VtaAuthorizationCredential` inside the
+///    payload is verified against the pinned VTA DID: bundle
+///    `vta_trust.vta_did == pinned == claim.admin_of.vta`, issuer
+///    pubkey extracted from the bundled DID doc's
+///    `verificationMethod[]`, Data Integrity proof verified, validity
+///    window fresh.
+/// 2. **Producer assertion verification** — when the chunk-0 producer
+///    assertion is `DidSigned`, we confirm the signature was produced
+///    by the key bound to `{vta_did}#key-0` in the bundled DID doc.
+///    This defends against bundle re-sealing (an attacker with the
+///    recipient's pubkey can HPKE-seal arbitrary content; the
+///    DidSigned layer over `client_x25519_pub || bundle_id` proves the
+///    VTA was the sealer). `PinnedOnly` short-circuits (caller is
+///    trusting OOB digest by design); `Attested` defers to the
+///    `attest-verify` feature path.
+///
+/// Both verifications use the same issuer pubkey derived from the
+/// verified trust bundle, so they share cryptographic grounding.
 fn verify_template_bundle(
-    _opened: &vta_cli_common::sealed_consumer::OpenedArmored,
+    opened: &vta_cli_common::sealed_consumer::OpenedArmored,
     payload: &vta_sdk::sealed_transfer::TemplateBootstrapPayload,
     pinned_vta_did: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use vta_sdk::provision_integration::template_verify::verify_template_bootstrap;
+    use vta_sdk::sealed_transfer::AssertionProof;
+    use vta_sdk::sealed_transfer::verify::verify_producer_assertion_with_pubkey;
 
+    // VC + claim verification against pinned DID. Runs first so the
+    // trust anchor is established before we authenticate the producer
+    // assertion with a key extracted from the same doc.
     let _verified = verify_template_bootstrap(
         payload.clone(),
         pinned_vta_did,
         chrono::Duration::minutes(5),
     )?;
+
+    // Producer assertion verification. Extract the producer's Ed25519
+    // pubkey from its did:key form (VTA default; for did:webvh
+    // producers a resolver-threading follow-up is tracked).
+    let producer_pubkey = if let AssertionProof::DidSigned(_) = opened.producer.proof {
+        match affinidi_crypto::did_key::did_key_to_ed25519_pub(&opened.producer.producer_did) {
+            Ok(pk) => Some(pk),
+            Err(e) => {
+                return Err(format!(
+                    "cannot decode producer DID '{}' as did:key for assertion verification: {e}. \
+                     did:webvh producers need resolver threading (follow-up).",
+                    opened.producer.producer_did
+                )
+                .into());
+            }
+        }
+    } else {
+        None
+    };
+
+    verify_producer_assertion_with_pubkey(
+        &opened.producer,
+        &opened.client_x25519_pub,
+        &opened.bundle_id,
+        producer_pubkey.as_ref(),
+    )?;
+
     Ok(())
 }
 
