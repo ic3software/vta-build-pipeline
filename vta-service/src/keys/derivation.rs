@@ -62,7 +62,7 @@ impl Bip32Extension for ExtendedSigningKey {
     }
 
     fn derive_p256(&self, path: &str) -> Result<P256Secret, AppError> {
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha512;
 
         let derivation_path: DerivationPath = path

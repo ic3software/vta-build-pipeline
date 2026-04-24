@@ -329,7 +329,8 @@ async fn verify_jwt_fingerprint(
 /// Uses HMAC-SHA256 as the PRF. The salt and info strings ensure domain separation.
 /// Deterministic: same seed + salt → same key (survives enclave restarts).
 pub(crate) fn derive_storage_key(seed: &[u8], salt: &str) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
+    // hmac 0.13 moved `new_from_slice` behind the `KeyInit` trait.
+    use hmac::{Hmac, KeyInit, Mac};
     type HmacSha256 = Hmac<Sha256>;
 
     // HKDF-Extract: PRK = HMAC-SHA256(salt, seed)
@@ -725,8 +726,11 @@ fn decrypt_cms_envelope(cms_bytes: &[u8], private_key_pkcs8: &[u8]) -> Result<Ve
     let aes_256_gcm_oid: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2e];
 
     let plaintext = if fields.content_encryption_oid == aes_256_cbc_oid {
-        // AES-256-CBC with PKCS#7 padding
-        use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+        // AES-256-CBC with PKCS#7 padding.
+        // cbc 0.2 / cipher 0.5: `BlockDecryptMut` was renamed to
+        // `BlockModeDecrypt`, and `decrypt_padded_mut` was renamed to
+        // `decrypt_padded` (which now consumes `self`).
+        use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
         type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
         if fields.iv.len() != 16 {
@@ -740,7 +744,7 @@ fn decrypt_cms_envelope(cms_bytes: &[u8], private_key_pkcs8: &[u8]) -> Result<Ve
         let decryptor = Aes256CbcDec::new_from_slices(&cek, &fields.iv)
             .map_err(|e| tee_attestation_error(format!("AES-256-CBC init failed: {e}")))?;
         let plaintext = decryptor
-            .decrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buf)
+            .decrypt_padded::<cbc::cipher::block_padding::Pkcs7>(&mut buf)
             .map_err(|e| {
                 tee_attestation_error(format!("AES-256-CBC decryption of CMS content failed: {e}"))
             })?;

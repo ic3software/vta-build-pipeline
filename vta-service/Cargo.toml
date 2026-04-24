@@ -71,13 +71,7 @@ affinidi-crypto = { workspace = true }
 # direct so `vta-service::operations::provision_integration` can name
 # the type.
 affinidi-secrets-resolver = { workspace = true }
-# HOLD: RustCrypto 0.11 ecosystem (sha1 0.11, hmac 0.13, hkdf 0.13,
-# aes 0.9, cbc 0.2) is released but rsa 0.10 and aes-gcm 0.11 are still
-# at release-candidate (0.10.0-rc.17 / 0.11.0-rc.3). Partial bump
-# duplicates the `digest`/`cipher` trait crates and breaks trait impls
-# (e.g. rsa::Oaep's DynDigest bound). Re-audit once rsa 0.10 and
-# aes-gcm 0.11 stabilize — they lead the migration for everything else.
-hkdf = "0.12"
+hkdf = "0.13"
 affinidi-tdk = { workspace = true }
 affinidi-messaging-didcomm = "0.13"
 affinidi-messaging-didcomm-service = { workspace = true }
@@ -123,8 +117,8 @@ dirs = "6"
 azure_security_keyvault_secrets = { version = "0.14", optional = true }
 azure_identity = { version = "0.35", optional = true }
 sha2 = { workspace = true }
-cbc = { version = "0.1", optional = true }
-aes = { version = "0.8", optional = true }
+cbc = { version = "0.2", optional = true }
+aes = { version = "0.9", optional = true }
 x25519-dalek = { workspace = true }
 multibase = { workspace = true }
 p256 = "0.13"
@@ -141,7 +135,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 aes-gcm = "0.10"
 argon2 = "0.5"
-hmac = "0.12"
+hmac = "0.13"
 aws-sdk-kms = { version = "1", optional = true }
 # RSA-OAEP for KMS CiphertextForRecipient unwrap. aws-lc-rs is AWS's own
 # BoringSSL-based crypto lib; constant-time operations, already transitive

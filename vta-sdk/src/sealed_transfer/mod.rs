@@ -80,7 +80,9 @@ pub fn bundle_digest(bundle: &SealedBundle) -> String {
     for c in chunks {
         hasher.update(&c.sealed_bytes);
     }
-    format!("{:x}", hasher.finalize())
+    // sha2 0.11's `finalize()` returns a hybrid-array `Array<u8, _>` which
+    // doesn't implement `LowerHex`. Encode the bytes explicitly.
+    crate::hex::lower(hasher.finalize().as_slice())
 }
 
 /// Seal a [`SealedPayloadV1`] for delivery to `recipient_pubkey`.

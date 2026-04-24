@@ -24,7 +24,7 @@ serde_json = { workspace = true }
 multibase = { workspace = true }
 x25519-dalek = { workspace = true }
 sha2 = { workspace = true }
-hkdf = "0.12" # see HOLD note in vta-service/Cargo.toml for the RustCrypto ecosystem
+hkdf = "0.13"
 aes-gcm = "0.10"
 base64 = { workspace = true }
 rand = { workspace = true }
