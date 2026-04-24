@@ -1,3 +1,20 @@
+//! Internal layout:
+//! - `mod.rs` — `create_did_webvh`, `delete_did_webvh`, `WebvhTransport`,
+//!   `CreateDidWebvhParams`, helpers still used only by the main flow
+//! - `document` — pure DID-document construction (shared with the TEE
+//!   enclave bootstrap path)
+//! - `lifecycle` — read ops on stored DID records (`get`, `list`, log)
+//! - `servers` — webvh hosting-server CRUD + DID validation
+
+mod document;
+mod lifecycle;
+mod servers;
+
+pub(crate) use document::build_did_document_with_options;
+pub use document::{build_did_document, build_vta_did_document_with_sealed_transfer};
+pub use lifecycle::{GetDidWebvhLogResult, get_did_webvh, get_did_webvh_log, list_dids_webvh};
+pub use servers::{add_webvh_server, list_webvh_servers, remove_webvh_server, update_webvh_server};
+
 use std::sync::Arc;
 
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
@@ -6,7 +23,6 @@ use didwebvh_rs::create::{CreateDIDConfig, create_did};
 use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
 use didwebvh_rs::parameters::Parameters as WebVHParameters;
 use didwebvh_rs::url::WebVHURL;
-use serde_json::json;
 use tracing::info;
 use url::Url;
 
@@ -17,11 +33,6 @@ use crate::didcomm_bridge::DIDCommBridge;
 use vta_sdk::protocols::did_management::{
     create::{CreateDidWebvhBody, CreateDidWebvhResultBody},
     delete::DeleteDidWebvhResultBody,
-    list::ListDidsWebvhResultBody,
-    servers::{
-        AddWebvhServerResultBody, ListWebvhServersResultBody, RemoveWebvhServerResultBody,
-        UpdateWebvhServerResultBody,
-    },
 };
 use vta_sdk::webvh::{WebvhDidRecord, WebvhServerRecord};
 
@@ -899,62 +910,6 @@ pub async fn create_did_webvh(
     }
 }
 
-pub async fn get_did_webvh(
-    webvh_ks: &KeyspaceHandle,
-    auth: &AuthClaims,
-    did: &str,
-    channel: &str,
-) -> Result<WebvhDidRecord, AppError> {
-    let record = webvh_store::get_did(webvh_ks, did)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("webvh DID not found: {did}")))?;
-    auth.require_context(&record.context_id)?;
-    info!(channel, did = %did, "webvh DID retrieved");
-    Ok(record)
-}
-
-pub async fn get_did_webvh_log(
-    webvh_ks: &KeyspaceHandle,
-    auth: &AuthClaims,
-    did: &str,
-    channel: &str,
-) -> Result<GetDidWebvhLogResult, AppError> {
-    let record = webvh_store::get_did(webvh_ks, did)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("webvh DID not found: {did}")))?;
-    auth.require_context(&record.context_id)?;
-    let log = webvh_store::get_did_log(webvh_ks, did).await?;
-    info!(channel, did = %did, "webvh DID log retrieved");
-    Ok(GetDidWebvhLogResult {
-        did: did.to_string(),
-        log,
-    })
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct GetDidWebvhLogResult {
-    pub did: String,
-    pub log: Option<String>,
-}
-
-pub async fn list_dids_webvh(
-    webvh_ks: &KeyspaceHandle,
-    auth: &AuthClaims,
-    context_id: Option<&str>,
-    server_id: Option<&str>,
-    channel: &str,
-) -> Result<ListDidsWebvhResultBody, AppError> {
-    let all = webvh_store::list_dids(webvh_ks).await?;
-    let dids: Vec<WebvhDidRecord> = all
-        .into_iter()
-        .filter(|d| auth.has_context_access(&d.context_id))
-        .filter(|d| context_id.is_none_or(|c| d.context_id == c))
-        .filter(|d| server_id.is_none_or(|s| d.server_id == s))
-        .collect();
-    info!(channel, caller = %auth.did, count = dids.len(), "webvh DIDs listed");
-    Ok(ListDidsWebvhResultBody { dids })
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn delete_did_webvh(
     webvh_ks: &KeyspaceHandle,
@@ -1010,99 +965,6 @@ pub async fn delete_did_webvh(
     Ok(DeleteDidWebvhResultBody {
         did: did.to_string(),
         deleted: true,
-    })
-}
-
-pub async fn add_webvh_server(
-    webvh_ks: &KeyspaceHandle,
-    auth: &AuthClaims,
-    id: &str,
-    server_did: &str,
-    label: Option<String>,
-    did_resolver: &DIDCacheClient,
-    channel: &str,
-) -> Result<AddWebvhServerResultBody, AppError> {
-    auth.require_super_admin()?;
-
-    if webvh_store::get_server(webvh_ks, id).await?.is_some() {
-        return Err(AppError::Conflict(format!(
-            "webvh server already exists: {id}"
-        )));
-    }
-
-    // Validate the DID resolves and has a supported WebVH service
-    validate_server_did(did_resolver, server_did).await?;
-
-    let now = Utc::now();
-    let record = WebvhServerRecord {
-        id: id.to_string(),
-        did: server_did.to_string(),
-        label,
-        access_token: None,
-        access_expires_at: None,
-        refresh_token: None,
-        created_at: now,
-        updated_at: now,
-    };
-    webvh_store::store_server(webvh_ks, &record).await?;
-
-    info!(channel, id = %id, did = %server_did, "webvh server added");
-    Ok(record)
-}
-
-pub async fn list_webvh_servers(
-    webvh_ks: &KeyspaceHandle,
-    auth: &AuthClaims,
-    channel: &str,
-) -> Result<ListWebvhServersResultBody, AppError> {
-    // Any authenticated user can list servers
-    let servers = webvh_store::list_servers(webvh_ks).await?;
-    info!(channel, caller = %auth.did, count = servers.len(), "webvh servers listed");
-    Ok(ListWebvhServersResultBody { servers })
-}
-
-pub async fn update_webvh_server(
-    webvh_ks: &KeyspaceHandle,
-    auth: &AuthClaims,
-    id: &str,
-    label: Option<String>,
-    channel: &str,
-) -> Result<UpdateWebvhServerResultBody, AppError> {
-    auth.require_super_admin()?;
-
-    let mut record = webvh_store::get_server(webvh_ks, id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("webvh server not found: {id}")))?;
-
-    if let Some(lbl) = label {
-        record.label = if lbl.is_empty() { None } else { Some(lbl) };
-    }
-    record.updated_at = Utc::now();
-
-    webvh_store::store_server(webvh_ks, &record).await?;
-
-    info!(channel, id = %id, "webvh server updated");
-    Ok(record)
-}
-
-pub async fn remove_webvh_server(
-    webvh_ks: &KeyspaceHandle,
-    auth: &AuthClaims,
-    id: &str,
-    channel: &str,
-) -> Result<RemoveWebvhServerResultBody, AppError> {
-    auth.require_super_admin()?;
-
-    webvh_store::get_server(webvh_ks, id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("webvh server not found: {id}")))?;
-
-    webvh_store::delete_server(webvh_ks, id).await?;
-
-    info!(channel, id = %id, "webvh server removed");
-    Ok(RemoveWebvhServerResultBody {
-        id: id.to_string(),
-        removed: true,
     })
 }
 
@@ -1203,197 +1065,9 @@ impl<'a> WebvhTransport<'a> {
     }
 }
 
-/// Validate that a DID resolves and has at least one supported WebVH service.
-///
-/// Checks for either `DIDCommMessaging` or `WebVHHostingService`.
-async fn validate_server_did(
-    did_resolver: &DIDCacheClient,
-    server_did: &str,
-) -> Result<(), AppError> {
-    let resolved = did_resolver.resolve(server_did).await.map_err(|e| {
-        AppError::Validation(format!("failed to resolve server DID {server_did}: {e}"))
-    })?;
-
-    let has_supported_service = resolved.doc.service.iter().any(|svc| {
-        svc.type_
-            .iter()
-            .any(|t| t == "WebVHHostingService" || t == "DIDCommMessaging")
-    });
-
-    if !has_supported_service {
-        return Err(AppError::Validation(format!(
-            "server DID {server_did} has no WebVHHostingService or DIDCommMessaging service endpoint"
-        )));
-    }
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Build a DID document with the given keys.
-///
-/// When `include_ka` is true (default for VTA-derived keys), adds a
-/// keyAgreement verification method. When false (signing-only DID),
-/// the document contains only authentication/assertion.
-pub fn build_did_document(
-    derived: &keys::DerivedEntityKeys,
-    config: &AppConfig,
-    add_mediator_service: bool,
-    additional_services: &Option<Vec<serde_json::Value>>,
-) -> serde_json::Value {
-    build_did_document_inner(
-        derived,
-        None,
-        config,
-        true,
-        add_mediator_service,
-        additional_services,
-    )
-}
-
-/// Build a DID document for the VTA's own DID, which additionally
-/// exposes `#sealed-transfer-0` as a distinct verification method.
-///
-/// Use this only when minting the VTA's own did:webvh — template-
-/// provisioned integration DIDs should use [`build_did_document`].
-pub fn build_vta_did_document_with_sealed_transfer(
-    derived: &keys::DerivedEntityKeys,
-    sealed_transfer: &keys::DerivedSealedTransferKey,
-    config: &AppConfig,
-    add_mediator_service: bool,
-    additional_services: &Option<Vec<serde_json::Value>>,
-) -> serde_json::Value {
-    build_did_document_inner(
-        derived,
-        Some(sealed_transfer),
-        config,
-        true,
-        add_mediator_service,
-        additional_services,
-    )
-}
-
-/// Build a DID document with optional keyAgreement support.
-pub(crate) fn build_did_document_with_options(
-    derived: &keys::DerivedEntityKeys,
-    config: &AppConfig,
-    include_ka: bool,
-    add_mediator_service: bool,
-    additional_services: &Option<Vec<serde_json::Value>>,
-) -> serde_json::Value {
-    build_did_document_inner(
-        derived,
-        None,
-        config,
-        include_ka,
-        add_mediator_service,
-        additional_services,
-    )
-}
-
-fn build_did_document_inner(
-    derived: &keys::DerivedEntityKeys,
-    sealed_transfer: Option<&keys::DerivedSealedTransferKey>,
-    config: &AppConfig,
-    include_ka: bool,
-    add_mediator_service: bool,
-    additional_services: &Option<Vec<serde_json::Value>>,
-) -> serde_json::Value {
-    let mut vm = vec![json!({
-        "id": "{DID}#key-0",
-        "type": "Multikey",
-        "controller": "{DID}",
-        "publicKeyMultibase": &derived.signing_pub
-    })];
-
-    let mut assertion_method = vec![json!("{DID}#key-0")];
-
-    let mut did_document = json!({
-        "@context": [
-            "https://www.w3.org/ns/did/v1",
-            "https://www.w3.org/ns/cid/v1"
-        ],
-        "id": "{DID}",
-        "authentication": ["{DID}#key-0"]
-    });
-
-    if include_ka {
-        vm.push(json!({
-            "id": "{DID}#key-1",
-            "type": "Multikey",
-            "controller": "{DID}",
-            "publicKeyMultibase": &derived.ka_pub
-        }));
-        did_document["keyAgreement"] = json!(["{DID}#key-1"]);
-    }
-
-    if let Some(st) = sealed_transfer {
-        vm.push(json!({
-            "id": "{DID}#sealed-transfer-0",
-            "type": "Multikey",
-            "controller": "{DID}",
-            "publicKeyMultibase": &st.public_key
-        }));
-        // Sealed-transfer signatures are assertion-flavoured (the VTA
-        // asserting "I produced this bundle"), so the key appears in
-        // assertionMethod alongside `#key-0`.
-        assertion_method.push(json!("{DID}#sealed-transfer-0"));
-    }
-
-    did_document["assertionMethod"] = json!(assertion_method);
-    did_document["verificationMethod"] = json!(vm);
-
-    // Optionally add mediator DIDComm service
-    if add_mediator_service && let Some(ref msg) = config.messaging {
-        let services = did_document
-            .as_object_mut()
-            .unwrap()
-            .entry("service")
-            .or_insert_with(|| json!([]));
-        services.as_array_mut().unwrap().push(json!({
-            "id": "{DID}#vta-didcomm",
-            "type": "DIDCommMessaging",
-            "serviceEndpoint": [{
-                "accept": ["didcomm/v2"],
-                "uri": msg.mediator_did
-            }]
-        }));
-    }
-
-    // Append any additional services
-    if let Some(svcs) = additional_services {
-        let services = did_document
-            .as_object_mut()
-            .unwrap()
-            .entry("service")
-            .or_insert_with(|| json!([]));
-        for svc in svcs {
-            services.as_array_mut().unwrap().push(svc.clone());
-        }
-    }
-
-    // Add TeeAttestation service when TEE is active and embed_in_did is enabled
-    #[cfg(feature = "tee")]
-    if config.tee.embed_in_did
-        && let Some(ref public_url) = config.public_url
-    {
-        let services = did_document
-            .as_object_mut()
-            .unwrap()
-            .entry("service")
-            .or_insert_with(|| json!([]));
-        services.as_array_mut().unwrap().push(json!({
-            "id": "{DID}#tee-attestation",
-            "type": "TeeAttestation",
-            "serviceEndpoint": format!("{}/attestation/report", public_url.trim_end_matches('/'))
-        }));
-    }
-
-    did_document
-}
 
 pub(crate) async fn derive_pre_rotation_keys(
     seed: &[u8],
