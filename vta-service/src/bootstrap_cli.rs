@@ -464,7 +464,7 @@ pub async fn run_provision_integration(
     //    access to the keyspace; there is no over-the-wire authn to
     //    delegate through. Production-grade gating happens on the HTTP
     //    endpoint (step 4) which extracts a real session-backed claim.
-    let auth = AuthClaims::local_cli("provision-integration");
+    let auth = AuthClaims::unsafe_local_cli_super_admin("provision-integration");
 
     // 5. Call the shared library fn.
     let vc_validity = vc_validity_hours.map(|hrs| {
@@ -640,7 +640,7 @@ pub async fn run_keys_bundle(
     .await
     .map_err(|e| format!("build app state: {e}"))?;
 
-    let auth = AuthClaims::local_cli("keys-bundle");
+    let auth = AuthClaims::unsafe_local_cli_super_admin("keys-bundle");
 
     let deps = ExportDeps {
         keys_ks: &state.keys_ks,
@@ -721,7 +721,7 @@ pub async fn run_context_reprovision(
     .await
     .map_err(|e| format!("build app state: {e}"))?;
 
-    let auth = AuthClaims::local_cli("context-reprovision");
+    let auth = AuthClaims::unsafe_local_cli_super_admin("context-reprovision");
 
     // Resolve the admin key: reuse an existing keystore entry when
     // `--admin-key` was passed, otherwise mint a fresh one scoped to

@@ -243,7 +243,14 @@ pub fn open_bundle(
     })
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// Constant-time byte-slice equality. Returns `false` for different-length
+/// inputs without short-circuiting on content.
+///
+/// Exported so other crates can use a single, audited implementation for
+/// secret-dependent comparisons (challenge matching, DID equality on
+/// authenticate, etc.). Do not use `==` for anything derived from a
+/// challenge, token, or other secret-adjacent material.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

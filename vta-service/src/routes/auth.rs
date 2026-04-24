@@ -8,6 +8,7 @@ use uuid::Uuid;
 use vta_sdk::protocols::auth::{
     AuthenticateData, AuthenticateResponse, ChallengeData, ChallengeRequest, ChallengeResponse,
 };
+use vta_sdk::sealed_transfer::constant_time_eq;
 
 use crate::acl::{Role, check_acl, check_acl_full};
 use crate::audit::audit;
@@ -208,7 +209,7 @@ pub async fn authenticate(
             "session already authenticated (replay)".into(),
         ));
     }
-    if session.challenge != challenge {
+    if !constant_time_eq(session.challenge.as_bytes(), challenge.as_bytes()) {
         warn!(session_id, "authentication rejected: challenge mismatch");
         audit!(
             "auth.authenticate",
@@ -218,9 +219,12 @@ pub async fn authenticate(
         );
         return Err(AppError::Authentication("challenge mismatch".into()));
     }
-    // Match the DID (compare base DID, ignoring any fragment)
+    // Match the DID (compare base DID, ignoring any fragment). Constant-time
+    // compare — DID bytes are not secret, but session.did is the challenge's
+    // expected holder; leaking byte-prefixes doesn't help an attacker who
+    // already knows the session, so this is defense-in-depth.
     let sender_base = sender_did.split('#').next().unwrap_or(sender_did);
-    if session.did != sender_base {
+    if !constant_time_eq(session.did.as_bytes(), sender_base.as_bytes()) {
         warn!(session_id, sender = %sender_base, expected = %session.did, "authentication rejected: DID mismatch");
         audit!(
             "auth.authenticate",

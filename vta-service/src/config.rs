@@ -202,6 +202,35 @@ pub struct TeeKmsConfig {
     /// the credential in the bootstrap keyspace (retrievable via REST).
     #[serde(default)]
     pub admin_did: Option<String>,
+    /// Allow falling back to non-attested KMS calls when the attested path
+    /// fails on real Nitro hardware (`/dev/nsm` present).
+    ///
+    /// **Default: false.** On production hardware a failure to use the
+    /// Nitro `Recipient` parameter must be terminal — otherwise a transient
+    /// NSM hiccup silently downgrades to an IAM-only KMS call, bypassing
+    /// the key policy's PCR conditions (PCR0/PCR8). The fallback path stays
+    /// available for simulated mode (no `/dev/nsm`), which uses the direct
+    /// KMS call regardless of this flag.
+    ///
+    /// Set to `true` only as a break-glass measure during incident response,
+    /// understanding that decrypts will then only require the enclave's IAM
+    /// role, not an attested PCR match.
+    #[serde(default)]
+    pub allow_unattested_fallback: bool,
+    /// Allow initializing the JWT key fingerprint when none is stored.
+    ///
+    /// **Default: false.** A missing fingerprint on a subsequent boot is
+    /// suspicious — the only legitimate cause is first boot after upgrading
+    /// from a pre-fingerprint VTA version. Left unguarded, an attacker with
+    /// write access to the bootstrap keyspace (parent-host / vsock proxy
+    /// compromise) could delete the fingerprint and then substitute a
+    /// rogue key that the enclave would accept as canonical on the next
+    /// restart.
+    ///
+    /// Operators migrating from a pre-fingerprint VTA: set `true`, boot
+    /// once to store the fingerprint, then set back to `false`.
+    #[serde(default)]
+    pub allow_fingerprint_init: bool,
 }
 
 // KMS ciphertexts (seed, JWT key, fingerprint) are stored as K/V entries

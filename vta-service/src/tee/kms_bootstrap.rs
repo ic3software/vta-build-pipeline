@@ -104,7 +104,7 @@ pub async fn bootstrap_secrets(
                     .try_into()
                     .map_err(|_| tee_attestation_error("JWT key must be exactly 32 bytes"))?;
 
-                verify_jwt_fingerprint(&bs_ks, &jwt_key).await?;
+                verify_jwt_fingerprint(&bs_ks, &jwt_key, kms_config.allow_fingerprint_init).await?;
                 info!("secrets decrypted from KMS — subsequent boot");
 
                 let storage_key = derive_storage_key(&seed, storage_key_salt);
@@ -261,15 +261,41 @@ async fn store_jwt_fingerprint(
 }
 
 /// Verify the JWT key matches the stored fingerprint.
+///
+/// A missing fingerprint is treated the same as a mismatch by default —
+/// silently re-baselining on a missing record would let an attacker with
+/// write access to the bootstrap keyspace delete the fingerprint and
+/// substitute a rogue key that passes verification on the next restart.
+///
+/// Operators upgrading from a pre-fingerprint VTA version can opt into a
+/// one-time init by setting `tee.kms.allow_fingerprint_init = true` in
+/// config; they should disable it again after the first successful boot.
 async fn verify_jwt_fingerprint(
     bs_ks: &crate::store::KeyspaceHandle,
     key: &[u8; 32],
+    allow_init: bool,
 ) -> Result<(), AppError> {
     let stored_bytes = match bs_ks.get_raw(BOOTSTRAP_JWT_FINGERPRINT_KEY).await? {
         Some(bytes) => bytes,
-        None => {
-            warn!("no JWT fingerprint found — storing one now (first boot after upgrade)");
+        None if allow_init => {
+            warn!(
+                "no JWT fingerprint found and allow_fingerprint_init=true — storing one \
+                 now. Disable allow_fingerprint_init after this boot."
+            );
             return store_jwt_fingerprint(bs_ks, key).await;
+        }
+        None => {
+            error!(
+                "no JWT fingerprint found — refusing to silently initialize. If this is \
+                 a first boot after upgrading from a pre-fingerprint VTA, set \
+                 tee.kms.allow_fingerprint_init = true, boot once, then disable."
+            );
+            return Err(tee_attestation_error(
+                "JWT key fingerprint missing — refusing to auto-initialize. Either (a) \
+                 set tee.kms.allow_fingerprint_init = true for a one-time migration, or \
+                 (b) clear the bootstrap keyspace to start fresh if this is disaster \
+                 recovery. A missing fingerprint on a running VTA is suspicious.",
+            ));
         }
     };
 
@@ -387,8 +413,12 @@ fn unwrap_cms_response(
 /// Decrypt a KMS data key ciphertext (the `CiphertextBlob` from `GenerateDataKey`).
 ///
 /// On real Nitro hardware (`/dev/nsm` available), uses attestation-based
-/// KMS Decrypt with the `Recipient` parameter. Falls back to direct KMS
-/// Decrypt if attestation fails.
+/// KMS Decrypt with the `Recipient` parameter. If attestation fails, the
+/// call is **terminal** unless `allow_unattested_fallback` is explicitly
+/// enabled — silent downgrade to IAM-only Decrypt would bypass the KMS
+/// key policy's PCR conditions.
+///
+/// Without `/dev/nsm` (simulated mode), uses direct KMS Decrypt.
 async fn kms_decrypt_data_key(
     config: &TeeKmsConfig,
     ciphertext: &[u8],
@@ -399,11 +429,21 @@ async fn kms_decrypt_data_key(
                 info!("KMS Decrypt succeeded with Nitro attestation");
                 return Ok(plaintext);
             }
-            Err(e) => {
+            Err(e) if config.allow_unattested_fallback => {
                 warn!(
                     error = %e,
-                    "attestation-based KMS Decrypt failed — falling back to direct Decrypt"
+                    "attestation-based KMS Decrypt failed — falling back to direct Decrypt \
+                     (allow_unattested_fallback = true). PCR policy is NOT enforced on this call."
                 );
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "attestation-based KMS Decrypt failed on Nitro hardware — refusing to \
+                     fall back. Set tee.kms.allow_unattested_fallback = true only as a \
+                     break-glass measure."
+                );
+                return Err(e);
             }
         }
     }
@@ -453,9 +493,12 @@ async fn kms_decrypt_direct(config: &TeeKmsConfig, ciphertext: &[u8]) -> Result<
 /// On real Nitro hardware, uses the `Recipient` parameter so KMS enforces
 /// PCR conditions on `kms:GenerateDataKey`. The plaintext key is returned
 /// via a CMS envelope decrypted with an ephemeral RSA key inside the enclave.
+/// If attestation fails, the call is **terminal** unless
+/// `allow_unattested_fallback` is explicitly enabled — silent downgrade
+/// would let an attacker with IAM (but not PCR) access encrypt rogue data
+/// that could overwrite legitimate ciphertexts.
 ///
-/// Without NSM, calls `GenerateDataKey` directly (KMS returns plaintext in
-/// the response — suitable for development/simulated mode only).
+/// Without NSM, calls `GenerateDataKey` directly (simulated/development mode).
 async fn kms_generate_data_key(config: &TeeKmsConfig) -> Result<(Vec<u8>, [u8; 32]), AppError> {
     if std::path::Path::new("/dev/nsm").exists() {
         match kms_generate_data_key_attested(config).await {
@@ -463,11 +506,21 @@ async fn kms_generate_data_key(config: &TeeKmsConfig) -> Result<(Vec<u8>, [u8; 3
                 info!("KMS GenerateDataKey succeeded with Nitro attestation");
                 return Ok(result);
             }
-            Err(e) => {
+            Err(e) if config.allow_unattested_fallback => {
                 warn!(
                     error = %e,
-                    "attestation-based GenerateDataKey failed — falling back to direct"
+                    "attestation-based GenerateDataKey failed — falling back to direct \
+                     (allow_unattested_fallback = true). PCR policy is NOT enforced on this call."
                 );
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "attestation-based GenerateDataKey failed on Nitro hardware — refusing \
+                     to fall back. Set tee.kms.allow_unattested_fallback = true only as a \
+                     break-glass measure."
+                );
+                return Err(e);
             }
         }
     }

@@ -14,6 +14,11 @@ repository.workspace = true
 default = []
 encryption = ["dep:aes-gcm", "dep:zeroize", "dep:rand"]
 vsock-store = ["dep:tokio-vsock", "dep:libc"]
+# Exposes `AuthClaims::unsafe_local_cli_super_admin` — a synthesizer that
+# produces a super-admin claim without any wire-level verification. Only
+# for the local/dev `vta` binary's CLI, where the trust boundary is the
+# OS process (not the network). NEVER enable in enclave builds.
+cli-synthesis = []
 
 [dependencies]
 axum = "0.8"

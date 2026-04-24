@@ -1155,7 +1155,7 @@ async fn load_vta_key_as_secret(
     state: &ProvisionIntegrationDeps,
     key_id: String,
 ) -> Result<Secret, AppError> {
-    let internal_auth = AuthClaims::local_cli("provision-integration-internal");
+    let internal_auth = AuthClaims::server_internal_super_admin("provision-integration");
     let resp = super::keys::get_key_secret(
         &state.keys_ks,
         &state.imported_ks,

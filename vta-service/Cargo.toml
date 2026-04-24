@@ -11,11 +11,17 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["setup", "keyring", "rest", "didcomm"]
+default = ["setup", "keyring", "rest", "didcomm", "cli-synthesis"]
 rest = []
 didcomm = []
 webvh = ["dep:didwebvh-rs", "dep:url", "dep:reqwest"]
 setup = ["webvh", "dep:tempfile"]
+# Enables the offline CLI command helpers (bootstrap_cli, webvh_cli) that
+# synthesize super-admin `AuthClaims` without wire-level verification. The
+# local `vta` binary enables this; the enclave binary does not (its
+# dependency is `default-features = false`), so the footgun is physically
+# absent from enclave builds.
+cli-synthesis = ["vti-common/cli-synthesis"]
 keyring = ["dep:keyring"]
 config-seed = []
 aws-secrets = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]

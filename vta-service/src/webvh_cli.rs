@@ -23,11 +23,11 @@ fn format_local_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
 /// Create a synthetic super-admin AuthClaims for CLI operations.
 ///
 /// Thin wrapper over the workspace-level
-/// [`AuthClaims::local_cli`] factory so the trust-boundary
-/// documentation lives in one place. Callers should prefer the
-/// factory directly in new code.
+/// [`AuthClaims::unsafe_local_cli_super_admin`] factory so the
+/// trust-boundary documentation lives in one place. Callers should
+/// prefer the factory directly in new code.
 pub(crate) fn cli_super_admin() -> AuthClaims {
-    AuthClaims::local_cli("webvh")
+    AuthClaims::unsafe_local_cli_super_admin("webvh")
 }
 
 pub async fn run_add_server(
