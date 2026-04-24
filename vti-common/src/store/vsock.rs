@@ -527,3 +527,286 @@ fn decode_key_list(data: &[u8]) -> Result<Vec<Vec<u8>>, AppError> {
         s => Err(AppError::Internal(format!("unexpected status: {s:#04x}"))),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+//
+// The full VsockStore round-trip is exercised at integration level against the
+// enclave-proxy binary (see `deploy/nitro/enclave-proxy`). These tests cover
+// the pure wire-format layer in isolation — the encoders/decoders that both
+// ends must agree on. A bug here silently breaks every enclave boot.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── encode/decode_bytes round-trip ─────────────────────────────
+
+    #[test]
+    fn encode_bytes_prepends_big_endian_length() {
+        let mut buf = Vec::new();
+        encode_bytes(&mut buf, b"hello");
+        assert_eq!(
+            buf,
+            vec![
+                0, 0, 0, 5, // length as u32 big-endian
+                b'h', b'e', b'l', b'l', b'o',
+            ],
+            "wire format must be BE-u32 length prefix + bytes"
+        );
+    }
+
+    #[test]
+    fn decode_bytes_recovers_encoded_payload() {
+        let mut buf = Vec::new();
+        encode_bytes(&mut buf, b"payload-one");
+        encode_bytes(&mut buf, b"payload-two");
+        let (first, next_offset) = decode_bytes(&buf, 0).unwrap();
+        assert_eq!(first, b"payload-one");
+        let (second, final_offset) = decode_bytes(&buf, next_offset).unwrap();
+        assert_eq!(second, b"payload-two");
+        assert_eq!(final_offset, buf.len());
+    }
+
+    #[test]
+    fn decode_bytes_rejects_truncated_length_prefix() {
+        // 3 bytes — not enough for a u32 length prefix.
+        let err = decode_bytes(&[0, 0, 5], 0).expect_err("truncated length must error");
+        assert!(err.contains("truncated length"), "got {err}");
+    }
+
+    #[test]
+    fn decode_bytes_rejects_truncated_data() {
+        // Length prefix claims 10 bytes but only 3 follow.
+        let mut buf = vec![0, 0, 0, 10];
+        buf.extend_from_slice(b"abc");
+        let err = decode_bytes(&buf, 0).expect_err("truncated data must error");
+        assert!(err.contains("truncated data"), "got {err}");
+    }
+
+    #[test]
+    fn decode_bytes_rejects_offset_past_end() {
+        let err = decode_bytes(&[0u8; 2], 10).expect_err("offset past end must error");
+        assert!(err.contains("truncated length"), "got {err}");
+    }
+
+    #[test]
+    fn encode_bytes_handles_empty_payload() {
+        let mut buf = Vec::new();
+        encode_bytes(&mut buf, b"");
+        assert_eq!(buf, vec![0, 0, 0, 0]);
+        let (decoded, _) = decode_bytes(&buf, 0).unwrap();
+        assert_eq!(decoded, b"");
+    }
+
+    // ── encode_keyspace ─────────────────────────────────────────────
+
+    #[test]
+    fn encode_keyspace_uses_be_u16_prefix() {
+        let mut buf = Vec::new();
+        encode_keyspace(&mut buf, "sessions");
+        assert_eq!(
+            buf,
+            vec![
+                0, 8, // length as u16 big-endian
+                b's', b'e', b's', b's', b'i', b'o', b'n', b's',
+            ],
+            "keyspace names use a u16 length prefix, not u32"
+        );
+    }
+
+    // ── decode_ok ───────────────────────────────────────────────────
+
+    #[test]
+    fn decode_ok_accepts_status_ok() {
+        decode_ok(&[STATUS_OK]).expect("STATUS_OK must decode");
+    }
+
+    #[test]
+    fn decode_ok_propagates_error_message() {
+        let mut resp = vec![STATUS_ERROR];
+        encode_bytes(&mut resp, b"disk full");
+        let err = decode_ok(&resp).expect_err("STATUS_ERROR must be an error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("storage proxy error") && msg.contains("disk full"),
+            "must surface the proxy message — got {msg}"
+        );
+    }
+
+    #[test]
+    fn decode_ok_rejects_empty_response() {
+        let err = decode_ok(&[]).expect_err("empty response must error");
+        assert!(format!("{err:?}").contains("empty response"), "got {err:?}");
+    }
+
+    #[test]
+    fn decode_ok_rejects_unknown_status() {
+        let err = decode_ok(&[0xFF]).expect_err("unknown status must error");
+        assert!(
+            format!("{err:?}").contains("unexpected status"),
+            "got {err:?}"
+        );
+    }
+
+    // ── decode_value ────────────────────────────────────────────────
+
+    #[test]
+    fn decode_value_returns_ok_payload() {
+        let mut resp = vec![STATUS_OK];
+        encode_bytes(&mut resp, b"the value");
+        let result = decode_value(&resp).unwrap();
+        assert_eq!(result, Some(b"the value".to_vec()));
+    }
+
+    #[test]
+    fn decode_value_returns_none_for_not_found() {
+        let result = decode_value(&[STATUS_NOT_FOUND]).unwrap();
+        assert_eq!(result, None, "STATUS_NOT_FOUND must map to Option::None");
+    }
+
+    #[test]
+    fn decode_value_propagates_error() {
+        let mut resp = vec![STATUS_ERROR];
+        encode_bytes(&mut resp, b"io error");
+        let err = decode_value(&resp).expect_err("STATUS_ERROR must be an error");
+        assert!(format!("{err:?}").contains("io error"), "got {err:?}");
+    }
+
+    // ── decode_kv_list / decode_key_list ────────────────────────────
+
+    #[test]
+    fn decode_kv_list_empty_result() {
+        // STATUS_OK + count=0 + no pairs
+        let resp = vec![STATUS_OK, 0, 0, 0, 0];
+        let pairs = decode_kv_list(&resp).unwrap();
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn decode_kv_list_decodes_multiple_pairs() {
+        let mut resp = vec![STATUS_OK];
+        resp.extend_from_slice(&2u32.to_be_bytes()); // count
+        encode_bytes(&mut resp, b"k1");
+        encode_bytes(&mut resp, b"v1");
+        encode_bytes(&mut resp, b"k2");
+        encode_bytes(&mut resp, b"v2");
+        let pairs = decode_kv_list(&resp).unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                (b"k1".to_vec(), b"v1".to_vec()),
+                (b"k2".to_vec(), b"v2".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_kv_list_rejects_truncated_count_header() {
+        // STATUS_OK but only 3 bytes of count (needs 4).
+        let resp = vec![STATUS_OK, 0, 0, 0];
+        let err = decode_kv_list(&resp).expect_err("truncated count must error");
+        assert!(
+            format!("{err:?}").contains("truncated kv list"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_kv_list_rejects_count_larger_than_payload() {
+        // Claims 5 pairs but no pair data follows — inner decode_bytes
+        // must error rather than silently returning an empty vec.
+        let mut resp = vec![STATUS_OK];
+        resp.extend_from_slice(&5u32.to_be_bytes());
+        let err = decode_kv_list(&resp).expect_err("count > actual pairs must error");
+        assert!(format!("{err:?}").contains("decode kv"), "got {err:?}");
+    }
+
+    #[test]
+    fn decode_key_list_decodes_multiple_keys() {
+        let mut resp = vec![STATUS_OK];
+        resp.extend_from_slice(&3u32.to_be_bytes());
+        encode_bytes(&mut resp, b"alpha");
+        encode_bytes(&mut resp, b"beta");
+        encode_bytes(&mut resp, b"gamma");
+        let keys = decode_key_list(&resp).unwrap();
+        assert_eq!(
+            keys,
+            vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()]
+        );
+    }
+
+    #[test]
+    fn decode_key_list_propagates_error() {
+        let mut resp = vec![STATUS_ERROR];
+        encode_bytes(&mut resp, b"denied");
+        let err = decode_key_list(&resp).expect_err("STATUS_ERROR must propagate");
+        assert!(format!("{err:?}").contains("denied"), "got {err:?}");
+    }
+
+    // ── Request payload shape ───────────────────────────────────────
+    //
+    // The enclave-proxy expects:
+    //   [OP_CODE: u8] [keyspace_len: u16 BE] [keyspace bytes] [..op-specific..]
+    // Both sides duplicate these constants; a change here without the
+    // corresponding proxy update silently breaks every enclave boot.
+
+    #[test]
+    fn op_code_constants_match_proxy_wire_contract() {
+        // Stability assertion: these values are persisted by the
+        // enclave-proxy and must not change without a protocol bump.
+        assert_eq!(OP_GET, 0x01);
+        assert_eq!(OP_INSERT, 0x02);
+        assert_eq!(OP_DELETE, 0x03);
+        assert_eq!(OP_PREFIX_ITER, 0x04);
+        assert_eq!(OP_PREFIX_KEYS, 0x05);
+        assert_eq!(OP_PERSIST, 0x06);
+    }
+
+    #[test]
+    fn status_code_constants_match_proxy_wire_contract() {
+        assert_eq!(STATUS_OK, 0x00);
+        assert_eq!(STATUS_NOT_FOUND, 0x01);
+        assert_eq!(STATUS_ERROR, 0x02);
+    }
+
+    #[test]
+    fn max_message_size_is_bounded() {
+        // Bounded-parser invariant: a malicious parent can't induce
+        // OOM by claiming a large response size. 16 MiB is generous
+        // for legitimate backup payloads while still bounding attack
+        // surface.
+        assert_eq!(MAX_MESSAGE_SIZE, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn get_request_payload_matches_wire_contract() {
+        // Manually construct what VsockKeyspaceHandle::get_raw sends.
+        let mut payload = vec![OP_GET];
+        encode_keyspace(&mut payload, "sessions");
+        encode_bytes(&mut payload, b"session:abc");
+
+        // Expected: op + u16(8) + "sessions" + u32(11) + "session:abc"
+        let mut expected = vec![OP_GET];
+        expected.extend_from_slice(&8u16.to_be_bytes());
+        expected.extend_from_slice(b"sessions");
+        expected.extend_from_slice(&11u32.to_be_bytes());
+        expected.extend_from_slice(b"session:abc");
+        assert_eq!(payload, expected);
+    }
+
+    #[test]
+    fn insert_request_payload_matches_wire_contract() {
+        let mut payload = vec![OP_INSERT];
+        encode_keyspace(&mut payload, "acl");
+        encode_bytes(&mut payload, b"acl:did:key:zABC");
+        encode_bytes(&mut payload, b"{\"role\":\"Admin\"}");
+
+        // Op byte + u16 keyspace len + keyspace + u32 key len + key + u32 val len + val
+        assert_eq!(payload[0], OP_INSERT);
+        let (ks_len, rest) = payload[1..].split_at(2);
+        assert_eq!(u16::from_be_bytes([ks_len[0], ks_len[1]]), 3);
+        assert_eq!(&rest[..3], b"acl");
+    }
+}
