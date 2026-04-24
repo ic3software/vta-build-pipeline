@@ -111,6 +111,23 @@ pub fn print_cli_error(err: &(dyn std::error::Error + 'static)) {
                     "  {DIM}This is a VTA-side failure. Check server logs or contact the operator.{RESET}"
                 );
             }
+            VtaError::UnsupportedTransport(msg) => {
+                eprintln!("{RED}\u{2717}{RESET} Unsupported transport: {msg}");
+                eprintln!(
+                    "  {DIM}This operation requires a specific transport (REST or DIDComm). \
+                     Check which mode your CLI is in and whether the endpoint supports it.{RESET}"
+                );
+            }
+            VtaError::DidcommTransport(msg) => {
+                eprintln!("{RED}\u{2717}{RESET} DIDComm transport error: {msg}");
+                eprintln!(
+                    "  {DIM}Mediator or peer unreachable. Retry after checking mediator \
+                     connectivity.{RESET}"
+                );
+            }
+            VtaError::DidcommRemote { code, comment } => {
+                eprintln!("{RED}\u{2717}{RESET} Remote error ({code}): {comment}");
+            }
             VtaError::Protocol(msg) => {
                 eprintln!("{RED}\u{2717}{RESET} Protocol error: {msg}");
             }

@@ -136,7 +136,7 @@ impl DIDCommSession {
                 Some(&self.client_did),
             )
             .await
-            .map_err(|e| VtaError::Protocol(format!("failed to pack message: {e}")))?;
+            .map_err(|e| VtaError::DidcommTransport(format!("failed to pack message: {e}")))?;
 
         debug!(msg_type, msg_id, "sending via DIDComm");
 
@@ -144,7 +144,7 @@ impl DIDCommSession {
         self.atm
             .send_message(&self.profile, &packed, &msg_id, false, false)
             .await
-            .map_err(|e| VtaError::Protocol(format!("failed to send message: {e}")))?;
+            .map_err(|e| VtaError::DidcommTransport(format!("failed to send message: {e}")))?;
 
         // Wait for the response via WebSocket live stream
         let timeout = std::time::Duration::from_secs(timeout_secs);
@@ -154,7 +154,7 @@ impl DIDCommSession {
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Err(VtaError::Protocol(
+                return Err(VtaError::DidcommTransport(
                     "timeout waiting for DIDComm response".into(),
                 ));
             }
@@ -165,7 +165,7 @@ impl DIDCommSession {
                 .message_pickup()
                 .live_stream_next(&self.profile, Some(wait), true)
                 .await
-                .map_err(|e| VtaError::Protocol(format!("message pickup error: {e}")))?;
+                .map_err(|e| VtaError::DidcommTransport(format!("message pickup error: {e}")))?;
 
             let (response_msg, _meta) = match next {
                 Some(pair) => pair,
@@ -240,6 +240,9 @@ fn problem_report_to_vta_error(code: &str, comment: String) -> VtaError {
             status: 500,
             body: comment,
         },
-        other => VtaError::Protocol(format!("{other}: {comment}")),
+        other => VtaError::DidcommRemote {
+            code: other.to_string(),
+            comment,
+        },
     }
 }

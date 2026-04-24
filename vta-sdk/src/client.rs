@@ -1960,7 +1960,7 @@ impl VtaClient {
     ///
     /// Requires REST transport — the endpoint has no DIDComm
     /// equivalent in phase 1. Callers on the DIDComm transport get
-    /// [`VtaError::Protocol`].
+    /// [`VtaError::UnsupportedTransport`].
     #[cfg(feature = "provision-integration")]
     pub async fn provision_integration(
         &self,
@@ -1981,7 +1981,7 @@ impl VtaClient {
                 Self::handle_response(resp).await
             }
             #[cfg(feature = "session")]
-            Transport::DIDComm { .. } => Err(VtaError::Protocol(
+            Transport::DIDComm { .. } => Err(VtaError::UnsupportedTransport(
                 "provision-integration is REST-only in phase 1".into(),
             )),
         }

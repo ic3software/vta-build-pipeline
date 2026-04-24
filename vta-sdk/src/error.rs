@@ -32,7 +32,27 @@ pub enum VtaError {
     #[error("server error ({status}): {body}")]
     Server { status: u16, body: String },
 
-    /// Protocol error (e.g. unexpected DIDComm message type).
+    /// The operation does not support the transport the client is
+    /// configured for (e.g. calling a REST-only helper on a client built
+    /// with DIDComm-only transport, or vice versa).
+    #[error("unsupported transport: {0}")]
+    UnsupportedTransport(String),
+
+    /// DIDComm transport failure (pack/send/pickup). Network-ish —
+    /// caller may want to retry. Distinct from [`Self::Network`] which
+    /// is REST-specific and carries a `reqwest::Error`.
+    #[error("didcomm transport error: {0}")]
+    DidcommTransport(String),
+
+    /// Remote endpoint returned an error message over DIDComm. The VTA
+    /// (or the peer) encoded a specific status; prefer matching on
+    /// this variant before falling back to [`Self::Protocol`].
+    #[error("didcomm remote error ({code}): {comment}")]
+    DidcommRemote { code: String, comment: String },
+
+    /// Catch-all for protocol-level errors that don't map to a typed
+    /// variant above. Prefer a typed variant when adding new call
+    /// sites — this exists so legacy dispatch paths still compile.
     #[error("protocol error: {0}")]
     Protocol(String),
 
