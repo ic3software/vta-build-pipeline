@@ -1,6 +1,7 @@
 use crate::error::AppError;
 use crate::store::KeyspaceHandle;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
@@ -27,8 +28,28 @@ fn session_key(session_id: &str) -> String {
     format!("session:{session_id}")
 }
 
+/// Key the refresh-token reverse-index by SHA-256 of the token rather
+/// than the token itself. An attacker with raw read access to the
+/// sessions keyspace (storage dump, vsock proxy compromise) sees only
+/// hashes, not live tokens. The lookup path hashes the presented token
+/// before probing the store.
+///
+/// Hash length (32 bytes → 64 hex chars) is fine for collision
+/// resistance; UUIDv4 refresh tokens have 122 bits of entropy, so
+/// pre-image resistance is what we rely on here, not second-preimage.
 fn refresh_key(token: &str) -> String {
-    format!("refresh:{token}")
+    let digest = Sha256::digest(token.as_bytes());
+    format!("refresh:{}", hex_lower(&digest))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(TABLE[(b >> 4) as usize] as char);
+        out.push(TABLE[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// Store a new session in the `sessions` keyspace.
