@@ -950,7 +950,7 @@ enum KeyCommands {
     /// identical arguments). Use `pnm keys list` to discover existing keys
     /// in a context first if you're trying to avoid duplicates.
     Create {
-        /// Key type: ed25519 or x25519
+        /// Key type: ed25519, x25519, or p256
         #[arg(long)]
         key_type: String,
         /// BIP-32 derivation path (auto-derived from context if omitted)

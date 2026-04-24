@@ -263,7 +263,7 @@ cnm config update --community-vta-name "My VTA" --public-url "https://vta.exampl
 | Command                                                                    | Description     |
 | -------------------------------------------------------------------------- | --------------- |
 | `keys list [--status active\|revoked] [--limit N] [--offset N]`            | List keys       |
-| `keys create --key-type ed25519\|x25519 [--context-id ID] [--label LABEL]` | Create a key    |
+| `keys create --key-type ed25519\|x25519\|p256 [--context-id ID] [--label LABEL]` | Create a key    |
 | `keys get <key_id>`                                                        | Get a key by ID |
 | `keys revoke <key_id>`                                                     | Revoke a key    |
 | `keys rename <key_id> <new_key_id>`                                        | Rename a key    |

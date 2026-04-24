@@ -19,8 +19,11 @@ pub async fn cmd_key_create(
     let key_type = match key_type {
         "ed25519" => KeyType::Ed25519,
         "x25519" => KeyType::X25519,
+        "p256" => KeyType::P256,
         other => {
-            return Err(format!("unknown key type '{other}', expected ed25519 or x25519").into());
+            return Err(
+                format!("unknown key type '{other}', expected ed25519, x25519, or p256").into(),
+            );
         }
     };
     let mut req = CreateKeyRequest::new(key_type);
