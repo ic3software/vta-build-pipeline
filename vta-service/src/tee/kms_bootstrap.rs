@@ -363,20 +363,33 @@ async fn kms_client(config: &TeeKmsConfig) -> aws_sdk_kms::Client {
 }
 
 /// Generate an ephemeral RSA-2048 keypair and obtain an NSM attestation
-/// document binding the public key. Returns `(private_key, recipient_info)`
+/// document binding the public key. Returns `(pkcs8_der, recipient_info)`
 /// for use with KMS attested operations.
-fn nsm_attested_recipient()
--> Result<(rsa::RsaPrivateKey, aws_sdk_kms::types::RecipientInfo), AppError> {
-    use rsa::pkcs8::EncodePublicKey;
+///
+/// The private key is returned as PKCS#8 DER bytes rather than the
+/// `PrivateDecryptingKey` object directly because that object is `!Send`
+/// (wraps a raw BoringSSL `EVP_PKEY` pointer) and would poison the Send
+/// bound on any async future that holds it across a KMS `.await`. DER
+/// bytes are `Vec<u8>` — trivially Send — and the caller deserializes
+/// right before the synchronous OAEP decrypt step.
+fn nsm_attested_recipient() -> Result<(Vec<u8>, aws_sdk_kms::types::RecipientInfo), AppError> {
+    use aws_lc_rs::encoding::AsDer;
+    use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
 
-    let mut rng = rsa::rand_core::OsRng;
-    let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048)
+    let private_key = PrivateDecryptingKey::generate(KeySize::Rsa2048)
         .map_err(|e| tee_attestation_error(format!("RSA key generation failed: {e}")))?;
 
+    // KMS requires the pubkey as X.509 SubjectPublicKeyInfo DER.
     let public_key_der = private_key
-        .to_public_key()
-        .to_public_key_der()
+        .public_key()
+        .as_der()
         .map_err(|e| tee_attestation_error(format!("RSA public key DER encoding failed: {e}")))?;
+
+    // Private key as PKCS#8 for round-tripping across await boundaries.
+    let pkcs8_der = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&private_key)
+        .map_err(|e| tee_attestation_error(format!("RSA private key PKCS#8 encoding failed: {e}")))?
+        .as_ref()
+        .to_vec();
 
     let attestation_doc = super::nitro::request_nsm_attestation_for_kms(public_key_der.as_ref())?;
 
@@ -385,7 +398,7 @@ fn nsm_attested_recipient()
         .key_encryption_algorithm(aws_sdk_kms::types::KeyEncryptionMechanism::RsaesOaepSha256)
         .build();
 
-    Ok((private_key, recipient))
+    Ok((pkcs8_der, recipient))
 }
 
 /// Extract the plaintext from an attested KMS response's CMS envelope.
@@ -395,7 +408,7 @@ fn nsm_attested_recipient()
 /// unwraps that envelope using the ephemeral RSA private key.
 fn unwrap_cms_response(
     cms_blob: Option<&aws_sdk_kms::primitives::Blob>,
-    private_key: &rsa::RsaPrivateKey,
+    private_key_pkcs8: &[u8],
 ) -> Result<Vec<u8>, AppError> {
     let cms_bytes = cms_blob.ok_or_else(|| {
         tee_attestation_error(
@@ -403,7 +416,7 @@ fn unwrap_cms_response(
              the KMS key may not support attestation-based operations",
         )
     })?;
-    decrypt_cms_envelope(cms_bytes.as_ref(), private_key)
+    decrypt_cms_envelope(cms_bytes.as_ref(), private_key_pkcs8)
 }
 
 // ---------------------------------------------------------------------------
@@ -651,10 +664,7 @@ fn aes_gcm_decrypt(key: &[u8], blob: &[u8]) -> Result<Vec<u8>, AppError> {
 ///
 /// We parse the DER structure manually (the format from KMS is fixed), unwrap the
 /// CEK with the ephemeral RSA private key, then decrypt the content with AES-256-GCM.
-fn decrypt_cms_envelope(
-    cms_bytes: &[u8],
-    private_key: &rsa::RsaPrivateKey,
-) -> Result<Vec<u8>, AppError> {
+fn decrypt_cms_envelope(cms_bytes: &[u8], private_key_pkcs8: &[u8]) -> Result<Vec<u8>, AppError> {
     // Log first bytes for diagnosing BER structure issues with real KMS responses
     debug!(
         cms_len = cms_bytes.len(),
@@ -665,19 +675,32 @@ fn decrypt_cms_envelope(
     // Parse the CMS EnvelopedData to extract the three fields we need
     let fields = cms_der::parse_enveloped_data(cms_bytes)?;
 
-    // RSA-OAEP decrypt the content-encryption key (CEK).
-    // We request RSAES_OAEP_SHA_256 in the Recipient parameter, but KMS may
-    // use SHA-256 for the hash and SHA-1 for the MGF1 mask generation function.
-    // Try SHA-256 first, then fall back to the mixed SHA-256/SHA-1 variant.
-    use rsa::Oaep;
-    let cek = private_key
-        .decrypt(Oaep::new::<sha2::Sha256>(), &fields.encrypted_key)
-        .or_else(|_| {
-            // KMS may use SHA-256 hash + SHA-1 MGF1 (common in PKCS#11 implementations)
-            let padding = Oaep::new_with_mgf_hash::<sha2::Sha256, sha1::Sha1>();
-            private_key.decrypt(padding, &fields.encrypted_key)
-        })
-        .map_err(|e| tee_attestation_error(format!("RSA-OAEP decryption of CEK failed: {e}")))?;
+    // RSA-OAEP decrypt the content-encryption key (CEK). We request
+    // RSAES_OAEP_SHA_256 in the Recipient parameter; per AWS KMS
+    // documentation this always produces symmetric OAEP-SHA256
+    // (SHA-256 hash + MGF1-SHA-256), so no algorithm fallback is needed.
+    use aws_lc_rs::rsa::{OAEP_SHA256_MGF1SHA256, OaepPrivateDecryptingKey, PrivateDecryptingKey};
+
+    let private_key = PrivateDecryptingKey::from_pkcs8(private_key_pkcs8).map_err(|e| {
+        tee_attestation_error(format!(
+            "RSA private key PKCS#8 deserialization failed: {e:?}"
+        ))
+    })?;
+    let key_size = private_key.key_size_bytes();
+    let oaep_key = OaepPrivateDecryptingKey::new(private_key)
+        .map_err(|e| tee_attestation_error(format!("OAEP private key wrap failed: {e:?}")))?;
+    // Output buffer sized to the key modulus length (upper bound on
+    // plaintext size; OAEP overhead is subtracted internally).
+    let mut plaintext_buf = vec![0u8; key_size];
+    let cek = oaep_key
+        .decrypt(
+            &OAEP_SHA256_MGF1SHA256,
+            &fields.encrypted_key,
+            &mut plaintext_buf,
+            None,
+        )
+        .map_err(|e| tee_attestation_error(format!("RSA-OAEP decryption of CEK failed: {e:?}")))?
+        .to_vec();
 
     debug!(
         cek_len = cek.len(),
@@ -1180,11 +1203,12 @@ mod tests {
     fn test_cms_envelope_roundtrip() {
         use aes_gcm::aead::generic_array::GenericArray;
         use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
-        use rsa::{Oaep, RsaPrivateKey};
+        use aws_lc_rs::rsa::{
+            KeySize, OAEP_SHA256_MGF1SHA256, OaepPublicEncryptingKey, PrivateDecryptingKey,
+        };
 
         // Generate RSA keypair (the "ephemeral" key the enclave would create)
-        let mut rng = rsa::rand_core::OsRng;
-        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let private_key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
 
         // The plaintext KMS would return (e.g., a 32-byte seed)
         let original_plaintext = b"this is a secret seed value!!!!!"; // 32 bytes
@@ -1200,17 +1224,30 @@ mod tests {
         let nonce = GenericArray::from_slice(&nonce_bytes);
         let aes_ciphertext = cipher.encrypt(nonce, original_plaintext.as_ref()).unwrap();
 
-        // RSA-OAEP-SHA256 encrypt the CEK
-        let encrypted_cek = private_key
-            .to_public_key()
-            .encrypt(&mut rng, Oaep::new::<sha2::Sha256>(), &cek)
+        // RSA-OAEP-SHA256 encrypt the CEK using the public key — mirrors
+        // what KMS does server-side before returning CiphertextForRecipient.
+        let oaep_pub = OaepPublicEncryptingKey::new(private_key.public_key().clone()).unwrap();
+        let mut encrypted_cek_buf = vec![0u8; private_key.key_size_bytes()];
+        let encrypted_cek_slice = oaep_pub
+            .encrypt(&OAEP_SHA256_MGF1SHA256, &cek, &mut encrypted_cek_buf, None)
             .unwrap();
+        let encrypted_cek = encrypted_cek_slice.to_vec();
 
         // Build the CMS EnvelopedData DER structure
         let cms_bytes = build_test_cms_envelope(&encrypted_cek, &nonce_bytes, &aes_ciphertext);
 
+        // Serialize the private key to PKCS#8 so decrypt_cms_envelope
+        // can round-trip it (mirrors the production path, where the key
+        // crosses async await boundaries as bytes rather than as the
+        // non-Send PrivateDecryptingKey object).
+        use aws_lc_rs::encoding::AsDer;
+        let pkcs8 = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&private_key)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+
         // Now decrypt it using our implementation
-        let recovered = decrypt_cms_envelope(&cms_bytes, &private_key).unwrap();
+        let recovered = decrypt_cms_envelope(&cms_bytes, &pkcs8).unwrap();
 
         assert_eq!(recovered, original_plaintext);
     }

@@ -36,7 +36,7 @@ tee = [
   "dep:libc",
   "dep:aws-sdk-kms",
   "dep:aws-config",
-  "dep:rsa",
+  "dep:aws-lc-rs",
   "dep:didwebvh-rs",
   "dep:cbc",
   "dep:aes",
@@ -122,7 +122,6 @@ dialoguer = { workspace = true }
 dirs = "6"
 azure_security_keyvault_secrets = { version = "0.14", optional = true }
 azure_identity = { version = "0.35", optional = true }
-sha1 = "0.10"
 sha2 = { workspace = true }
 cbc = { version = "0.1", optional = true }
 aes = { version = "0.8", optional = true }
@@ -144,7 +143,14 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 hmac = "0.12"
 aws-sdk-kms = { version = "1", optional = true }
-rsa = { version = "0.9", optional = true, features = ["sha2"] }
+# RSA-OAEP for KMS CiphertextForRecipient unwrap. aws-lc-rs is AWS's own
+# BoringSSL-based crypto lib; constant-time operations, already transitive
+# via aws-sdk-* so no new build-time cost. Replaces the RustCrypto `rsa`
+# crate (RUSTSEC-2023-0071 — non-constant-time PKCS#1 v1.5 / OAEP
+# decryption). Our use was ephemeral-key + KMS-only so the advisory
+# didn't map directly to exploitation, but dropping the dep frees us
+# from the RustCrypto 0.11 ecosystem HOLD above.
+aws-lc-rs = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
