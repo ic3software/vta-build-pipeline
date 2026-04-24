@@ -60,7 +60,8 @@ The workspace has a **DID templates feature** (`docs/did-templates.md`,
 template is a JSON file describing the **shape** of a DID document with
 `{TOKEN}` placeholders; the VTA renders them server-side, filling in keys it
 just minted + caller-supplied variables. Built-ins ship with the service
-(`didcomm-mediator`, `webvh-hosting-server`); operators can upload more.
+(`didcomm-mediator`, `vta-admin`, `webvh-hosting-server`, `webvh-service`);
+operators can upload more.
 
 **Before inventing a new mint-a-DID path, reach for templates first.**
 
@@ -297,7 +298,8 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Offline**: `pnm did-templates init <kind>`, `validate`, `list-builtins`.
 - **Online**: `pnm did-templates list/show/create/update/delete` →
   REST `/did-templates` (global) or `/contexts/{id}/did-templates` (scoped).
-- **Built-ins**: `didcomm-mediator`, `webvh-hosting-server` (shipped with
+- **Built-ins**: `didcomm-mediator`, `vta-admin`, `webvh-hosting-server`,
+  `webvh-service` (shipped with
   the SDK, always available).
 - **Code**: `vta-sdk/src/did_templates/`,
   `vta-service/src/routes/did_templates.rs`, `vta-service/src/operations/did_templates.rs`.

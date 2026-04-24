@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "name": "webvh-service",
+  "kind": "webvh-service",
+  "description": "WebVH service endpoint (control plane, DID-hosting server, witness, or watcher) that routes DIDComm through a shared mediator. Uses key-0/key-1 verification-method IDs and a single DIDCommMessaging service whose serviceEndpoint is an array pointing at a mediator DID.",
+  "methods": ["webvh"],
+  "requiredVars": ["MEDIATOR_DID"],
+  "optionalVars": {
+    "ACCEPT": ["didcomm/v2"]
+  },
+  "defaults": {
+    "preRotationCount": 2,
+    "portable": true
+  },
+  "document": {
+    "@context": [
+      "https://www.w3.org/ns/did/v1",
+      "https://www.w3.org/ns/cid/v1"
+    ],
+    "id": "{DID}",
+    "verificationMethod": [
+      {
+        "id": "{DID}#key-0",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{SIGNING_KEY_MB}"
+      },
+      {
+        "id": "{DID}#key-1",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{KA_KEY_MB}"
+      }
+    ],
+    "assertionMethod": ["{DID}#key-0"],
+    "authentication": ["{DID}#key-0"],
+    "keyAgreement": ["{DID}#key-1"],
+    "service": [
+      {
+        "id": "{DID}#vta-didcomm",
+        "type": "DIDCommMessaging",
+        "serviceEndpoint": [
+          { "accept": "{ACCEPT}", "uri": "{MEDIATOR_DID}" }
+        ]
+      }
+    ]
+  }
+}

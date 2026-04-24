@@ -13,8 +13,9 @@ consumer gets the new shape on the next create. No redeploy.
 ## Why templates
 
 - **Data, not code.** An operator can ship a new agent kind by dropping a JSON
-  file, no recompile. The built-ins (`didcomm-mediator`, `webvh-hosting-server`)
-  are baseline shapes, not the only shapes.
+  file, no recompile. The built-ins (`didcomm-mediator`, `vta-admin`,
+  `webvh-hosting-server`, `webvh-service`) are baseline shapes, not the only
+  shapes.
 - **Method-agnostic.** Same format works for `did:webvh`, `did:web`, or
   `did:key` — the loader only knows about `{TOKEN}` placeholders. Method-
   specific details (SCID, log endpoints) are just placeholders the VTA fills.
@@ -136,7 +137,15 @@ Templates live in one of three scopes. Resolution order when a caller names a
 template without explicit scope is **context → global → builtin**:
 
 - **Built-in** — embedded in the SDK at compile time. Always available. Fork
-  with `pnm did-templates init <kind>`.
+  with `pnm did-templates init <kind>`. Current built-ins:
+  - `didcomm-mediator` — DIDComm v2 routing mediator with a URL-based service
+    endpoint.
+  - `vta-admin` — did:key admin DID for provision-integration admin rollover.
+  - `webvh-hosting-server` — did:webvh hosting server exposing a
+    `WebVHHosting` service.
+  - `webvh-service` — generic webvh service (control plane / hosting /
+    witness / watcher) whose DIDComm endpoint routes through a shared
+    mediator DID instead of a URL.
 - **Global** (`tpl:global:<name>`) — super-admin-managed. Visible across every
   context.
 - **Context** (`tpl:ctx:<id>:<name>`) — context-admin-managed (or super
