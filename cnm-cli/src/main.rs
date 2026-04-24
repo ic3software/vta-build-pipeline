@@ -1231,7 +1231,11 @@ async fn cmd_community_ping(
         }
     };
 
-    let mediator_did = match vta_sdk::session::resolve_mediator_did(&session.vta_did).await? {
+    let vta_did = session
+        .vta_did
+        .as_deref()
+        .ok_or("community session is pending VTA binding — finish `cnm setup` first")?;
+    let mediator_did = match vta_sdk::session::resolve_mediator_did(vta_did).await? {
         Some(did) => did,
         None => {
             println!("  This community is not using DIDComm Messaging.");
@@ -1239,7 +1243,7 @@ async fn cmd_community_ping(
         }
     };
 
-    println!("  {CYAN}{:<13}{RESET} {}", "VTA DID", session.vta_did);
+    println!("  {CYAN}{:<13}{RESET} {vta_did}", "VTA DID");
     println!("  {CYAN}{:<13}{RESET} {mediator_did}", "Mediator DID");
 
     let timeout = std::time::Duration::from_secs(10);
@@ -1249,7 +1253,7 @@ async fn cmd_community_ping(
             &session.client_did,
             &session.private_key_multibase,
             &mediator_did,
-            Some(&session.vta_did),
+            Some(vta_did),
         ),
     )
     .await
@@ -1323,35 +1327,40 @@ async fn cmd_health(
         if let Some(ref resolver) = resolver {
             print_did_resolution(resolver, "Client DID", &session.client_did, false).await;
 
-            let mediator_did =
-                print_did_resolution(resolver, "VTA DID", &session.vta_did, true).await;
+            if let Some(vta_did) = session.vta_did.as_deref() {
+                let mediator_did = print_did_resolution(resolver, "VTA DID", vta_did, true).await;
 
-            if let Some(ref mediator_did) = mediator_did {
-                print_did_resolution(resolver, "Mediator DID", mediator_did, false).await;
-                match tokio::time::timeout(
-                    ping_timeout,
-                    vta_sdk::session::send_trust_ping(
-                        &session.client_did,
-                        &session.private_key_multibase,
-                        mediator_did,
-                        None,
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(latency)) => println!(
-                        "  {CYAN}{:<13}{RESET} {GREEN}✓{RESET} pong ({latency}ms)",
-                        "Trust-ping"
-                    ),
-                    Ok(Err(e)) => println!(
-                        "  {CYAN}{:<13}{RESET} {RED}✗{RESET} trust-ping failed: {e}",
-                        "Trust-ping"
-                    ),
-                    Err(_) => println!(
-                        "  {CYAN}{:<13}{RESET} {RED}✗{RESET} trust-ping timed out",
-                        "Trust-ping"
-                    ),
+                if let Some(ref mediator_did) = mediator_did {
+                    print_did_resolution(resolver, "Mediator DID", mediator_did, false).await;
+                    match tokio::time::timeout(
+                        ping_timeout,
+                        vta_sdk::session::send_trust_ping(
+                            &session.client_did,
+                            &session.private_key_multibase,
+                            mediator_did,
+                            None,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(latency)) => println!(
+                            "  {CYAN}{:<13}{RESET} {GREEN}✓{RESET} pong ({latency}ms)",
+                            "Trust-ping"
+                        ),
+                        Ok(Err(e)) => println!(
+                            "  {CYAN}{:<13}{RESET} {RED}✗{RESET} trust-ping failed: {e}",
+                            "Trust-ping"
+                        ),
+                        Err(_) => println!(
+                            "  {CYAN}{:<13}{RESET} {RED}✗{RESET} trust-ping timed out",
+                            "Trust-ping"
+                        ),
+                    }
                 }
+            } else {
+                println!(
+                    "  {DIM}(session pending VTA binding — finish `cnm setup` to enable DID resolution){RESET}"
+                );
             }
         }
     } else {
@@ -1402,35 +1411,40 @@ async fn print_personal_vta_section(
         if let Some(resolver) = resolver {
             print_did_resolution(resolver, "Client DID", &session.client_did, false).await;
 
-            let mediator_did =
-                print_did_resolution(resolver, "VTA DID", &session.vta_did, true).await;
+            if let Some(vta_did) = session.vta_did.as_deref() {
+                let mediator_did = print_did_resolution(resolver, "VTA DID", vta_did, true).await;
 
-            if let Some(ref mediator_did) = mediator_did {
-                print_did_resolution(resolver, "Mediator DID", mediator_did, false).await;
-                match tokio::time::timeout(
-                    ping_timeout,
-                    vta_sdk::session::send_trust_ping(
-                        &session.client_did,
-                        &session.private_key_multibase,
-                        mediator_did,
-                        None,
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(latency)) => println!(
-                        "  {CYAN}{:<13}{RESET} {GREEN}✓{RESET} pong ({latency}ms)",
-                        "Trust-ping"
-                    ),
-                    Ok(Err(e)) => println!(
-                        "  {CYAN}{:<13}{RESET} {RED}✗{RESET} trust-ping failed: {e}",
-                        "Trust-ping"
-                    ),
-                    Err(_) => println!(
-                        "  {CYAN}{:<13}{RESET} {RED}✗{RESET} trust-ping timed out",
-                        "Trust-ping"
-                    ),
+                if let Some(ref mediator_did) = mediator_did {
+                    print_did_resolution(resolver, "Mediator DID", mediator_did, false).await;
+                    match tokio::time::timeout(
+                        ping_timeout,
+                        vta_sdk::session::send_trust_ping(
+                            &session.client_did,
+                            &session.private_key_multibase,
+                            mediator_did,
+                            None,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(latency)) => println!(
+                            "  {CYAN}{:<13}{RESET} {GREEN}✓{RESET} pong ({latency}ms)",
+                            "Trust-ping"
+                        ),
+                        Ok(Err(e)) => println!(
+                            "  {CYAN}{:<13}{RESET} {RED}✗{RESET} trust-ping failed: {e}",
+                            "Trust-ping"
+                        ),
+                        Err(_) => println!(
+                            "  {CYAN}{:<13}{RESET} {RED}✗{RESET} trust-ping timed out",
+                            "Trust-ping"
+                        ),
+                    }
                 }
+            } else {
+                println!(
+                    "  {DIM}(personal session pending VTA binding — finish `pnm setup continue <slug>` to enable DID resolution){RESET}"
+                );
             }
         }
     } else {

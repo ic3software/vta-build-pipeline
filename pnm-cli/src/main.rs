@@ -1970,18 +1970,29 @@ async fn cmd_health(
     print_section("VTA");
 
     if let Some(ref info) = session {
-        println!("  {CYAN}{:<13}{RESET} {}", "DID", info.vta_did);
-        if let Some(ref resolver) = did_resolver {
-            match resolver.resolve(&info.vta_did).await {
-                Ok(_) => {
-                    let method = info
-                        .vta_did
-                        .strip_prefix("did:")
-                        .and_then(|s| s.split(':').next())
-                        .unwrap_or("?");
-                    println!("                {GREEN}✓{RESET} resolves ({method})");
+        match info.vta_did.as_deref() {
+            Some(vta_did) => {
+                println!("  {CYAN}{:<13}{RESET} {vta_did}", "DID");
+                if let Some(ref resolver) = did_resolver {
+                    match resolver.resolve(vta_did).await {
+                        Ok(_) => {
+                            let method = vta_did
+                                .strip_prefix("did:")
+                                .and_then(|s| s.split(':').next())
+                                .unwrap_or("?");
+                            println!("                {GREEN}✓{RESET} resolves ({method})");
+                        }
+                        Err(e) => {
+                            println!("                {RED}✗{RESET} resolution failed: {e}")
+                        }
+                    }
                 }
-                Err(e) => println!("                {RED}✗{RESET} resolution failed: {e}"),
+            }
+            None => {
+                println!(
+                    "  {CYAN}{:<13}{RESET} {DIM}(pending — run `pnm setup continue <slug>`){RESET}",
+                    "DID"
+                );
             }
         }
     }
@@ -2047,12 +2058,14 @@ async fn cmd_health(
     // ── Mediator + DIDComm pings ──────────────────────────────────
     print_section("Mediator");
 
-    if let Some(ref info) = session {
+    if let Some(ref info) = session
+        && let Some(vta_did) = info.vta_did.as_deref()
+    {
         // Resolve mediator DID using the shared resolver (avoids creating a second one)
         let mediator_result = if let Some(ref resolver) = did_resolver {
-            vta_sdk::session::resolve_mediator_did_with_resolver(&info.vta_did, resolver).await
+            vta_sdk::session::resolve_mediator_did_with_resolver(vta_did, resolver).await
         } else {
-            vta_sdk::session::resolve_mediator_did(&info.vta_did).await
+            vta_sdk::session::resolve_mediator_did(vta_did).await
         };
 
         match mediator_result {
@@ -2110,7 +2123,7 @@ async fn cmd_health(
 
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(15),
-                            session.ping(Some(&info.vta_did)),
+                            session.ping(Some(vta_did)),
                         )
                         .await
                         {

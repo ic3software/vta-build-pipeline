@@ -35,7 +35,10 @@ pub async fn login(
 
     println!("Credential imported:");
     println!("  Client DID: {}", result.client_did);
-    println!("  VTA DID:    {}", result.vta_did);
+    println!(
+        "  VTA DID:    {}",
+        result.vta_did.as_deref().unwrap_or("(unset)")
+    );
     if let Some(ref url) = result.vta_url {
         println!("  VTA URL:    {url}");
     }
@@ -79,7 +82,10 @@ pub fn status(keyring_key: &str) {
     match store().session_status(keyring_key) {
         Some(status) => {
             println!("Client DID: {}", status.client_did);
-            println!("VTA DID:    {}", status.vta_did);
+            println!(
+                "VTA DID:    {}",
+                status.vta_did.as_deref().unwrap_or("(pending setup)")
+            );
             println!(
                 "VTA URL:    {}",
                 status.vta_url.as_deref().unwrap_or("(not set)")

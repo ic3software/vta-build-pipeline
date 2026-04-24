@@ -11,13 +11,25 @@ use tracing::debug;
 use crate::credentials::CredentialBundle;
 use crate::protocols::auth::{AuthenticateResponse, ChallengeRequest, ChallengeResponse};
 
+/// Test-support types (public `SessionBackend` mock for consumers'
+/// integration tests). Compiled for unit tests and whenever the
+/// `test-support` feature is enabled by downstream crates.
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+
 // ── Session (internal) ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Session {
     client_did: String,
     private_key: String,
-    vta_did: String,
+    /// `None` in the `PendingVtaBinding` state — the client DID has been
+    /// minted locally but the operator has not yet supplied the VTA DID
+    /// to bind to. `Some` in both `PendingRotation` (combined with
+    /// `needs_rotation = true`) and `Direct` (no rotation) states. See
+    /// `SessionStore::store_pending_vta_binding` + `bind_vta_did`.
+    #[serde(default)]
+    vta_did: Option<String>,
     #[serde(default)]
     vta_url: Option<String>,
     access_token: Option<String>,
@@ -32,19 +44,40 @@ struct Session {
     needs_rotation: bool,
 }
 
+/// Pull the VTA DID out of a session or error with the deferred-setup
+/// hint. Used at every authenticated-operation entry point so a
+/// `PendingVtaBinding` session surfaces as a clean error rather than a
+/// panic when downstream code tries to unwrap.
+///
+/// This is the SDK-side defensive backstop. The CLI should gate on
+/// [`SessionStore::has_pending_vta_binding`] before reaching these
+/// functions; if it does, operators never see this string.
+fn require_vta_did(session: &Session) -> Result<&str, Box<dyn std::error::Error>> {
+    session.vta_did.as_deref().ok_or_else(|| {
+        "session is pending VTA binding — run `pnm setup continue <slug>` to supply the VTA DID"
+            .into()
+    })
+}
+
 // ── Public types ────────────────────────────────────────────────────
 
 /// Loaded session info exposed for health/diagnostics.
+///
+/// `vta_did` is `None` when the session is in the `PendingVtaBinding`
+/// state — the client DID was minted but the operator has not yet
+/// supplied the VTA DID.
 pub struct SessionInfo {
     pub client_did: String,
-    pub vta_did: String,
+    pub vta_did: Option<String>,
     pub private_key_multibase: String,
 }
 
 /// Status of a stored session.
+///
+/// See [`SessionInfo`] for the `vta_did` semantics.
 pub struct SessionStatus {
     pub client_did: String,
-    pub vta_did: String,
+    pub vta_did: Option<String>,
     pub vta_url: Option<String>,
     pub token_status: TokenStatus,
 }
@@ -57,9 +90,14 @@ pub enum TokenStatus {
 }
 
 /// Result of a successful login.
+///
+/// `vta_did` is always `Some` here — you cannot log in without one.
+/// Kept as `Option<String>` to match the cascaded field shape across
+/// the session types; callers can `.expect("login succeeded")` if they
+/// truly need the unwrapped value.
 pub struct LoginResult {
     pub client_did: String,
-    pub vta_did: String,
+    pub vta_did: Option<String>,
     pub vta_url: Option<String>,
 }
 
@@ -432,7 +470,7 @@ impl SessionStore {
         let mut session = Session {
             client_did: bundle.did.clone(),
             private_key: bundle.private_key_multibase.clone(),
-            vta_did: bundle.vta_did.clone(),
+            vta_did: Some(bundle.vta_did.clone()),
             vta_url: bundle.vta_url.clone(),
             access_token: None,
             access_expires_at: None,
@@ -456,7 +494,7 @@ impl SessionStore {
 
         Ok(LoginResult {
             client_did: bundle.did.clone(),
-            vta_did: bundle.vta_did.clone(),
+            vta_did: Some(bundle.vta_did.clone()),
             vta_url: bundle.vta_url.clone(),
         })
     }
@@ -478,7 +516,7 @@ impl SessionStore {
         let session = Session {
             client_did: did.to_string(),
             private_key: private_key.to_string(),
-            vta_did: vta_did.to_string(),
+            vta_did: Some(vta_did.to_string()),
             vta_url: vta_url.map(str::to_string),
             access_token: None,
             access_expires_at: None,
@@ -507,13 +545,103 @@ impl SessionStore {
         let session = Session {
             client_did: did.to_string(),
             private_key: private_key.to_string(),
-            vta_did: vta_did.to_string(),
+            vta_did: Some(vta_did.to_string()),
             vta_url: vta_url.map(str::to_string),
             access_token: None,
             access_expires_at: None,
             needs_rotation: true,
         };
         self.save_session(key, &session)
+    }
+
+    /// Store an ephemeral did:key with no VTA DID bound yet.
+    ///
+    /// This is the `PendingVtaBinding` state used by the deferred-VTA-DID
+    /// `pnm setup` flow: phase 1 mints the DID and parks it in the keyring;
+    /// phase 2 lifts the entry into a `PendingRotation` session via
+    /// [`Self::bind_vta_did`] once the operator supplies the VTA DID.
+    ///
+    /// A session in this state is **not** usable for authentication. Callers
+    /// should gate authenticated operations on
+    /// [`Self::has_pending_vta_binding`] and route operators to
+    /// `pnm setup continue <slug>` before attempting to authenticate.
+    pub fn store_pending_vta_binding(
+        &self,
+        key: &str,
+        did: &str,
+        private_key: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if key.trim().is_empty() {
+            return Err("keyring key must be non-empty".into());
+        }
+        if !did.starts_with("did:key:") {
+            return Err(
+                "pending ephemeral DID must be a did:key (minted locally by the SDK)".into(),
+            );
+        }
+        if private_key.trim().is_empty() {
+            return Err("private key multibase must be non-empty".into());
+        }
+        let session = Session {
+            client_did: did.to_string(),
+            private_key: private_key.to_string(),
+            vta_did: None,
+            vta_url: None,
+            access_token: None,
+            access_expires_at: None,
+            needs_rotation: false,
+        };
+        self.save_session(key, &session)
+    }
+
+    /// Lift a `PendingVtaBinding` session into a `PendingRotation` session
+    /// by supplying the VTA DID.
+    ///
+    /// Preserves the ephemeral did:key + private key from phase 1 and sets
+    /// `needs_rotation = true`, so the first successful authenticate triggers
+    /// the same auto-rotate-off-the-temp-DID flow as
+    /// [`Self::store_pending_rotation`].
+    ///
+    /// Errors if:
+    /// - the entry is missing at `key`;
+    /// - the entry already has a VTA DID bound (re-binding is not allowed —
+    ///   use `logout` + re-provision instead);
+    /// - `vta_did` is empty after trim, or does not start with `did:`.
+    pub fn bind_vta_did(
+        &self,
+        key: &str,
+        vta_did: &str,
+        vta_url: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let vta_did = vta_did.trim();
+        if vta_did.is_empty() {
+            return Err("VTA DID must be non-empty".into());
+        }
+        if !vta_did.starts_with("did:") {
+            return Err(
+                "VTA DID must start with `did:` (e.g. did:webvh:..., did:web:..., did:key:...)"
+                    .into(),
+            );
+        }
+        let mut session = self
+            .load_session(key)
+            .ok_or("no session found — cannot bind VTA DID to a non-existent entry")?;
+        if session.vta_did.is_some() {
+            return Err("session already has a VTA DID bound".into());
+        }
+        session.vta_did = Some(vta_did.to_string());
+        session.vta_url = vta_url.map(str::to_string);
+        session.needs_rotation = true;
+        self.save_session(key, &session)
+    }
+
+    /// Report whether the entry at `key` is a `PendingVtaBinding` session
+    /// (exists, parses, and has `vta_did: None`). Total — no errors.
+    pub fn has_pending_vta_binding(&self, key: &str) -> bool {
+        match self.load_session(key) {
+            Some(session) => session.vta_did.is_none(),
+            None => false,
+        }
     }
 
     /// Clear stored credentials and cached tokens.
@@ -576,9 +704,11 @@ impl SessionStore {
             "Not authenticated.\n\nRun `pnm setup` (or the equivalent) to provision an admin identity.",
         )?;
 
+        let session_vta_did = require_vta_did(&session)?.to_string();
+
         debug!(
             client_did = %session.client_did,
-            vta_did = %session.vta_did,
+            vta_did = %session_vta_did,
             needs_rotation = session.needs_rotation,
             "session loaded"
         );
@@ -602,7 +732,7 @@ impl SessionStore {
             base_url,
             &session.client_did,
             &session.private_key,
-            &session.vta_did,
+            &session_vta_did,
         )
         .await?;
 
@@ -661,14 +791,16 @@ impl SessionStore {
             "Not authenticated.\n\nRun `pnm setup` (or the equivalent) to provision an admin identity.",
         )?;
 
+        let session_vta_did = require_vta_did(&session)?.to_string();
+
         debug!(
             client_did = %session.client_did,
-            vta_did = %session.vta_did,
+            vta_did = %session_vta_did,
             needs_rotation = session.needs_rotation,
             "ensure_authenticated_didcomm: session loaded"
         );
 
-        let (vta_did, mediator_did, rest_url) = match resolve_vta_endpoint(&session.vta_did).await?
+        let (vta_did, mediator_did, rest_url) = match resolve_vta_endpoint(&session_vta_did).await?
         {
             VtaEndpoint::DIDComm {
                 vta_did,
@@ -677,10 +809,9 @@ impl SessionStore {
             } => (vta_did, mediator_did, rest_url),
             VtaEndpoint::Rest { .. } => {
                 return Err(format!(
-                    "VTA '{}' does not advertise a DIDComm service endpoint. \
+                    "VTA '{session_vta_did}' does not advertise a DIDComm service endpoint. \
                      Use SessionStore::ensure_authenticated for REST, or \
-                     SessionStore::connect to auto-select.",
-                    session.vta_did
+                     SessionStore::connect to auto-select."
                 )
                 .into());
             }
@@ -745,8 +876,10 @@ impl SessionStore {
             return Ok(client);
         }
 
+        let session_vta_did = require_vta_did(&session)?.to_string();
+
         // Resolve VTA DID for transport selection
-        match resolve_vta_endpoint(&session.vta_did).await? {
+        match resolve_vta_endpoint(&session_vta_did).await? {
             VtaEndpoint::DIDComm {
                 vta_did,
                 mediator_did,
@@ -967,11 +1100,18 @@ async fn rotate_key(
 
     // 3. Verify the new DID can actually authenticate. Fail *before* we
     //    delete the temp — if this errors, the temp still works.
+    //
+    // `ensure_authenticated` has already gated `vta_did.is_some()` via
+    // `require_vta_did`; we're safe to unwrap here.
+    let session_vta_did = session
+        .vta_did
+        .as_deref()
+        .expect("ensure_authenticated gates vta_did.is_some() before calling rotate_key");
     let new_token_result = challenge_response(
         base_url,
         &new_did,
         &new_private_key,
-        &session.vta_did,
+        session_vta_did,
     )
     .await
     .map_err(|e| {
@@ -1472,7 +1612,7 @@ mod tests {
         let session = Session {
             client_did: "did:key:z6Mk1".into(),
             private_key: "z_seed".into(),
-            vta_did: "did:key:z6MkVTA".into(),
+            vta_did: Some("did:key:z6MkVTA".into()),
             vta_url: Some("https://vta.example.com".into()),
             access_token: Some("tok123".into()),
             access_expires_at: Some(1700000000),
@@ -1499,6 +1639,35 @@ mod tests {
         }"#;
         let session: Session = serde_json::from_str(json).unwrap();
         assert!(session.vta_url.is_none());
+    }
+
+    #[test]
+    fn test_session_vta_did_defaults_to_none_when_missing() {
+        // A PendingVtaBinding session persists with `vta_did` absent.
+        let json = r#"{
+            "client_did": "did:key:z6MkPending",
+            "private_key": "z_seed",
+            "access_token": null,
+            "access_expires_at": null
+        }"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert!(session.vta_did.is_none());
+    }
+
+    #[test]
+    fn test_session_vta_did_round_trips_null() {
+        let session = Session {
+            client_did: "did:key:z6MkPending".into(),
+            private_key: "z_seed".into(),
+            vta_did: None,
+            vta_url: None,
+            access_token: None,
+            access_expires_at: None,
+            needs_rotation: false,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert!(restored.vta_did.is_none());
     }
 
     #[test]
@@ -1545,35 +1714,13 @@ mod tests {
         assert_eq!(url_from_did("did:key:z6MkTest"), None);
     }
 
+    fn test_store() -> SessionStore {
+        SessionStore::with_backend(Box::new(testing::InMemorySessionBackend::new()))
+    }
+
     #[test]
     fn test_in_memory_backend() {
-        use std::collections::HashMap;
-        use std::sync::Mutex;
-
-        struct InMemoryBackend {
-            data: Mutex<HashMap<String, String>>,
-        }
-
-        impl SessionBackend for InMemoryBackend {
-            fn load(&self, key: &str) -> Option<String> {
-                self.data.lock().unwrap().get(key).cloned()
-            }
-            fn save(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-                self.data
-                    .lock()
-                    .unwrap()
-                    .insert(key.to_string(), value.to_string());
-                Ok(())
-            }
-            fn clear(&self, key: &str) {
-                self.data.lock().unwrap().remove(key);
-            }
-        }
-
-        let backend = InMemoryBackend {
-            data: Mutex::new(HashMap::new()),
-        };
-        let store = SessionStore::with_backend(Box::new(backend));
+        let store = test_store();
 
         assert!(!store.has_session("test"));
 
@@ -1590,9 +1737,153 @@ mod tests {
 
         let info = store.loaded_session("test").unwrap();
         assert_eq!(info.client_did, "did:key:z6Mk1");
-        assert_eq!(info.vta_did, "did:key:zVTA");
+        assert_eq!(info.vta_did.as_deref(), Some("did:key:zVTA"));
 
         store.logout("test");
         assert!(!store.has_session("test"));
+    }
+
+    #[test]
+    fn store_pending_vta_binding_round_trips() {
+        let store = test_store();
+        store
+            .store_pending_vta_binding("slug", "did:key:z6MkPending", "zSeed123")
+            .unwrap();
+
+        assert!(store.has_pending_vta_binding("slug"));
+
+        let info = store.loaded_session("slug").unwrap();
+        assert_eq!(info.client_did, "did:key:z6MkPending");
+        assert!(info.vta_did.is_none());
+    }
+
+    #[test]
+    fn store_pending_vta_binding_rejects_non_did_key() {
+        let store = test_store();
+        let err = store
+            .store_pending_vta_binding("slug", "did:web:something", "zSeed")
+            .unwrap_err();
+        assert!(err.to_string().contains("did:key"));
+    }
+
+    #[test]
+    fn store_pending_vta_binding_rejects_empty_inputs() {
+        let store = test_store();
+        assert!(
+            store
+                .store_pending_vta_binding("   ", "did:key:z6Mk", "zSeed")
+                .is_err()
+        );
+        assert!(
+            store
+                .store_pending_vta_binding("slug", "did:key:z6Mk", "")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bind_vta_did_promotes_pending_to_rotation() {
+        let store = test_store();
+        store
+            .store_pending_vta_binding("slug", "did:key:z6MkPending", "zSeed")
+            .unwrap();
+
+        store
+            .bind_vta_did("slug", "did:webvh:abc:vta.example.com:primary", None)
+            .unwrap();
+
+        assert!(!store.has_pending_vta_binding("slug"));
+        let info = store.loaded_session("slug").unwrap();
+        assert_eq!(info.client_did, "did:key:z6MkPending");
+        assert_eq!(
+            info.vta_did.as_deref(),
+            Some("did:webvh:abc:vta.example.com:primary")
+        );
+    }
+
+    #[test]
+    fn bind_vta_did_accepts_did_key_vta() {
+        // did:key VTAs are documented in docs/cold-start-guide.md — keep
+        // the validation loose.
+        let store = test_store();
+        store
+            .store_pending_vta_binding("slug", "did:key:z6MkPending", "zSeed")
+            .unwrap();
+
+        store.bind_vta_did("slug", "did:key:z6MkVTA", None).unwrap();
+    }
+
+    #[test]
+    fn bind_vta_did_rejects_rebind() {
+        let store = test_store();
+        store
+            .store_direct(
+                "slug",
+                "did:key:z6Mk",
+                "zSeed",
+                "did:web:vta.example.com",
+                None,
+            )
+            .unwrap();
+        let err = store
+            .bind_vta_did("slug", "did:web:other.example.com", None)
+            .unwrap_err();
+        assert!(err.to_string().contains("already has a VTA DID bound"));
+    }
+
+    #[test]
+    fn bind_vta_did_rejects_missing_session() {
+        let store = test_store();
+        let err = store
+            .bind_vta_did("no-such-slug", "did:web:vta.example.com", None)
+            .unwrap_err();
+        assert!(err.to_string().contains("no session found"));
+    }
+
+    #[test]
+    fn bind_vta_did_rejects_malformed_input() {
+        let store = test_store();
+        store
+            .store_pending_vta_binding("slug", "did:key:z6Mk", "zSeed")
+            .unwrap();
+
+        assert!(store.bind_vta_did("slug", "   ", None).is_err());
+        assert!(store.bind_vta_did("slug", "not-a-did", None).is_err());
+    }
+
+    #[test]
+    fn has_pending_vta_binding_false_for_direct_session() {
+        let store = test_store();
+        store
+            .store_direct(
+                "slug",
+                "did:key:z6Mk",
+                "zSeed",
+                "did:web:vta.example.com",
+                None,
+            )
+            .unwrap();
+        assert!(!store.has_pending_vta_binding("slug"));
+    }
+
+    #[test]
+    fn has_pending_vta_binding_false_for_missing_entry() {
+        let store = test_store();
+        assert!(!store.has_pending_vta_binding("nope"));
+    }
+
+    #[test]
+    fn require_vta_did_errors_on_pending() {
+        let pending = Session {
+            client_did: "did:key:z6MkPending".into(),
+            private_key: "zSeed".into(),
+            vta_did: None,
+            vta_url: None,
+            access_token: None,
+            access_expires_at: None,
+            needs_rotation: false,
+        };
+        let err = require_vta_did(&pending).unwrap_err();
+        assert!(err.to_string().contains("pnm setup continue"));
     }
 }

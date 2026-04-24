@@ -19,6 +19,23 @@ use rand::Rng;
 use vta_sdk::credentials::CredentialBundle;
 use vta_sdk::prelude::ed25519_multibase_pubkey;
 
+/// Mint a fresh Ed25519 keypair and derive a `did:key`.
+///
+/// Returns `(did, private_key_multibase)` where `private_key_multibase` is
+/// the raw 32-byte seed encoded as Base58Btc multibase — matching the
+/// format used by `CredentialBundle.private_key_multibase` and the rest
+/// of the workspace.
+fn mint_ed25519_did_key() -> (String, String) {
+    let mut seed = [0u8; 32];
+    rand::rng().fill_bytes(&mut seed);
+    let signing_key = SigningKey::from_bytes(&seed);
+    let public_key = signing_key.verifying_key().to_bytes();
+    let multibase_pubkey = ed25519_multibase_pubkey(&public_key);
+    let did = format!("did:key:{multibase_pubkey}");
+    let private_key_multibase = multibase::encode(multibase::Base::Base58Btc, seed);
+    (did, private_key_multibase)
+}
+
 /// Generate a fresh Ed25519 keypair, derive a `did:key`, and package the
 /// result as a [`CredentialBundle`] bound to the given VTA DID/URL.
 ///
@@ -28,13 +45,7 @@ pub fn generate_admin_did_key(
     vta_did: impl Into<String>,
     vta_url: Option<String>,
 ) -> (CredentialBundle, String) {
-    let mut seed = [0u8; 32];
-    rand::rng().fill_bytes(&mut seed);
-    let signing_key = SigningKey::from_bytes(&seed);
-    let public_key = signing_key.verifying_key().to_bytes();
-    let multibase_pubkey = ed25519_multibase_pubkey(&public_key);
-    let did = format!("did:key:{multibase_pubkey}");
-    let private_key_multibase = multibase::encode(multibase::Base::Base58Btc, seed);
+    let (did, private_key_multibase) = mint_ed25519_did_key();
     let bundle = CredentialBundle {
         did: did.clone(),
         private_key_multibase,
@@ -42,6 +53,20 @@ pub fn generate_admin_did_key(
         vta_url,
     };
     (bundle, did)
+}
+
+/// Mint a fresh Ed25519 `did:key` with no VTA binding.
+///
+/// Returns `(did, private_key_multibase)`. Used by the deferred-VTA-DID
+/// `pnm setup` flow: phase 1 mints this keypair and parks it in the
+/// keyring as a `PendingVtaBinding` session; phase 2 supplies the VTA
+/// DID and lifts the session to `PendingRotation`.
+///
+/// Unlike [`generate_admin_did_key`], this does not construct a
+/// [`CredentialBundle`] — the `CredentialBundle.vta_did` field is
+/// required and not yet known at mint time.
+pub fn generate_unbound_admin_did_key() -> (String, String) {
+    mint_ed25519_did_key()
 }
 
 #[cfg(test)]
@@ -76,6 +101,32 @@ mod tests {
         let (bundle, did) = generate_admin_did_key("did:key:z6MkVTA", None);
         // Re-derive from the private key and confirm we land on the same DID.
         let (_, seed_bytes) = multibase::decode(&bundle.private_key_multibase).unwrap();
+        let seed: [u8; 32] = seed_bytes.try_into().unwrap();
+        let signing_key = SigningKey::from_bytes(&seed);
+        let pubkey = signing_key.verifying_key().to_bytes();
+        let rederived = format!("did:key:{}", ed25519_multibase_pubkey(&pubkey));
+        assert_eq!(rederived, did);
+    }
+
+    #[test]
+    fn unbound_did_key_has_valid_shape() {
+        let (did, private_key_multibase) = generate_unbound_admin_did_key();
+        assert!(did.starts_with("did:key:z"));
+        let (_, decoded) = multibase::decode(&private_key_multibase).unwrap();
+        assert_eq!(decoded.len(), 32, "Ed25519 seed must be 32 bytes");
+    }
+
+    #[test]
+    fn unbound_dids_are_unique() {
+        let (a, _) = generate_unbound_admin_did_key();
+        let (b, _) = generate_unbound_admin_did_key();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn unbound_seed_round_trips_to_did() {
+        let (did, private_key_multibase) = generate_unbound_admin_did_key();
+        let (_, seed_bytes) = multibase::decode(&private_key_multibase).unwrap();
         let seed: [u8; 32] = seed_bytes.try_into().unwrap();
         let signing_key = SigningKey::from_bytes(&seed);
         let pubkey = signing_key.verifying_key().to_bytes();

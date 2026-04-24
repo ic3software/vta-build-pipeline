@@ -71,6 +71,9 @@ provision-integration = [
 # against the AWS Nitro root). Consumers of sealed-bootstrap Mode B enable
 # this to validate the `Attested` producer assertion end-to-end.
 attest-verify = ["dep:nitro_attest", "dep:time", "dep:affinidi-crypto"]
+# Expose in-memory `SessionBackend` mocks for downstream integration tests.
+# Additive, zero-cost when off.
+test-support = ["session"]
 
 [dependencies]
 serde = { workspace = true }
