@@ -56,6 +56,14 @@ pub enum SealedTransferError {
     #[error("assertion verification failed: {0}")]
     AssertionVerification(String),
 
+    #[error(
+        "producer uses PinnedOnly assertion but no expect_digest was supplied — \
+         PinnedOnly has no in-band integrity anchor, so the OOB digest MUST be \
+         pinned. Either use a DidSigned or Attested producer, or call \
+         open_bundle with the digest communicated out-of-band."
+    )]
+    PinnedOnlyRequiresDigest,
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

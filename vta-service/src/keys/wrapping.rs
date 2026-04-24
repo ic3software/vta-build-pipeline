@@ -168,7 +168,9 @@ impl WrappingKeyCache {
     /// The caller must cross-check the tag against the outer request's
     /// declared `key_type` to reject mismatches.
     pub async fn unwrap_sealed(&self, armored: &str) -> Result<(String, Vec<u8>), AppError> {
-        use vta_sdk::sealed_transfer::{SealedPayloadV1, armor, open_bundle};
+        use vta_sdk::sealed_transfer::{
+            PinnedOnlyPolicy, SealedPayloadV1, armor, open_bundle_with_policy,
+        };
 
         let bundles = armor::decode(armored)
             .map_err(|e| AppError::Validation(format!("sealed bundle armor: {e}")))?;
@@ -199,7 +201,17 @@ impl WrappingKeyCache {
 
         for (kid, entry) in entries.iter() {
             let secret_bytes = entry.private_key.to_bytes();
-            match open_bundle(&secret_bytes, bundle, None) {
+            // Trust anchor: this is the POST /keys/import handshake; the
+            // caller has already authenticated to the VTA and the
+            // wrapping key is one-shot + ephemeral. PinnedOnly without
+            // an OOB digest is expected here — the HTTP session is the
+            // integrity anchor.
+            match open_bundle_with_policy(
+                &secret_bytes,
+                bundle,
+                None,
+                PinnedOnlyPolicy::CallerHasIndependentTrustAnchor,
+            ) {
                 Ok(opened) => {
                     matched_kid = Some(kid.clone());
                     matched_payload = Some(opened.payload);

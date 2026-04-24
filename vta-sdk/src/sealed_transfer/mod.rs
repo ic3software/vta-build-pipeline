@@ -156,20 +156,72 @@ pub struct OpenedBundle {
     pub bundle_id: [u8; 16],
 }
 
+/// Policy for opening a bundle whose producer uses the `PinnedOnly`
+/// assertion (no in-band integrity anchor).
+///
+/// PinnedOnly tells the opener "the bundle itself carries no proof of
+/// who produced it — rely on something outside the bundle for that".
+/// If that "something outside" is missing, opening the bundle means
+/// trusting anyone who happened to know the recipient's X25519 public
+/// key. The enum forces the caller to name what the outside trust
+/// anchor is.
+#[derive(Debug, Clone, Copy)]
+pub enum PinnedOnlyPolicy {
+    /// Require the caller to supply `expect_digest` to
+    /// [`open_bundle_with_policy`]. The OOB digest is the integrity
+    /// anchor. This is the safe default and what `open_bundle` uses.
+    RequireOobDigest,
+    /// The caller has an independent trust anchor — e.g. the bundle
+    /// arrived over an authenticated HTTP session, or is consumed
+    /// inside a single-process key-import handshake where the peer is
+    /// the same authenticated caller. Document the anchor at the call
+    /// site. Using this variant without a real anchor is equivalent to
+    /// accepting bundles from anyone who knows the recipient pubkey.
+    CallerHasIndependentTrustAnchor,
+}
+
 /// Open a [`SealedBundle`] with the recipient's secret. Performs:
 ///
 /// 1. Optional canonical-digest verification when `expect_digest` is `Some`.
 /// 2. Per-chunk HPKE open with header AAD binding.
 /// 3. Chunk header consistency + reassembly.
 /// 4. Extraction of the chunk-0 producer assertion.
+/// 5. Coupling check: if the producer's assertion is `PinnedOnly`,
+///    `expect_digest` **must** have been supplied. PinnedOnly carries
+///    no in-band integrity anchor, so the out-of-band digest is the
+///    only thing preventing a party with the recipient's X25519 public
+///    key from forging a bundle. See
+///    [`SealedTransferError::PinnedOnlyRequiresDigest`].
 ///
 /// The caller is then responsible for verifying the producer assertion against
-/// its trust policy (resolve DID + check signature, validate attestation quote,
-/// or compare to a pinned pubkey).
+/// its trust policy via
+/// [`crate::sealed_transfer::verify::verify_producer_assertion_with_pubkey`].
+///
+/// For flows where the trust anchor is elsewhere (HTTP session auth on
+/// a key-import endpoint, in-process handoff, etc.), use
+/// [`open_bundle_with_policy`] with
+/// [`PinnedOnlyPolicy::CallerHasIndependentTrustAnchor`].
 pub fn open_bundle(
     recipient_secret: &[u8; 32],
     bundle: &SealedBundle,
     expect_digest: Option<&str>,
+) -> Result<OpenedBundle, SealedTransferError> {
+    open_bundle_with_policy(
+        recipient_secret,
+        bundle,
+        expect_digest,
+        PinnedOnlyPolicy::RequireOobDigest,
+    )
+}
+
+/// Variant of [`open_bundle`] that accepts an explicit policy for
+/// PinnedOnly producer assertions. Prefer `open_bundle` unless the
+/// trust anchor is explicitly elsewhere.
+pub fn open_bundle_with_policy(
+    recipient_secret: &[u8; 32],
+    bundle: &SealedBundle,
+    expect_digest: Option<&str>,
+    pinned_policy: PinnedOnlyPolicy,
 ) -> Result<OpenedBundle, SealedTransferError> {
     if let Some(expected) = expect_digest {
         let got = bundle_digest(bundle);
@@ -236,6 +288,17 @@ pub fn open_bundle(
     let payload: SealedPayloadV1 = ciborium::de::from_reader(&payload_bytes[..])
         .map_err(|e| SealedTransferError::CborDecode(e.to_string()))?;
 
+    // PinnedOnly + no OOB digest = no integrity anchor unless the
+    // caller has named an out-of-band trust anchor (e.g. HTTP session
+    // auth). DidSigned verifies via crypto in the caller; Attested via
+    // nitro quote verification.
+    if matches!(producer.proof, AssertionProof::PinnedOnly)
+        && expect_digest.is_none()
+        && matches!(pinned_policy, PinnedOnlyPolicy::RequireOobDigest)
+    {
+        return Err(SealedTransferError::PinnedOnlyRequiresDigest);
+    }
+
     Ok(OpenedBundle {
         payload,
         producer,
@@ -296,7 +359,10 @@ mod tests {
 
         assert_eq!(bundle.chunks.len(), 1);
 
-        let opened = open_bundle(&recip_sk, &bundle, None).unwrap();
+        // PinnedOnly assertion requires an OOB digest — the bundle has
+        // no in-band integrity anchor otherwise.
+        let digest = bundle_digest(&bundle);
+        let opened = open_bundle(&recip_sk, &bundle, Some(&digest)).unwrap();
         assert_eq!(opened.bundle_id, bundle_id);
         match opened.payload {
             SealedPayloadV1::AdminCredential(c) => assert_eq!(c.did, "did:key:z6Mk123"),
@@ -328,7 +394,8 @@ mod tests {
             .unwrap();
         assert!(bundle.chunks.len() > 1, "expected multi-chunk bundle");
 
-        let opened = open_bundle(&recip_sk, &bundle, None).unwrap();
+        let digest = bundle_digest(&bundle);
+        let opened = open_bundle(&recip_sk, &bundle, Some(&digest)).unwrap();
         match opened.payload {
             SealedPayloadV1::AdminKeySet(keys) => assert_eq!(keys.len(), 2048),
             _ => panic!("wrong variant"),
@@ -404,11 +471,35 @@ mod tests {
         assert!(armored.contains("BEGIN VTA SEALED BUNDLE"));
         let parsed = armor::decode(&armored).unwrap();
         assert_eq!(parsed.len(), 1);
-        let opened = open_bundle(&recip_sk, &parsed[0], None).unwrap();
+        let digest = bundle_digest(&parsed[0]);
+        let opened = open_bundle(&recip_sk, &parsed[0], Some(&digest)).unwrap();
         match opened.payload {
             SealedPayloadV1::AdminCredential(c) => assert_eq!(c.did, "did:key:z6Mk123"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[tokio::test]
+    async fn pinned_only_without_digest_rejected() {
+        // The S-10 coupling: a bundle that uses PinnedOnly has no
+        // in-band integrity anchor, so opening without supplying an
+        // OOB digest must fail closed rather than silently succeed.
+        let (recip_sk, recip_pk) = generate_keypair();
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
+        let store = InMemoryNonceStore::new();
+
+        let bundle = seal_payload(&recip_pk, [11u8; 16], assertion, &sample_payload(), &store)
+            .await
+            .unwrap();
+
+        let err = open_bundle(&recip_sk, &bundle, None)
+            .expect_err("PinnedOnly without OOB digest must be rejected");
+        assert!(
+            matches!(err, SealedTransferError::PinnedOnlyRequiresDigest),
+            "expected PinnedOnlyRequiresDigest, got {err:?}"
+        );
     }
 
     #[tokio::test]
