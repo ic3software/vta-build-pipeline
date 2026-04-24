@@ -28,19 +28,31 @@ pub fn store_session(
     store().store_direct(keyring_key, did, private_key, vta_did, vta_url)
 }
 
-/// Store a session flagged for rotation on first successful authentication.
+/// Park a phase-1 ephemeral identity with no VTA DID bound yet.
 ///
-/// Used by `pnm setup` for the non-TEE flow: the did:key is handed to an
-/// admin out-of-band to be added to the ACL, and PNM rotates it out as soon
-/// as it can authenticate (see `SessionStore::ensure_authenticated` in vta-sdk).
-pub fn store_session_pending_rotation(
+/// Used by the deferred-VTA-DID `pnm setup` flow. Phase 2
+/// (`pnm setup continue <slug>`) lifts the entry into a
+/// `PendingRotation` session via [`bind_vta_did`].
+pub fn store_pending_vta_binding(
     keyring_key: &str,
     did: &str,
     private_key: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    store().store_pending_vta_binding(keyring_key, did, private_key)
+}
+
+/// Lift a `PendingVtaBinding` entry into a `PendingRotation` session.
+pub fn bind_vta_did(
+    keyring_key: &str,
     vta_did: &str,
     vta_url: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    store().store_pending_rotation(keyring_key, did, private_key, vta_did, vta_url)
+    store().bind_vta_did(keyring_key, vta_did, vta_url)
+}
+
+/// Report whether `keyring_key` identifies a `PendingVtaBinding` session.
+pub fn has_pending_vta_binding(keyring_key: &str) -> bool {
+    store().has_pending_vta_binding(keyring_key)
 }
 
 /// Clear stored credentials and cached tokens.

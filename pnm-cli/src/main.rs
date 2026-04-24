@@ -1198,12 +1198,44 @@ async fn main() {
 
     // Handle commands that don't need VTA resolution
     match &cli.command {
-        Commands::Setup { .. } => {
-            // Commit 2 is CLI-shape-only; logic still routes through the
-            // existing interactive wizard. Commit 3 replaces this dispatch
-            // with the four-way start/continue × interactive/non-interactive
-            // split.
-            let result = setup::run_setup(setup::SetupOptions {}, &mut pnm_config).await;
+        Commands::Setup {
+            command,
+            name,
+            overwrite,
+        } => {
+            // Route based on (command, name) pair. Clap allows both to be
+            // set (they're orthogonal to the parser); enforce the conflict
+            // at dispatch so operators get a targeted error instead of
+            // clap's generic one.
+            let result: Result<(), Box<dyn std::error::Error>> = match (command, name) {
+                (
+                    Some(SetupCommands::Continue {
+                        slug,
+                        vta_did: None,
+                    }),
+                    None,
+                ) => setup::continue_non_tee_setup_interactive(&mut pnm_config, slug).await,
+                (
+                    Some(SetupCommands::Continue {
+                        slug,
+                        vta_did: Some(vta_did),
+                    }),
+                    None,
+                ) => {
+                    setup::continue_non_tee_setup_non_interactive(&mut pnm_config, slug, vta_did)
+                        .await
+                }
+                (None, Some(name)) => {
+                    setup::start_non_tee_setup_non_interactive(&mut pnm_config, name, *overwrite)
+                        .await
+                }
+                (None, None) => setup::run_setup(setup::SetupOptions {}, &mut pnm_config).await,
+                (Some(_), Some(_)) => Err(
+                    "conflicting options: `--name` is for phase 1, `continue` is for phase 2 — \
+                     pass one or the other, not both."
+                        .into(),
+                ),
+            };
             if let Err(e) = result {
                 vta_cli_common::render::print_cli_error(e.as_ref());
                 std::process::exit(1);

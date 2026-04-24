@@ -85,6 +85,12 @@ pub fn save_config(config: &PnmConfig) -> Result<(), Box<dyn std::error::Error>>
 /// Resolve the active VTA from CLI override, env var, or config default.
 ///
 /// Returns `(slug, &VtaConfig)`.
+///
+/// Rejects pending-setup slugs with a targeted `pnm setup continue`
+/// hint. Invariant: pending ⇔ `VtaConfig.vta_did.is_none()` AND the
+/// keyring holds a `PendingVtaBinding` session for the slug. If
+/// `vta_did.is_none()` but the keyring entry is missing, the config is
+/// orphaned and we fall through to the generic not-configured error.
 pub fn resolve_vta<'a>(
     cli_override: Option<&str>,
     config: &'a PnmConfig,
@@ -103,6 +109,16 @@ pub fn resolve_vta<'a>(
              Run `pnm vta list` to see configured VTAs."
         )
     })?;
+
+    if vta.vta_did.is_none() && crate::auth::has_pending_vta_binding(&vta_keyring_key(&slug)) {
+        return Err(format!(
+            "VTA '{slug}' is pending setup — the admin DID has been minted but the VTA DID \
+             has not been supplied yet.\n\n\
+             Run `pnm setup continue {slug}` once the VTA is running, or\n\
+             `pnm setup continue {slug} --vta-did <did:...>` non-interactively."
+        )
+        .into());
+    }
 
     Ok((slug, vta))
 }

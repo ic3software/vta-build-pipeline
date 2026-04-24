@@ -3,6 +3,7 @@ use std::io::{self, BufRead, Write};
 use dialoguer::{Input, Select};
 use ed25519_dalek::SigningKey;
 use rand::Rng;
+use serde::Serialize;
 use vta_sdk::prelude::*;
 
 use crate::auth;
@@ -16,14 +17,39 @@ use crate::config::{PnmConfig, VtaConfig, save_config, slugify, vta_keyring_key}
 /// + key rotation via the admin.
 pub struct SetupOptions {}
 
+// ── JSON stdout contract (non-interactive paths) ────────────────────
+
+#[derive(Serialize)]
+struct SetupOutput<'a> {
+    slug: &'a str,
+    admin_did: &'a str,
+    state: &'static str,
+}
+
+fn emit_json(slug: &str, admin_did: &str, state: &'static str) -> io::Result<()> {
+    let line = serde_json::to_string(&SetupOutput {
+        slug,
+        admin_did,
+        state,
+    })
+    .expect("SetupOutput serializes");
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{line}")?;
+    stdout.flush()
+}
+
+// ── Interactive entry point ─────────────────────────────────────────
+
 /// Interactive setup for PNM.
 ///
 /// Two paths:
-/// - **Connect to an existing non-TEE VTA** — PNM mints a temp did:key
-///   locally, tells the admin to add it to the ACL, and auto-rotates to a
-///   fresh long-lived did:key on first successful authentication.
-/// - **Set up a new VTA in a TEE** — operator is bootstrapping a brand new
-///   enclave; generates an admin did:key to embed in the TEE config.
+/// - **Connect to an existing non-TEE VTA** — phase-1 interactive. PNM
+///   mints the ephemeral `did:key` first and shows it, then asks for a
+///   name and (optionally) the VTA DID. If the operator leaves the VTA
+///   DID blank, setup finishes in `PendingVtaBinding` state and they
+///   come back later with `pnm setup continue <slug>`.
+/// - **Set up a new VTA in a TEE** — operator is bootstrapping a brand
+///   new enclave; generates an admin did:key to embed in the TEE config.
 pub async fn run_setup(
     _opts: SetupOptions,
     config: &mut PnmConfig,
@@ -40,94 +66,372 @@ pub async fn run_setup(
         .interact()?;
 
     match selection {
-        0 => connect_to_non_tee_vta(config).await,
+        0 => start_non_tee_setup_interactive(config).await,
         1 => setup_tee(config).await,
         _ => unreachable!(),
     }
 }
 
-/// Connect to an existing non-TEE VTA.
-///
-/// PNM generates a temp did:key locally, stores the session flagged
-/// `needs_rotation`, and prints an `vta acl create ...` command for the
-/// admin to run. On first successful authentication, the session auto-
-/// rotates to a fresh did:key and drops the temp from the ACL (see
-/// `vta_sdk::session::SessionStore::ensure_authenticated`).
-///
-/// The operator does not need to reach the VTA during setup — rotation
-/// happens the first time a command actually needs a token. Setup
-/// succeeds even if the VTA is offline or the admin has not yet granted
-/// the DID.
-async fn connect_to_non_tee_vta(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Error>> {
+// ── Non-TEE phase 1: interactive ───────────────────────────────────
+
+async fn start_non_tee_setup_interactive(
+    config: &mut PnmConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
-    let vta_did: String = Input::new()
-        .with_prompt("VTA DID (see `vta config show` on the VTA host)")
+    eprintln!("Generating ephemeral admin identity...");
+    let (did, private_key_multibase) = mint_ephemeral_identity();
+
+    eprintln!();
+    eprintln!("  \x1b[1mAdmin DID:\x1b[0m {did}");
+    eprintln!();
+    eprintln!("  Next steps:");
+    eprintln!("    1. Use this DID when setting up the VTA. Either:");
+    eprintln!("         a. Run on the VTA host:");
+    eprintln!("              \x1b[1mvta setup --from setup.toml\x1b[0m");
+    eprintln!("            with: admin_did = \"{did}\"");
+    eprintln!("         b. Or, on an already-running VTA:");
+    eprintln!("              \x1b[1mvta import-did --did {did} --role admin\x1b[0m");
+    eprintln!("    2. Once the VTA is running, finish here with:");
+    eprintln!("         \x1b[1mpnm setup continue <name-you-pick>\x1b[0m");
+    eprintln!();
+
+    let name: String = Input::new()
+        .with_prompt("Name for this VTA")
         .interact_text()?;
-    let vta_did = vta_did.trim().to_string();
+    let slug = slugify(&name);
+    let keyring_key = vta_keyring_key(&slug);
+
+    // Collision check BEFORE we write anything.
+    match detect_existing_state(config, &slug, &keyring_key) {
+        ExistingState::None => {}
+        ExistingState::Complete { vta_did } => {
+            return Err(format!(
+                "'{slug}' is already set up (VTA DID: {vta_did}).\n\n\
+                 To replace it, first run: \x1b[1mpnm vta remove {slug}\x1b[0m"
+            )
+            .into());
+        }
+        ExistingState::Pending { existing_did } => {
+            let prompt_choices = &[
+                "Show the existing DID and keep pending setup",
+                "Override — mint a fresh DID, discard the old keypair",
+                "Cancel",
+            ];
+            let choice = Select::new()
+                .with_prompt(format!(
+                    "A pending setup already exists for '{slug}':\n  Admin DID: {existing_did}\n\
+                     Choose"
+                ))
+                .items(prompt_choices)
+                .default(0)
+                .interact()?;
+            match choice {
+                0 => {
+                    eprintln!();
+                    eprintln!("Keeping existing pending setup. Admin DID: {existing_did}");
+                    eprintln!("Run `pnm setup continue {slug}` once the VTA is running.");
+                    return Ok(());
+                }
+                1 => { /* fall through and overwrite below */ }
+                _ => {
+                    eprintln!("Cancelled.");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    let vta_did_input: String = Input::new()
+        .with_prompt("VTA DID (leave blank to finish setup later)")
+        .allow_empty(true)
+        .interact_text()?;
+    let vta_did_input = vta_did_input.trim();
+
+    if vta_did_input.is_empty() {
+        persist_pending(
+            config,
+            &slug,
+            &name,
+            &keyring_key,
+            &did,
+            &private_key_multibase,
+        )?;
+        eprintln!();
+        eprintln!("Saved pending VTA '{slug}'.");
+        eprintln!(
+            "Run \x1b[1mpnm setup continue {slug}\x1b[0m once the VTA is running and you \
+             know its DID."
+        );
+        return Ok(());
+    }
+
+    if !vta_did_input.starts_with("did:") {
+        return Err("VTA DID must start with `did:` (e.g. did:webvh:... or did:key:...)".into());
+    }
+
+    // Operator supplied the VTA DID up front → phase 1 + phase 2 in one
+    // shot. Park in pending, then bind immediately.
+    persist_pending(
+        config,
+        &slug,
+        &name,
+        &keyring_key,
+        &did,
+        &private_key_multibase,
+    )?;
+    finalize_session(config, &slug, &name, vta_did_input, &did, false)?;
+
+    Ok(())
+}
+
+// ── Non-TEE phase 1: non-interactive ───────────────────────────────
+
+pub async fn start_non_tee_setup_non_interactive(
+    config: &mut PnmConfig,
+    name: &str,
+    overwrite: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let slug = slugify(name);
+    if slug.is_empty() {
+        return Err("--name must produce a non-empty slug after normalization".into());
+    }
+    let keyring_key = vta_keyring_key(&slug);
+
+    match detect_existing_state(config, &slug, &keyring_key) {
+        ExistingState::None => {}
+        ExistingState::Complete { vta_did } => {
+            return Err(format!(
+                "'{slug}' is already set up (VTA DID: {vta_did}).\n\n\
+                 To replace it, first run: pnm vta remove {slug}"
+            )
+            .into());
+        }
+        ExistingState::Pending { existing_did } => {
+            if !overwrite {
+                return Err(format!(
+                    "pending setup already exists for slug '{slug}' (Admin DID: {existing_did}).\n\n\
+                     Pass --overwrite to replace, or run `pnm setup continue {slug}` to finish it."
+                )
+                .into());
+            }
+        }
+    }
+
+    let (did, private_key_multibase) = mint_ephemeral_identity();
+    persist_pending(
+        config,
+        &slug,
+        name,
+        &keyring_key,
+        &did,
+        &private_key_multibase,
+    )?;
+
+    eprintln!("Pending VTA '{slug}' created.");
+    eprintln!("  Admin DID: {did}");
+    eprintln!();
+    eprintln!("Next: set `admin_did = \"{did}\"` in the VTA setup.toml, boot the VTA,");
+    eprintln!("      then run: pnm setup continue {slug} --vta-did <did:...>");
+
+    emit_json(&slug, &did, "pending")?;
+    Ok(())
+}
+
+// ── Non-TEE phase 2: interactive ───────────────────────────────────
+
+pub async fn continue_non_tee_setup_interactive(
+    config: &mut PnmConfig,
+    slug: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let keyring_key = vta_keyring_key(slug);
+    let (name, existing_did) = require_pending(config, slug, &keyring_key)?;
+
+    eprintln!();
+    eprintln!("Continuing setup for '{slug}'.");
+    eprintln!();
+    eprintln!("  \x1b[1mAdmin DID:\x1b[0m {existing_did}   (unchanged from phase 1)");
+    eprintln!();
+
+    let vta_did: String = Input::new().with_prompt("VTA DID").interact_text()?;
+    let vta_did = vta_did.trim();
     if !vta_did.starts_with("did:") {
         return Err("VTA DID must start with `did:` (e.g. did:webvh:... or did:key:...)".into());
     }
 
-    let default_name = vta_did
-        .rsplit(':')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("my-vta")
-        .to_string();
-    let name: String = Input::new()
-        .with_prompt("Name for this VTA")
-        .default(default_name)
-        .interact_text()?;
+    finalize_session(config, slug, &name, vta_did, &existing_did, false)?;
+    Ok(())
+}
 
-    let slug = slugify(&name);
-    let keyring_key = vta_keyring_key(&slug);
+// ── Non-TEE phase 2: non-interactive ───────────────────────────────
 
-    // Mint a temp admin did:key. This is the DID the user shares with the
-    // admin; PNM rotates it out of the ACL the first time it successfully
-    // authenticates, so an accidental leak over email/chat only exposes a
-    // short-lived identity.
-    let (bundle, did) = vta_cli_common::local_keygen::generate_admin_did_key(&vta_did, None);
+pub async fn continue_non_tee_setup_non_interactive(
+    config: &mut PnmConfig,
+    slug: &str,
+    vta_did: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let keyring_key = vta_keyring_key(slug);
+    let (name, existing_did) = require_pending(config, slug, &keyring_key)?;
 
-    auth::store_session_pending_rotation(
-        &keyring_key,
-        &did,
-        &bundle.private_key_multibase,
-        &vta_did,
-        None,
-    )?;
+    let vta_did = vta_did.trim();
+    if !vta_did.starts_with("did:") {
+        return Err("VTA DID must start with `did:` (e.g. did:webvh:... or did:key:...)".into());
+    }
+
+    finalize_session(config, slug, &name, vta_did, &existing_did, true)?;
+    Ok(())
+}
+
+// ── Shared helpers ─────────────────────────────────────────────────
+
+fn mint_ephemeral_identity() -> (String, String) {
+    vta_cli_common::local_keygen::generate_unbound_admin_did_key()
+}
+
+fn persist_pending(
+    config: &mut PnmConfig,
+    slug: &str,
+    name: &str,
+    keyring_key: &str,
+    did: &str,
+    private_key_multibase: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    auth::store_pending_vta_binding(keyring_key, did, private_key_multibase)?;
 
     config.vtas.insert(
-        slug.clone(),
+        slug.to_string(),
         VtaConfig {
-            name: name.clone(),
+            name: name.to_string(),
             url: None,
-            vta_did: Some(vta_did.clone()),
+            vta_did: None,
         },
     );
     if config.default_vta.is_none() || config.vtas.len() == 1 {
-        config.default_vta = Some(slug.clone());
+        config.default_vta = Some(slug.to_string());
+    }
+    save_config(config)?;
+    Ok(())
+}
+
+fn finalize_session(
+    config: &mut PnmConfig,
+    slug: &str,
+    name: &str,
+    vta_did: &str,
+    did: &str,
+    non_interactive: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let keyring_key = vta_keyring_key(slug);
+    auth::bind_vta_did(&keyring_key, vta_did, None)?;
+
+    config.vtas.insert(
+        slug.to_string(),
+        VtaConfig {
+            name: name.to_string(),
+            url: None,
+            vta_did: Some(vta_did.to_string()),
+        },
+    );
+    if config.default_vta.is_none() || config.vtas.len() == 1 {
+        config.default_vta = Some(slug.to_string());
     }
     save_config(config)?;
 
-    eprintln!();
-    eprintln!("\x1b[1;32mTemp admin identity created.\x1b[0m");
-    eprintln!();
-    eprintln!("  VTA slug:  {slug}");
-    eprintln!("  VTA DID:   {vta_did}");
-    eprintln!("  Temp DID:  {did}");
-    eprintln!();
-    eprintln!("Ask your VTA admin to grant this identity admin access. On the VTA host,");
-    eprintln!("they should run:");
-    eprintln!();
-    eprintln!("  \x1b[1mvta import-did --did {did} --role admin\x1b[0m");
-    eprintln!();
-    eprintln!("Once the grant is in place, run any PNM command (e.g. `pnm health`). PNM");
-    eprintln!("will resolve the VTA's REST / DIDComm endpoints from its DID document,");
-    eprintln!("rotate to a fresh long-lived did:key on first connect, and remove the");
-    eprintln!("temp DID from the ACL.");
-    eprintln!();
+    if non_interactive {
+        eprintln!("Bound VTA DID for '{slug}': {vta_did}");
+        eprintln!("Ask the VTA admin to grant admin access:");
+        eprintln!("  vta import-did --did {did} --role admin");
+        emit_json(slug, did, "complete")?;
+    } else {
+        eprintln!();
+        eprintln!("\x1b[1;32mSession stored for '{slug}'.\x1b[0m");
+        eprintln!();
+        eprintln!("  VTA slug: {slug}");
+        eprintln!("  VTA DID:  {vta_did}");
+        eprintln!("  Temp DID: {did}");
+        eprintln!();
+        eprintln!("Ask your VTA admin to grant this identity admin access:");
+        eprintln!();
+        eprintln!("  \x1b[1mvta import-did --did {did} --role admin\x1b[0m");
+        eprintln!();
+        eprintln!("Once the grant is in place, run any PNM command (e.g. `pnm health`). PNM will");
+        eprintln!("rotate to a fresh long-lived did:key on first connect and drop the temp");
+        eprintln!("from the ACL.");
+        eprintln!();
+    }
 
     Ok(())
+}
+
+enum ExistingState {
+    None,
+    Pending { existing_did: String },
+    Complete { vta_did: String },
+}
+
+fn detect_existing_state(config: &PnmConfig, slug: &str, keyring_key: &str) -> ExistingState {
+    let Some(vta) = config.vtas.get(slug) else {
+        return ExistingState::None;
+    };
+    if let Some(ref vta_did) = vta.vta_did {
+        return ExistingState::Complete {
+            vta_did: vta_did.clone(),
+        };
+    }
+    // vta_did is None → pending, *if* the keyring agrees. If the
+    // keyring has no pending entry, the config is orphaned — treat as
+    // None so the caller re-mints cleanly.
+    match vta_sdk::session::SessionStore::new(
+        "pnm-cli",
+        crate::config::config_dir().expect("config dir"),
+    )
+    .loaded_session(keyring_key)
+    {
+        Some(info) if info.vta_did.is_none() => ExistingState::Pending {
+            existing_did: info.client_did,
+        },
+        _ => ExistingState::None,
+    }
+}
+
+fn require_pending(
+    config: &PnmConfig,
+    slug: &str,
+    keyring_key: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let Some(vta) = config.vtas.get(slug) else {
+        return Err(format!(
+            "no pending VTA named '{slug}'.\n\n\
+             Run `pnm vta list` to see configured VTAs."
+        )
+        .into());
+    };
+    if vta.vta_did.is_some() {
+        return Err(format!(
+            "'{slug}' is already set up.\n\n\
+             Use `pnm vta show {slug}` to inspect, or `pnm vta remove {slug}` to start over."
+        )
+        .into());
+    }
+    let store = vta_sdk::session::SessionStore::new(
+        "pnm-cli",
+        crate::config::config_dir().expect("config dir"),
+    );
+    let info = store.loaded_session(keyring_key).ok_or_else(|| {
+        format!(
+            "'{slug}' is in pending state in config but the keyring entry is missing.\n\n\
+             This usually means the keyring was cleared. Run `pnm setup --name \"{}\" --overwrite` \
+             to mint a fresh ephemeral identity.",
+            vta.name
+        )
+    })?;
+    if info.vta_did.is_some() {
+        return Err(format!(
+            "'{slug}' keyring entry already has a VTA DID bound — config and keyring are \
+             out of sync. Run `pnm vta remove {slug}` and start over."
+        )
+        .into());
+    }
+    Ok((vta.name.clone(), info.client_did))
 }
 
 /// Set up a new VTA for TEE deployment.
