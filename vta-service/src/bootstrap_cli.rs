@@ -356,7 +356,9 @@ fn verify_template_bundle(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use vta_sdk::provision_integration::template_verify::verify_template_bootstrap;
     use vta_sdk::sealed_transfer::AssertionProof;
-    use vta_sdk::sealed_transfer::verify::verify_producer_assertion_with_pubkey;
+    use vta_sdk::sealed_transfer::verify::{
+        VerifiedAssertion, verify_producer_assertion_with_pubkey,
+    };
 
     // VC + claim verification against pinned DID. Runs first so the
     // trust anchor is established before we authenticate the producer
@@ -386,12 +388,38 @@ fn verify_template_bundle(
         None
     };
 
-    verify_producer_assertion_with_pubkey(
+    let verdict = verify_producer_assertion_with_pubkey(
         &opened.producer,
         &opened.client_x25519_pub,
         &opened.bundle_id,
         producer_pubkey.as_ref(),
     )?;
+
+    // Exhaustively match so that a future variant addition forces this
+    // code site to make an explicit decision rather than silently
+    // accept the bundle.
+    match verdict {
+        VerifiedAssertion::DidSignedVerified(_) => {
+            // Signature check succeeded — producer is cryptographically bound.
+        }
+        VerifiedAssertion::PinnedOnlyAcknowledged(_) => {
+            // The digest-pinning check in `vta_cli_common::sealed_consumer::open_bundle`
+            // is the sole integrity anchor for this variant. `--expect-digest` is
+            // required by default at the CLI surface; if the caller opted out, they
+            // accept the trust tradeoff.
+        }
+        VerifiedAssertion::AttestedNeedsNitroCheck(_) => {
+            // `vta bootstrap provision-integration` does not currently accept
+            // Attested producer assertions from the offline CLI. Refuse rather
+            // than silently treat this as verified.
+            return Err(
+                "Attested producer assertion is not supported in the offline provision \
+                 path — use the TEE Mode B bootstrap (`pnm bootstrap connect`) for \
+                 attested-quote flows."
+                    .into(),
+            );
+        }
+    }
 
     Ok(())
 }

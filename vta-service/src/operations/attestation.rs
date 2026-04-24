@@ -42,12 +42,14 @@ pub async fn generate_attestation_report(
     let mut report = tee_state.provider.attest(user_data, &nonce_bytes)?;
     report.vta_did = vta_did;
 
-    // Self-verify
-    let self_verified = tee_state.provider.verify(&report)?;
+    // Structural smoke-check — NOT full cryptographic verification. The
+    // remote verifier is responsible for checking the vendor cert chain,
+    // signature, and PCR values. See `tee::provider::StructuralCheckOutcome`.
+    let outcome = tee_state.provider.smoke_check_structure(&report)?;
 
     Ok(AttestationResponse {
         report,
-        self_verified,
+        self_verified: outcome.as_bool(),
     })
 }
 

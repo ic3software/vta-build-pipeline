@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::AppError;
 
-use super::provider::TeeProvider;
+use super::provider::{StructuralCheckOutcome, TeeProvider};
 use super::types::{AttestationReport, TeeStatus, TeeType};
 
 /// Simulated TEE provider for development and testing.
@@ -52,8 +52,14 @@ impl TeeProvider for SimulatedProvider {
         })
     }
 
-    fn verify(&self, report: &AttestationReport) -> Result<bool, AppError> {
-        // Simulated reports are always "valid" — the evidence is just a hash
-        Ok(report.tee_type == TeeType::Simulated && !report.evidence.is_empty())
+    fn smoke_check_structure(
+        &self,
+        report: &AttestationReport,
+    ) -> Result<StructuralCheckOutcome, AppError> {
+        if report.tee_type == TeeType::Simulated && !report.evidence.is_empty() {
+            Ok(StructuralCheckOutcome::StructurallyValid)
+        } else {
+            Ok(StructuralCheckOutcome::Malformed)
+        }
     }
 }

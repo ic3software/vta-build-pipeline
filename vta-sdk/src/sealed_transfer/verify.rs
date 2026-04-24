@@ -86,22 +86,57 @@ pub fn verify_did_signed_assertion_with_pubkey(
     })
 }
 
-/// Dispatch over [`AssertionProof`] variants. Returns `Ok(())` for
-/// `PinnedOnly` (the caller is deliberately relying on the OOB digest
-/// alone) and for any verified `DidSigned` or `Attested` variant.
+/// Classification of a producer assertion after dispatch. Callers
+/// consume this to decide what integrity anchor they are relying on.
+/// A value is only constructable via
+/// [`verify_producer_assertion_with_pubkey`], so holding one is
+/// evidence of (at least) a successful dispatch.
 ///
-/// `Attested` verification is deferred to
-/// [`crate::attestation::verify_nitro_assertion`] (feature-gated on
-/// `attest-verify`); when the feature is off, `Attested` returns
-/// `Ok(())` with a caller-supplied warning path recommended.
-pub fn verify_producer_assertion_with_pubkey(
-    producer: &ProducerAssertion,
+/// [`DidSignedVerified`] carries a fully-verified Ed25519 signature.
+/// [`PinnedOnlyAcknowledged`] is a receipt that the caller accepted a
+/// bundle whose only integrity anchor is the out-of-band digest —
+/// they must have verified that digest separately; this type does not
+/// prove it.
+/// [`AttestedNeedsNitroCheck`] is an explicit demand on the caller to
+/// invoke Nitro attestation verification (see
+/// [`crate::attestation::verify_nitro_assertion`] under the
+/// `attest-verify` feature). It is **not** a verification success.
+#[derive(Debug)]
+pub enum VerifiedAssertion<'a> {
+    /// Ed25519 signature verified against the producer's resolved
+    /// public key.
+    DidSignedVerified(&'a ProducerAssertion),
+    /// Dispatched as `PinnedOnly`. The caller is responsible for
+    /// independently verifying the out-of-band digest; this variant
+    /// does not prove integrity on its own.
+    PinnedOnlyAcknowledged(&'a ProducerAssertion),
+    /// Dispatched as `Attested`. The caller MUST call
+    /// [`crate::attestation::verify_nitro_assertion`] to graduate
+    /// this to a verified state. Discarding this variant without
+    /// verification is a bug — downstream code should match
+    /// exhaustively on this enum.
+    AttestedNeedsNitroCheck(&'a ProducerAssertion),
+}
+
+/// Dispatch over [`AssertionProof`] variants, returning a
+/// [`VerifiedAssertion`] typestate that tells the caller what (if any)
+/// in-band integrity anchor was confirmed.
+///
+/// Previously this function returned `Result<(), _>` and quietly
+/// returned `Ok(())` for `Attested` (deferring to
+/// [`crate::attestation::verify_nitro_assertion`]) and `PinnedOnly`
+/// (expecting the caller to verify the OOB digest separately). That
+/// API let forgetful callers treat any non-error return as a full
+/// verification success. The typestate return forces the caller to
+/// branch on the variant and makes the remaining work explicit.
+pub fn verify_producer_assertion_with_pubkey<'a>(
+    producer: &'a ProducerAssertion,
     client_x25519_pub: &[u8; 32],
     bundle_id: &[u8; 16],
     producer_ed25519_pubkey: Option<&[u8; 32]>,
-) -> Result<(), SealedTransferError> {
+) -> Result<VerifiedAssertion<'a>, SealedTransferError> {
     match &producer.proof {
-        AssertionProof::PinnedOnly => Ok(()),
+        AssertionProof::PinnedOnly => Ok(VerifiedAssertion::PinnedOnlyAcknowledged(producer)),
         AssertionProof::DidSigned(a) => {
             let pubkey = producer_ed25519_pubkey.ok_or_else(|| {
                 SealedTransferError::AssertionVerification(
@@ -116,16 +151,10 @@ pub fn verify_producer_assertion_with_pubkey(
                 pubkey,
                 client_x25519_pub,
                 bundle_id,
-            )
+            )?;
+            Ok(VerifiedAssertion::DidSignedVerified(producer))
         }
-        AssertionProof::Attested(_) => {
-            // Attested verification is feature-gated on the dedicated
-            // `attest-verify` feature in the consumer crate. This
-            // top-level helper treats Attested as "caller is responsible
-            // for verifying via `crate::attestation`" and returns Ok so
-            // the caller can branch without duplicating the dispatch.
-            Ok(())
-        }
+        AssertionProof::Attested(_) => Ok(VerifiedAssertion::AttestedNeedsNitroCheck(producer)),
     }
 }
 
@@ -253,15 +282,62 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_pinned_only_always_passes() {
+    fn dispatch_pinned_only_yields_acknowledged_variant() {
         let client_x = [0xAAu8; 32];
         let bundle_id = [0x55u8; 16];
         let producer = ProducerAssertion {
             producer_did: "did:key:zVtaTestProducer".into(),
             proof: AssertionProof::PinnedOnly,
         };
-        verify_producer_assertion_with_pubkey(&producer, &client_x, &bundle_id, None)
-            .expect("PinnedOnly dispatches to Ok (caller trusts OOB digest)");
+        let verified =
+            verify_producer_assertion_with_pubkey(&producer, &client_x, &bundle_id, None)
+                .expect("PinnedOnly dispatches successfully");
+        assert!(
+            matches!(verified, VerifiedAssertion::PinnedOnlyAcknowledged(_)),
+            "PinnedOnly must yield PinnedOnlyAcknowledged so callers can't mistake it \
+             for a real signature check — got {verified:?}",
+        );
+    }
+
+    #[test]
+    fn dispatch_attested_yields_needs_nitro_check_variant() {
+        let client_x = [0xAAu8; 32];
+        let bundle_id = [0x55u8; 16];
+        let producer = ProducerAssertion {
+            producer_did: "did:key:zVtaTestProducer".into(),
+            proof: AssertionProof::Attested(
+                crate::sealed_transfer::bundle::AttestationQuoteAssertion {
+                    format: "aws-nitro-v1".into(),
+                    quote_b64: "AAAA".into(),
+                },
+            ),
+        };
+        let verified =
+            verify_producer_assertion_with_pubkey(&producer, &client_x, &bundle_id, None)
+                .expect("Attested dispatches successfully");
+        assert!(
+            matches!(verified, VerifiedAssertion::AttestedNeedsNitroCheck(_)),
+            "Attested must yield AttestedNeedsNitroCheck so the caller is forced to \
+             explicitly invoke nitro quote verification — got {verified:?}",
+        );
+    }
+
+    #[test]
+    fn dispatch_did_signed_yields_verified_variant() {
+        let client_x = [0xAAu8; 32];
+        let bundle_id = [0x55u8; 16];
+        let (_signing, pubkey, assertion) = sign_fixture(&client_x, &bundle_id);
+        let producer = ProducerAssertion {
+            producer_did: "did:key:zVtaTestProducer".into(),
+            proof: AssertionProof::DidSigned(assertion),
+        };
+        let verified =
+            verify_producer_assertion_with_pubkey(&producer, &client_x, &bundle_id, Some(&pubkey))
+                .expect("DidSigned with valid pubkey verifies");
+        assert!(
+            matches!(verified, VerifiedAssertion::DidSignedVerified(_)),
+            "got: {verified:?}",
+        );
     }
 
     #[test]
