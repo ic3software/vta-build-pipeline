@@ -17,6 +17,7 @@ use serde_json::Value;
 use tracing::info;
 
 use vta_sdk::did_templates::{DidTemplate, DidTemplateRecord, Scope, TemplateVars};
+use vti_common::identifier::validate_identifier;
 
 use crate::audit;
 use crate::auth::AuthClaims;
@@ -42,6 +43,10 @@ pub async fn create_global(
     template
         .validate()
         .map_err(|e| AppError::Validation(e.to_string()))?;
+    // Defence against store-keyspace injection: a template name
+    // containing ':' or other separator characters could collide with
+    // adjacent keyspace prefixes (see vti_common::identifier).
+    validate_identifier("template name", &template.name)?;
 
     if store::get_global_template(templates_ks, &template.name)
         .await?
@@ -92,6 +97,7 @@ pub async fn update_global(
     channel: &str,
 ) -> Result<DidTemplateRecord, AppError> {
     auth.require_super_admin()?;
+    validate_identifier("template name", name)?;
 
     if template.name != name {
         return Err(AppError::Validation(format!(
@@ -284,6 +290,8 @@ pub async fn create_context(
     channel: &str,
 ) -> Result<DidTemplateRecord, AppError> {
     require_context_write(auth, context_id)?;
+    validate_identifier("context id", context_id)?;
+    validate_identifier("template name", &template.name)?;
 
     if crate::contexts::get_context(contexts_ks, context_id)
         .await?
@@ -351,6 +359,8 @@ pub async fn update_context(
     channel: &str,
 ) -> Result<DidTemplateRecord, AppError> {
     require_context_write(auth, context_id)?;
+    validate_identifier("context id", context_id)?;
+    validate_identifier("template name", name)?;
 
     if template.name != name {
         return Err(AppError::Validation(format!(
