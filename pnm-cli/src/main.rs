@@ -475,6 +475,7 @@ enum VtaCommands {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum WebvhCommands {
     /// Add a WebVH server
     AddServer {
@@ -1158,8 +1159,32 @@ fn is_online_template_cmd(cmd: &DidTemplateCommands) -> bool {
     )
 }
 
+/// Spawn a Ctrl-C / SIGTERM watcher that lets a second signal force the
+/// process out. Operations like a stuck mediator handshake can hold the
+/// async runtime for tens of seconds even though the runtime itself
+/// observed the signal — without this, the operator has no escape.
+fn install_force_exit_handler() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+    tokio::spawn(async {
+        loop {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
+            if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
+                eprintln!("\nForcing exit.");
+                std::process::exit(130);
+            }
+            eprintln!("\nShutting down — press Ctrl-C again to force exit.");
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() {
+    install_force_exit_handler();
+
     let cli = Cli::parse();
 
     // Propagate --full-display to the shared render module so any list

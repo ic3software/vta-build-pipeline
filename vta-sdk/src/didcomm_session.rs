@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use affinidi_tdk::common::TDKSharedState;
 use affinidi_tdk::didcomm::Message;
@@ -10,6 +11,13 @@ use tracing::{debug, info, warn};
 
 use crate::error::VtaError;
 use crate::protocols::PROBLEM_REPORT_TYPE;
+
+// Per-step ceiling for mediator round-trips during session setup. The
+// upstream calls below are otherwise unbounded — when the mediator is
+// unreachable a CLI invocation can hang for the full TCP/TLS retry
+// window (30–60s on macOS) before failing. 15s is generous for healthy
+// mediators and keeps Ctrl-C responsive.
+const MEDIATOR_OP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Client-side DIDComm session for request-response messaging via ATM.
 ///
@@ -63,8 +71,13 @@ impl DIDCommSession {
         // Flush stale messages from the inbox (accumulated between CLI runs)
         {
             use affinidi_tdk::messaging::messages::Folder;
-            match atm.list_messages(&profile, Folder::Inbox).await {
-                Ok(messages) if !messages.is_empty() => {
+            match tokio::time::timeout(
+                MEDIATOR_OP_TIMEOUT,
+                atm.list_messages(&profile, Folder::Inbox),
+            )
+            .await
+            {
+                Ok(Ok(messages)) if !messages.is_empty() => {
                     let ids: Vec<String> = messages.iter().map(|m| m.msg_id.clone()).collect();
                     info!(
                         count = ids.len(),
@@ -73,26 +86,51 @@ impl DIDCommSession {
                     let delete_req = affinidi_tdk::messaging::messages::DeleteMessageRequest {
                         message_ids: ids,
                     };
-                    match atm.delete_messages_direct(&profile, &delete_req).await {
-                        Ok(resp) => {
+                    match tokio::time::timeout(
+                        MEDIATOR_OP_TIMEOUT,
+                        atm.delete_messages_direct(&profile, &delete_req),
+                    )
+                    .await
+                    {
+                        Ok(Ok(resp)) => {
                             debug!(
                                 deleted = resp.success.len(),
                                 errors = resp.errors.len(),
                                 "inbox flushed"
                             );
                         }
-                        Err(e) => warn!("failed to flush stale messages (non-fatal): {e}"),
+                        Ok(Err(e)) => warn!("failed to flush stale messages (non-fatal): {e}"),
+                        Err(_) => warn!(
+                            "timeout flushing stale messages after {}s (non-fatal)",
+                            MEDIATOR_OP_TIMEOUT.as_secs()
+                        ),
                     }
                 }
-                Ok(_) => {} // Empty inbox
-                Err(e) => warn!("could not list inbox (non-fatal): {e}"),
+                Ok(Ok(_)) => {} // Empty inbox
+                Ok(Err(e)) => warn!("could not list inbox (non-fatal): {e}"),
+                Err(_) => warn!(
+                    "timeout listing inbox after {}s (non-fatal)",
+                    MEDIATOR_OP_TIMEOUT.as_secs()
+                ),
             }
         }
 
         // Enable WebSocket for streaming message delivery from mediator.
         // Without this, the ATM can only poll via REST and may miss responses
         // that arrive after the initial send_message call returns.
-        atm.profile_enable_websocket(&profile).await?;
+        match tokio::time::timeout(MEDIATOR_OP_TIMEOUT, atm.profile_enable_websocket(&profile))
+            .await
+        {
+            Ok(res) => res?,
+            Err(_) => {
+                return Err(format!(
+                    "timeout enabling WebSocket to mediator after {}s — \
+                     mediator may be unreachable",
+                    MEDIATOR_OP_TIMEOUT.as_secs()
+                )
+                .into());
+            }
+        }
 
         debug!("DIDComm session connected via mediator {mediator_did} (WebSocket mode)");
 

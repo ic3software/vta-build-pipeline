@@ -259,16 +259,24 @@ pub async fn run(
         #[cfg(feature = "didcomm")]
         let didcomm_shutdown = CancellationToken::new();
 
-        // Spawn signal handler
+        // Spawn signal handler. First signal triggers cooperative shutdown;
+        // a second signal forces an immediate exit so an operator can always
+        // bail out if cleanup hangs (e.g., a mediator handshake that won't
+        // complete before its timeout fires).
         tokio::spawn({
             let shutdown_tx = shutdown_tx.clone();
             #[cfg(feature = "didcomm")]
             let didcomm_shutdown = didcomm_shutdown.clone();
             async move {
                 shutdown_signal().await;
+                info!("shutting down — press Ctrl-C again to force exit");
                 let _ = shutdown_tx.send(true);
                 #[cfg(feature = "didcomm")]
                 didcomm_shutdown.cancel();
+
+                shutdown_signal().await;
+                eprintln!("\nForcing exit.");
+                std::process::exit(130);
             }
         });
 
@@ -420,12 +428,22 @@ pub async fn run(
                         .await
                     {
                         Ok(service) => {
-                            // Wait for the mediator connection before accepting traffic
-                            if let Err(e) = service
-                                .wait_connected("vta-main", Duration::from_secs(30))
-                                .await
-                            {
-                                warn!("DIDComm listener not connected after 30s: {e}");
+                            // Wait for the mediator connection before accepting traffic.
+                            // Race the wait against shutdown so a Ctrl-C while the
+                            // mediator is unreachable doesn't park us here for the full
+                            // 30s — `wait_connected` is itself signal-deaf upstream.
+                            tokio::select! {
+                                res = service.wait_connected(
+                                    "vta-main",
+                                    Duration::from_secs(30),
+                                ) => {
+                                    if let Err(e) = res {
+                                        warn!("DIDComm listener not connected after 30s: {e}");
+                                    }
+                                }
+                                _ = didcomm_shutdown.cancelled() => {
+                                    info!("shutdown received before mediator connected");
+                                }
                             }
                             didcomm_bridge.set_service(service.clone());
                             spawn_event_logger(service.clone());
@@ -547,6 +565,7 @@ pub async fn run(
 }
 
 /// Storage thread: runs session cleanup loop and persists the store on shutdown.
+#[allow(clippy::too_many_arguments)]
 fn run_storage_thread(
     store: Store,
     sessions_ks: KeyspaceHandle,
