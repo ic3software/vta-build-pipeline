@@ -409,21 +409,107 @@ Is this a developer workstation?
 
 ## Migrating between backends
 
-The seed is hex-encoded everywhere, so migration is a read-from-old,
-write-to-new operation. Two options:
+Every backend stores the seed as the **same hex-encoded string**, so
+migrating is a copy operation between two trusted CLIs.
 
-1. **Plan it from setup.** `vta setup --from setup.toml` accepts the
-   destination backend's config; the wizard mints a fresh seed
-   directly into that backend.
-2. **Migrate post-hoc.** Stop the VTA. Read the old seed
-   (`vta keys seeds export`), update `[secrets]` in `config.toml`
-   to the new backend, restart. The first call to
-   `seed_store.get()` returns `None`; the wizard / first-write path
-   stashes the imported seed in the new backend.
+> The VTA does **not** ship a built-in seed export. There is no
+> `vta keys seeds export` command. Exposing the master seed from the
+> CLI would be a single-step path to leaking the root of the entire
+> key hierarchy, so we rely on the source backend's vendor CLI for
+> the read step — that CLI already has the audit logging and access
+> controls your organization has standardized on. `vta keys seeds`
+> only lists generation metadata; it never prints the seed bytes.
 
-Treat seed migration the same way you treat key rotation: scheduled
-maintenance, with a backup of the prior backend retained until the
-new one is verified.
+### Procedure
+
+1. **Stop the VTA.** Migration is offline. Take a backup of the
+   local fjall store first (`pnm backup export`).
+
+2. **Read the seed from the source backend** with the vendor CLI.
+   The output is hex (32 or 64 chars):
+
+   | Source | Command |
+   |---|---|
+   | macOS keyring | `security find-generic-password -s vta -a master_seed -w` |
+   | Linux keyring | `secret-tool lookup service vta username master_seed` |
+   | AWS Secrets Manager | `aws secretsmanager get-secret-value --secret-id vta/master-seed --query SecretString --output text` |
+   | GCP Secret Manager | `gcloud secrets versions access latest --secret=vta-master-seed` |
+   | Azure Key Vault | `az keyvault secret show --vault-name my-vault --name vta-master-seed --query value -o tsv` |
+   | HashiCorp Vault | `vault kv get -field=seed secret/vta/master-seed` |
+   | Config-seed | `awk '/^seed/ {print $3}' config.toml` (already plaintext) |
+   | Plaintext file | `cat <data_dir>/seed.hex` |
+
+   Sanity-check the length: 64 chars for a 24-word mnemonic, 32 for
+   a 12-word. Anything else is wrong and you should stop here.
+
+3. **Write the same hex value to the destination backend** with its
+   vendor CLI. Substitute `<hex>` for the value you read in step 2:
+
+   | Destination | Command |
+   |---|---|
+   | macOS keyring | `security add-generic-password -s vta -a master_seed -w '<hex>' -U` |
+   | Linux keyring | `secret-tool store --label='vta' service vta username master_seed` (then paste hex on stdin) |
+   | AWS Secrets Manager | `aws secretsmanager create-secret --name vta/master-seed --secret-string '<hex>'` (use `put-secret-value` if it already exists) |
+   | GCP Secret Manager | `printf %s '<hex>' \| gcloud secrets versions add vta-master-seed --data-file=-` |
+   | Azure Key Vault | `az keyvault secret set --vault-name my-vault --name vta-master-seed --value '<hex>'` |
+   | HashiCorp Vault | `vault kv put secret/vta/master-seed seed='<hex>'` |
+
+   Pass the hex via env var or stdin where possible; argv exposes
+   it to `ps`. For example:
+
+   ```bash
+   HEX=$(security find-generic-password -s vta -a master_seed -w)
+   vault kv put secret/vta/master-seed seed="$HEX"
+   unset HEX
+   ```
+
+4. **Update `[secrets]` in `config.toml`** to reference the
+   destination backend. The simplest path is to **remove** the old
+   backend's keys so there's no ambiguity — but if you leave both,
+   the priority order in [How backend selection works](#how-backend-selection-works)
+   resolves the destination first, so it still works.
+
+5. **Restart the VTA.** Local fjall state (key records, ACL,
+   contexts, sessions) is untouched. The VTA reads the seed from
+   the new backend at boot and resumes.
+
+6. **Verify** with `vta status` and at least one authenticated REST
+   or DIDComm call. If anything is wrong (signing fails, DIDComm
+   handshake mismatches), **stop, revert config.toml**, and
+   investigate before deleting anything.
+
+7. **Once verified, delete the seed from the source backend** with
+   the vendor CLI. Don't leave it lying around just in case —
+   that's a leak waiting to happen.
+
+### Cross-checks
+
+The pubkey of `<vta_did>#key-0` is deterministic from the seed and
+the BIP-32 path stored in the key record. After the restart in
+step 5, run `vta keys list --context vta` and confirm the
+`Public Key Multibase` matches the value the running service
+publishes via `GET /config`. If they differ, the seed you migrated
+is not the seed the existing key records were derived from — back
+out before continuing.
+
+### Treat it like key rotation
+
+Schedule the migration as a maintenance window, take the backup,
+keep the source backend's secret retained until you've observed the
+new backend through a full operator flow (auth + a signing call +
+DIDComm round-trip if applicable), then delete. Don't migrate
+under time pressure.
+
+### Future: built-in seed migration
+
+A `vta keys seeds export-hex --confirm` and matching
+`vta keys seeds import-hex` pair would shorten this procedure to
+two commands. The code already has `seed_store.get()` and
+`seed_store.set()` as the underlying primitives. The reason it's
+not exposed today is the foot-gun risk; if your operations posture
+makes a CLI export safe (e.g. you run the VTA as an unprivileged
+user and sudo controls the relevant binary), open an issue with
+your threat-model writeup and we can wire it up.
 
 ## See also
 
