@@ -2,7 +2,7 @@
 //! VTA CLI (`vta bootstrap provision-integration`) and the HTTP endpoint
 //! (`POST /bootstrap/provision-integration`).
 //!
-//! See `docs/bootstrap-provision-integration.md` for the full design.
+//! See `docs/03-integrating/provision-integration.md` for the full design.
 //!
 //! Flow, at the broadest level:
 //! 1. Precondition checks — caller is admin of the target context;
@@ -456,7 +456,7 @@ pub async fn provision_integration(
     // long-term admin DID under its own key custody and binds the VC
     // subject + ACL row to that DID instead of `client_did`. The
     // ephemeral `client_did` then has no authority at the VTA — it
-    // only opened the bundle. See `docs/bootstrap-provision-integration.md`
+    // only opened the bundle. See `docs/03-integrating/provision-integration.md`
     // §"Admin-DID rollover" and CLAUDE.md "Use DID templates" /
     // "Authorization claims … VC/VP".
     let admin_did = if let Some(ref admin_ref) = admin_template_ref {

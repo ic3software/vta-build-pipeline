@@ -249,7 +249,7 @@ enum BootstrapCommands {
     /// provision-request` — same wire shape, same on-disk layout,
     /// different default seed directory.
     ///
-    /// See `docs/offline-integration-bootstrap.md` for the flow.
+    /// See `docs/03-integrating/provision-integration.md` for the flow.
     ProvisionRequest {
         /// DID template name the VTA should render (e.g.
         /// `didcomm-mediator`, `webvh-hosting-server`, or an

@@ -44,7 +44,7 @@ pub enum SealedPayloadV1 {
     /// config. Produced by `vta bootstrap provision-integration` and
     /// its `pnm` bridge equivalent.
     ///
-    /// See `docs/bootstrap-provision-integration.md` for the full design.
+    /// See `docs/03-integrating/provision-integration.md` for the full design.
     TemplateBootstrap(Box<super::template_bootstrap::TemplateBootstrapPayload>),
 }
 

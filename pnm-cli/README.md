@@ -250,5 +250,6 @@ Backups are encrypted with Argon2id + AES-256-GCM using a user-provided password
 - [VTA Service & Architecture](../README.md)
 - [CNM CLI (multi-community)](../cnm-cli/README.md)
 - [First Person Network White Paper](https://www.firstperson.network/white-paper)
-- [Design Document](../docs/design.md)
-- [BIP-32 Path Specification](../docs/bip32_paths.md)
+- [Documentation index](../docs/README.md)
+- [Architecture](../docs/01-concepts/architecture.md)
+- [BIP-32 Path Specification](../docs/04-reference/bip32-paths.md)

@@ -12,7 +12,7 @@
 //!   operate (zeroized on drop).
 //! - First-boot config (template outputs, VTA trust bundle, connect URL).
 //!
-//! See `docs/bootstrap-provision-integration.md` §"Payload" for the full
+//! See `docs/03-integrating/provision-integration.md` §"Payload" for the full
 //! design.
 
 use std::collections::BTreeMap;

@@ -5,7 +5,7 @@ inputs file — no prompts, no terminal needed. Use it for CI pipelines,
 immutable images, sealed-image redeploys, or any unattended bootstrap.
 
 For the prompted walkthrough, see
-[`cold-start-guide.md`](cold-start-guide.md). Both paths produce
+[`cold-start.md`](cold-start.md). Both paths produce
 identical state on disk.
 
 ## When to use which
@@ -46,7 +46,7 @@ vta bootstrap-admin --did did:key:z6Mk... --label ops
 
 To add an integration (mediator, webvh hosting server, etc.) **after**
 setup — offline, file-based, no running VTA required — see
-[`offline-integration-bootstrap.md`](offline-integration-bootstrap.md).
+[`../03-integrating/provision-integration.md`](../03-integrating/provision-integration.md).
 The integration emits a signed VP, the VTA runs
 `vta bootstrap provision-integration` locally, the integration opens
 the returned sealed bundle. Same three-phase flow for every template-
@@ -238,7 +238,7 @@ vta --config /srv/vta/config.toml
 If you set `admin_did`, the VTA is sealed and ready for production
 management via the authenticated REST API or DIDComm. If you didn't,
 follow the
-[interactive admin-grant flow in `cold-start-guide.md`](cold-start-guide.md)
+[interactive admin-grant flow in `cold-start.md`](cold-start.md)
 (`pnm setup` → `vta import-did` → start VTA → first authenticated
 command auto-rotates).
 

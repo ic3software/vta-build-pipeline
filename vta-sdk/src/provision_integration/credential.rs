@@ -1,7 +1,7 @@
 //! `VtaAuthorizationCredential` — the VC the VTA issues to a holder at
 //! integration bootstrap.
 //!
-//! See `docs/bootstrap-provision-integration.md` §"VC" for the full
+//! See `docs/03-integrating/provision-integration.md` §"VC" for the full
 //! shape. Summary:
 //!
 //! - `credentialSubject.adminOf.{vta, context, role}` — always present.

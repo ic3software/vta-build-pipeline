@@ -18,7 +18,7 @@ pub mod did_webvh;
 pub mod export;
 pub mod keys;
 /// Generic template-driven integration bootstrap. See
-/// `docs/bootstrap-provision-integration.md`. Feature-gated on `webvh`
+/// `docs/03-integrating/provision-integration.md`. Feature-gated on `webvh`
 /// because the phase-1 implementation delegates minting to
 /// `create_did_webvh`.
 #[cfg(feature = "webvh")]

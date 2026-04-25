@@ -8,7 +8,7 @@ TEE deployments add hardware isolation, KMS-backed secrets, and encrypted
 storage.
 
 For TEE implementation details (KMS bootstrap code, encrypted store layer,
-config changes), see [TEE Enclave Security Design](design/tee-enclave-security.md).
+config changes), see [TEE Enclave Security Design](tee-architecture.md).
 
 ## Security Layers
 

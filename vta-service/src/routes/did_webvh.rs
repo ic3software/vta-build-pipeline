@@ -168,7 +168,7 @@ pub async fn get_did_log_handler(
 /// integration boots and publishes on its own webvh host, that copy
 /// becomes the live source of truth. Use this endpoint for audit,
 /// debugging, or republication fallback; not as a general DID
-/// resolver. See `docs/bootstrap-provision-integration.md` §"did.jsonl
+/// resolver. See `docs/03-integrating/provision-integration.md` §"did.jsonl
 /// retrieval" for the full semantics.
 pub async fn get_did_log_public_handler(
     State(state): State<AppState>,

@@ -1,16 +1,23 @@
 # Feature Flags
 
-The VTA workspace uses Cargo feature flags to control which capabilities are
-compiled in. This document lists all flags, their purpose, dependencies, and
-which deployment modes use them.
+The VTI workspace uses Cargo feature flags to control which
+capabilities are compiled in. This chapter is the reference for what
+each flag does, what it pulls in, and which deployment profile uses
+it.
+
+For the operator-facing view of secret-storage backends (which one
+to pick, how to configure each), see
+[`secret-backends.md`](secret-backends.md). This chapter is the
+build-time perspective.
 
 ## vta-service features
 
-These are the flags on the `vta-service` library crate. Front-end binaries
-(`vta-enclave`, etc.) forward relevant flags to `vta-service`.
+These are the flags on the `vta-service` library crate. Front-end
+binaries (`vta-enclave`, etc.) forward relevant flags to
+`vta-service`.
 
 | Feature | Purpose | Dependencies |
-|---------|---------|-------------|
+|---|---|---|
 | `rest` | REST API endpoints (axum routes) | None |
 | `didcomm` | DIDComm v2 messaging transport | None |
 | `tee` | TEE attestation types, providers, KMS bootstrap | `libc`, `hmac`, `aws-sdk-kms`, `aws-config`, `rsa`, `didwebvh-rs` |
@@ -27,8 +34,8 @@ These are the flags on the `vta-service` library crate. Front-end binaries
 
 **Default features:** `setup`, `keyring`, `rest`, `didcomm`
 
-**Compile-time constraint:** At least one of `rest` or `didcomm` must be
-enabled, or the build fails with a compile error.
+**Compile-time constraint:** at least one of `rest` or `didcomm` must
+be enabled, or the build fails with a compile error.
 
 ## Feature dependency graph
 
@@ -43,51 +50,46 @@ vsock-store ──→ vti-common/vsock-store ──→ [tokio-vsock, libc]
 ```
 
 **Key relationships:**
-- `setup` automatically enables `webvh` (the wizard creates did:webvh identities)
-- `tee` pulls in `didwebvh-rs` (for automatic DID generation on first boot)
-- `vsock-store` is a cross-crate feature chain: `vta-enclave` → `vta-service` → `vti-common`
+
+- `setup` automatically enables `webvh` (the wizard creates
+  did:webvh identities).
+- `tee` pulls in `didwebvh-rs` (for automatic DID generation on
+  first boot).
+- `vsock-store` is a cross-crate feature chain:
+  `vta-enclave` → `vta-service` → `vti-common`.
 
 ## vti-common features
 
 | Feature | Purpose |
-|---------|---------|
+|---|---|
 | `encryption` | AES-256-GCM encryption for `KeyspaceHandle.with_encryption()` |
 | `vsock-store` | `VsockStore` and `VsockKeyspaceHandle` for vsock-proxied storage |
 
 ## vta-enclave features
 
 | Feature | Purpose |
-|---------|---------|
+|---|---|
 | `rest` | Forwards to `vta-service/rest` |
 | `didcomm` | Forwards to `vta-service/didcomm` |
 | `webvh` | Forwards to `vta-service/webvh` |
 | `vsock-store` | Forwards to `vta-service/vsock-store` |
 
-The `tee` feature is always enabled on `vta-service` (hardcoded in the
-dependency: `features = ["tee"]`). No need to specify it.
+The `tee` feature is always enabled on `vta-service` (hardcoded in
+the dependency: `features = ["tee"]`). No need to specify it.
 
 ## Deployment profiles
 
 | Profile | vta-service binary | vta-enclave binary |
-|---------|-------------------|-------------------|
+|---|---|---|
 | Local development | `default` (setup, keyring, rest, didcomm) | N/A |
 | Nitro Hardened (DIDComm only) | N/A | `didcomm,vsock-store` |
 | Nitro Full API (REST + DIDComm) | N/A | `rest,didcomm,vsock-store` |
 | Nitro REST only | N/A | `rest,vsock-store` |
-| Cloud (no TEE) | `rest,didcomm,aws-secrets` | N/A |
+| Cloud (no TEE), AWS | `rest,didcomm,aws-secrets` | N/A |
+| Cloud (no TEE), GCP | `rest,didcomm,gcp-secrets` | N/A |
+| Cloud (no TEE), Azure | `rest,didcomm,azure-secrets` | N/A |
+| Kubernetes (any cloud) | `rest,didcomm,vault-secrets` | N/A |
 
-## Secret storage priority
-
-When multiple secret storage features are enabled, the `create_seed_store()`
-function checks backends in this order:
-
-1. AWS Secrets Manager (`aws-secrets` + config set)
-2. GCP Secret Manager (`gcp-secrets` + config set)
-3. Azure Key Vault (`azure-secrets` + config set)
-4. HashiCorp Vault (`vault-secrets` + `secrets.vault_addr` set)
-5. Config file (`config-seed` + config set)
-6. OS keyring (`keyring` — default)
-7. Plaintext file (always available fallback)
-
-In TEE mode (vta-enclave), KMS bootstrap provides the seed directly —
-none of the above backends are used.
+For the runtime configuration that pairs with each backend feature
+(TOML keys, env vars, IAM/Vault setup), see
+[`secret-backends.md`](secret-backends.md).

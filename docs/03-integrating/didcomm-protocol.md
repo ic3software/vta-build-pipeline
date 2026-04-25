@@ -41,7 +41,7 @@ replaces the JWT-based auth flow used by the REST API.
    operation being performed.
 
 The same role hierarchy and context-scoping rules apply as in the REST API.
-See the [Authorization Model](design.md#authorization-model) section of the
+See the [Authorization Model](../01-concepts/overview.md#roles-and-authorization) section of the
 design doc for details.
 
 ### REST-Only Endpoints

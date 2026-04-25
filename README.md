@@ -65,11 +65,11 @@ that issues short-lived EdDSA JWTs.
 | DID resolution | affinidi-did-resolver-cache-sdk                                                                           |
 | DIDComm        | affinidi-tdk (didcomm, secrets_resolver)                                                                  |
 | JWT            | jsonwebtoken (EdDSA / Ed25519)                                                                            |
-| Seed storage   | OS keyring, AWS Secrets Manager, GCP Secret Manager, or config file (see [Feature Flags](#feature-flags)) |
+| Seed storage   | OS keyring, AWS / GCP / Azure secret managers, HashiCorp Vault, or KMS-TEE — see [Secret-storage backends](docs/02-operating/secret-backends.md) |
 
-See [docs/design.md](docs/design.md) for the full design document.
+See [docs/](docs/README.md) for the full documentation index.
 
-See [Feature Flags](docs/feature-flags.md) for compile-time feature configuration.
+For an architectural overview start with [docs/01-concepts/overview.md](docs/01-concepts/overview.md). For Cargo feature configuration see [docs/02-operating/feature-flags.md](docs/02-operating/feature-flags.md).
 
 ## Prerequisites
 
@@ -101,8 +101,8 @@ cargo run --package vta-service --features setup -- setup
 cargo run --package vta-service --features setup -- setup --from setup.toml
 ```
 
-See [`docs/non-interactive-setup.md`](docs/non-interactive-setup.md) and
-[`docs/examples/vta-setup.example.toml`](docs/examples/vta-setup.example.toml)
+See [`docs/02-operating/non-interactive-setup.md`](docs/02-operating/non-interactive-setup.md) and
+[`docs/02-operating/examples/vta-setup.example.toml`](docs/02-operating/examples/vta-setup.example.toml)
 for the `--from` schema.
 
 The wizard walks through these steps:
@@ -199,15 +199,21 @@ See [PNM CLI](pnm-cli/README.md) and [CNM CLI](cnm-cli/README.md) for command re
 
 ## Documentation
 
-- [Design Document](docs/design.md) -- architecture, API, and workspace structure
-- [Security Architecture](docs/security.md) -- defense-in-depth model and threat model
-- [TEE Enclave Security](docs/design/tee-enclave-security.md) -- Nitro Enclave KMS bootstrap and encrypted storage design
-- [Cold-Start Guide](docs/cold-start-guide.md) -- bootstrapping a VTA + WebVH + mediator from scratch
-- [Non-Interactive Setup](docs/non-interactive-setup.md) -- scripted VTA provisioning via TOML for CI / sealed images / unattended bootstrap
-- [Integration Guide](docs/integration-guide.md) -- integrating a 3rd-party application with the VTA
-- [DIDComm Protocol](docs/didcomm_protocol.md) -- message types, schemas, and authorization
-- [BIP-32 Path Specification](docs/bip32_paths.md) -- hierarchical key derivation paths
-- [Feature Flags](docs/feature-flags.md) -- Cargo feature flags and deployment profiles
-- [Adding a Front-End](docs/extending.md) -- how to add a new VTA deployment binary
-- [Store Migration](docs/design/store-migration.md) -- enum-to-trait migration path for storage backends
+The full documentation tree is organized as a book — see
+[`docs/README.md`](docs/README.md) for the index. Quick links by topic:
+
+- **Concepts** — [Overview](docs/01-concepts/overview.md) ·
+  [Architecture](docs/01-concepts/architecture.md) ·
+  [Security model](docs/01-concepts/security-model.md) ·
+  [TEE architecture](docs/01-concepts/tee-architecture.md)
+- **Operating** — [Cold-start](docs/02-operating/cold-start.md) ·
+  [Non-interactive setup](docs/02-operating/non-interactive-setup.md) ·
+  [Secret-storage backends](docs/02-operating/secret-backends.md) ·
+  [Feature flags](docs/02-operating/feature-flags.md)
+- **Integrating** — [Integration guide](docs/03-integrating/integration-guide.md) ·
+  [DIDComm protocol](docs/03-integrating/didcomm-protocol.md) ·
+  [DID templates](docs/03-integrating/did-templates.md) ·
+  [Provision-integration](docs/03-integrating/provision-integration.md)
+- **Reference** — [BIP-32 paths](docs/04-reference/bip32-paths.md) ·
+  [CLI style](docs/04-reference/cli-style.md)
 - [First Person Project White Paper](https://www.firstperson.network/white-paper)

@@ -1803,7 +1803,7 @@ mod tests {
 
     #[test]
     fn bind_vta_did_accepts_did_key_vta() {
-        // did:key VTAs are documented in docs/cold-start-guide.md — keep
+        // did:key VTAs are documented in docs/02-operating/cold-start.md — keep
         // the validation loose.
         let store = test_store();
         store

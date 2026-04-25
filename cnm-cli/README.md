@@ -306,5 +306,6 @@ has unrestricted access across all contexts.
 - [VTA Service & Architecture](../README.md)
 - [PNM CLI (single-VTA)](../pnm-cli/README.md) -- simpler alternative for personal use
 - [First Person Network White Paper](https://www.firstperson.network/white-paper)
-- [Design Document](../docs/design.md)
-- [BIP-32 Path Specification](../docs/bip32_paths.md)
+- [Documentation index](../docs/README.md)
+- [Architecture](../docs/01-concepts/architecture.md)
+- [BIP-32 Path Specification](../docs/04-reference/bip32-paths.md)

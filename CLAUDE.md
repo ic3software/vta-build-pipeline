@@ -55,7 +55,7 @@ Tests and docs refer to DIDs, not pubkeys.
 
 ## Use DID templates, don't hand-roll DID shapes
 
-The workspace has a **DID templates feature** (`docs/did-templates.md`,
+The workspace has a **DID templates feature** (`docs/03-integrating/did-templates.md`,
 `vta-sdk/src/did_templates`, `vta-service/src/routes/did_templates.rs`). A
 template is a JSON file describing the **shape** of a DID document with
 `{TOKEN}` placeholders; the VTA renders them server-side, filling in keys it
@@ -201,7 +201,7 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Code**: `vta-service/src/setup/interactive.rs`, `vta-service/src/setup/from_toml.rs`.
 - **Seed**: 24-word BIP-39 mnemonic, stored via `affinidi-secrets-resolver`
   backend (OS keyring by default; AWS/GCP/Azure via feature flags).
-- **Docs**: `docs/cold-start-guide.md`, `docs/non-interactive-setup.md`.
+- **Docs**: `docs/02-operating/cold-start.md`, `docs/02-operating/non-interactive-setup.md`.
 
 ### Admin credential cold-start
 - **What**: Bootstrap the first operator without a running VTA.
@@ -210,7 +210,7 @@ new flow, update both this section and the relevant `docs/*.md`.
   authenticates → on first authenticated call PNM **auto-rotates** to a
   fresh `did:key`, creates the new ACL entry, deletes the temp one.
 - **Code**: `pnm-cli/src/setup.rs`, `vta-service/src/main.rs` (`import-did`).
-- **Docs**: `docs/cold-start-guide.md` §3–6.
+- **Docs**: `docs/02-operating/cold-start.md` §3–6.
 
 ### TEE Mode B bootstrap (attested first-boot)
 - **What**: One-command admin provisioning against a fresh Nitro-Enclave VTA.
@@ -221,7 +221,7 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Carve-out**: Single-use. `BOOTSTRAP_CARVEOUT_CLOSED_KEY` flips on
   first success; subsequent calls return 410.
 - **Code**: `vta-service/src/routes/bootstrap.rs`, `vta-service/src/tee/`.
-- **Docs**: `sealed-bootstrap.md`, `docs/design/tee-enclave-security.md`.
+- **Docs**: `sealed-bootstrap.md`, `docs/01-concepts/tee-architecture.md`.
 
 ### DIDComm challenge-response auth
 - **What**: Session initiation for any authenticated call.
@@ -262,8 +262,7 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Code**: `vta-service/src/operations/provision_integration.rs`,
   `vta-sdk/src/provision_integration/`,
   `vta-service/src/routes/bootstrap.rs:provision_integration`.
-- **Docs**: `docs/bootstrap-provision-integration.md`,
-  `docs/offline-integration-bootstrap.md`.
+- **Docs**: `docs/03-integrating/provision-integration.md`.
 
 ### Sealed-transfer envelope format
 - **Inner**: CBOR-serialized `SealedPayloadV1` enum variant.
@@ -303,7 +302,7 @@ new flow, update both this section and the relevant `docs/*.md`.
   the SDK, always available).
 - **Code**: `vta-sdk/src/did_templates/`,
   `vta-service/src/routes/did_templates.rs`, `vta-service/src/operations/did_templates.rs`.
-- **Docs**: `docs/did-templates.md`.
+- **Docs**: `docs/03-integrating/did-templates.md`.
 
 ## Runtime guards to preserve
 

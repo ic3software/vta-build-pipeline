@@ -199,7 +199,7 @@ $ pnm setup --name "My VTA"
 ```
 
 Feed the `admin_did` into your VTA's `setup.toml` at the `admin_did`
-key (see `docs/non-interactive-setup.md`), or pass it to `vta import-did`
+key (see `non-interactive-setup.md`), or pass it to `vta import-did`
 on an already-running VTA. Once the VTA is up and you know its DID:
 
 ```bash
@@ -343,11 +343,11 @@ Two transports, same operation:
   bridges to the VTA's `POST /bootstrap/provision-integration` endpoint.
   Same shared library function runs on the VTA regardless of transport.
 
-Full design: [`bootstrap-provision-integration.md`].
+Full design: [`../03-integrating/provision-integration.md`].
 
 For the operator-focused end-to-end walkthrough (including the
 WEBVH_PATH/WEBVH_SERVER knobs and SDK-level integration), see
-[`offline-integration-bootstrap.md`].
+[`../03-integrating/provision-integration.md`].
 
 ### Example: provision a DIDComm mediator
 
@@ -418,7 +418,7 @@ Snapshot-only — once the integration publishes on its own webvh host,
 that copy is the live source. Use this for audit, republication
 fallback, or debugging resolution issues.
 
-[`bootstrap-provision-integration.md`]: ./bootstrap-provision-integration.md
+[`../03-integrating/provision-integration.md`]: ../03-integrating/provision-integration.md
 
 ---
 
@@ -537,11 +537,11 @@ cargo run --package vta-service \
 - [`phase5-cutover.md`](../phase5-cutover.md) — removal of the
   plaintext base64 `encode/decode` path; the new `needs_rotation` +
   local keygen flow replaces Mode A token bootstrap.
-- [`bip32_paths.md`](bip32_paths.md) — how contexts map to BIP-32
+- [`../04-reference/bip32-paths.md`](../04-reference/bip32-paths.md) — how contexts map to BIP-32
   derivation paths.
 - [`feature-flags.md`](feature-flags.md) — compile-time feature matrix
   (TEE mode, secret backends, REST vs DIDComm, etc.).
-- [`offline-integration-bootstrap.md`](offline-integration-bootstrap.md) —
+- [`../03-integrating/provision-integration.md`](../03-integrating/provision-integration.md) —
   operator walkthrough for the three-phase provision flow
   (generate VP request → provision → open+install), covering mediator
   and webvh-hosting-server greenfield setup.

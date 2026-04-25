@@ -7,7 +7,7 @@
 //!
 //! Follows the workspace CLI style guide: **list operations emit a ratatui
 //! table**, **detail views emit aligned key-value lines**, **actions emit a
-//! short `✓`-prefixed confirmation**. See `docs/cli-style.md`.
+//! short `✓`-prefixed confirmation**. See `docs/04-reference/cli-style.md`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

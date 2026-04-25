@@ -77,7 +77,7 @@ let result = startup(&config, &MyCache).await?;
 // result.client   — Some(VtaClient) when VTA is reachable
 ```
 
-See the [Integration Guide](../docs/integration-guide.md) for the full walkthrough.
+See the [Integration Guide](../docs/03-integrating/integration-guide.md) for the full walkthrough.
 
 ### Quick Start: Direct Client
 
