@@ -62,10 +62,79 @@ pub struct SecretsConfig {
     /// Change this to run multiple VTA instances on the same machine.
     #[serde(default = "default_keyring_service")]
     pub keyring_service: String,
+    /// HashiCorp Vault server URL (vault-secrets feature). Setting this
+    /// activates the Vault backend.
+    pub vault_addr: Option<String>,
+    /// KV v2 mount path (vault-secrets feature). Default `secret`.
+    #[serde(default = "default_vault_kv_mount")]
+    pub vault_kv_mount: String,
+    /// KV v2 secret path under the mount, e.g. `vta/master-seed`
+    /// (vault-secrets feature).
+    pub vault_secret_path: Option<String>,
+    /// Field name within the KV v2 secret that holds the hex-encoded
+    /// seed (vault-secrets feature). Default `seed`.
+    #[serde(default = "default_vault_secret_key")]
+    pub vault_secret_key: String,
+    /// Vault Enterprise namespace, if any (vault-secrets feature).
+    pub vault_namespace: Option<String>,
+    /// Auth method: `kubernetes` (default), `token`, or `approle`
+    /// (vault-secrets feature).
+    #[serde(default = "default_vault_auth_method")]
+    pub vault_auth_method: String,
+    /// Kubernetes auth role name (vault-secrets feature, kubernetes
+    /// auth method).
+    pub vault_k8s_role: Option<String>,
+    /// Kubernetes auth mount path (vault-secrets feature). Default
+    /// `kubernetes`.
+    #[serde(default = "default_vault_k8s_mount")]
+    pub vault_k8s_mount: String,
+    /// File holding the ServiceAccount JWT presented to Vault
+    /// (vault-secrets feature, kubernetes auth method). Default is the
+    /// kubelet-mounted projected volume path.
+    #[serde(default = "default_vault_k8s_jwt_path")]
+    pub vault_k8s_jwt_path: String,
+    /// Static token (vault-secrets feature, token auth method). Prefer
+    /// the `VAULT_TOKEN` env var over hard-coding here.
+    pub vault_token: Option<String>,
+    /// AppRole role_id (vault-secrets feature, approle auth method).
+    pub vault_approle_role_id: Option<String>,
+    /// AppRole secret_id (vault-secrets feature, approle auth method).
+    pub vault_approle_secret_id: Option<String>,
+    /// AppRole mount path (vault-secrets feature). Default `approle`.
+    #[serde(default = "default_vault_approle_mount")]
+    pub vault_approle_mount: String,
+    /// Skip TLS certificate verification — dev/test only
+    /// (vault-secrets feature).
+    #[serde(default)]
+    pub vault_skip_verify: bool,
 }
 
 fn default_keyring_service() -> String {
     "vta".to_string()
+}
+
+fn default_vault_kv_mount() -> String {
+    "secret".to_string()
+}
+
+fn default_vault_secret_key() -> String {
+    "seed".to_string()
+}
+
+fn default_vault_auth_method() -> String {
+    "kubernetes".to_string()
+}
+
+fn default_vault_k8s_mount() -> String {
+    "kubernetes".to_string()
+}
+
+fn default_vault_k8s_jwt_path() -> String {
+    "/var/run/secrets/kubernetes.io/serviceaccount/token".to_string()
+}
+
+fn default_vault_approle_mount() -> String {
+    "approle".to_string()
 }
 
 impl Default for SecretsConfig {
@@ -79,6 +148,20 @@ impl Default for SecretsConfig {
             azure_vault_url: None,
             azure_secret_name: None,
             keyring_service: default_keyring_service(),
+            vault_addr: None,
+            vault_kv_mount: default_vault_kv_mount(),
+            vault_secret_path: None,
+            vault_secret_key: default_vault_secret_key(),
+            vault_namespace: None,
+            vault_auth_method: default_vault_auth_method(),
+            vault_k8s_role: None,
+            vault_k8s_mount: default_vault_k8s_mount(),
+            vault_k8s_jwt_path: default_vault_k8s_jwt_path(),
+            vault_token: None,
+            vault_approle_role_id: None,
+            vault_approle_secret_id: None,
+            vault_approle_mount: default_vault_approle_mount(),
+            vault_skip_verify: false,
         }
     }
 }
@@ -467,6 +550,61 @@ impl AppConfig {
         }
         if let Ok(service) = std::env::var("VTA_SECRETS_KEYRING_SERVICE") {
             config.secrets.keyring_service = service;
+        }
+
+        // Vault. K8s deployments commonly inject these via Secret /
+        // ConfigMap so envs override file-config. `VAULT_ADDR` /
+        // `VAULT_NAMESPACE` / `VAULT_TOKEN` are the canonical names
+        // Vault itself uses; we accept those alongside the
+        // VTA_SECRETS_* prefix for symmetry.
+        if let Ok(addr) =
+            std::env::var("VAULT_ADDR").or_else(|_| std::env::var("VTA_SECRETS_VAULT_ADDR"))
+        {
+            config.secrets.vault_addr = Some(addr);
+        }
+        if let Ok(ns) = std::env::var("VAULT_NAMESPACE")
+            .or_else(|_| std::env::var("VTA_SECRETS_VAULT_NAMESPACE"))
+        {
+            config.secrets.vault_namespace = Some(ns);
+        }
+        if let Ok(path) = std::env::var("VTA_SECRETS_VAULT_SECRET_PATH") {
+            config.secrets.vault_secret_path = Some(path);
+        }
+        if let Ok(key) = std::env::var("VTA_SECRETS_VAULT_SECRET_KEY") {
+            config.secrets.vault_secret_key = key;
+        }
+        if let Ok(mount) = std::env::var("VTA_SECRETS_VAULT_KV_MOUNT") {
+            config.secrets.vault_kv_mount = mount;
+        }
+        if let Ok(method) = std::env::var("VTA_SECRETS_VAULT_AUTH_METHOD") {
+            config.secrets.vault_auth_method = method;
+        }
+        if let Ok(role) = std::env::var("VTA_SECRETS_VAULT_K8S_ROLE") {
+            config.secrets.vault_k8s_role = Some(role);
+        }
+        if let Ok(mount) = std::env::var("VTA_SECRETS_VAULT_K8S_MOUNT") {
+            config.secrets.vault_k8s_mount = mount;
+        }
+        if let Ok(jwt) = std::env::var("VTA_SECRETS_VAULT_K8S_JWT_PATH") {
+            config.secrets.vault_k8s_jwt_path = jwt;
+        }
+        if let Ok(token) = std::env::var("VAULT_TOKEN") {
+            config.secrets.vault_token = Some(token);
+        }
+        if let Ok(rid) = std::env::var("VTA_SECRETS_VAULT_APPROLE_ROLE_ID") {
+            config.secrets.vault_approle_role_id = Some(rid);
+        }
+        if let Ok(sid) = std::env::var("VTA_SECRETS_VAULT_APPROLE_SECRET_ID") {
+            config.secrets.vault_approle_secret_id = Some(sid);
+        }
+        if let Ok(mount) = std::env::var("VTA_SECRETS_VAULT_APPROLE_MOUNT") {
+            config.secrets.vault_approle_mount = mount;
+        }
+        if let Ok(skip) = std::env::var("VAULT_SKIP_VERIFY")
+            .or_else(|_| std::env::var("VTA_SECRETS_VAULT_SKIP_VERIFY"))
+        {
+            config.secrets.vault_skip_verify =
+                matches!(skip.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
         }
 
         // Auth

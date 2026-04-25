@@ -11,6 +11,8 @@ mod keyring;
 #[cfg(feature = "tee")]
 pub mod kms_tee;
 mod plaintext;
+#[cfg(feature = "vault-secrets")]
+mod vault;
 
 #[cfg(feature = "aws-secrets")]
 pub use aws::AwsSeedStore;
@@ -25,6 +27,8 @@ pub use keyring::KeyringSeedStore;
 #[cfg(feature = "tee")]
 pub use kms_tee::KmsTeeSeedStore;
 pub use plaintext::PlaintextSeedStore;
+#[cfg(feature = "vault-secrets")]
+pub use vault::{VaultSeedStore, from_config as vault_from_config};
 
 #[cfg(feature = "tee")]
 use std::future::Future;
@@ -48,9 +52,10 @@ pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// 1. AWS Secrets Manager (if `aws-secrets` compiled + `secrets.aws_secret_name` set)
 /// 2. GCP Secret Manager (if `gcp-secrets` compiled + `secrets.gcp_secret_name` set)
 /// 3. Azure Key Vault (if `azure-secrets` compiled + `secrets.azure_vault_url` set)
-/// 4. Config file seed (if `config-seed` compiled + `secrets.seed` set)
-/// 5. OS keyring (if `keyring` compiled — the default)
-/// 6. Plaintext file (always available — NOT secure)
+/// 4. HashiCorp Vault (if `vault-secrets` compiled + `secrets.vault_addr` set)
+/// 5. Config file seed (if `config-seed` compiled + `secrets.seed` set)
+/// 6. OS keyring (if `keyring` compiled — the default)
+/// 7. Plaintext file (always available — NOT secure)
 ///
 /// `unused_variables` allowed: `config` is only read under specific
 /// feature flags; a build with none of the cloud/keyring/config-seed
@@ -88,6 +93,12 @@ pub fn create_seed_store(config: &AppConfig) -> Result<Box<dyn SeedStore>, AppEr
             .clone()
             .unwrap_or_else(|| "vta-master-seed".to_string());
         let store = AzureSeedStore::new(vault_url, secret_name);
+        return Ok(Box::new(store));
+    }
+
+    #[cfg(feature = "vault-secrets")]
+    if config.secrets.vault_addr.is_some() {
+        let store = vault::from_config(&config.secrets)?;
         return Ok(Box::new(store));
     }
 

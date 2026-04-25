@@ -21,6 +21,7 @@ These are the flags on the `vta-service` library crate. Front-end binaries
 | `aws-secrets` | AWS Secrets Manager seed storage | `aws-sdk-secretsmanager`, `aws-config` |
 | `gcp-secrets` | GCP Secret Manager seed storage | `google-cloud-secretmanager`, `google-cloud-auth`, `bytes` |
 | `azure-secrets` | Azure Key Vault seed storage | `azure_security_keyvault_secrets`, `azure_identity` |
+| `vault-secrets` | HashiCorp Vault seed storage (KV v2; Kubernetes / token / AppRole auth) | `vaultrs` |
 | `vsock-store` | Vsock-proxied persistent storage (for enclaves) | `vti-common/vsock-store` |
 | `vsock-log` | Vsock-proxied log forwarding (for enclaves) | `vti-common/vsock-log` |
 
@@ -83,9 +84,10 @@ function checks backends in this order:
 1. AWS Secrets Manager (`aws-secrets` + config set)
 2. GCP Secret Manager (`gcp-secrets` + config set)
 3. Azure Key Vault (`azure-secrets` + config set)
-4. Config file (`config-seed` + config set)
-5. OS keyring (`keyring` — default)
-6. Plaintext file (always available fallback)
+4. HashiCorp Vault (`vault-secrets` + `secrets.vault_addr` set)
+5. Config file (`config-seed` + config set)
+6. OS keyring (`keyring` — default)
+7. Plaintext file (always available fallback)
 
 In TEE mode (vta-enclave), KMS bootstrap provides the seed directly —
 none of the above backends are used.
