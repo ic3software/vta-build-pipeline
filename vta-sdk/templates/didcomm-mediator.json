@@ -48,6 +48,11 @@
           "accept": "{ACCEPT}",
           "routingKeys": "{ROUTING_KEYS}"
         }
+      },
+      {
+        "id": "{DID}#auth",
+        "type": "Authentication",
+        "serviceEndpoint": "{URL}/authenticate"
       }
     ]
   }

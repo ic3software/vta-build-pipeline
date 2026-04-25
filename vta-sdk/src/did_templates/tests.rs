@@ -326,19 +326,24 @@ fn didcomm_mediator_builtin_renders_end_to_end() {
 
     let doc = tpl.render(&vars).unwrap();
     assert_eq!(doc["id"], "did:webvh:example.com:mediator");
-    assert_eq!(doc["service"][0]["type"], "DIDCommMessaging");
+    let services = doc["service"].as_array().unwrap();
+    assert_eq!(services.len(), 2);
+    assert_eq!(services[0]["type"], "DIDCommMessaging");
     assert_eq!(
-        doc["service"][0]["serviceEndpoint"]["uri"],
+        services[0]["serviceEndpoint"]["uri"],
         "https://mediator.example.com"
     );
     // Optional default flowed through as a native array, not a string.
     assert_eq!(
-        doc["service"][0]["serviceEndpoint"]["accept"],
+        services[0]["serviceEndpoint"]["accept"],
         json!(["didcomm/v2"])
     );
+    assert_eq!(services[0]["serviceEndpoint"]["routingKeys"], json!([]));
+    assert_eq!(services[1]["id"], "did:webvh:example.com:mediator#auth");
+    assert_eq!(services[1]["type"], "Authentication");
     assert_eq!(
-        doc["service"][0]["serviceEndpoint"]["routingKeys"],
-        json!([])
+        services[1]["serviceEndpoint"],
+        "https://mediator.example.com/authenticate"
     );
 }
 
