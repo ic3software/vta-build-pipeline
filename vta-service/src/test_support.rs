@@ -183,7 +183,7 @@ pub async fn signed_request_with_vars(
 
 /// Provision the minimum VTA state a full `provision_integration()`
 /// call needs: an active seed, the VTA's `{vta_did}#key-0` signing key
-/// + `#sealed-transfer-0` producer-assertion key saved in the keystore,
+/// and `#sealed-transfer-0` producer-assertion key saved in the keystore,
 /// a DID resolver that can resolve the VTA's own `did:key`, and an
 /// `AppConfig` with `vta_did` populated.
 ///

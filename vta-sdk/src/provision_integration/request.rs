@@ -104,7 +104,7 @@ pub struct TemplateBootstrapAsk {
 
     /// Optional admin-DID template. When present, the VTA renders it,
     /// mints a fresh admin DID + keys, and binds the authorization VC
-    /// + ACL row to that DID — rolling the holder over from the
+    /// and ACL row to that DID — rolling the holder over from the
     /// ephemeral `client_did` to a long-term VTA-minted admin identity
     /// in a single bootstrap round-trip.
     ///

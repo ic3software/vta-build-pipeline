@@ -178,6 +178,7 @@ pub async fn update_context_did(
 }
 
 /// Collect a preview of all resources associated with a context.
+#[allow(clippy::too_many_arguments)]
 pub async fn preview_delete_context(
     contexts_ks: &KeyspaceHandle,
     keys_ks: &KeyspaceHandle,

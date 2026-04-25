@@ -280,7 +280,6 @@ fn document_has_didcomm_service(doc: &serde_json::Value) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub async fn create_did_webvh(
     keys_ks: &KeyspaceHandle,
     imported_ks: &KeyspaceHandle,

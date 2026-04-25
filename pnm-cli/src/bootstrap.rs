@@ -369,14 +369,14 @@ pub async fn run_connect(
     // Optional client-side digest verification. Attestation + TLS give the
     // primary integrity anchor; this is a belt-and-suspenders check the
     // operator can opt into by communicating the digest out-of-band.
-    if let Some(expected) = &expect_digest {
-        if expected.to_ascii_lowercase() != wire.digest.to_ascii_lowercase() {
-            return Err(format!(
-                "server-reported digest {} does not match expected {}",
-                wire.digest, expected
-            )
-            .into());
-        }
+    if let Some(expected) = &expect_digest
+        && !expected.eq_ignore_ascii_case(&wire.digest)
+    {
+        return Err(format!(
+            "server-reported digest {} does not match expected {}",
+            wire.digest, expected
+        )
+        .into());
     }
 
     let bundles = armor::decode(&wire.bundle)?;
