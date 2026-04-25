@@ -56,6 +56,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "vta"
 path = "src/main.rs"
+# `bootstrap_cli` and `webvh_cli` call
+# `AuthClaims::unsafe_local_cli_super_admin`, which is gated on
+# `vti-common/cli-synthesis`. Without this feature the binary cannot
+# link, so let cargo skip it cleanly instead of failing with a
+# "method not found" deep in the build.
+required-features = ["cli-synthesis"]
 
 [dependencies]
 vti-common = { path = "../vti-common", version = "0.3", features = ["encryption"] }
