@@ -84,53 +84,33 @@ fn slugify(name: &str) -> String {
         .join("-")
 }
 
-/// Try to resolve a VTA URL from a DID's `#vta-rest` service endpoint.
-async fn resolve_vta_url(did: &str) -> Option<String> {
-    vta_sdk::session::resolve_vta_url(did).await.ok()
+/// Resolve a VTA DID's `#vta-rest` service endpoint to a URL. The DID is
+/// the source of truth; CNM does not persist URLs locally, it derives
+/// them at point-of-use.
+async fn resolve_vta_url(did: &str) -> Result<String, Box<dyn std::error::Error>> {
+    vta_sdk::session::resolve_vta_url(did)
+        .await
+        .map_err(|e| format!("could not resolve REST endpoint from {did}: {e}").into())
 }
 
-/// Prompt for a VTA DID, resolve the `#vta-rest` service URL if possible,
-/// then ask for the URL (pre-filled with the discovered value or manual entry).
+/// Prompt for a VTA DID and resolve its REST endpoint via the DID
+/// document's `#vta-rest` service. The URL is **not** persisted — it is
+/// re-resolved on each call. Returns `(did, url)`.
 ///
 /// `label` is a human-readable prefix like "Personal" or "Community".
-/// Returns `(Option<did>, url)`.
-async fn prompt_vta_url(
-    label: &str,
-) -> Result<(Option<String>, String), Box<dyn std::error::Error>> {
+async fn prompt_vta_did(label: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
     let did: String = Input::new()
-        .with_prompt(format!("{label} VTA DID (press Enter to skip)"))
-        .allow_empty(true)
+        .with_prompt(format!("{label} VTA DID"))
         .interact_text()?;
+    let did = did.trim().to_string();
+    if did.is_empty() {
+        return Err(format!("{label} VTA DID is required").into());
+    }
 
-    let (did, discovered_url) = if did.is_empty() {
-        (None, None)
-    } else {
-        eprintln!("Resolving DID...");
-        let url = match resolve_vta_url(&did).await {
-            Some(url) => {
-                eprintln!("  Discovered VTA URL: {url}");
-                Some(url)
-            }
-            None => {
-                eprintln!("  No #vta-rest service endpoint found in DID document.");
-                None
-            }
-        };
-        (Some(did), url)
-    };
-
-    let vta_url: String = if let Some(url) = discovered_url {
-        Input::new()
-            .with_prompt(format!("{label} VTA URL"))
-            .default(url)
-            .interact_text()?
-    } else {
-        Input::new()
-            .with_prompt(format!("{label} VTA URL"))
-            .interact_text()?
-    };
-
-    Ok((did, vta_url))
+    eprintln!("Resolving DID...");
+    let url = resolve_vta_url(&did).await?;
+    eprintln!("  REST endpoint: {url}");
+    Ok((did, url))
 }
 
 /// Run the interactive setup wizard.
@@ -140,7 +120,7 @@ pub async fn run_setup_wizard() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = load_config()?;
 
     // ── Personal VTA ────────────────────────────────────────────────
-    let (_personal_did, personal_url) = prompt_vta_url("Personal").await?;
+    let (personal_did, personal_url) = prompt_vta_did("Personal").await?;
 
     let personal_bundle = prompt_for_sealed_credential("personal VTA").await?;
 
@@ -149,7 +129,7 @@ pub async fn run_setup_wizard() -> Result<(), Box<dyn std::error::Error>> {
     auth::login(&personal_bundle, &personal_url, PERSONAL_KEYRING_KEY).await?;
 
     config.personal_vta = Some(PersonalVtaConfig {
-        url: personal_url.clone(),
+        vta_did: Some(personal_did.clone()),
     });
 
     // ── Community ───────────────────────────────────────────────────
@@ -161,7 +141,7 @@ pub async fn run_setup_wizard() -> Result<(), Box<dyn std::error::Error>> {
         .default(default_slug)
         .interact_text()?;
 
-    let (community_did, community_url) = prompt_vta_url("Community").await?;
+    let (community_did, community_url) = prompt_vta_did("Community").await?;
 
     let join_options = &["Import existing credential", "Generate from personal VTA"];
     let join_choice = Select::new()
@@ -170,7 +150,7 @@ pub async fn run_setup_wizard() -> Result<(), Box<dyn std::error::Error>> {
         .default(0)
         .interact()?;
 
-    let mut community_vta_did_for_config: Option<String> = community_did.clone();
+    let community_vta_did_for_config: Option<String> = Some(community_did.clone());
 
     let context_id = match join_choice {
         // Import existing credential
@@ -215,20 +195,8 @@ pub async fn run_setup_wizard() -> Result<(), Box<dyn std::error::Error>> {
             // through `/auth/credentials` (removed in 5c6).
             eprintln!("Minting community admin credential locally...");
 
-            // Ensure we have the community VTA DID (prompt if not provided earlier)
-            let community_vta_did = match &community_did {
-                Some(did) => did.clone(),
-                None => {
-                    let did: String = Input::new()
-                        .with_prompt("Community VTA DID (required for authentication)")
-                        .interact_text()?;
-                    community_vta_did_for_config = Some(did.clone());
-                    did
-                }
-            };
-
             let (bundle, admin_did) = vta_cli_common::local_keygen::generate_admin_did_key(
-                community_vta_did.clone(),
+                community_did.clone(),
                 Some(community_url.clone()),
             );
             let acl_req = vta_sdk::client::CreateAclRequest::new(&admin_did, "admin")
@@ -236,14 +204,15 @@ pub async fn run_setup_wizard() -> Result<(), Box<dyn std::error::Error>> {
                 .contexts(vec![context_slug.clone()]);
             personal_client.create_acl(acl_req).await?;
 
-            // Store community session so cnm can authenticate automatically
+            // Store community session so cnm can authenticate automatically.
+            // No URL persisted — derived from `community_did` at runtime
+            // on every subsequent command.
             let keyring_key = community_keyring_key(&community_slug);
             auth::store_session_direct(
                 &keyring_key,
                 &admin_did,
                 &bundle.private_key_multibase,
-                &community_vta_did,
-                &community_url,
+                &community_did,
             )?;
 
             eprintln!();
@@ -261,11 +230,13 @@ pub async fn run_setup_wizard() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ── Save config ─────────────────────────────────────────────────
+    // The REST URL isn't persisted — `community_url` is derived from
+    // `community_did` at runtime on every call.
+    let _ = community_url;
     config.communities.insert(
         community_slug.clone(),
         CommunityConfig {
             name: community_name,
-            url: community_url,
             context_id,
             vta_did: community_vta_did_for_config,
         },
@@ -306,7 +277,7 @@ pub async fn add_community() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let (_community_did, community_url) = prompt_vta_url("Community").await?;
+    let (community_did, community_url) = prompt_vta_did("Community").await?;
 
     let bundle = prompt_for_sealed_credential("community VTA").await?;
 
@@ -318,9 +289,8 @@ pub async fn add_community() -> Result<(), Box<dyn std::error::Error>> {
         community_slug.clone(),
         CommunityConfig {
             name: community_name,
-            url: community_url,
             context_id: None,
-            vta_did: None,
+            vta_did: Some(community_did),
         },
     );
 
@@ -357,6 +327,10 @@ pub async fn bootstrap_community_session(
         .as_deref()
         .ok_or("community has no vta_did in config (setup ran before this feature was added)")?;
 
+    // Resolve the community VTA's REST endpoint from its DID document
+    // for the credential bundle hint (no longer persisted in CNM config).
+    let community_url = resolve_vta_url(community_vta_did).await?;
+
     // Authenticate to personal VTA
     let token = auth::ensure_authenticated(personal_url, PERSONAL_KEYRING_KEY).await?;
     let personal_client = VtaClient::new(personal_url);
@@ -367,21 +341,20 @@ pub async fn bootstrap_community_session(
     eprintln!("Bootstrapping community session from personal VTA...");
     let (bundle, admin_did) = vta_cli_common::local_keygen::generate_admin_did_key(
         community_vta_did.to_string(),
-        Some(community.url.clone()),
+        Some(community_url),
     );
     let acl_req = vta_sdk::client::CreateAclRequest::new(&admin_did, "admin")
         .label(format!("CNM community admin — {slug} (bootstrapped)"))
         .contexts(vec![context_id.to_string()]);
     personal_client.create_acl(acl_req).await?;
 
-    // Store community session
+    // Store community session — URL not persisted, derived at runtime.
     let keyring_key = community_keyring_key(slug);
     auth::store_session_direct(
         &keyring_key,
         &admin_did,
         &bundle.private_key_multibase,
         community_vta_did,
-        &community.url,
     )?;
 
     eprintln!();

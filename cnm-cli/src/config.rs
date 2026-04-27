@@ -11,16 +11,20 @@ pub struct CnmConfig {
     pub communities: BTreeMap<String, CommunityConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PersonalVtaConfig {
-    pub url: String,
+    /// VTA DID is the source of truth — the REST endpoint and the
+    /// DIDComm mediator are both resolved from the DID document at
+    /// runtime.
+    #[serde(default)]
+    pub vta_did: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommunityConfig {
     pub name: String,
-    pub url: String,
     pub context_id: Option<String>,
+    /// VTA DID is the source of truth — see [`PersonalVtaConfig::vta_did`].
     #[serde(default)]
     pub vta_did: Option<String>,
 }
@@ -105,7 +109,7 @@ mod tests {
         let mut config = CnmConfig {
             default_community: Some("storm".into()),
             personal_vta: Some(PersonalVtaConfig {
-                url: "https://personal.vta.example.com".into(),
+                vta_did: Some("did:webvh:personal.example.com".into()),
             }),
             communities: BTreeMap::new(),
         };
@@ -113,7 +117,6 @@ mod tests {
             "storm".into(),
             CommunityConfig {
                 name: "Storm Network".into(),
-                url: "https://vta.storm.ws".into(),
                 context_id: Some("cnm-storm-network".into()),
                 vta_did: Some("did:key:z6MkStorm".into()),
             },
@@ -122,7 +125,6 @@ mod tests {
             "acme".into(),
             CommunityConfig {
                 name: "Acme Corp".into(),
-                url: "https://vta.acme.example.com".into(),
                 context_id: None,
                 vta_did: None,
             },
@@ -132,13 +134,40 @@ mod tests {
         let restored: CnmConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(restored.default_community.as_deref(), Some("storm"));
         assert_eq!(
-            restored.personal_vta.as_ref().unwrap().url,
-            "https://personal.vta.example.com"
+            restored.personal_vta.as_ref().unwrap().vta_did.as_deref(),
+            Some("did:webvh:personal.example.com")
         );
         assert_eq!(restored.communities.len(), 2);
         assert_eq!(restored.communities["storm"].name, "Storm Network");
         assert_eq!(restored.communities["acme"].name, "Acme Corp");
         assert!(restored.communities["acme"].context_id.is_none());
+    }
+
+    /// Older CNM configs persisted `url = "..."` on PersonalVtaConfig and
+    /// CommunityConfig. After this change the field is no longer in the
+    /// struct; serde silently drops it on deserialize so legacy configs
+    /// keep loading. The URL is now derived from the VTA DID at runtime.
+    #[test]
+    fn test_legacy_url_is_silently_dropped() {
+        let toml_str = r#"
+default_community = "storm"
+
+[personal_vta]
+url = "https://personal.example.com"
+
+[communities.storm]
+name = "Storm"
+url = "https://vta.storm.ws"
+vta_did = "did:key:z6MkStorm"
+"#;
+        let restored: CnmConfig = toml::from_str(toml_str).unwrap();
+        assert!(restored.personal_vta.is_some());
+        assert!(restored.personal_vta.unwrap().vta_did.is_none());
+        assert_eq!(restored.communities["storm"].name, "Storm");
+        assert_eq!(
+            restored.communities["storm"].vta_did.as_deref(),
+            Some("did:key:z6MkStorm")
+        );
     }
 
     #[test]
@@ -163,7 +192,6 @@ mod tests {
             "storm".into(),
             CommunityConfig {
                 name: "Storm".into(),
-                url: "https://vta.storm.ws".into(),
                 context_id: None,
                 vta_did: None,
             },
@@ -183,7 +211,6 @@ mod tests {
             "acme".into(),
             CommunityConfig {
                 name: "Acme".into(),
-                url: "https://vta.acme.example.com".into(),
                 context_id: None,
                 vta_did: None,
             },

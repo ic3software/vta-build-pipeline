@@ -39,31 +39,22 @@ pub async fn login(
         "  VTA DID:    {}",
         result.vta_did.as_deref().unwrap_or("(unset)")
     );
-    if let Some(ref url) = result.vta_url {
-        println!("  VTA URL:    {url}");
-    }
     println!("\nAuthentication successful.");
     Ok(())
 }
 
 /// Store a session directly (without performing authentication).
+///
+/// The VTA's REST URL is not persisted — the SDK resolves it from the
+/// VTA DID document at runtime on every command. `--url` overrides at
+/// the CLI layer remain ephemeral.
 pub fn store_session_direct(
     keyring_key: &str,
     did: &str,
     private_key: &str,
     vta_did: &str,
-    vta_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // cnm-cli keeps its wrapper API taking `&str` for vta_url — all the
-    // cnm-cli call sites have a concrete URL in hand from `prompt_vta_url`.
-    // vta-sdk's SessionStore now takes Option<&str>; empty strings map to
-    // None so the runtime resolver kicks in if a caller passes "".
-    let url_opt = if vta_url.is_empty() {
-        None
-    } else {
-        Some(vta_url)
-    };
-    store().store_direct(keyring_key, did, private_key, vta_did, url_opt)
+    store().store_direct(keyring_key, did, private_key, vta_did, None)
 }
 
 /// Clear stored credentials and cached tokens.
@@ -78,6 +69,10 @@ pub fn loaded_session(keyring_key: &str) -> Option<SessionInfo> {
 }
 
 /// Show current authentication status.
+///
+/// The VTA's REST URL isn't shown here — it's derived from the VTA DID
+/// at runtime, not stored. Use `cnm health` or `cnm community info` to
+/// see the resolved URL.
 pub fn status(keyring_key: &str) {
     match store().session_status(keyring_key) {
         Some(status) => {
@@ -85,10 +80,6 @@ pub fn status(keyring_key: &str) {
             println!(
                 "VTA DID:    {}",
                 status.vta_did.as_deref().unwrap_or("(pending setup)")
-            );
-            println!(
-                "VTA URL:    {}",
-                status.vta_url.as_deref().unwrap_or("(not set)")
             );
             match status.token_status {
                 TokenStatus::Valid { expires_in_secs } => {

@@ -818,12 +818,22 @@ async fn main() {
 
     // Resolve community URL and keyring key for commands that need a VTA connection.
     // Setup and Community commands handle their own URL resolution.
+    // For everything else, the URL is derived from the community VTA
+    // DID at runtime — `--url` stays as an ephemeral per-command override.
     let (url, keyring_key): (String, String) =
         if requires_auth(&cli.command) || matches!(cli.command, Commands::Auth { .. }) {
             // Auth-required and Auth commands always need a community
             match resolve_community(cli.community.as_deref(), &cnm_config) {
                 Ok((slug, community)) => {
-                    let url = cli.url.unwrap_or_else(|| community.url.clone());
+                    let url = match cli.url.clone() {
+                        Some(u) => u,
+                        None => match community.vta_did.as_deref() {
+                            Some(did) => vta_sdk::session::resolve_vta_url(did)
+                                .await
+                                .unwrap_or_default(),
+                            None => String::new(),
+                        },
+                    };
                     let key = community_keyring_key(&slug);
                     (url, key)
                 }
@@ -836,7 +846,15 @@ async fn main() {
             // Health: use community if available, otherwise require --url
             match resolve_community(cli.community.as_deref(), &cnm_config) {
                 Ok((slug, community)) => {
-                    let url = cli.url.unwrap_or_else(|| community.url.clone());
+                    let url = match cli.url.clone() {
+                        Some(u) => u,
+                        None => match community.vta_did.as_deref() {
+                            Some(did) => vta_sdk::session::resolve_vta_url(did)
+                                .await
+                                .unwrap_or_default(),
+                            None => String::new(),
+                        },
+                    };
                     let key = community_keyring_key(&slug);
                     (url, key)
                 }
@@ -869,9 +887,13 @@ async fn main() {
         if auth::loaded_session(&keyring_key).is_none()
             && let Ok((slug, community)) = resolve_community(cli.community.as_deref(), &cnm_config)
             && community.context_id.is_some()
-            && let Some(ref personal) = cnm_config.personal_vta
+            && let Some(personal_did) = cnm_config
+                .personal_vta
+                .as_ref()
+                .and_then(|p| p.vta_did.as_deref())
+            && let Ok(personal_url) = vta_sdk::session::resolve_vta_url(personal_did).await
             && let Err(e) =
-                setup::bootstrap_community_session(&slug, community, &personal.url).await
+                setup::bootstrap_community_session(&slug, community, &personal_url).await
         {
             eprintln!(
                 "Error: could not bootstrap session from personal VTA: {e}\n\n\
@@ -1159,7 +1181,9 @@ async fn cmd_community(
                 let marker = if slug == default { " (default)" } else { "" };
                 println!("  {slug}{marker}");
                 println!("    Name: {}", community.name);
-                println!("    URL:  {}", community.url);
+                if let Some(ref did) = community.vta_did {
+                    println!("    DID:  {did}");
+                }
                 if let Some(ref ctx) = community.context_id {
                     println!("    Context: {ctx}");
                 }
@@ -1222,7 +1246,15 @@ async fn cmd_community(
                 Ok((slug, community)) => {
                     println!("Active community: {slug}");
                     println!("  Name: {}", community.name);
-                    println!("  URL:  {}", community.url);
+                    if let Some(ref did) = community.vta_did {
+                        println!("  DID:  {did}");
+                        // REST endpoint is derived from the DID document at
+                        // runtime — show what was resolved so the operator
+                        // can see the live URL.
+                        if let Ok(url) = vta_sdk::session::resolve_vta_url(did).await {
+                            println!("  URL:  {url} (from DID)");
+                        }
+                    }
                     if let Some(ref ctx) = community.context_id {
                         println!("  Context: {ctx}");
                     }
@@ -1408,8 +1440,27 @@ async fn print_personal_vta_section(
         println!("  {DIM}Not configured.{RESET}");
         return;
     };
+    let Some(personal_did) = personal.vta_did.as_deref() else {
+        println!(
+            "  {DIM}(personal VTA configured without a DID — finish `cnm setup` to enable health checks){RESET}"
+        );
+        return;
+    };
 
-    let personal_client = VtaClient::new(&personal.url);
+    // REST endpoint is derived from the personal VTA's DID document on
+    // every call. Surface what was resolved so the operator can see the
+    // live URL.
+    let personal_url = match vta_sdk::session::resolve_vta_url(personal_did).await {
+        Ok(url) => url,
+        Err(e) => {
+            println!(
+                "  {CYAN}{:<13}{RESET} {RED}✗{RESET} could not resolve REST endpoint from {personal_did}: {e}",
+                "URL"
+            );
+            return;
+        }
+    };
+    let personal_client = VtaClient::new(&personal_url);
     match personal_client.health().await {
         Ok(resp) => {
             let ver = resp
@@ -1427,7 +1478,10 @@ async fn print_personal_vta_section(
             return;
         }
     };
-    println!("  {CYAN}{:<13}{RESET} {}", "URL", personal.url);
+    println!(
+        "  {CYAN}{:<13}{RESET} {personal_url} {DIM}(from DID){RESET}",
+        "URL"
+    );
 
     // Personal DID resolution + trust-ping
     let personal_session = auth::loaded_session(config::PERSONAL_KEYRING_KEY);
