@@ -72,6 +72,10 @@ pub fn session_status(keyring_key: &str) -> Option<vta_sdk::session::SessionStat
 }
 
 /// Show current authentication status.
+///
+/// The VTA's REST URL isn't shown here — it's derived from the VTA DID
+/// at runtime, not stored by PNM. Use `pnm health` or `pnm vta info` to
+/// see the resolved URL.
 pub fn status(keyring_key: &str) {
     match store().session_status(keyring_key) {
         Some(status) => {
@@ -79,10 +83,6 @@ pub fn status(keyring_key: &str) {
             println!(
                 "VTA DID:    {}",
                 status.vta_did.as_deref().unwrap_or("(pending setup)")
-            );
-            println!(
-                "VTA URL:    {}",
-                status.vta_url.as_deref().unwrap_or("(not set)")
             );
             match status.token_status {
                 TokenStatus::Valid { expires_in_secs } => {

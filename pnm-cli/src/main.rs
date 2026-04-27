@@ -1360,9 +1360,6 @@ async fn main() {
                             let marker = if slug == default { " (default)" } else { "" };
                             println!("  {slug}{marker}");
                             println!("    Name: {}", vta.name);
-                            if let Some(ref url) = vta.url {
-                                println!("    URL:  {url}");
-                            }
                             if let Some(ref did) = vta.vta_did {
                                 println!("    DID:  {did}");
                             }
@@ -1414,11 +1411,14 @@ async fn main() {
                         Ok((slug, vta)) => {
                             println!("Active VTA: {slug}");
                             println!("  Name: {}", vta.name);
-                            if let Some(ref url) = vta.url {
-                                println!("  URL:  {url}");
-                            }
                             if let Some(ref did) = vta.vta_did {
                                 println!("  DID:  {did}");
+                                // REST endpoint isn't stored in PNM config —
+                                // it lives in the VTA's DID document. Try to
+                                // resolve and surface it for the operator.
+                                if let Ok(url) = vta_sdk::session::resolve_vta_url(did).await {
+                                    println!("  URL:  {url} (from DID)");
+                                }
                             }
                             let key = config::vta_keyring_key(&slug);
                             auth::status(&key);
@@ -1473,7 +1473,20 @@ async fn main() {
             }
         }
     } else {
-        let url = url_override.or(vta_config.url.clone()).unwrap_or_default();
+        // Non-auth commands (e.g. `pnm health`) build the client without
+        // running the SessionStore::connect path. Honour an explicit
+        // `--url` override; otherwise resolve the VTA DID's REST endpoint
+        // at runtime. Empty string is fine for commands that don't make
+        // HTTP calls (the client is constructed but unused).
+        let url = match url_override.as_deref() {
+            Some(u) => u.to_string(),
+            None => match vta_config.vta_did.as_deref() {
+                Some(did) => vta_sdk::session::resolve_vta_url(did)
+                    .await
+                    .unwrap_or_default(),
+                None => String::new(),
+            },
+        };
         VtaClient::new(&url)
     };
 
@@ -2137,12 +2150,35 @@ async fn cmd_health(
     };
     println!("  {CYAN}{:<13}{RESET} {mode_label}", "Mode");
 
-    let has_local_rest = !client.base_url().is_empty();
+    // The REST endpoint is not stored — PNM derives it from the DID
+    // document on every command. Show what was resolved (or the explicit
+    // --url override if one was passed).
+    let url_overridden =
+        !client.base_url().is_empty() && advertised_rest_url.as_deref() != Some(client.base_url());
+    let effective_rest_url = if !client.base_url().is_empty() {
+        Some(client.base_url().to_string())
+    } else {
+        advertised_rest_url.clone()
+    };
 
-    if has_local_rest {
-        println!("  {CYAN}{:<13}{RESET} {}", "URL", client.base_url());
+    if let Some(ref url) = effective_rest_url {
+        let suffix = if url_overridden {
+            format!(" {DIM}(--url override){RESET}")
+        } else {
+            format!(" {DIM}(from DID){RESET}")
+        };
+        println!("  {CYAN}{:<13}{RESET} {url}{suffix}", "URL");
 
-        match client.health().await {
+        // Build a one-shot client at the effective URL for the health
+        // probe, since the outer `client` may have been built with an
+        // empty URL (no override + non-auth command path) before we
+        // resolved the DID.
+        let probe_client = if client.base_url().is_empty() {
+            VtaClient::new(url)
+        } else {
+            VtaClient::new(client.base_url())
+        };
+        match probe_client.health().await {
             Ok(resp) => {
                 let ver = resp
                     .version
@@ -2158,24 +2194,15 @@ async fn cmd_health(
                 );
             }
         }
-    } else if let Some(ref url) = advertised_rest_url {
-        // VTA advertises REST but PNM has no URL configured locally —
-        // surface the mismatch as an actionable hint. Common when
-        // `pnm setup` was run without `--vta-url` against a REST-capable
-        // VTA.
-        println!(
-            "  {CYAN}{:<13}{RESET} {DIM}(VTA advertises {url}; PNM has no URL configured){RESET}",
-            "URL"
-        );
     }
 
     // ── Authentication ─────────────────────────────────────────────
     print_section("Authentication");
 
-    if has_local_rest {
+    if let Some(ref url) = effective_rest_url {
         if let Some(ref info) = session {
             println!("  {CYAN}{:<13}{RESET} {}", "Client DID", info.client_did);
-            match auth::ensure_authenticated(client.base_url(), keyring_key).await {
+            match auth::ensure_authenticated(url, keyring_key).await {
                 Ok(_token) => {
                     if let Some(status) = auth::session_status(keyring_key) {
                         match status.token_status {
@@ -2200,12 +2227,8 @@ async fn cmd_health(
         }
     } else if advertises_didcomm {
         println!("  {DIM}DIDComm-only VTA — no REST auth{RESET}");
-    } else if advertised_rest_url.is_some() {
-        println!(
-            "  {DIM}REST-only VTA but PNM has no URL configured — REST auth unavailable{RESET}"
-        );
     } else {
-        println!("  {DIM}No transport configured{RESET}");
+        println!("  {DIM}No transport advertised{RESET}");
     }
 
     // ── Mediator + DIDComm pings ──────────────────────────────────

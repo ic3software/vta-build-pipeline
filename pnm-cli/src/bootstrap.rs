@@ -426,7 +426,6 @@ pub async fn run_connect(
         slug.clone(),
         crate::config::VtaConfig {
             name: slug.clone(),
-            url: Some(vta_url.clone()),
             vta_did: Some(credential.vta_did.clone()),
         },
     );
@@ -435,13 +434,16 @@ pub async fn run_connect(
     }
     crate::config::save_config(pnm_config)?;
 
+    // The bootstrap URL is only needed for the immediate `auth::ensure_authenticated`
+    // call below — every subsequent command resolves the REST endpoint
+    // from the VTA DID document at runtime.
     let keyring_key = crate::config::vta_keyring_key(&slug);
     auth::store_session(
         &keyring_key,
         &credential.did,
         &credential.private_key_multibase,
         &credential.vta_did,
-        Some(&vta_url),
+        None,
     )?;
     // Verify the credential works end-to-end before declaring success.
     auth::ensure_authenticated(&vta_url, &keyring_key).await?;

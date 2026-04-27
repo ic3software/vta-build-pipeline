@@ -20,8 +20,6 @@ pub struct PnmConfig {
 pub struct VtaConfig {
     pub name: String,
     #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
     pub vta_did: Option<String>,
 }
 
@@ -52,22 +50,23 @@ pub fn load_config() -> Result<PnmConfig, Box<dyn std::error::Error>> {
     let mut config: PnmConfig = toml::from_str(&contents)
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
 
-    // Migrate legacy single-URL config
-    if config.vtas.is_empty()
-        && let Some(url) = config.url.take()
-    {
+    // Migrate legacy single-URL config. The URL itself is no longer
+    // persisted (PNM resolves the REST endpoint at runtime from the VTA's
+    // DID document); we just create the slug placeholder so the operator
+    // can `pnm setup continue` to bind a VTA DID.
+    if config.vtas.is_empty() && config.url.take().is_some() {
         eprintln!("\x1b[33mMigrating legacy config to multi-VTA format...\x1b[0m");
         config.vtas.insert(
             "default".to_string(),
             VtaConfig {
                 name: "Default VTA".to_string(),
-                url: Some(url),
                 vta_did: None,
             },
         );
         config.default_vta = Some("default".to_string());
         save_config(&config)?;
         eprintln!("  Migrated to VTA slug: \x1b[36mdefault\x1b[0m");
+        eprintln!("  Run `pnm setup continue default` to bind a VTA DID.");
     }
 
     Ok(config)
@@ -162,7 +161,6 @@ mod tests {
             "personal".into(),
             VtaConfig {
                 name: "Personal VTA".into(),
-                url: Some("https://vta.example.com".into()),
                 vta_did: Some("did:web:vta.example.com".into()),
             },
         );
@@ -170,7 +168,6 @@ mod tests {
             "work".into(),
             VtaConfig {
                 name: "Work VTA".into(),
-                url: None,
                 vta_did: Some("did:webvh:abc:work.example.com:vta".into()),
             },
         );
@@ -181,10 +178,30 @@ mod tests {
         assert_eq!(restored.vtas.len(), 2);
         assert_eq!(restored.vtas["personal"].name, "Personal VTA");
         assert_eq!(
-            restored.vtas["personal"].url.as_deref(),
-            Some("https://vta.example.com")
+            restored.vtas["personal"].vta_did.as_deref(),
+            Some("did:web:vta.example.com")
         );
-        assert!(restored.vtas["work"].url.is_none());
+    }
+
+    /// Existing config files written by older PNM versions carry a per-VTA
+    /// `url` field. After this change the field is no longer in the
+    /// `VtaConfig` struct; serde silently drops it on deserialize so legacy
+    /// configs keep loading.
+    #[test]
+    fn test_legacy_per_vta_url_is_silently_dropped() {
+        let toml_str = r#"
+default_vta = "personal"
+[vtas.personal]
+name = "Personal"
+url = "https://vta.example.com"
+vta_did = "did:web:vta.example.com"
+"#;
+        let restored: PnmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(restored.vtas["personal"].name, "Personal");
+        assert_eq!(
+            restored.vtas["personal"].vta_did.as_deref(),
+            Some("did:web:vta.example.com")
+        );
     }
 
     #[test]
@@ -215,7 +232,6 @@ mod tests {
             "personal".into(),
             VtaConfig {
                 name: "Personal".into(),
-                url: None,
                 vta_did: None,
             },
         );
@@ -234,7 +250,6 @@ mod tests {
             "work".into(),
             VtaConfig {
                 name: "Work".into(),
-                url: None,
                 vta_did: None,
             },
         );

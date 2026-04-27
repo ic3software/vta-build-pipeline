@@ -301,7 +301,6 @@ fn persist_pending(
         slug.to_string(),
         VtaConfig {
             name: name.to_string(),
-            url: None,
             vta_did: None,
         },
     );
@@ -327,7 +326,6 @@ fn finalize_session(
         slug.to_string(),
         VtaConfig {
             name: name.to_string(),
-            url: None,
             vta_did: Some(vta_did.to_string()),
         },
     );
@@ -509,7 +507,6 @@ async fn setup_tee(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Err
         slug.clone(),
         VtaConfig {
             name: name.clone(),
-            url: None,
             vta_did: Some(vta_did.clone()),
         },
     );
@@ -548,7 +545,6 @@ mod tests {
             slug.to_string(),
             VtaConfig {
                 name: slug.to_string(),
-                url: None,
                 vta_did: vta_did.map(str::to_string),
             },
         );
