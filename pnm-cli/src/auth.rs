@@ -16,16 +16,15 @@ fn store() -> SessionStore {
 /// Used by the TEE setup flow where the admin identity is a stable key baked
 /// into the enclave config and must not be rotated.
 ///
-/// Pass `vta_url: None` to force runtime endpoint resolution from the VTA
-/// DID; pass `Some(url)` only to pin an explicit URL.
+/// The VTA's REST URL is not stored — it's resolved from the VTA DID
+/// document at runtime on every command.
 pub fn store_session(
     keyring_key: &str,
     did: &str,
     private_key: &str,
     vta_did: &str,
-    vta_url: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    store().store_direct(keyring_key, did, private_key, vta_did, vta_url)
+    store().store_direct(keyring_key, did, private_key, vta_did)
 }
 
 /// Park a phase-1 ephemeral identity with no VTA DID bound yet.
@@ -42,12 +41,8 @@ pub fn store_pending_vta_binding(
 }
 
 /// Lift a `PendingVtaBinding` entry into a `PendingRotation` session.
-pub fn bind_vta_did(
-    keyring_key: &str,
-    vta_did: &str,
-    vta_url: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    store().bind_vta_did(keyring_key, vta_did, vta_url)
+pub fn bind_vta_did(keyring_key: &str, vta_did: &str) -> Result<(), Box<dyn std::error::Error>> {
+    store().bind_vta_did(keyring_key, vta_did)
 }
 
 /// Report whether `keyring_key` identifies a `PendingVtaBinding` session.

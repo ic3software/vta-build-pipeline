@@ -54,7 +54,7 @@ pub fn store_session_direct(
     private_key: &str,
     vta_did: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    store().store_direct(keyring_key, did, private_key, vta_did, None)
+    store().store_direct(keyring_key, did, private_key, vta_did)
 }
 
 /// Clear stored credentials and cached tokens.

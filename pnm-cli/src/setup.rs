@@ -320,7 +320,7 @@ fn finalize_session(
     non_interactive: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let keyring_key = vta_keyring_key(slug);
-    auth::bind_vta_did(&keyring_key, vta_did, None)?;
+    auth::bind_vta_did(&keyring_key, vta_did)?;
 
     config.vtas.insert(
         slug.to_string(),
@@ -500,7 +500,7 @@ async fn setup_tee(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Err
     // Store session directly — the TEE admin identity does not rotate.
     // No REST URL in TEE mode; operator reaches the VTA via DIDComm through
     // the mediator, resolved from the VTA DID at connect time.
-    auth::store_session(&keyring_key, &did, &private_key_multibase, &vta_did, None)?;
+    auth::store_session(&keyring_key, &did, &private_key_multibase, &vta_did)?;
 
     // 8. Save to config
     config.vtas.insert(

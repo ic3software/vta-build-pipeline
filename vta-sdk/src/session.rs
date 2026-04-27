@@ -30,8 +30,6 @@ struct Session {
     /// `SessionStore::store_pending_vta_binding` + `bind_vta_did`.
     #[serde(default)]
     vta_did: Option<String>,
-    #[serde(default)]
-    vta_url: Option<String>,
     access_token: Option<String>,
     access_expires_at: Option<u64>,
     /// Marks a session whose `client_did` was minted locally with no live
@@ -74,11 +72,13 @@ pub struct SessionInfo {
 
 /// Status of a stored session.
 ///
-/// See [`SessionInfo`] for the `vta_did` semantics.
+/// See [`SessionInfo`] for the `vta_did` semantics. The VTA's REST URL
+/// is not part of session state — callers resolve it from the VTA DID
+/// document at runtime via [`resolve_vta_url`] or
+/// [`resolve_vta_endpoint`].
 pub struct SessionStatus {
     pub client_did: String,
     pub vta_did: Option<String>,
-    pub vta_url: Option<String>,
     pub token_status: TokenStatus,
 }
 
@@ -98,7 +98,6 @@ pub enum TokenStatus {
 pub struct LoginResult {
     pub client_did: String,
     pub vta_did: Option<String>,
-    pub vta_url: Option<String>,
 }
 
 pub struct TokenResult {
@@ -463,7 +462,6 @@ impl SessionStore {
         debug!(
             client_did = %bundle.did,
             vta_did = %bundle.vta_did,
-            vta_url = ?bundle.vta_url,
             "login with credential bundle"
         );
 
@@ -471,7 +469,6 @@ impl SessionStore {
             client_did: bundle.did.clone(),
             private_key: bundle.private_key_multibase.clone(),
             vta_did: Some(bundle.vta_did.clone()),
-            vta_url: bundle.vta_url.clone(),
             access_token: None,
             access_expires_at: None,
             needs_rotation: false,
@@ -495,29 +492,26 @@ impl SessionStore {
         Ok(LoginResult {
             client_did: bundle.did.clone(),
             vta_did: Some(bundle.vta_did.clone()),
-            vta_url: bundle.vta_url.clone(),
         })
     }
 
     /// Store a session directly (without performing authentication).
     ///
-    /// `vta_url` is optional — omit it to force runtime endpoint resolution
-    /// from the VTA's DID document (`#vta-rest` service or did:web/did:webvh
-    /// parsing). Supply it only when you want to pin a specific URL (e.g.
-    /// staging, local dev, or when the DID document is not yet reachable).
+    /// The VTA's REST endpoint is resolved at runtime from the VTA DID
+    /// document on every command (see [`resolve_vta_url`] /
+    /// [`resolve_vta_endpoint`]); it is no longer persisted in session
+    /// state. Per-command CLI overrides (e.g. `--url`) remain ephemeral.
     pub fn store_direct(
         &self,
         key: &str,
         did: &str,
         private_key: &str,
         vta_did: &str,
-        vta_url: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let session = Session {
             client_did: did.to_string(),
             private_key: private_key.to_string(),
             vta_did: Some(vta_did.to_string()),
-            vta_url: vta_url.map(str::to_string),
             access_token: None,
             access_expires_at: None,
             needs_rotation: false,
@@ -532,21 +526,17 @@ impl SessionStore {
     /// the ACL entry exists, `ensure_authenticated()` will atomically rotate
     /// to a fresh did:key and drop the temp one, so the DID that may have
     /// been copy-pasted through a low-trust channel does not remain live.
-    ///
-    /// `vta_url` is optional — see [`Self::store_direct`].
     pub fn store_pending_rotation(
         &self,
         key: &str,
         did: &str,
         private_key: &str,
         vta_did: &str,
-        vta_url: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let session = Session {
             client_did: did.to_string(),
             private_key: private_key.to_string(),
             vta_did: Some(vta_did.to_string()),
-            vta_url: vta_url.map(str::to_string),
             access_token: None,
             access_expires_at: None,
             needs_rotation: true,
@@ -586,7 +576,6 @@ impl SessionStore {
             client_did: did.to_string(),
             private_key: private_key.to_string(),
             vta_did: None,
-            vta_url: None,
             access_token: None,
             access_expires_at: None,
             needs_rotation: false,
@@ -607,12 +596,7 @@ impl SessionStore {
     /// - the entry already has a VTA DID bound (re-binding is not allowed —
     ///   use `logout` + re-provision instead);
     /// - `vta_did` is empty after trim, or does not start with `did:`.
-    pub fn bind_vta_did(
-        &self,
-        key: &str,
-        vta_did: &str,
-        vta_url: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn bind_vta_did(&self, key: &str, vta_did: &str) -> Result<(), Box<dyn std::error::Error>> {
         let vta_did = vta_did.trim();
         if vta_did.is_empty() {
             return Err("VTA DID must be non-empty".into());
@@ -630,7 +614,6 @@ impl SessionStore {
             return Err("session already has a VTA DID bound".into());
         }
         session.vta_did = Some(vta_did.to_string());
-        session.vta_url = vta_url.map(str::to_string);
         session.needs_rotation = true;
         self.save_session(key, &session)
     }
@@ -677,7 +660,6 @@ impl SessionStore {
         Some(SessionStatus {
             client_did: session.client_did,
             vta_did: session.vta_did,
-            vta_url: session.vta_url,
             token_status,
         })
     }
@@ -990,14 +972,11 @@ async fn rotate_key_didcomm(
     }
     probe.shutdown().await;
 
-    let Session {
-        vta_did, vta_url, ..
-    } = session.clone();
+    let Session { vta_did, .. } = session.clone();
     Ok(Session {
         client_did: new_did,
         private_key: new_private_key,
         vta_did,
-        vta_url,
         access_token: None,
         access_expires_at: None,
         needs_rotation: false,
@@ -1153,14 +1132,11 @@ async fn rotate_key(
         }
     }
 
-    let Session {
-        vta_did, vta_url, ..
-    } = session;
+    let Session { vta_did, .. } = session;
     let rotated = Session {
         client_did: new_did,
         private_key: new_private_key,
         vta_did,
-        vta_url,
         access_token: None,
         access_expires_at: None,
         needs_rotation: false,
@@ -1613,7 +1589,6 @@ mod tests {
             client_did: "did:key:z6Mk1".into(),
             private_key: "z_seed".into(),
             vta_did: Some("did:key:z6MkVTA".into()),
-            vta_url: Some("https://vta.example.com".into()),
             access_token: Some("tok123".into()),
             access_expires_at: Some(1700000000),
             needs_rotation: false,
@@ -1623,22 +1598,28 @@ mod tests {
         assert_eq!(restored.client_did, session.client_did);
         assert_eq!(restored.private_key, session.private_key);
         assert_eq!(restored.vta_did, session.vta_did);
-        assert_eq!(restored.vta_url, session.vta_url);
         assert_eq!(restored.access_token, session.access_token);
         assert_eq!(restored.access_expires_at, session.access_expires_at);
     }
 
+    /// Older session blobs include a `vta_url` field. Serde silently drops
+    /// unknown fields on deserialise so they keep loading; the field
+    /// disappears on next save.
     #[test]
-    fn test_session_vta_url_defaults_to_none() {
+    fn test_session_legacy_vta_url_field_silently_dropped() {
         let json = r#"{
             "client_did": "did:key:z6Mk1",
             "private_key": "z_seed",
             "vta_did": "did:key:z6MkVTA",
+            "vta_url": "https://stale.example.com",
             "access_token": null,
             "access_expires_at": null
         }"#;
         let session: Session = serde_json::from_str(json).unwrap();
-        assert!(session.vta_url.is_none());
+        assert_eq!(session.vta_did.as_deref(), Some("did:key:z6MkVTA"));
+        // Field is gone — re-serializing produces no `vta_url` key.
+        let reserialised = serde_json::to_string(&session).unwrap();
+        assert!(!reserialised.contains("vta_url"));
     }
 
     #[test]
@@ -1660,7 +1641,6 @@ mod tests {
             client_did: "did:key:z6MkPending".into(),
             private_key: "z_seed".into(),
             vta_did: None,
-            vta_url: None,
             access_token: None,
             access_expires_at: None,
             needs_rotation: false,
@@ -1725,13 +1705,7 @@ mod tests {
         assert!(!store.has_session("test"));
 
         store
-            .store_direct(
-                "test",
-                "did:key:z6Mk1",
-                "zSeed",
-                "did:key:zVTA",
-                Some("https://vta.example.com"),
-            )
+            .store_direct("test", "did:key:z6Mk1", "zSeed", "did:key:zVTA")
             .unwrap();
         assert!(store.has_session("test"));
 
@@ -1789,7 +1763,7 @@ mod tests {
             .unwrap();
 
         store
-            .bind_vta_did("slug", "did:webvh:abc:vta.example.com:primary", None)
+            .bind_vta_did("slug", "did:webvh:abc:vta.example.com:primary")
             .unwrap();
 
         assert!(!store.has_pending_vta_binding("slug"));
@@ -1810,23 +1784,17 @@ mod tests {
             .store_pending_vta_binding("slug", "did:key:z6MkPending", "zSeed")
             .unwrap();
 
-        store.bind_vta_did("slug", "did:key:z6MkVTA", None).unwrap();
+        store.bind_vta_did("slug", "did:key:z6MkVTA").unwrap();
     }
 
     #[test]
     fn bind_vta_did_rejects_rebind() {
         let store = test_store();
         store
-            .store_direct(
-                "slug",
-                "did:key:z6Mk",
-                "zSeed",
-                "did:web:vta.example.com",
-                None,
-            )
+            .store_direct("slug", "did:key:z6Mk", "zSeed", "did:web:vta.example.com")
             .unwrap();
         let err = store
-            .bind_vta_did("slug", "did:web:other.example.com", None)
+            .bind_vta_did("slug", "did:web:other.example.com")
             .unwrap_err();
         assert!(err.to_string().contains("already has a VTA DID bound"));
     }
@@ -1835,7 +1803,7 @@ mod tests {
     fn bind_vta_did_rejects_missing_session() {
         let store = test_store();
         let err = store
-            .bind_vta_did("no-such-slug", "did:web:vta.example.com", None)
+            .bind_vta_did("no-such-slug", "did:web:vta.example.com")
             .unwrap_err();
         assert!(err.to_string().contains("no session found"));
     }
@@ -1847,21 +1815,15 @@ mod tests {
             .store_pending_vta_binding("slug", "did:key:z6Mk", "zSeed")
             .unwrap();
 
-        assert!(store.bind_vta_did("slug", "   ", None).is_err());
-        assert!(store.bind_vta_did("slug", "not-a-did", None).is_err());
+        assert!(store.bind_vta_did("slug", "   ").is_err());
+        assert!(store.bind_vta_did("slug", "not-a-did").is_err());
     }
 
     #[test]
     fn has_pending_vta_binding_false_for_direct_session() {
         let store = test_store();
         store
-            .store_direct(
-                "slug",
-                "did:key:z6Mk",
-                "zSeed",
-                "did:web:vta.example.com",
-                None,
-            )
+            .store_direct("slug", "did:key:z6Mk", "zSeed", "did:web:vta.example.com")
             .unwrap();
         assert!(!store.has_pending_vta_binding("slug"));
     }
@@ -1878,7 +1840,6 @@ mod tests {
             client_did: "did:key:z6MkPending".into(),
             private_key: "zSeed".into(),
             vta_did: None,
-            vta_url: None,
             access_token: None,
             access_expires_at: None,
             needs_rotation: false,
