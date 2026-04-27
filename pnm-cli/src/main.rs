@@ -2108,9 +2108,38 @@ async fn cmd_health(
         }
     }
 
-    let has_rest = !client.base_url().is_empty();
+    // What the VTA's DID document actually advertises. Source of truth
+    // for the "Mode" label below. `client.base_url()` reflects what PNM
+    // was told about during `pnm setup` — not what the VTA can do.
+    let advertised = match session.as_ref().and_then(|s| s.vta_did.as_deref()) {
+        Some(vta_did) => vta_sdk::session::resolve_vta_endpoint(vta_did).await.ok(),
+        None => None,
+    };
 
-    if has_rest {
+    let (mode_label, advertised_rest_url, advertises_didcomm) = match &advertised {
+        Some(vta_sdk::session::VtaEndpoint::DIDComm {
+            rest_url: Some(u), ..
+        }) => ("DIDComm + REST", Some(u.clone()), true),
+        Some(vta_sdk::session::VtaEndpoint::DIDComm { rest_url: None, .. }) => {
+            ("DIDComm-only", None, true)
+        }
+        Some(vta_sdk::session::VtaEndpoint::Rest { url }) => {
+            ("REST-only", Some(url.clone()), false)
+        }
+        None if session
+            .as_ref()
+            .and_then(|s| s.vta_did.as_deref())
+            .is_some() =>
+        {
+            ("unknown (could not enumerate services)", None, false)
+        }
+        None => ("(pending DID setup)", None, false),
+    };
+    println!("  {CYAN}{:<13}{RESET} {mode_label}", "Mode");
+
+    let has_local_rest = !client.base_url().is_empty();
+
+    if has_local_rest {
         println!("  {CYAN}{:<13}{RESET} {}", "URL", client.base_url());
 
         match client.health().await {
@@ -2129,14 +2158,21 @@ async fn cmd_health(
                 );
             }
         }
-    } else {
-        println!("  {CYAN}{:<13}{RESET} DIDComm-only", "Mode");
+    } else if let Some(ref url) = advertised_rest_url {
+        // VTA advertises REST but PNM has no URL configured locally —
+        // surface the mismatch as an actionable hint. Common when
+        // `pnm setup` was run without `--vta-url` against a REST-capable
+        // VTA.
+        println!(
+            "  {CYAN}{:<13}{RESET} {DIM}(VTA advertises {url}; PNM has no URL configured){RESET}",
+            "URL"
+        );
     }
 
     // ── Authentication ─────────────────────────────────────────────
     print_section("Authentication");
 
-    if has_rest {
+    if has_local_rest {
         if let Some(ref info) = session {
             println!("  {CYAN}{:<13}{RESET} {}", "Client DID", info.client_did);
             match auth::ensure_authenticated(client.base_url(), keyring_key).await {
@@ -2162,8 +2198,14 @@ async fn cmd_health(
         } else {
             println!("  {DIM}Not authenticated{RESET}");
         }
+    } else if advertises_didcomm {
+        println!("  {DIM}DIDComm-only VTA — no REST auth{RESET}");
+    } else if advertised_rest_url.is_some() {
+        println!(
+            "  {DIM}REST-only VTA but PNM has no URL configured — REST auth unavailable{RESET}"
+        );
     } else {
-        println!("  {DIM}DIDComm — no REST auth{RESET}");
+        println!("  {DIM}No transport configured{RESET}");
     }
 
     // ── Mediator + DIDComm pings ──────────────────────────────────
