@@ -222,7 +222,15 @@ pub fn router() -> Router<AppState> {
             "/webvh/dids/{did}",
             get(did_webvh::get_did_handler).delete(did_webvh::delete_did_handler),
         )
-        .route("/webvh/dids/{did}/log", get(did_webvh::get_did_log_handler));
+        .route("/webvh/dids/{did}/log", get(did_webvh::get_did_log_handler))
+        .route(
+            "/contexts/{ctx_id}/dids/{scid}/update",
+            post(did_webvh::update_did_handler),
+        )
+        .route(
+            "/contexts/{ctx_id}/dids/{scid}/rotate-keys",
+            post(did_webvh::rotate_did_keys_handler),
+        );
 
     // VTA management routes
     let router = router

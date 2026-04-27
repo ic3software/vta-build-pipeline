@@ -313,6 +313,14 @@ pub fn build_handler(
             .route(
                 did_management::REMOVE_WEBVH_SERVER,
                 handler_fn(handlers::handle_remove_webvh_server),
+            )?
+            .route(
+                did_management::UPDATE_DID_WEBVH,
+                handler_fn(handlers::handle_update_did_webvh),
+            )?
+            .route(
+                did_management::ROTATE_DID_WEBVH_KEYS,
+                handler_fn(handlers::handle_rotate_did_webvh_keys),
             )?;
     }
 

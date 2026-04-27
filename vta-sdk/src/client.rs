@@ -1485,6 +1485,69 @@ impl VtaClient {
         .await
     }
 
+    /// Apply a generic update to an existing webvh DID.
+    ///
+    /// `ctx_id` is the context the DID lives in; `scid` is the
+    /// stable component of the DID (e.g. the `Q...` segment of
+    /// `did:webvh:Q...:host:slug`). REST path:
+    /// `POST /contexts/{ctx_id}/dids/{scid}/update`.
+    pub async fn update_did_webvh(
+        &self,
+        ctx_id: &str,
+        scid: &str,
+        body: crate::protocols::did_management::update::UpdateDidWebvhBody,
+    ) -> Result<crate::protocols::did_management::update::UpdateDidWebvhResultBody, VtaError> {
+        self.rpc(
+            did_management::UPDATE_DID_WEBVH,
+            serde_json::json!({
+                "context_id": ctx_id,
+                "scid": scid,
+                "body": &body,
+            }),
+            did_management::UPDATE_DID_WEBVH_RESULT,
+            60,
+            |c, url| {
+                c.post(format!(
+                    "{url}/contexts/{}/dids/{}/update",
+                    encode_path_segment(ctx_id),
+                    encode_path_segment(scid)
+                ))
+                .json(&body)
+            },
+        )
+        .await
+    }
+
+    /// Rotate every verificationMethod's keys on a webvh DID. Auth
+    /// keys + pre-rotation rotate as a consequence of the resulting
+    /// document update.
+    pub async fn rotate_did_webvh_keys(
+        &self,
+        ctx_id: &str,
+        scid: &str,
+        body: crate::protocols::did_management::update::RotateDidWebvhKeysBody,
+    ) -> Result<crate::protocols::did_management::update::UpdateDidWebvhResultBody, VtaError> {
+        self.rpc(
+            did_management::ROTATE_DID_WEBVH_KEYS,
+            serde_json::json!({
+                "context_id": ctx_id,
+                "scid": scid,
+                "body": &body,
+            }),
+            did_management::ROTATE_DID_WEBVH_KEYS_RESULT,
+            60,
+            |c, url| {
+                c.post(format!(
+                    "{url}/contexts/{}/dids/{}/rotate-keys",
+                    encode_path_segment(ctx_id),
+                    encode_path_segment(scid)
+                ))
+                .json(&body)
+            },
+        )
+        .await
+    }
+
     // ── Audit Management ───────────────────────────────────────────
 
     /// List audit logs with optional filtering and pagination.

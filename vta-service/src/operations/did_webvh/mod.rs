@@ -9,11 +9,17 @@
 mod document;
 mod lifecycle;
 mod servers;
+mod update;
+mod webvh_keys;
 
 pub(crate) use document::build_did_document_with_options;
 pub use document::{build_did_document, build_vta_did_document_with_sealed_transfer};
 pub use lifecycle::{GetDidWebvhLogResult, get_did_webvh, get_did_webvh_log, list_dids_webvh};
 pub use servers::{add_webvh_server, list_webvh_servers, remove_webvh_server, update_webvh_server};
+pub use update::{
+    RotateDidWebvhKeysOptions, UpdateDidWebvhError, UpdateDidWebvhOptions, UpdateDidWebvhResult,
+    rotate_did_webvh_keys, update_did_webvh,
+};
 
 use std::sync::Arc;
 
@@ -386,6 +392,10 @@ pub async fn create_did_webvh(
             .as_deref()
             .unwrap_or("serverless")
             .to_string();
+        // Pre-signed-log mode: we don't know the pre-rotation count or
+        // current fragment id without parsing the log. Use defensive
+        // defaults; the next `update_did_webvh` call performs a one-shot
+        // re-scan and persists the corrected values.
         let did_record = WebvhDidRecord {
             did: final_did.clone(),
             server_id: server_id_str.clone(),
@@ -394,6 +404,8 @@ pub async fn create_did_webvh(
             context_id: params.context_id.clone(),
             portable: params.portable,
             log_entry_count: 1,
+            pre_rotation_count: 0,
+            next_fragment_id: 1,
             created_at: now,
             updated_at: now,
         };
@@ -822,6 +834,8 @@ pub async fn create_did_webvh(
 
     if serverless {
         // Serverless: skip publish but DO store the DID record and log locally.
+        // Create mints exactly two verificationMethods (#key-0 = signing,
+        // #key-1 = key-agreement). Next rotation allocates from `#key-2`.
         let did_record = WebvhDidRecord {
             did: final_did.clone(),
             server_id: "serverless".to_string(),
@@ -830,6 +844,8 @@ pub async fn create_did_webvh(
             context_id: params.context_id.clone(),
             portable: params.portable,
             log_entry_count: 1,
+            pre_rotation_count: pre_rotation_keys.len() as u32,
+            next_fragment_id: 2,
             created_at: now,
             updated_at: now,
         };
@@ -878,6 +894,8 @@ pub async fn create_did_webvh(
             context_id: params.context_id.clone(),
             portable: params.portable,
             log_entry_count: 1,
+            pre_rotation_count: pre_rotation_keys.len() as u32,
+            next_fragment_id: 2,
             created_at: now,
             updated_at: now,
         };

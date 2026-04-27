@@ -13,6 +13,9 @@ use vta_sdk::webvh::WebvhDidRecord;
 use crate::auth::{AdminAuth, AuthClaims, SuperAdminAuth};
 use crate::error::AppError;
 use crate::operations;
+use crate::operations::did_webvh::{
+    RotateDidWebvhKeysOptions, UpdateDidWebvhOptions, UpdateDidWebvhResult,
+};
 use crate::server::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -210,4 +213,61 @@ pub async fn delete_did_handler(
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /contexts/{ctx_id}/dids/{scid}/update` — apply a generic
+/// update to an existing webvh DID. The `ctx_id` path component is
+/// validated against the DID's context inside the operation; mismatches
+/// surface as 404 to avoid cross-context existence leaks.
+pub async fn update_did_handler(
+    auth: AdminAuth,
+    State(state): State<AppState>,
+    Path((_ctx_id, scid)): Path<(String, String)>,
+    Json(body): Json<UpdateDidWebvhOptions>,
+) -> Result<Json<UpdateDidWebvhResult>, AppError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let result = operations::did_webvh::update_did_webvh(
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &*state.seed_store,
+        &auth.0,
+        &scid,
+        body,
+        did_resolver,
+        "rest",
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+/// `POST /contexts/{ctx_id}/dids/{scid}/rotate-keys` — rotate every
+/// verificationMethod's keys + drive an update. Mirrors
+/// [`update_did_handler`].
+pub async fn rotate_did_keys_handler(
+    auth: AdminAuth,
+    State(state): State<AppState>,
+    Path((_ctx_id, scid)): Path<(String, String)>,
+    Json(body): Json<RotateDidWebvhKeysOptions>,
+) -> Result<Json<UpdateDidWebvhResult>, AppError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let result = operations::did_webvh::rotate_did_webvh_keys(
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &*state.seed_store,
+        &auth.0,
+        &scid,
+        body,
+        did_resolver,
+        "rest",
+    )
+    .await?;
+    Ok(Json(result))
 }

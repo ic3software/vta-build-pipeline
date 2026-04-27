@@ -1232,6 +1232,127 @@ pub async fn handle_provision_integration(
     )
 }
 
+/// Envelope used by the DIDComm update + rotate-keys messages.
+/// Mirrors the SDK rpc call shape: `{ context_id, scid, body }`.
+#[cfg(feature = "webvh")]
+#[derive(Debug, serde::Deserialize)]
+struct WebvhUpdateEnvelope<B> {
+    #[allow(dead_code)]
+    // ctx_id is enforced inside the operation via the record's context_id; the field exists on the wire for client-side routing.
+    context_id: String,
+    scid: String,
+    body: B,
+}
+
+#[cfg(feature = "webvh")]
+pub async fn handle_update_did_webvh(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
+    let env: WebvhUpdateEnvelope<vta_sdk::protocols::did_management::update::UpdateDidWebvhBody> =
+        serde_json::from_value(message.body).map_err(handler_err)?;
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| handler_err("DID resolver not available"))?;
+
+    // Translate wire body → ops body. `witnesses` flips from opaque
+    // JSON to the typed `Witnesses` enum.
+    let witnesses = env
+        .body
+        .witnesses
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(handler_err)?;
+    let opts = operations::did_webvh::UpdateDidWebvhOptions {
+        document: env.body.document,
+        pre_rotation_count: env.body.pre_rotation_count,
+        witnesses,
+        watchers: env.body.watchers,
+        ttl: env.body.ttl,
+        label: env.body.label,
+    };
+
+    let result = app_try!(
+        operations::did_webvh::update_did_webvh(
+            &state.keys_ks,
+            &state.contexts_ks,
+            &state.webvh_ks,
+            &*state.seed_store,
+            &auth,
+            &env.scid,
+            opts,
+            did_resolver,
+            "didcomm",
+        )
+        .await
+        .map_err(crate::error::AppError::from)
+    );
+    let body = vta_sdk::protocols::did_management::update::UpdateDidWebvhResultBody {
+        did: result.did,
+        new_version_id: result.new_version_id,
+        new_scid: result.new_scid,
+        new_log_entry: result.new_log_entry,
+        update_keys_count: result.update_keys_count,
+        pre_rotation_key_count: result.pre_rotation_key_count,
+    };
+    response(
+        vta_sdk::protocols::did_management::UPDATE_DID_WEBVH_RESULT,
+        &body,
+    )
+}
+
+#[cfg(feature = "webvh")]
+pub async fn handle_rotate_did_webvh_keys(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
+    let env: WebvhUpdateEnvelope<
+        vta_sdk::protocols::did_management::update::RotateDidWebvhKeysBody,
+    > = serde_json::from_value(message.body).map_err(handler_err)?;
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| handler_err("DID resolver not available"))?;
+
+    let opts = operations::did_webvh::RotateDidWebvhKeysOptions {
+        pre_rotation_count: env.body.pre_rotation_count,
+        label: env.body.label,
+    };
+
+    let result = app_try!(
+        operations::did_webvh::rotate_did_webvh_keys(
+            &state.keys_ks,
+            &state.contexts_ks,
+            &state.webvh_ks,
+            &*state.seed_store,
+            &auth,
+            &env.scid,
+            opts,
+            did_resolver,
+            "didcomm",
+        )
+        .await
+        .map_err(crate::error::AppError::from)
+    );
+    let body = vta_sdk::protocols::did_management::update::UpdateDidWebvhResultBody {
+        did: result.did,
+        new_version_id: result.new_version_id,
+        new_scid: result.new_scid,
+        new_log_entry: result.new_log_entry,
+        update_keys_count: result.update_keys_count,
+        pre_rotation_key_count: result.pre_rotation_key_count,
+    };
+    response(
+        vta_sdk::protocols::did_management::ROTATE_DID_WEBVH_KEYS_RESULT,
+        &body,
+    )
+}
+
 pub async fn handle_unknown(_ctx: HandlerContext, message: Message) -> HandlerResult {
     let from = message.from.as_deref().unwrap_or("unknown");
     let thid = message.thid.as_deref().unwrap_or("none");
