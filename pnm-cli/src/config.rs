@@ -21,6 +21,11 @@ pub struct VtaConfig {
     pub name: String,
     #[serde(default)]
     pub vta_did: Option<String>,
+    /// Explicit REST URL for DIDs that cannot advertise a service endpoint
+    /// (e.g. `did:key`). Ignored for `did:webvh` where the URL is derived
+    /// from the DID document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Returns `~/.config/pnm/`, creating it if it doesn't exist.
@@ -61,6 +66,7 @@ pub fn load_config() -> Result<PnmConfig, Box<dyn std::error::Error>> {
             VtaConfig {
                 name: "Default VTA".to_string(),
                 vta_did: None,
+                url: None,
             },
         );
         config.default_vta = Some("default".to_string());
@@ -162,6 +168,7 @@ mod tests {
             VtaConfig {
                 name: "Personal VTA".into(),
                 vta_did: Some("did:web:vta.example.com".into()),
+                url: None,
             },
         );
         config.vtas.insert(
@@ -169,6 +176,7 @@ mod tests {
             VtaConfig {
                 name: "Work VTA".into(),
                 vta_did: Some("did:webvh:abc:work.example.com:vta".into()),
+                url: None,
             },
         );
 
@@ -184,11 +192,11 @@ mod tests {
     }
 
     /// Existing config files written by older PNM versions carry a per-VTA
-    /// `url` field. After this change the field is no longer in the
-    /// `VtaConfig` struct; serde silently drops it on deserialize so legacy
-    /// configs keep loading.
+    /// `url` field. After the `did:key` URL support, the field is restored
+    /// for DIDs that cannot advertise a service endpoint. Legacy configs
+    /// with a URL now round-trip correctly.
     #[test]
-    fn test_legacy_per_vta_url_is_silently_dropped() {
+    fn test_legacy_per_vta_url_is_preserved() {
         let toml_str = r#"
 default_vta = "personal"
 [vtas.personal]
@@ -198,6 +206,10 @@ vta_did = "did:web:vta.example.com"
 "#;
         let restored: PnmConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(restored.vtas["personal"].name, "Personal");
+        assert_eq!(
+            restored.vtas["personal"].url.as_deref(),
+            Some("https://vta.example.com")
+        );
         assert_eq!(
             restored.vtas["personal"].vta_did.as_deref(),
             Some("did:web:vta.example.com")
@@ -233,6 +245,7 @@ vta_did = "did:web:vta.example.com"
             VtaConfig {
                 name: "Personal".into(),
                 vta_did: None,
+                url: None,
             },
         );
         let (slug, vta) = resolve_vta(Some("personal"), &config).unwrap();
@@ -251,6 +264,7 @@ vta_did = "did:web:vta.example.com"
             VtaConfig {
                 name: "Work".into(),
                 vta_did: None,
+                url: None,
             },
         );
         let (slug, _) = resolve_vta(None, &config).unwrap();

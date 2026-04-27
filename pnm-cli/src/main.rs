@@ -172,6 +172,10 @@ enum SetupCommands {
         /// VTA DID to bind (non-interactive). Must start with `did:`.
         #[arg(long)]
         vta_did: Option<String>,
+
+        /// VTA REST URL (required for did:key DIDs that cannot advertise a service endpoint).
+        #[arg(long)]
+        vta_url: Option<String>,
     },
 }
 
@@ -1237,6 +1241,7 @@ async fn main() {
                     Some(SetupCommands::Continue {
                         slug,
                         vta_did: None,
+                        ..
                     }),
                     None,
                 ) => setup::continue_non_tee_setup_interactive(&mut pnm_config, slug).await,
@@ -1244,10 +1249,11 @@ async fn main() {
                     Some(SetupCommands::Continue {
                         slug,
                         vta_did: Some(vta_did),
+                        vta_url,
                     }),
                     None,
                 ) => {
-                    setup::continue_non_tee_setup_non_interactive(&mut pnm_config, slug, vta_did)
+                    setup::continue_non_tee_setup_non_interactive(&mut pnm_config, slug, vta_did, vta_url.as_deref())
                         .await
                 }
                 (None, Some(name)) => {
@@ -1464,8 +1470,11 @@ async fn main() {
     eprintln!();
 
     // Build client
+    // For did:key VTAs, use the persisted URL as fallback (DID has no service endpoint).
+    let effective_url_override = url_override.as_deref().or(vta_config.url.as_deref());
+
     let client = if requires_auth(&cli.command) {
-        match auth::connect(url_override.as_deref(), &keyring_key).await {
+        match auth::connect(effective_url_override, &keyring_key).await {
             Ok(c) => c,
             Err(e) => {
                 vta_cli_common::render::print_cli_error(e.as_ref());
@@ -1478,7 +1487,7 @@ async fn main() {
         // `--url` override; otherwise resolve the VTA DID's REST endpoint
         // at runtime. Empty string is fine for commands that don't make
         // HTTP calls (the client is constructed but unused).
-        let url = match url_override.as_deref() {
+        let url = match effective_url_override {
             Some(u) => u.to_string(),
             None => match vta_config.vta_did.as_deref() {
                 Some(did) => vta_sdk::session::resolve_vta_url(did)
@@ -2472,7 +2481,7 @@ mod tests {
         ]);
         match cli.command {
             Commands::Setup {
-                command: Some(SetupCommands::Continue { slug, vta_did }),
+                command: Some(SetupCommands::Continue { slug, vta_did, .. }),
                 ..
             } => {
                 assert_eq!(slug, "my-vta");
