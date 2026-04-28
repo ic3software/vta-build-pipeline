@@ -171,6 +171,22 @@ async fn start_non_tee_setup_interactive(
 
     // Operator supplied the VTA DID up front → phase 1 + phase 2 in one
     // shot. Park in pending, then bind immediately.
+    // did:key has no service endpoints — prompt for URL so PNM can reach the VTA.
+    let vta_url = if vta_did_input.starts_with("did:key:") {
+        let url: String = Input::new()
+            .with_prompt("VTA URL (required for did:key — e.g. http://localhost:7001)")
+            .interact_text()?;
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err(
+                "did:key VTAs require an explicit URL (the DID has no service endpoint)".into(),
+            );
+        }
+        Some(url)
+    } else {
+        None
+    };
+
     persist_pending(
         config,
         &slug,
@@ -179,7 +195,15 @@ async fn start_non_tee_setup_interactive(
         &did,
         &private_key_multibase,
     )?;
-    finalize_session(config, &slug, &name, vta_did_input, &did, false)?;
+    finalize_session(
+        config,
+        &slug,
+        &name,
+        vta_did_input,
+        &did,
+        vta_url.as_deref(),
+        false,
+    )?;
 
     Ok(())
 }
@@ -258,7 +282,31 @@ pub async fn continue_non_tee_setup_interactive(
         return Err("VTA DID must start with `did:` (e.g. did:webvh:... or did:key:...)".into());
     }
 
-    finalize_session(config, slug, &name, vta_did, &existing_did, false)?;
+    // did:key has no service endpoints — prompt for URL so PNM can reach the VTA.
+    let vta_url = if vta_did.starts_with("did:key:") {
+        let url: String = Input::new()
+            .with_prompt("VTA URL (required for did:key — e.g. http://localhost:7001)")
+            .interact_text()?;
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err(
+                "did:key VTAs require an explicit URL (the DID has no service endpoint)".into(),
+            );
+        }
+        Some(url)
+    } else {
+        None
+    };
+
+    finalize_session(
+        config,
+        slug,
+        &name,
+        vta_did,
+        &existing_did,
+        vta_url.as_deref(),
+        false,
+    )?;
     Ok(())
 }
 
@@ -268,6 +316,7 @@ pub async fn continue_non_tee_setup_non_interactive(
     config: &mut PnmConfig,
     slug: &str,
     vta_did: &str,
+    vta_url: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let keyring_key = vta_keyring_key(slug);
     let (name, existing_did) = require_pending(config, slug, &keyring_key)?;
@@ -277,7 +326,21 @@ pub async fn continue_non_tee_setup_non_interactive(
         return Err("VTA DID must start with `did:` (e.g. did:webvh:... or did:key:...)".into());
     }
 
-    finalize_session(config, slug, &name, vta_did, &existing_did, true)?;
+    // did:key has no service endpoints — require --vta-url.
+    let vta_url = if vta_did.starts_with("did:key:") {
+        match vta_url {
+            Some(u) => Some(u),
+            None => {
+                return Err(
+                    "did:key VTAs require --vta-url (the DID has no service endpoint)".into(),
+                );
+            }
+        }
+    } else {
+        vta_url
+    };
+
+    finalize_session(config, slug, &name, vta_did, &existing_did, vta_url, true)?;
     Ok(())
 }
 
@@ -302,6 +365,7 @@ fn persist_pending(
         VtaConfig {
             name: name.to_string(),
             vta_did: None,
+            url: None,
         },
     );
     if config.default_vta.is_none() || config.vtas.len() == 1 {
@@ -317,6 +381,7 @@ fn finalize_session(
     name: &str,
     vta_did: &str,
     did: &str,
+    vta_url: Option<&str>,
     non_interactive: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let keyring_key = vta_keyring_key(slug);
@@ -327,6 +392,7 @@ fn finalize_session(
         VtaConfig {
             name: name.to_string(),
             vta_did: Some(vta_did.to_string()),
+            url: vta_url.map(|u| u.trim_end_matches('/').to_string()),
         },
     );
     if config.default_vta.is_none() || config.vtas.len() == 1 {
@@ -508,6 +574,7 @@ async fn setup_tee(config: &mut PnmConfig) -> Result<(), Box<dyn std::error::Err
         VtaConfig {
             name: name.clone(),
             vta_did: Some(vta_did.clone()),
+            url: None,
         },
     );
     if config.default_vta.is_none() || config.vtas.len() == 1 {
@@ -546,6 +613,7 @@ mod tests {
             VtaConfig {
                 name: slug.to_string(),
                 vta_did: vta_did.map(str::to_string),
+                url: None,
             },
         );
         config.vtas = vtas;

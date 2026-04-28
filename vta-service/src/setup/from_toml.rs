@@ -207,6 +207,11 @@ pub enum VtaDidInput {
     Skip,
     /// Use a DID that already exists.
     Existing { did: String },
+    /// Mint a new `did:key` for the VTA. Uses BIP-32-derived Ed25519
+    /// keys from the active seed — same derivation scheme as `did:webvh`
+    /// but no external hosting needed. Ideal for local development and
+    /// deployments that don't need webvh's portability/rotation.
+    CreateDidKey,
     /// Mint a new `did:webvh` for the VTA. Always uses the operations
     /// layer's "simple mode" (VTA generates keys + document).
     CreateWebvh {
@@ -393,6 +398,11 @@ pub async fn apply_inputs(inputs: WizardInputs) -> Result<(), Box<dyn std::error
     let vta_did = match &inputs.vta_did {
         VtaDidInput::Skip => None,
         VtaDidInput::Existing { did } => Some(did.clone()),
+        VtaDidInput::CreateDidKey => {
+            let did =
+                create_vta_did_key("vta", &keys_ks, &contexts_ks, &*wizard_seed_store).await?;
+            Some(did)
+        }
         VtaDidInput::CreateWebvh {
             url,
             portable,
@@ -708,6 +718,88 @@ fn scratch_config_for_seed_store(
         resolver_url: None,
         config_path,
     }
+}
+
+/// Mint a `did:key` for the VTA identity using BIP-32-derived keys from
+/// the active seed. Stores key records (`#key-0` Ed25519 signing,
+/// `#key-1` X25519 key-agreement) so `init_auth` can find them at
+/// startup. No external hosting needed — `did:key` is self-resolving.
+async fn create_vta_did_key(
+    context_id: &str,
+    keys_ks: &KeyspaceHandle,
+    contexts_ks: &KeyspaceHandle,
+    seed_store: &dyn SeedStore,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use crate::keys;
+    use crate::keys::seeds::{get_active_seed_id, load_seed_bytes};
+    use vta_sdk::keys::KeyType as SdkKeyType;
+
+    let active_seed_id = get_active_seed_id(keys_ks).await?;
+    let seed = load_seed_bytes(keys_ks, seed_store, Some(active_seed_id)).await?;
+
+    // Load context to get base derivation path
+    let ctx = crate::contexts::get_context(contexts_ks, context_id)
+        .await
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| format!("context '{context_id}' not found"))?;
+
+    let derived = keys::derive_entity_keys(
+        &seed,
+        &ctx.base_path,
+        "VTA signing key",
+        "VTA key-agreement key",
+        keys_ks,
+    )
+    .await?;
+
+    // Build did:key from the Ed25519 signing public key
+    let did = format!("did:key:{}", derived.signing_pub);
+
+    // Store key records so init_auth can find them at runtime
+    keys::save_key_record(
+        keys_ks,
+        &format!("{did}#key-0"),
+        &derived.signing_path,
+        SdkKeyType::Ed25519,
+        &derived.signing_pub,
+        "VTA signing key",
+        Some(context_id),
+        Some(active_seed_id),
+    )
+    .await?;
+
+    keys::save_key_record(
+        keys_ks,
+        &format!("{did}#key-1"),
+        &derived.ka_path,
+        SdkKeyType::X25519,
+        &derived.ka_pub,
+        "VTA key-agreement key",
+        Some(context_id),
+        Some(active_seed_id),
+    )
+    .await?;
+
+    // Derive and store sealed-transfer key for bootstrap assertions
+    let st = keys::derive_sealed_transfer_key(
+        &seed,
+        &ctx.base_path,
+        "VTA sealed-transfer producer-assertion key",
+        keys_ks,
+    )
+    .await?;
+    keys::save_sealed_transfer_key_record(
+        &did,
+        &st,
+        keys_ks,
+        Some(context_id),
+        Some(active_seed_id),
+    )
+    .await?;
+
+    eprintln!("  Created DID: {did}");
+
+    Ok(did)
 }
 
 /// Mint a `did:webvh` via the operations layer with no interactive

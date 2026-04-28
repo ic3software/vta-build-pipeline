@@ -321,6 +321,8 @@ async fn send_trust_ping(
     let root = ExtendedSigningKey::from_seed(&seed)?;
 
     let keys_ks = store.keyspace("keys")?;
+
+    // Internal storage always uses #key-0/#key-1, regardless of DID method.
     let signing_key_id = format!("{vta_did}#key-0");
     let ka_key_id = format!("{vta_did}#key-1");
 
@@ -328,20 +330,33 @@ async fn send_trust_ping(
         .get(crate::keys::store_key(&signing_key_id))
         .await?
         .ok_or("VTA signing key record not found")?;
-    let ka: KeyRecord = keys_ks
-        .get(crate::keys::store_key(&ka_key_id))
-        .await?
-        .ok_or("VTA key-agreement key record not found")?;
 
     let tdk = TDKSharedState::default().await;
 
-    let mut signing_secret = root.derive_ed25519(&signing.derivation_path)?;
-    signing_secret.id = signing_key_id;
-    tdk.secrets_resolver.insert(signing_secret).await;
+    if vta_did.starts_with("did:key:") {
+        // did:key: X25519 is curve-converted from Ed25519, and verification method
+        // IDs use multibase-encoded public key fragments, not #key-0/#key-1.
+        let dp: ed25519_dalek_bip32::DerivationPath = signing.derivation_path.parse()?;
+        let derived = root.derive(&dp)?;
+        let seed_bytes: &[u8; 32] = derived.signing_key.as_bytes();
+        let secrets = vta_sdk::did_key::secrets_from_did_key(vta_did, seed_bytes)?;
+        tdk.secrets_resolver.insert(secrets.signing).await;
+        tdk.secrets_resolver.insert(secrets.key_agreement).await;
+    } else {
+        // did:webvh / other methods: independently derived keys, #key-0/#key-1 IDs.
+        let ka: KeyRecord = keys_ks
+            .get(crate::keys::store_key(&ka_key_id))
+            .await?
+            .ok_or("VTA key-agreement key record not found")?;
 
-    let mut ka_secret = root.derive_x25519(&ka.derivation_path)?;
-    ka_secret.id = ka_key_id;
-    tdk.secrets_resolver.insert(ka_secret).await;
+        let mut signing_secret = root.derive_ed25519(&signing.derivation_path)?;
+        signing_secret.id = signing_key_id;
+        tdk.secrets_resolver.insert(signing_secret).await;
+
+        let mut ka_secret = root.derive_x25519(&ka.derivation_path)?;
+        ka_secret.id = ka_key_id;
+        tdk.secrets_resolver.insert(ka_secret).await;
+    }
 
     let atm = ATM::new(ATMConfig::builder().build()?, Arc::new(tdk)).await?;
 

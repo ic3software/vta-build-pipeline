@@ -503,7 +503,7 @@ enum AuthCredentialCommands {
 enum KeyCommands {
     /// Create a new key
     Create {
-        /// Key type: ed25519 or x25519
+        /// Key type: ed25519, x25519, or p256
         #[arg(long)]
         key_type: String,
         /// BIP-32 derivation path (auto-derived from context if omitted)
