@@ -638,6 +638,8 @@ fn state_from_jsonl(did_log: &str) -> Result<DIDWebVHState, UpdateDidWebvhError>
     }
     state
         .validate()
+        .map_err(|e| UpdateDidWebvhError::Library(format!("chain validation: {e}")))?
+        .assert_complete()
         .map_err(|e| UpdateDidWebvhError::Library(format!("chain validation: {e}")))?;
     Ok(state)
 }
