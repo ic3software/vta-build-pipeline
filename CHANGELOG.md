@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- **WebVH built-in templates renamed by deployment role.**
+  `webvh-hosting-server` → `webvh-daemon`, `webvh-service` → `webvh-server`,
+  and a new `webvh-control` joins them. Three fixed shapes, one per role:
+  `webvh-control` exposes both `WebVHHosting` and `DIDCommMessaging`
+  (hosting + DIDComm); `webvh-daemon` exposes `WebVHHosting` only (no
+  DIDComm); `webvh-server` exposes `DIDCommMessaging` only (witness,
+  watcher, server consumed via DIDComm). The renderer stays declarative —
+  no conditionals — so the template name is a 1:1 promise of what comes
+  out. See `docs/03-integrating/provision-integration.md` for the
+  comparison matrix.
+- **`ProvisionAsk` builders renamed to match.** `ProvisionAsk::webvh_service`
+  → `ProvisionAsk::webvh_server`, `ProvisionAsk::webvh_hosting_server` →
+  `ProvisionAsk::webvh_daemon`, plus a new `ProvisionAsk::webvh_control`.
+  Constants follow: `BUILTIN_WEBVH_SERVICE_TEMPLATE` →
+  `BUILTIN_WEBVH_SERVER_TEMPLATE`, `BUILTIN_WEBVH_HOSTING_TEMPLATE` →
+  `BUILTIN_WEBVH_DAEMON_TEMPLATE`, plus `BUILTIN_WEBVH_CONTROL_TEMPLATE`.
+  `WebvhServiceMessages` → `WebvhServerMessages`.
+- **`webvh-daemon` document shape normalized to `key-0`/`key-1`** (was
+  `key-1`/`key-2`). Matches the other webvh templates. Existing
+  `webvh-hosting-server` deployments must re-provision against
+  `webvh-daemon`.
+- **`webvh-server`/`webvh-control` declare `URL` and `WEBVH_SERVER` in
+  `optionalVars`** for discoverability. The runtime check that "URL or
+  WEBVH_SERVER must be set for any webvh-method template" is unchanged
+  — declaring them in the template just makes the contract visible to
+  consumers.
+
+### Changed
+
+- **Provisioning error message** when neither `URL` nor `WEBVH_SERVER` is
+  supplied now names the satisfying built-in templates explicitly and
+  shows the exact `--var` flags to pass.
+
 ## 0.5.0 — 2026-04-24
 
 The `sealed-bootstrap` release: every secret-bearing transfer between

@@ -19,7 +19,7 @@ pub enum DiagCheck {
     /// or as a `Skipped` placeholder when the DIDComm path completed
     /// without needing a fallback.
     AuthenticateREST,
-    /// FullSetup-only: fetches the VTA's registered webvh-hosting-server
+    /// FullSetup-only: fetches the VTA's registered webvh-daemon
     /// catalogue so the runner can either auto-pick (0/1 entries) or
     /// surface a choice (2+). Skipped on AdminOnly.
     ListWebvhServers,

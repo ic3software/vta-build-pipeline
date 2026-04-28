@@ -278,7 +278,7 @@ async fn provision_via_rest_didcomm_mediator_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn provision_via_rest_webvh_service_round_trip() {
+async fn provision_via_rest_webvh_server_round_trip() {
     let server = MockServer::start().await;
     mount_auth_mocks(&server).await;
 
@@ -294,14 +294,14 @@ async fn provision_via_rest_webvh_service_round_trip() {
             recipient_x_pub,
             integration_did: integration_did.clone(),
             admin_did: admin_did.clone(),
-            template_name: "webvh-service".into(),
-            template_kind: "webvh-service".into(),
+            template_name: "webvh-server".into(),
+            template_kind: "webvh-server".into(),
             producer_did: "did:webvh:vta.example.com".into(),
         })
         .mount(&server)
         .await;
 
-    let ask = ProvisionAsk::webvh_service("prod-webvh", "did:webvh:m.example.com");
+    let ask = ProvisionAsk::webvh_server("prod-webvh", "did:webvh:m.example.com");
 
     let result: ProvisionResult = provision_via_rest(
         &server.uri(),
@@ -315,6 +315,6 @@ async fn provision_via_rest_webvh_service_round_trip() {
 
     assert_eq!(result.integration_did(), integration_did);
     assert_eq!(result.admin_did(), admin_did);
-    assert_eq!(result.summary.template_name, "webvh-service");
-    assert_eq!(result.summary.template_kind, "webvh-service");
+    assert_eq!(result.summary.template_name, "webvh-server");
+    assert_eq!(result.summary.template_kind, "webvh-server");
 }

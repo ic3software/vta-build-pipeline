@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "name": "webvh-control",
+  "kind": "webvh-control",
+  "description": "WebVH control-plane node — hosts did:webvh logs over HTTP AND accepts DIDComm via a shared mediator. Use this for any webvh node that needs both inbound DID-log writes (operator/client API) and DIDComm messaging (admin RPC, witness coordination, control-plane traffic). A pure hosting daemon with no DIDComm should use 'webvh-daemon' instead; a witness/watcher with no public URL should use 'webvh-server'.",
+  "methods": ["webvh", "web"],
+  "requiredVars": ["URL", "MEDIATOR_DID"],
+  "optionalVars": {
+    "ACCEPT": ["didcomm/v2"],
+    "HOSTING_PATH": "/webvh",
+    "WEBVH_SERVER": null
+  },
+  "defaults": {
+    "preRotationCount": 2,
+    "portable": false,
+    "addMediatorService": false
+  },
+  "document": {
+    "@context": [
+      "https://www.w3.org/ns/did/v1",
+      "https://www.w3.org/ns/cid/v1",
+      "https://w3id.org/security/multikey/v1"
+    ],
+    "id": "{DID}",
+    "verificationMethod": [
+      {
+        "id": "{DID}#key-0",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{SIGNING_KEY_MB}"
+      },
+      {
+        "id": "{DID}#key-1",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{KA_KEY_MB}"
+      }
+    ],
+    "assertionMethod": ["{DID}#key-0"],
+    "authentication": ["{DID}#key-0"],
+    "keyAgreement": ["{DID}#key-1"],
+    "service": [
+      {
+        "id": "{DID}#webvh-hosting",
+        "type": "WebVHHosting",
+        "serviceEndpoint": {
+          "uri": "{URL}",
+          "hostingPath": "{HOSTING_PATH}"
+        }
+      },
+      {
+        "id": "{DID}#vta-didcomm",
+        "type": "DIDCommMessaging",
+        "serviceEndpoint": [
+          { "accept": "{ACCEPT}", "uri": "{MEDIATOR_DID}" }
+        ]
+      }
+    ]
+  }
+}

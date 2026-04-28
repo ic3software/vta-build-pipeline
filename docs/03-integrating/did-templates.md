@@ -14,8 +14,8 @@ consumer gets the new shape on the next create. No redeploy.
 
 - **Data, not code.** An operator can ship a new agent kind by dropping a JSON
   file, no recompile. The built-ins (`didcomm-mediator`, `vta-admin`,
-  `webvh-hosting-server`, `webvh-service`) are baseline shapes, not the only
-  shapes.
+  `webvh-control`, `webvh-daemon`, `webvh-server`) are baseline shapes, not
+  the only shapes.
 - **Method-agnostic.** Same format works for `did:webvh`, `did:web`, or
   `did:key` — the loader only knows about `{TOKEN}` placeholders. Method-
   specific details (SCID, log endpoints) are just placeholders the VTA fills.
@@ -141,11 +141,17 @@ template without explicit scope is **context → global → builtin**:
   - `didcomm-mediator` — DIDComm v2 routing mediator with a URL-based service
     endpoint.
   - `vta-admin` — did:key admin DID for provision-integration admin rollover.
-  - `webvh-hosting-server` — did:webvh hosting server exposing a
-    `WebVHHosting` service.
-  - `webvh-service` — generic webvh service (control plane / hosting /
-    witness / watcher) whose DIDComm endpoint routes through a shared
-    mediator DID instead of a URL.
+  - `webvh-control` — webvh control-plane node exposing both a
+    `WebVHHosting` service (URL-based) **and** a `DIDCommMessaging` service
+    routed through a mediator. Use for nodes that publish DID logs over
+    HTTP and accept DIDComm (admin RPC, witness coordination,
+    control-plane traffic).
+  - `webvh-daemon` — pure webvh hosting daemon with a `WebVHHosting`
+    service and **no** DIDComm. Use for nodes whose only role is hosting
+    DID logs. If you also need DIDComm, use `webvh-control`.
+  - `webvh-server` — webvh node that talks DIDComm via a shared mediator
+    and exposes **no** public HTTP endpoint. Use for witness, watcher, or
+    any service consumed via DIDComm only.
 - **Global** (`tpl:global:<name>`) — super-admin-managed. Visible across every
   context.
 - **Context** (`tpl:ctx:<id>:<name>`) — context-admin-managed (or super

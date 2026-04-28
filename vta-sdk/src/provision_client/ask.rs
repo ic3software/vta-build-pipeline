@@ -3,10 +3,11 @@
 //! [`ProvisionAsk`] mirrors the SDK's
 //! [`crate::provision_integration::BootstrapAsk::TemplateBootstrap`] without
 //! requiring callers to construct `DidTemplateRef` directly. Use the typed
-//! builders ([`ProvisionAsk::didcomm_mediator`], [`ProvisionAsk::webvh_service`],
-//! etc.) for the templates that ship with `vta-service`. For an operator-
-//! supplied template, use [`ProvisionAsk::for_template`] with the template
-//! name and variable bindings the template's `requiredVars` declares.
+//! builders ([`ProvisionAsk::didcomm_mediator`], [`ProvisionAsk::webvh_control`],
+//! [`ProvisionAsk::webvh_daemon`], [`ProvisionAsk::webvh_server`], etc.) for
+//! the templates that ship with `vta-service`. For an operator-supplied
+//! template, use [`ProvisionAsk::for_template`] with the template name and
+//! variable bindings the template's `requiredVars` declares.
 //!
 //! Adding a built-in template to `vta-service` without adding a curated
 //! builder here is an SDK-side bug — the equivalence tests at the bottom
@@ -23,8 +24,9 @@ use crate::provision_integration::ProvisionRequestBuilder;
 /// a typed builder below.
 pub const BUILTIN_MEDIATOR_TEMPLATE: &str = "didcomm-mediator";
 pub const BUILTIN_VTA_ADMIN_TEMPLATE: &str = "vta-admin";
-pub const BUILTIN_WEBVH_SERVICE_TEMPLATE: &str = "webvh-service";
-pub const BUILTIN_WEBVH_HOSTING_TEMPLATE: &str = "webvh-hosting-server";
+pub const BUILTIN_WEBVH_CONTROL_TEMPLATE: &str = "webvh-control";
+pub const BUILTIN_WEBVH_DAEMON_TEMPLATE: &str = "webvh-daemon";
+pub const BUILTIN_WEBVH_SERVER_TEMPLATE: &str = "webvh-server";
 
 /// Default validity on a wizard-issued VP for the online path — chosen to
 /// comfortably cover the round-trip with the verifier's ±5min skew margin
@@ -84,25 +86,46 @@ impl ProvisionAsk {
         Self::for_template(BUILTIN_MEDIATOR_TEMPLATE, vars, context)
     }
 
-    /// Curated builder for the built-in `webvh-service` template. The
-    /// service's DID routes DIDComm through `mediator_did`; required by
-    /// the template.
-    pub fn webvh_service(context: impl Into<String>, mediator_did: impl Into<String>) -> Self {
+    /// Curated builder for the built-in `webvh-control` template. Mints
+    /// a control-plane node's DID with both a `WebVHHosting` service at
+    /// `host_url` and a `DIDCommMessaging` service routed through
+    /// `mediator_did`. Use for nodes that both publish DID logs over HTTP
+    /// and accept DIDComm (admin RPC, witness coordination, etc.).
+    pub fn webvh_control(
+        context: impl Into<String>,
+        host_url: impl Into<String>,
+        mediator_did: impl Into<String>,
+    ) -> Self {
+        let mut vars = BTreeMap::new();
+        vars.insert("URL".to_string(), Value::String(host_url.into()));
+        vars.insert(
+            "MEDIATOR_DID".to_string(),
+            Value::String(mediator_did.into()),
+        );
+        Self::for_template(BUILTIN_WEBVH_CONTROL_TEMPLATE, vars, context)
+    }
+
+    /// Curated builder for the built-in `webvh-daemon` template. Mints a
+    /// hosting daemon's DID with a `WebVHHosting` service at `host_url`.
+    /// No DIDComm — use [`Self::webvh_control`] if the daemon also needs
+    /// to accept DIDComm.
+    pub fn webvh_daemon(context: impl Into<String>, host_url: impl Into<String>) -> Self {
+        let mut vars = BTreeMap::new();
+        vars.insert("URL".to_string(), Value::String(host_url.into()));
+        Self::for_template(BUILTIN_WEBVH_DAEMON_TEMPLATE, vars, context)
+    }
+
+    /// Curated builder for the built-in `webvh-server` template. Mints a
+    /// witness/watcher/server DID that talks DIDComm through
+    /// `mediator_did` and exposes no public HTTP endpoint. The DID
+    /// document carries only a `DIDCommMessaging` service.
+    pub fn webvh_server(context: impl Into<String>, mediator_did: impl Into<String>) -> Self {
         let mut vars = BTreeMap::new();
         vars.insert(
             "MEDIATOR_DID".to_string(),
             Value::String(mediator_did.into()),
         );
-        Self::for_template(BUILTIN_WEBVH_SERVICE_TEMPLATE, vars, context)
-    }
-
-    /// Curated builder for the built-in `webvh-hosting-server` template.
-    /// Mints a webvh hosting server's integration DID with `URL` set to
-    /// the public URL the server will accept HTTP requests at.
-    pub fn webvh_hosting_server(context: impl Into<String>, host_url: impl Into<String>) -> Self {
-        let mut vars = BTreeMap::new();
-        vars.insert("URL".to_string(), Value::String(host_url.into()));
-        Self::for_template(BUILTIN_WEBVH_HOSTING_TEMPLATE, vars, context)
+        Self::for_template(BUILTIN_WEBVH_SERVER_TEMPLATE, vars, context)
     }
 
     /// Curated builder for the built-in `vta-admin` template — mint a
@@ -174,8 +197,9 @@ mod tests {
         for name in [
             BUILTIN_MEDIATOR_TEMPLATE,
             BUILTIN_VTA_ADMIN_TEMPLATE,
-            BUILTIN_WEBVH_SERVICE_TEMPLATE,
-            BUILTIN_WEBVH_HOSTING_TEMPLATE,
+            BUILTIN_WEBVH_CONTROL_TEMPLATE,
+            BUILTIN_WEBVH_DAEMON_TEMPLATE,
+            BUILTIN_WEBVH_SERVER_TEMPLATE,
         ] {
             load_embedded(name).unwrap_or_else(|e| {
                 panic!("built-in template {name} not in vta-sdk registry: {e}")
@@ -200,9 +224,9 @@ mod tests {
     }
 
     #[test]
-    fn webvh_service_sets_mediator_did_var() {
-        let ask = ProvisionAsk::webvh_service("ctx", "did:webvh:m.example.com");
-        assert_eq!(ask.integration_template, BUILTIN_WEBVH_SERVICE_TEMPLATE);
+    fn webvh_server_sets_mediator_did_var() {
+        let ask = ProvisionAsk::webvh_server("ctx", "did:webvh:m.example.com");
+        assert_eq!(ask.integration_template, BUILTIN_WEBVH_SERVER_TEMPLATE);
         assert_eq!(
             ask.integration_template_vars["MEDIATOR_DID"],
             Value::String("did:webvh:m.example.com".into())
@@ -210,12 +234,27 @@ mod tests {
     }
 
     #[test]
-    fn webvh_hosting_server_sets_url_var() {
-        let ask = ProvisionAsk::webvh_hosting_server("ctx", "https://h.example.com");
-        assert_eq!(ask.integration_template, BUILTIN_WEBVH_HOSTING_TEMPLATE);
+    fn webvh_daemon_sets_url_var() {
+        let ask = ProvisionAsk::webvh_daemon("ctx", "https://h.example.com");
+        assert_eq!(ask.integration_template, BUILTIN_WEBVH_DAEMON_TEMPLATE);
         assert_eq!(
             ask.integration_template_vars["URL"],
             Value::String("https://h.example.com".into())
+        );
+    }
+
+    #[test]
+    fn webvh_control_sets_url_and_mediator_did_vars() {
+        let ask =
+            ProvisionAsk::webvh_control("ctx", "https://h.example.com", "did:webvh:m.example.com");
+        assert_eq!(ask.integration_template, BUILTIN_WEBVH_CONTROL_TEMPLATE);
+        assert_eq!(
+            ask.integration_template_vars["URL"],
+            Value::String("https://h.example.com".into())
+        );
+        assert_eq!(
+            ask.integration_template_vars["MEDIATOR_DID"],
+            Value::String("did:webvh:m.example.com".into())
         );
     }
 
@@ -262,29 +301,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn curated_webvh_service_equivalent_to_for_template() {
-        let curated = ProvisionAsk::webvh_service("ctx", "did:webvh:m.example.com");
+    async fn curated_webvh_server_equivalent_to_for_template() {
+        let curated = ProvisionAsk::webvh_server("ctx", "did:webvh:m.example.com");
 
         let mut vars = BTreeMap::new();
         vars.insert(
             "MEDIATOR_DID".to_string(),
             Value::String("did:webvh:m.example.com".into()),
         );
-        let generic = ProvisionAsk::for_template(BUILTIN_WEBVH_SERVICE_TEMPLATE, vars, "ctx");
+        let generic = ProvisionAsk::for_template(BUILTIN_WEBVH_SERVER_TEMPLATE, vars, "ctx");
 
         assert_signed_vps_have_equivalent_ask(&curated, &generic).await;
     }
 
     #[tokio::test]
-    async fn curated_webvh_hosting_server_equivalent_to_for_template() {
-        let curated = ProvisionAsk::webvh_hosting_server("ctx", "https://h.example.com");
+    async fn curated_webvh_daemon_equivalent_to_for_template() {
+        let curated = ProvisionAsk::webvh_daemon("ctx", "https://h.example.com");
 
         let mut vars = BTreeMap::new();
         vars.insert(
             "URL".to_string(),
             Value::String("https://h.example.com".into()),
         );
-        let generic = ProvisionAsk::for_template(BUILTIN_WEBVH_HOSTING_TEMPLATE, vars, "ctx");
+        let generic = ProvisionAsk::for_template(BUILTIN_WEBVH_DAEMON_TEMPLATE, vars, "ctx");
+
+        assert_signed_vps_have_equivalent_ask(&curated, &generic).await;
+    }
+
+    #[tokio::test]
+    async fn curated_webvh_control_equivalent_to_for_template() {
+        let curated =
+            ProvisionAsk::webvh_control("ctx", "https://h.example.com", "did:webvh:m.example.com");
+
+        let mut vars = BTreeMap::new();
+        vars.insert(
+            "URL".to_string(),
+            Value::String("https://h.example.com".into()),
+        );
+        vars.insert(
+            "MEDIATOR_DID".to_string(),
+            Value::String("did:webvh:m.example.com".into()),
+        );
+        let generic = ProvisionAsk::for_template(BUILTIN_WEBVH_CONTROL_TEMPLATE, vars, "ctx");
 
         assert_signed_vps_have_equivalent_ask(&curated, &generic).await;
     }

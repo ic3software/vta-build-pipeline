@@ -63,6 +63,27 @@ rotation is ever needed — compromised key, operator policy — it's an
 admin operation: revoke the old ACL entry and run
 `provision-integration` again with a fresh request.
 
+## Built-in templates
+
+Pick the template that matches the integration's deployment role.
+Each template emits one fixed DID-document shape — there is no
+conditional logic in the renderer, so the template name is a
+1:1 promise of what comes out.
+
+| Template | DID-document services | Required vars (renderer) | Required at provision time | Use for |
+|---|---|---|---|---|
+| `didcomm-mediator` | `DIDCommMessaging` URL endpoint | `URL` | — | DIDComm v2 routing mediator |
+| `webvh-control` | `WebVHHosting` + `DIDCommMessaging` | `URL`, `MEDIATOR_DID` | `URL` or `WEBVH_SERVER` | Control-plane node — hosts DID logs **and** accepts DIDComm (admin RPC, witness coordination, control-plane traffic) |
+| `webvh-daemon` | `WebVHHosting` only | `URL` | `URL` or `WEBVH_SERVER` | Pure hosting daemon — publishes DID logs over HTTP, no DIDComm. If you also need DIDComm, use `webvh-control` |
+| `webvh-server` | `DIDCommMessaging` only | `MEDIATOR_DID` | `URL` or `WEBVH_SERVER` | Witness, watcher, or any service consumed via DIDComm only — no public HTTP endpoint |
+| `vta-admin` | (none) | (none) | — | Long-term admin DID for `--admin-template` rollover |
+
+"Required at provision time" applies in addition to the renderer's
+`requiredVars`. Any webvh-method template needs to know where its
+`did.jsonl` log will be published — pass `--var URL=<host>` for
+serverless mode, or `--var WEBVH_SERVER=<id>` to route through a
+hosting server registered with `vta webvh add-server`.
+
 ---
 
 ## Operating
@@ -148,17 +169,50 @@ vta bootstrap provision-request \
     --out            mediator-request.vp.json
 ```
 
-**Webvh-hosting-server example:**
+**Webvh-daemon example** (hosts DID logs over HTTP, no DIDComm):
 
 ```bash
 vta bootstrap provision-request \
-    --template       webvh-hosting-server \
+    --template       webvh-daemon \
     --var            URL=https://webvh.example.com \
     --context-hint   webvh-host-prod \
     --admin-template vta-admin \
     --validity-hours 168 \
     --out            webvh-host-request.vp.json
 ```
+
+**Webvh-control example** (hosts DID logs **and** accepts DIDComm —
+admin RPC, witness coordination, etc.):
+
+```bash
+vta bootstrap provision-request \
+    --template       webvh-control \
+    --var            URL=https://webvh.example.com \
+    --var            MEDIATOR_DID=did:webvh:mediator.example.com \
+    --context-hint   webvh-control-prod \
+    --admin-template vta-admin \
+    --validity-hours 168 \
+    --out            webvh-control-request.vp.json
+```
+
+**Webvh-server example** (witness/watcher — DIDComm only, no public HTTP):
+
+```bash
+vta bootstrap provision-request \
+    --template       webvh-server \
+    --var            MEDIATOR_DID=did:webvh:mediator.example.com \
+    --var            URL=https://logs.example.com \
+    --context-hint   webvh-witness \
+    --admin-template vta-admin \
+    --validity-hours 168 \
+    --out            webvh-witness-request.vp.json
+```
+
+`URL` is required for any webvh-method template at provision time so
+the VTA knows where the DID's `did.jsonl` log will be published —
+even on `webvh-server`, where `URL` does not appear in the rendered
+document. Pass `--var WEBVH_SERVER=<id>` instead to route through a
+hosting server already registered with `vta webvh add-server`.
 
 What this does:
 
@@ -181,7 +235,7 @@ shape, different binary, different default seed directory
 
 | Flag | Required | Notes |
 |---|---|---|
-| `--template` | yes | Built-in (`didcomm-mediator`, `webvh-hosting-server`) or operator-uploaded template name. |
+| `--template` | yes | Built-in (`didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`) or operator-uploaded template name. |
 | `--var KEY=VALUE` | varies | Template-specific. Values are parsed as JSON when possible (`true`, numbers, arrays, objects, quoted strings); unquoted values are treated as strings. |
 | `--context-hint` | recommended | The VTA context the integration will live in. The VTA operator confirms; mismatch is rejected, not silently normalized. |
 | `--admin-template` | recommended | Typically `vta-admin`. The VTA mints a long-term admin DID under its own key custody and binds authorization to it — the ephemeral key stays throwaway. Omit only if you intentionally want the ephemeral `client_did` to remain the admin. |
@@ -289,7 +343,7 @@ What it does:
 `vta bootstrap open` today **prints** the payload contents; it does
 not automatically install them into the integration's keystore. That
 install step is integration-specific and lives in the integration's
-own setup wizard (mediator repo, webvh-hosting-server repo, etc.).
+own setup wizard (mediator repo, webvh-daemon repo, etc.).
 Those wizards use the SDK directly — see [SDK surface](#sdk-surface).
 
 **What the integration installs:**
@@ -720,14 +774,15 @@ let reply = run_provision(
 
 ### `ProvisionAsk` — curated vs `for_template`
 
-Four curated builders mirror the built-in templates shipped by
+Five curated builders mirror the built-in templates shipped by
 `vta-service`:
 
 | Builder | Template | Required vars |
 |---|---|---|
 | `ProvisionAsk::didcomm_mediator(ctx, url)` | `didcomm-mediator` | `URL` |
-| `ProvisionAsk::webvh_service(ctx, mediator_did)` | `webvh-service` | `MEDIATOR_DID` |
-| `ProvisionAsk::webvh_hosting_server(ctx, url)` | `webvh-hosting-server` | `URL` |
+| `ProvisionAsk::webvh_control(ctx, url, mediator_did)` | `webvh-control` | `URL`, `MEDIATOR_DID` |
+| `ProvisionAsk::webvh_daemon(ctx, url)` | `webvh-daemon` | `URL` |
+| `ProvisionAsk::webvh_server(ctx, mediator_did)` | `webvh-server` | `MEDIATOR_DID` |
 | `ProvisionAsk::vta_admin(ctx)` | `vta-admin` | (none) |
 
 For an operator-supplied template, use
@@ -743,10 +798,10 @@ each curated builder must produce a `BootstrapRequest` byte-equal to
 ### `OperatorMessages` — per-integration strings
 
 The library never hardcodes integration nouns ("mediator", "WebVH
-service") or full PNM commands. Each consumer implements
+server") or full PNM commands. Each consumer implements
 `OperatorMessages` and passes an `Arc<dyn OperatorMessages>` into
 `run_provision` and the headless `driver` helpers. Two default impls
-ship: `MediatorMessages` and `WebvhServiceMessages`.
+ship: `MediatorMessages` and `WebvhServerMessages`.
 
 ```rust
 use vta_sdk::prelude::*;
@@ -830,7 +885,7 @@ The integration operator generates the request side with:
 
 ```
 vta bootstrap provision-request \
-    --template       <name>               # didcomm-mediator | webvh-hosting-server | …
+    --template       <name>               # didcomm-mediator | webvh-control | webvh-daemon | webvh-server | …
     --var KEY=VALUE                       # repeat for each template variable
     --context-hint   <id>                 # recommended
     --admin-template vta-admin            # recommended (long-term admin rollover)

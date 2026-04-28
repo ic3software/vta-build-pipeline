@@ -412,8 +412,8 @@ pub struct ProvisionRequestBuilder {
 
 impl ProvisionRequestBuilder {
     /// Start a new builder targeting the named DID template (e.g.
-    /// `"didcomm-mediator"`, `"webvh-hosting-server"`, or an
-    /// operator-uploaded custom template).
+    /// `"didcomm-mediator"`, `"webvh-daemon"`, or an operator-uploaded
+    /// custom template).
     pub fn new(template_name: impl Into<String>) -> Self {
         Self {
             template: template_name.into(),
