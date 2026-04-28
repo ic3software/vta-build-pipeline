@@ -89,29 +89,62 @@ pub(super) async fn load_vta_sealed_transfer_secret(
 }
 
 /// Assemble the trust bundle shipped alongside every provisioning
-/// payload: VTA DID, resolved DID document, and webvh log if we have
-/// one on disk (we should — the VTA's own DID was provisioned through
-/// the same webvh path).
+/// payload: VTA DID, rendered DID document, and webvh log if we have
+/// one on disk.
+///
+/// For `did:webvh:` VTAs the document is rendered from the locally-stored
+/// `did.jsonl` — going to the network would fail any time the public
+/// endpoint isn't reachable (offline bootstrap, pre-publication, or a
+/// transient 5xx from the hosting webvh server) even though the VTA
+/// already holds the authoritative log on disk. The public endpoint only
+/// serves what the VTA itself produced; resolving locally keeps
+/// provisioning self-contained.
+///
+/// For other methods (e.g. `did:key:` in dev mode) there is no log to
+/// replay, so we fall back to the cache resolver — `did:key` is purely
+/// local anyway, so this stays offline-safe.
 pub(super) async fn load_vta_trust_bundle(
     state: &ProvisionIntegrationDeps,
     vta_did: &str,
 ) -> Result<VtaTrustBundle, AppError> {
-    let resolver = state
-        .did_resolver
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("DID resolver not initialized".into()))?;
-    let resolved = resolver
-        .resolve(vta_did)
-        .await
-        .map_err(|e| AppError::Internal(format!("resolve VTA DID '{vta_did}': {e}")))?;
-
-    let vta_did_document = serde_json::to_value(&resolved.doc)
-        .map_err(|e| AppError::Internal(format!("serialize VTA DID doc: {e}")))?;
-
     #[cfg(feature = "webvh")]
     let vta_did_log = crate::webvh_store::get_did_log(&state.webvh_ks, vta_did).await?;
     #[cfg(not(feature = "webvh"))]
     let vta_did_log: Option<String> = None;
+
+    let vta_did_document = match &vta_did_log {
+        #[cfg(feature = "webvh")]
+        Some(log) => {
+            let mut webvh_state = didwebvh_rs::DIDWebVHState::default();
+            let (log_entry, _meta) =
+                webvh_state
+                    .resolve_log(vta_did, log, None)
+                    .await
+                    .map_err(|e| {
+                        AppError::Internal(format!(
+                            "resolve VTA DID '{vta_did}' from local webvh log: {e}"
+                        ))
+                    })?;
+            use didwebvh_rs::log_entry::LogEntryMethods;
+            log_entry.get_did_document().map_err(|e| {
+                AppError::Internal(format!(
+                    "render VTA DID doc from local webvh log for '{vta_did}': {e}"
+                ))
+            })?
+        }
+        _ => {
+            let resolver = state
+                .did_resolver
+                .as_ref()
+                .ok_or_else(|| AppError::Internal("DID resolver not initialized".into()))?;
+            let resolved = resolver
+                .resolve(vta_did)
+                .await
+                .map_err(|e| AppError::Internal(format!("resolve VTA DID '{vta_did}': {e}")))?;
+            serde_json::to_value(&resolved.doc)
+                .map_err(|e| AppError::Internal(format!("serialize VTA DID doc: {e}")))?
+        }
+    };
 
     Ok(VtaTrustBundle {
         vta_did: vta_did.to_string(),
