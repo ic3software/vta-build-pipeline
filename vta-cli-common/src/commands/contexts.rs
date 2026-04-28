@@ -5,7 +5,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Cell, Row, Table},
 };
-use vta_sdk::client::{CreateDidWebvhRequest, UpdateContextRequest};
+use vta_sdk::client::{ContextResponse, CreateDidWebvhRequest, UpdateContextRequest};
 use vta_sdk::context_provision::{ContextProvisionBundle, ProvisionedDid};
 use vta_sdk::prelude::*;
 use vta_sdk::sealed_transfer::SealedPayloadV1;
@@ -75,17 +75,21 @@ pub async fn cmd_context_bootstrap(
     Ok(())
 }
 
-pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::error::Error>> {
-    let resp = client.list_contexts().await?;
-
-    if resp.contexts.is_empty() {
+/// Render a list of context records — table view by default, full
+/// `key: value` blocks when `--full-display` is set.
+///
+/// Shared by the online (`pnm contexts list`, REST) and offline
+/// (`vta contexts list`, keystore-direct) paths so both render
+/// identically.
+pub fn render_context_list(contexts: &[ContextResponse]) {
+    if contexts.is_empty() {
         println!("No contexts found.");
-        return Ok(());
+        return;
     }
 
     if is_full_display() {
-        print_full_list_title("Contexts", resp.contexts.len());
-        for ctx in &resp.contexts {
+        print_full_list_title("Contexts", contexts.len());
+        for ctx in contexts {
             let did = ctx.did.as_deref().unwrap_or("—");
             let created = ctx
                 .created_at
@@ -100,7 +104,7 @@ pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::err
                 ("Created", &created),
             ]);
         }
-        return Ok(());
+        return;
     }
 
     let header_style = Style::default()
@@ -110,8 +114,7 @@ pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::err
         .style(header_style)
         .bottom_margin(1);
 
-    let rows: Vec<Row> = resp
-        .contexts
+    let rows: Vec<Row> = contexts
         .iter()
         .map(|ctx| {
             let did = ctx.did.clone().unwrap_or_else(|| "\u{2014}".into());
@@ -131,7 +134,7 @@ pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::err
         })
         .collect();
 
-    let title = format!(" Contexts ({}) ", resp.contexts.len());
+    let title = format!(" Contexts ({}) ", contexts.len());
 
     // DID field carries full did:webvh / did:key values (40+ chars).
     // Use `Min` so it expands on wide terminals rather than truncating
@@ -154,9 +157,34 @@ pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::err
             .border_style(Style::default().fg(Color::DarkGray)),
     );
 
-    let height = resp.contexts.len() as u16 + 4;
+    let height = contexts.len() as u16 + 4;
     print_widget(table, height);
+}
 
+/// Render a single context record's details, used by `get` and the
+/// success path of `update`. Shared by online + offline call sites.
+pub fn render_context_record(ctx: &ContextResponse) {
+    println!("ID:          {}", ctx.id);
+    println!("Name:        {}", ctx.name);
+    println!("DID:         {}", ctx.did.as_deref().unwrap_or("(not set)"));
+    println!(
+        "Description: {}",
+        ctx.description.as_deref().unwrap_or("(not set)")
+    );
+    println!("Base Path:   {}", ctx.base_path);
+    println!(
+        "Created At:  {}",
+        crate::duration::format_local_datetime(ctx.created_at)
+    );
+    println!(
+        "Updated At:  {}",
+        crate::duration::format_local_datetime(ctx.updated_at)
+    );
+}
+
+pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::error::Error>> {
+    let resp = client.list_contexts().await?;
+    render_context_list(&resp.contexts);
     Ok(())
 }
 
@@ -165,25 +193,7 @@ pub async fn cmd_context_get(
     id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resp = client.get_context(id).await?;
-    println!("ID:          {}", resp.id);
-    println!("Name:        {}", resp.name);
-    println!(
-        "DID:         {}",
-        resp.did.as_deref().unwrap_or("(not set)")
-    );
-    println!(
-        "Description: {}",
-        resp.description.as_deref().unwrap_or("(not set)")
-    );
-    println!("Base Path:   {}", resp.base_path);
-    println!(
-        "Created At:  {}",
-        crate::duration::format_local_datetime(resp.created_at)
-    );
-    println!(
-        "Updated At:  {}",
-        crate::duration::format_local_datetime(resp.updated_at)
-    );
+    render_context_record(&resp);
     Ok(())
 }
 
@@ -334,20 +344,7 @@ pub async fn cmd_context_update(
     };
     let resp = client.update_context(id, req).await?;
     println!("Context updated:");
-    println!("  ID:          {}", resp.id);
-    println!("  Name:        {}", resp.name);
-    println!(
-        "  DID:         {}",
-        resp.did.as_deref().unwrap_or("(not set)")
-    );
-    println!(
-        "  Description: {}",
-        resp.description.as_deref().unwrap_or("(not set)")
-    );
-    println!(
-        "  Updated At:  {}",
-        crate::duration::format_local_datetime(resp.updated_at)
-    );
+    render_context_record(&resp);
     Ok(())
 }
 
@@ -370,6 +367,80 @@ pub async fn cmd_context_update_did(
     Ok(())
 }
 
+/// Print the human-readable resource preview shown before context
+/// deletion. Returns `true` when the preview lists any resources
+/// (i.e. the caller should prompt for confirmation unless `--force`).
+///
+/// Shared by online + offline delete paths so both warn about exactly
+/// the same resource classes.
+pub fn render_delete_context_preview(
+    id: &str,
+    preview: &vta_sdk::protocols::context_management::delete::DeleteContextPreviewResultBody,
+) -> bool {
+    let has_resources = !preview.keys.is_empty()
+        || !preview.webvh_dids.is_empty()
+        || !preview.acl_entries_removed.is_empty()
+        || !preview.acl_entries_updated.is_empty();
+
+    if !has_resources {
+        return false;
+    }
+
+    println!(
+        "Deleting context '{}' will remove the following resources:\n",
+        id
+    );
+
+    if !preview.keys.is_empty() {
+        println!("  Keys ({}):", preview.keys.len());
+        for key in &preview.keys {
+            println!("    - {key}");
+        }
+    }
+
+    if !preview.webvh_dids.is_empty() {
+        println!("  WebVH DIDs ({}):", preview.webvh_dids.len());
+        for did in &preview.webvh_dids {
+            println!("    - {did}");
+        }
+    }
+
+    if !preview.acl_entries_removed.is_empty() {
+        println!(
+            "  ACL entries removed ({}):",
+            preview.acl_entries_removed.len()
+        );
+        for did in &preview.acl_entries_removed {
+            println!("    - {did}");
+        }
+    }
+
+    if !preview.acl_entries_updated.is_empty() {
+        println!(
+            "  ACL entries updated (context removed from access list) ({}):",
+            preview.acl_entries_updated.len()
+        );
+        for did in &preview.acl_entries_updated {
+            println!("    - {did}");
+        }
+    }
+
+    println!();
+    true
+}
+
+/// Read a `[y/N]` reply from stdin. Returns `true` for `y` / `yes`,
+/// `false` otherwise. Shared by the destructive shared commands so
+/// the prompt wording stays consistent.
+pub fn confirm_destructive(prompt: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    print!("{prompt} [y/N] ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+    Ok(input == "y" || input == "yes")
+}
+
 pub async fn cmd_context_delete(
     client: &VtaClient,
     id: &str,
@@ -378,66 +449,11 @@ pub async fn cmd_context_delete(
     // Fetch a preview of what will be removed
     let preview = client.preview_delete_context(id).await?;
 
-    let has_resources = !preview.keys.is_empty()
-        || !preview.webvh_dids.is_empty()
-        || !preview.acl_entries_removed.is_empty()
-        || !preview.acl_entries_updated.is_empty();
+    let has_resources = render_delete_context_preview(id, &preview);
 
-    if has_resources {
-        println!(
-            "Deleting context '{}' will remove the following resources:\n",
-            id
-        );
-
-        if !preview.keys.is_empty() {
-            println!("  Keys ({}):", preview.keys.len());
-            for key in &preview.keys {
-                println!("    - {key}");
-            }
-        }
-
-        if !preview.webvh_dids.is_empty() {
-            println!("  WebVH DIDs ({}):", preview.webvh_dids.len());
-            for did in &preview.webvh_dids {
-                println!("    - {did}");
-            }
-        }
-
-        if !preview.acl_entries_removed.is_empty() {
-            println!(
-                "  ACL entries removed ({}):",
-                preview.acl_entries_removed.len()
-            );
-            for did in &preview.acl_entries_removed {
-                println!("    - {did}");
-            }
-        }
-
-        if !preview.acl_entries_updated.is_empty() {
-            println!(
-                "  ACL entries updated (context removed from access list) ({}):",
-                preview.acl_entries_updated.len()
-            );
-            for did in &preview.acl_entries_updated {
-                println!("    - {did}");
-            }
-        }
-
-        println!();
-
-        if !force {
-            print!("Proceed with deletion? [y/N] ");
-            io::stdout().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            let input = input.trim().to_lowercase();
-
-            if input != "y" && input != "yes" {
-                println!("Aborted.");
-                return Ok(());
-            }
-        }
+    if has_resources && !force && !confirm_destructive("Proceed with deletion?")? {
+        println!("Aborted.");
+        return Ok(());
     }
 
     client.delete_context(id, true).await?;

@@ -715,25 +715,50 @@ pub async fn run_keys_bundle(
     .await
 }
 
-/// `vta context create` — offline equivalent of `POST /contexts`
+/// Convert a server-side `CreateContextResultBody` (the operations-layer
+/// return type) to the client-side `ContextResponse` shape that the
+/// shared `vta_cli_common::commands::contexts::render_*` helpers
+/// consume. Field-by-field copy — the two types are identical on the
+/// wire; this adapter exists only because they're declared in
+/// different modules for layering reasons.
+fn to_context_response(
+    record: &vta_sdk::protocols::context_management::create::CreateContextResultBody,
+) -> vta_sdk::client::ContextResponse {
+    vta_sdk::client::ContextResponse {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        did: record.did.clone(),
+        description: record.description.clone(),
+        base_path: record.base_path.clone(),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }
+}
+
+/// `vta contexts create` — offline equivalent of `POST /contexts`
 /// (and `pnm contexts create`).
 ///
 /// Allocates the next BIP-32 context index and writes the context
-/// record directly to the local keystore. No keys, ACL entries, or
-/// DID are minted; pair with `vta bootstrap provision-integration`
-/// (or run that command with `--create-context` to do both in one
-/// step) to populate the context.
+/// record directly to the local keystore. When `--admin-did` is set,
+/// also writes an admin ACL entry scoped to the new context, mirroring
+/// the online `pnm contexts create --admin-did` shorthand.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_context_create(
     config_path: Option<PathBuf>,
     id: String,
     name: Option<String>,
     description: Option<String>,
+    admin_did: Option<String>,
+    admin_label: Option<String>,
+    admin_expires: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::auth::AuthClaims;
+    use vta_cli_common::commands::contexts::render_context_record;
 
     let app_config = AppConfig::load(config_path)?;
     let store = Store::open(&app_config.store)?;
     let contexts_ks = store.keyspace("contexts")?;
+    let acl_ks = store.keyspace("acl")?;
 
     let auth = AuthClaims::unsafe_local_cli_super_admin("context-create");
     let display_name = name.unwrap_or_else(|| id.clone());
@@ -748,15 +773,181 @@ pub async fn run_context_create(
     )
     .await?;
 
+    // Optionally grant admin access to the supplied DID, scoped to the
+    // new context. Mirrors `pnm contexts create --admin-did ...` so the
+    // offline path can also do "create context + grant first admin" in
+    // one shot.
+    if let Some(did) = admin_did {
+        if !did.starts_with("did:") {
+            return Err(format!(
+                "--admin-did must start with `did:` (got {did:?}) — context was created \
+                 but no ACL entry was added"
+            )
+            .into());
+        }
+        let expires_at = match admin_expires.as_deref() {
+            Some(raw) => Some(vta_cli_common::duration::duration_to_expires_at(raw)?),
+            None => None,
+        };
+        let entry = crate::acl::AclEntry {
+            did: did.clone(),
+            role: crate::acl::Role::Admin,
+            label: admin_label,
+            allowed_contexts: vec![id.clone()],
+            created_at: vti_common::auth::session::now_epoch(),
+            created_by: format!("vta-context-create:{}", auth.did),
+            expires_at,
+        };
+        crate::acl::store_acl_entry(&acl_ks, &entry).await?;
+        eprintln!("Admin ACL entry created for {did} (context: {id}).");
+    }
+
     store.persist().await?;
 
-    eprintln!("Context created:");
-    eprintln!("  ID:        {}", record.id);
-    eprintln!("  Name:      {}", record.name);
-    if let Some(desc) = record.description.as_ref() {
-        eprintln!("  Desc:      {desc}");
+    println!("Context created:");
+    render_context_record(&to_context_response(&record));
+    Ok(())
+}
+
+/// `vta contexts list` — offline equivalent of `GET /contexts`
+/// (and `pnm contexts list`).
+pub async fn run_context_list(
+    config_path: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::auth::AuthClaims;
+    use vta_cli_common::commands::contexts::render_context_list;
+
+    let app_config = AppConfig::load(config_path)?;
+    let store = Store::open(&app_config.store)?;
+    let contexts_ks = store.keyspace("contexts")?;
+
+    let auth = AuthClaims::unsafe_local_cli_super_admin("context-list");
+    let resp = crate::operations::contexts::list_contexts(&contexts_ks, &auth, "vta-contexts-list")
+        .await?;
+
+    let contexts: Vec<_> = resp.contexts.iter().map(to_context_response).collect();
+    render_context_list(&contexts);
+    Ok(())
+}
+
+/// `vta contexts get` — offline equivalent of `GET /contexts/{id}`
+/// (and `pnm contexts get`).
+pub async fn run_context_get(
+    config_path: Option<PathBuf>,
+    id: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::auth::AuthClaims;
+    use vta_cli_common::commands::contexts::render_context_record;
+
+    let app_config = AppConfig::load(config_path)?;
+    let store = Store::open(&app_config.store)?;
+    let contexts_ks = store.keyspace("contexts")?;
+
+    let auth = AuthClaims::unsafe_local_cli_super_admin("context-get");
+    let record =
+        crate::operations::contexts::get_context_op(&contexts_ks, &auth, &id, "vta-contexts-get")
+            .await?;
+
+    render_context_record(&to_context_response(&record));
+    Ok(())
+}
+
+/// `vta contexts update` — offline equivalent of `PUT /contexts/{id}`
+/// (and `pnm contexts update`).
+pub async fn run_context_update(
+    config_path: Option<PathBuf>,
+    id: String,
+    name: Option<String>,
+    did: Option<String>,
+    description: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::auth::AuthClaims;
+    use crate::operations::contexts::UpdateContextParams;
+    use vta_cli_common::commands::contexts::render_context_record;
+
+    let app_config = AppConfig::load(config_path)?;
+    let store = Store::open(&app_config.store)?;
+    let contexts_ks = store.keyspace("contexts")?;
+
+    let auth = AuthClaims::unsafe_local_cli_super_admin("context-update");
+    let params = UpdateContextParams {
+        name,
+        did,
+        description,
+    };
+    let record = crate::operations::contexts::update_context(
+        &contexts_ks,
+        &auth,
+        &id,
+        params,
+        "vta-contexts-update",
+    )
+    .await?;
+
+    store.persist().await?;
+    println!("Context updated:");
+    render_context_record(&to_context_response(&record));
+    Ok(())
+}
+
+/// `vta contexts delete` — offline equivalent of `DELETE /contexts/{id}`
+/// (and `pnm contexts delete`).
+pub async fn run_context_delete(
+    config_path: Option<PathBuf>,
+    id: String,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::auth::AuthClaims;
+    use crate::operations::Keyspaces;
+    use vta_cli_common::commands::contexts::{confirm_destructive, render_delete_context_preview};
+
+    let app_config = AppConfig::load(config_path)?;
+    let store = Store::open(&app_config.store)?;
+    let contexts_ks = store.keyspace("contexts")?;
+    let keys_ks = store.keyspace("keys")?;
+    let acl_ks = store.keyspace("acl")?;
+    let did_templates_ks = store.keyspace("did_templates")?;
+    let audit_ks = store.keyspace("audit")?;
+    let imported_ks = store.keyspace("imported_secrets")?;
+    #[cfg(feature = "webvh")]
+    let webvh_ks = store.keyspace("webvh")?;
+
+    let auth = AuthClaims::unsafe_local_cli_super_admin("context-delete");
+
+    let preview = crate::operations::contexts::preview_delete_context(
+        &contexts_ks,
+        &keys_ks,
+        &acl_ks,
+        &did_templates_ks,
+        #[cfg(feature = "webvh")]
+        &webvh_ks,
+        &auth,
+        &id,
+        "vta-contexts-delete",
+    )
+    .await?;
+
+    let has_resources = render_delete_context_preview(&id, &preview);
+    if has_resources && !force && !confirm_destructive("Proceed with deletion?")? {
+        println!("Aborted.");
+        return Ok(());
     }
-    eprintln!("  Index:     {}", record.base_path);
+
+    let ks = Keyspaces {
+        contexts: &contexts_ks,
+        keys: &keys_ks,
+        acl: &acl_ks,
+        did_templates: &did_templates_ks,
+        audit: &audit_ks,
+        imported: &imported_ks,
+        #[cfg(feature = "webvh")]
+        webvh: &webvh_ks,
+    };
+    crate::operations::contexts::delete_context(&ks, &auth, &id, true, "vta-contexts-delete")
+        .await?;
+
+    store.persist().await?;
+    println!("Context deleted: {id}");
     Ok(())
 }
 

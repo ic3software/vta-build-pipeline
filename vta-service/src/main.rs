@@ -135,7 +135,14 @@ enum Commands {
         command: KeyCliCommands,
     },
     /// Manage application contexts (offline, no server required)
-    Context {
+    ///
+    /// Mirrors `pnm contexts` so cold-start / air-gapped operators
+    /// have an identical CLI surface (list/get/create/update/delete)
+    /// against the local keystore. The historical `vta context`
+    /// (singular) form is retained as a hidden alias for scripts
+    /// already in production.
+    #[command(alias = "context")]
+    Contexts {
         #[command(subcommand)]
         command: ContextCommands,
     },
@@ -400,6 +407,13 @@ enum KeyCliCommands {
 
 #[derive(Subcommand)]
 enum ContextCommands {
+    /// List all application contexts.
+    List,
+    /// Get a context by ID.
+    Get {
+        /// Context ID.
+        id: String,
+    },
     /// Create an application context (offline, no running VTA required).
     ///
     /// Allocates the next BIP-32 context index and writes the context
@@ -407,9 +421,12 @@ enum ContextCommands {
     /// `pnm contexts create`) for cold-start / air-gapped operators
     /// who need to provision a context before standing the service up.
     ///
-    /// No keys, ACL entries, or DID are minted — pair with
-    /// `vta bootstrap provision-integration` (or run it with
-    /// `--create-context`) to populate the context.
+    /// Without `--admin-did` no keys, ACL entries, or DID are minted —
+    /// pair with `vta bootstrap provision-integration` (or run it with
+    /// `--create-context`) to populate the context. Supplying
+    /// `--admin-did` writes an admin ACL entry scoped to the new
+    /// context atomically with the context record, mirroring the
+    /// `pnm contexts create --admin-did` shorthand.
     Create {
         /// Context ID (slug). Lowercase alphanumeric + hyphens, ≤64
         /// chars, no leading/trailing hyphen.
@@ -421,6 +438,43 @@ enum ContextCommands {
         /// Free-form description.
         #[arg(long)]
         description: Option<String>,
+        /// DID to grant admin access to (must start with `did:`). When
+        /// set, atomically creates an ACL entry with role=admin scoped
+        /// to this context.
+        #[arg(long)]
+        admin_did: Option<String>,
+        /// Human-readable label for the admin ACL entry.
+        #[arg(long)]
+        admin_label: Option<String>,
+        /// Setup-ACL expiry — accepts `N[s|m|h|d|w]` (e.g. `24h`, `7d`).
+        /// When set, the admin ACL entry auto-expires via the server's
+        /// ACL sweeper. Without this flag the entry is permanent.
+        /// Requires `--admin-did`.
+        #[arg(long, requires = "admin_did")]
+        admin_expires: Option<String>,
+    },
+    /// Update an existing context.
+    Update {
+        /// Context ID.
+        id: String,
+        /// New name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Set the DID for this context.
+        #[arg(long)]
+        did: Option<String>,
+        /// New description.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Delete a context and all associated resources (keys, ACL
+    /// entries, DID records, scoped templates).
+    Delete {
+        /// Context ID.
+        id: String,
+        /// Skip confirmation and delete immediately.
+        #[arg(long, short)]
+        force: bool,
     },
     /// Export an existing context — its admin credential + all DID
     /// keys (signing + KA + any pre-rotation) + DID document + log —
@@ -782,18 +836,51 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Commands::Context { command }) => {
+        Some(Commands::Contexts { command }) => {
+            // SEALED CHECK: only commands that mutate state need the
+            // unsealed-store guard. List/Get are read-only.
             match &command {
-                ContextCommands::Create { .. } | ContextCommands::Reprovision { .. } => {
+                ContextCommands::List | ContextCommands::Get { .. } => {}
+                ContextCommands::Create { .. }
+                | ContextCommands::Update { .. }
+                | ContextCommands::Delete { .. }
+                | ContextCommands::Reprovision { .. } => {
                     check_seal(&cli.config).await;
                 }
             }
             let result = match command {
+                ContextCommands::List => bootstrap_cli::run_context_list(cli.config).await,
+                ContextCommands::Get { id } => bootstrap_cli::run_context_get(cli.config, id).await,
                 ContextCommands::Create {
                     id,
                     name,
                     description,
-                } => bootstrap_cli::run_context_create(cli.config, id, name, description).await,
+                    admin_did,
+                    admin_label,
+                    admin_expires,
+                } => {
+                    bootstrap_cli::run_context_create(
+                        cli.config,
+                        id,
+                        name,
+                        description,
+                        admin_did,
+                        admin_label,
+                        admin_expires,
+                    )
+                    .await
+                }
+                ContextCommands::Update {
+                    id,
+                    name,
+                    did,
+                    description,
+                } => {
+                    bootstrap_cli::run_context_update(cli.config, id, name, did, description).await
+                }
+                ContextCommands::Delete { id, force } => {
+                    bootstrap_cli::run_context_delete(cli.config, id, force).await
+                }
                 ContextCommands::Reprovision {
                     id,
                     admin_key,
