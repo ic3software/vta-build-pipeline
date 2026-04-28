@@ -1,12 +1,14 @@
 {
   "schemaVersion": 1,
-  "name": "webvh-service",
-  "kind": "webvh-service",
-  "description": "WebVH service endpoint (control plane, DID-hosting server, witness, or watcher) that routes DIDComm through a shared mediator. Uses key-0/key-1 verification-method IDs and a single DIDCommMessaging service whose serviceEndpoint is an array pointing at a mediator DID.",
+  "name": "webvh-server",
+  "kind": "webvh-server",
+  "description": "WebVH node that talks DIDComm via a shared mediator and exposes no public HTTP endpoint. Use this for a witness, watcher, or any service whose role is consumed via DIDComm rather than an inbound URL. The DID document carries a single DIDCommMessaging service pointing at the mediator. URL or WEBVH_SERVER is still required at provision time so the VTA knows where to publish the did:webvh log itself, but neither appears in the rendered document. Hosts that publish DID logs over HTTP should use 'webvh-daemon'; hosts that need both should use 'webvh-control'.",
   "methods": ["webvh"],
   "requiredVars": ["MEDIATOR_DID"],
   "optionalVars": {
-    "ACCEPT": ["didcomm/v2"]
+    "ACCEPT": ["didcomm/v2"],
+    "URL": null,
+    "WEBVH_SERVER": null
   },
   "defaults": {
     "preRotationCount": 2,

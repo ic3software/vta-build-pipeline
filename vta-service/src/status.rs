@@ -322,9 +322,10 @@ async fn send_trust_ping(
 
     let keys_ks = store.keyspace("keys")?;
 
-    // Internal storage always uses #key-0/#key-1, regardless of DID method.
+    // Internal storage always uses #key-0 for the signing record, regardless
+    // of DID method. The X25519 record at #key-1 only exists for did:webvh
+    // (did:key curve-converts the X25519 key from Ed25519 at runtime).
     let signing_key_id = format!("{vta_did}#key-0");
-    let ka_key_id = format!("{vta_did}#key-1");
 
     let signing: KeyRecord = keys_ks
         .get(crate::keys::store_key(&signing_key_id))
@@ -344,6 +345,7 @@ async fn send_trust_ping(
         tdk.secrets_resolver.insert(secrets.key_agreement).await;
     } else {
         // did:webvh / other methods: independently derived keys, #key-0/#key-1 IDs.
+        let ka_key_id = format!("{vta_did}#key-1");
         let ka: KeyRecord = keys_ks
             .get(crate::keys::store_key(&ka_key_id))
             .await?

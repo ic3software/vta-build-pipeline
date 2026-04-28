@@ -248,7 +248,7 @@ enum BootstrapCommands {
     /// Mints an ephemeral Ed25519 keypair, persists the seed under
     /// `~/.config/pnm/bootstrap-secrets/<bundle_id>.key`, and writes a
     /// signed VP naming the target DID template (e.g.
-    /// `didcomm-mediator`, `webvh-hosting-server`) + variables. Hand the
+    /// `didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`) + variables. Hand the
     /// JSON to the VTA operator. Counterpart to `vta bootstrap
     /// provision-request` — same wire shape, same on-disk layout,
     /// different default seed directory.
@@ -256,7 +256,7 @@ enum BootstrapCommands {
     /// See `docs/03-integrating/provision-integration.md` for the flow.
     ProvisionRequest {
         /// DID template name the VTA should render (e.g.
-        /// `didcomm-mediator`, `webvh-hosting-server`, or an
+        /// `didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`, or an
         /// operator-uploaded custom template).
         #[arg(long)]
         template: String,
@@ -328,8 +328,8 @@ enum DidTemplateCommands {
     ///
     /// Emits JSON on stdout so it can be redirected to a file for editing.
     /// `kind` accepts either the full built-in name
-    /// (`didcomm-mediator`, `webvh-hosting-server`) or a short alias
-    /// (`mediator`, `webvh-hosting`, `hosting`).
+    /// (`didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`) or a short alias
+    /// (`mediator`, `control`, `webvh-hosting`, `hosting`, `daemon`, `witness`, `watcher`, `server`).
     Init {
         /// Built-in kind or alias to fork.
         kind: String,

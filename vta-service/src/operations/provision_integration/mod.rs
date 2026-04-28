@@ -319,13 +319,15 @@ pub async fn provision_integration(
             Some(id) => (Some(id.clone()), None),
             None => {
                 let url = integration_url.clone().ok_or_else(|| {
-                    AppError::Validation(
-                        "serverless provisioning requires the template to supply a 'URL' variable \
-                         (the integration's webvh host URL). Either add it to the template's \
-                         `requiredVars` and pass it in `template_vars`, or set `WEBVH_SERVER` to \
-                         route publication through a registered webvh hosting server instead."
-                            .into(),
-                    )
+                    AppError::Validation(format!(
+                        "webvh DIDs need a publication target. Template '{template_name}' \
+                         resolved without a 'URL' or 'WEBVH_SERVER' template var. Pass either \
+                         `--var URL=https://...` (serverless mode — you publish did.jsonl \
+                         yourself) or `--var WEBVH_SERVER=<id>` (route through a webvh \
+                         hosting server registered with `vta webvh add-server`). At least one \
+                         is required for any webvh-method built-in (webvh-control, \
+                         webvh-daemon, webvh-server)."
+                    ))
                 })?;
                 (None, Some(url))
             }

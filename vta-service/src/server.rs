@@ -814,6 +814,19 @@ async fn init_auth(
     } else {
         // did:webvh / other methods: use #key-0 / #key-1 fragment convention
         // with independently derived Ed25519 + X25519 keys.
+        let ka_path = match ka_path {
+            Some(p) => p,
+            None => {
+                warn!(
+                    "VTA key-agreement record missing — auth endpoints will not work (run setup first)"
+                );
+                return AuthInit {
+                    did_resolver: Some(did_resolver),
+                    ..AuthInit::empty()
+                };
+            }
+        };
+
         signing_vm_id = Some(format!("{vta_did}#key-0"));
         ka_vm_id = Some(format!("{vta_did}#key-1"));
 
@@ -839,8 +852,10 @@ async fn init_auth(
                                 key_id = %format!("{vta_did}#key-0"),
                                 stored = %record.public_key,
                                 runtime = %runtime_pub,
-                                "SIGNING KEY MISMATCH — DIDComm signing/verification will fail. \
-                                 This likely means the DID was created with a different seed."
+                                "SIGNING KEY MISMATCH: runtime-derived Ed25519 public key does not match \
+                                 the key stored in the key record (and published in the DID document). \
+                                 DIDComm message signing/verification will fail. \
+                                 This likely means the DID was created with different code or seed."
                             );
                         }
                         Ok(runtime_pub) => {
@@ -865,8 +880,11 @@ async fn init_auth(
                                 key_id = %format!("{vta_did}#key-1"),
                                 stored = %record.public_key,
                                 runtime = %runtime_pub,
-                                "KEY-AGREEMENT KEY MISMATCH — DIDComm encryption will fail. \
-                                 This likely means the DID was created with a different seed."
+                                "KEY-AGREEMENT KEY MISMATCH: runtime-derived X25519 public key does not match \
+                                 the key stored in the key record (and published in the DID document). \
+                                 DIDComm encryption/decryption will fail. Others will encrypt to the DID \
+                                 document key but this VTA holds a different private key. \
+                                 The DID document must be updated or the VTA identity must be regenerated."
                             );
                         }
                         Ok(runtime_pub) => {
@@ -956,28 +974,37 @@ async fn init_auth(
 
 /// Look up VTA signing and key-agreement derivation paths from stored key records.
 ///
-/// Uses direct lookups by `{vta_did}#key-0` and `{vta_did}#key-1`.
+/// `did:webvh` (and other methods with independently-derived X25519) stores
+/// records at both `#key-0` and `#key-1`. `did:key` stores only `#key-0`
+/// because its X25519 key is curve-converted from Ed25519 at runtime, not
+/// independently derived — there is no separate path to record.
 ///
-/// Returns `(signing_path, ka_path, seed_id)` where `seed_id` comes from
-/// the signing key record.
+/// Returns `(signing_path, ka_path, seed_id)` where `ka_path` is `None` for
+/// `did:key` and `seed_id` comes from the signing key record.
 async fn find_vta_key_paths(
     vta_did: &str,
     keys_ks: &KeyspaceHandle,
-) -> Result<(String, String, Option<u32>), AppError> {
+) -> Result<(String, Option<String>, Option<u32>), AppError> {
     let signing_key_id = format!("{vta_did}#key-0");
-    let ka_key_id = format!("{vta_did}#key-1");
 
     let signing: KeyRecord = keys_ks
         .get(crate::keys::store_key(&signing_key_id))
         .await?
         .ok_or_else(|| AppError::NotFound("VTA signing key not found".into()))?;
-    let ka: KeyRecord = keys_ks
-        .get(crate::keys::store_key(&ka_key_id))
-        .await?
-        .ok_or_else(|| AppError::NotFound("VTA key-agreement key not found".into()))?;
 
-    debug!(signing_path = %signing.derivation_path, ka_path = %ka.derivation_path, "VTA key paths resolved");
-    Ok((signing.derivation_path, ka.derivation_path, signing.seed_id))
+    let ka_path = if vta_did.starts_with("did:key:") {
+        None
+    } else {
+        let ka_key_id = format!("{vta_did}#key-1");
+        let ka: KeyRecord = keys_ks
+            .get(crate::keys::store_key(&ka_key_id))
+            .await?
+            .ok_or_else(|| AppError::NotFound("VTA key-agreement key not found".into()))?;
+        Some(ka.derivation_path)
+    };
+
+    debug!(signing_path = %signing.derivation_path, ka_path = ?ka_path, "VTA key paths resolved");
+    Ok((signing.derivation_path, ka_path, signing.seed_id))
 }
 
 /// Decode a base64url-no-pad JWT signing key and construct `JwtKeys`.
@@ -1054,5 +1081,123 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => info!("received SIGINT"),
         () = terminate => info!("received SIGTERM"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::{KeyType, save_key_record};
+    use crate::store::Store;
+    use vti_common::config::StoreConfig;
+
+    fn temp_keys_ks() -> (Store, KeyspaceHandle, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = Store::open(&StoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        })
+        .expect("store open");
+        let keys_ks = store.keyspace("keys").expect("keys keyspace");
+        (store, keys_ks, dir)
+    }
+
+    /// `did:key` VTAs only store the Ed25519 signing record at `#key-0`;
+    /// the X25519 key-agreement secret is curve-converted from Ed25519 at
+    /// runtime, so a `#key-1` record is intentionally absent.
+    /// `find_vta_key_paths` must succeed without it.
+    #[tokio::test]
+    async fn find_vta_key_paths_returns_none_ka_for_did_key() {
+        let (_store, keys_ks, _dir) = temp_keys_ks();
+        let did = "did:key:z6MkTestKey";
+
+        save_key_record(
+            &keys_ks,
+            &format!("{did}#key-0"),
+            "m/44'/0'/0'",
+            KeyType::Ed25519,
+            "z6MkSigningPub",
+            "VTA signing key",
+            Some("vta"),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+        let (signing_path, ka_path, seed_id) =
+            find_vta_key_paths(did, &keys_ks).await.expect("paths");
+
+        assert_eq!(signing_path, "m/44'/0'/0'");
+        assert!(ka_path.is_none(), "did:key must not require #key-1 lookup");
+        assert_eq!(seed_id, Some(0));
+    }
+
+    /// `did:webvh` (and any non-`did:key` method) keeps the
+    /// independently-derived X25519 record at `#key-1`, and
+    /// `find_vta_key_paths` must surface it.
+    #[tokio::test]
+    async fn find_vta_key_paths_loads_ka_for_did_webvh() {
+        let (_store, keys_ks, _dir) = temp_keys_ks();
+        let did = "did:webvh:abc:example.com:vta";
+
+        save_key_record(
+            &keys_ks,
+            &format!("{did}#key-0"),
+            "m/44'/0'/0'",
+            KeyType::Ed25519,
+            "z6MkSigningPub",
+            "VTA signing key",
+            Some("vta"),
+            Some(0),
+        )
+        .await
+        .unwrap();
+        save_key_record(
+            &keys_ks,
+            &format!("{did}#key-1"),
+            "m/44'/0'/1'",
+            KeyType::X25519,
+            "z6LSKaPub",
+            "VTA key-agreement key",
+            Some("vta"),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+        let (signing_path, ka_path, _seed_id) =
+            find_vta_key_paths(did, &keys_ks).await.expect("paths");
+
+        assert_eq!(signing_path, "m/44'/0'/0'");
+        assert_eq!(ka_path.as_deref(), Some("m/44'/0'/1'"));
+    }
+
+    /// A `did:webvh` setup that is missing its `#key-1` record is broken —
+    /// `find_vta_key_paths` must return `NotFound` rather than silently
+    /// degrading to a `None` ka_path. (The `did:key` short-circuit is
+    /// keyed off the DID prefix, not off record presence, so a missing
+    /// record for non-`did:key` is genuinely an error.)
+    #[tokio::test]
+    async fn find_vta_key_paths_errors_when_did_webvh_missing_ka() {
+        let (_store, keys_ks, _dir) = temp_keys_ks();
+        let did = "did:webvh:abc:example.com:vta";
+
+        save_key_record(
+            &keys_ks,
+            &format!("{did}#key-0"),
+            "m/44'/0'/0'",
+            KeyType::Ed25519,
+            "z6MkSigningPub",
+            "VTA signing key",
+            Some("vta"),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+        let result = find_vta_key_paths(did, &keys_ks).await;
+        assert!(
+            matches!(result, Err(AppError::NotFound(_))),
+            "expected NotFound for did:webvh missing #key-1, got {result:?}"
+        );
     }
 }

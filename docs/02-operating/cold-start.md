@@ -544,4 +544,4 @@ cargo run --package vta-service \
 - [`../03-integrating/provision-integration.md`](../03-integrating/provision-integration.md) —
   operator walkthrough for the three-phase provision flow
   (generate VP request → provision → open+install), covering mediator
-  and webvh-hosting-server greenfield setup.
+  and webvh-daemon greenfield setup.

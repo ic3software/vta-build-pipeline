@@ -63,12 +63,14 @@ pub fn cmd_validate(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Emit a starter template on stdout by forking an embedded built-in. The
 /// operator can redirect to a file, edit, and upload. `kind` is a built-in
-/// name (`didcomm-mediator`, `webvh-hosting-server`).
+/// name (`didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`).
 pub fn cmd_init(kind: String) -> Result<(), Box<dyn std::error::Error>> {
     // Accept either the exact builtin name or a short alias.
     let builtin_name = match kind.as_str() {
         "mediator" => "didcomm-mediator",
-        "webvh-hosting" | "hosting" => "webvh-hosting-server",
+        "webvh-hosting" | "hosting" | "daemon" => "webvh-daemon",
+        "control" => "webvh-control",
+        "witness" | "watcher" | "server" => "webvh-server",
         other if BUILTIN_NAMES.contains(&other) => other,
         other => {
             eprintln!(

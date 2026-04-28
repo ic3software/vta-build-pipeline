@@ -720,16 +720,21 @@ fn scratch_config_for_seed_store(
     }
 }
 
-/// Mint a `did:key` for the VTA identity using BIP-32-derived keys from
-/// the active seed. Stores key records (`#key-0` Ed25519 signing,
-/// `#key-1` X25519 key-agreement) so `init_auth` can find them at
-/// startup. No external hosting needed — `did:key` is self-resolving.
+/// Mint a `did:key` for the VTA identity using a BIP-32-derived Ed25519
+/// key from the active seed. Stores only the Ed25519 signing record at
+/// `{did}#key-0`; the X25519 key-agreement secret is curve-converted
+/// from Ed25519 at runtime (per the `did:key` spec) so a separate
+/// `#key-1` record would be a misleading second source of truth. No
+/// external hosting needed — `did:key` is self-resolving.
 async fn create_vta_did_key(
     context_id: &str,
     keys_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    use affinidi_tdk::secrets_resolver::secrets::Secret;
+    use ed25519_dalek_bip32::{DerivationPath, ExtendedSigningKey};
+
     use crate::keys;
     use crate::keys::seeds::{get_active_seed_id, load_seed_bytes};
     use vta_sdk::keys::KeyType as SdkKeyType;
@@ -743,38 +748,36 @@ async fn create_vta_did_key(
         .map_err(|e| format!("{e}"))?
         .ok_or_else(|| format!("context '{context_id}' not found"))?;
 
-    let derived = keys::derive_entity_keys(
-        &seed,
-        &ctx.base_path,
-        "VTA signing key",
-        "VTA key-agreement key",
-        keys_ks,
-    )
-    .await?;
+    // Allocate a single BIP-32 path for the Ed25519 signing key. Unlike
+    // did:webvh we do NOT allocate a second path for X25519 — it is
+    // derived from the Ed25519 key at runtime.
+    let signing_path = keys::paths::allocate_path(keys_ks, &ctx.base_path)
+        .await
+        .map_err(|e| format!("{e}"))?;
 
-    // Build did:key from the Ed25519 signing public key
-    let did = format!("did:key:{}", derived.signing_pub);
+    let root = ExtendedSigningKey::from_seed(&seed)
+        .map_err(|e| format!("Failed to create BIP-32 root key: {e}"))?;
+    let derivation_path: DerivationPath = signing_path
+        .parse()
+        .map_err(|e| format!("Invalid derivation path: {e}"))?;
+    let derived = root
+        .derive(&derivation_path)
+        .map_err(|e| format!("Key derivation failed: {e}"))?;
 
-    // Store key records so init_auth can find them at runtime
+    let signing_secret = Secret::generate_ed25519(None, Some(derived.signing_key.as_bytes()));
+    let signing_pub = signing_secret
+        .get_public_keymultibase()
+        .map_err(|e| format!("{e}"))?;
+
+    let did = format!("did:key:{signing_pub}");
+
     keys::save_key_record(
         keys_ks,
         &format!("{did}#key-0"),
-        &derived.signing_path,
+        &signing_path,
         SdkKeyType::Ed25519,
-        &derived.signing_pub,
+        &signing_pub,
         "VTA signing key",
-        Some(context_id),
-        Some(active_seed_id),
-    )
-    .await?;
-
-    keys::save_key_record(
-        keys_ks,
-        &format!("{did}#key-1"),
-        &derived.ka_path,
-        SdkKeyType::X25519,
-        &derived.ka_pub,
-        "VTA key-agreement key",
         Some(context_id),
         Some(active_seed_id),
     )

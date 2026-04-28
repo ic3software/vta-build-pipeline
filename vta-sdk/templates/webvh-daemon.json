@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "name": "webvh-hosting-server",
-  "kind": "webvh-hosting",
-  "description": "did:webvh hosting server DID that publishes log entries for self-hosted DIDs. Exposes a WebVHHosting service endpoint clients use to register and update DID logs.",
+  "name": "webvh-daemon",
+  "kind": "webvh-daemon",
+  "description": "WebVH hosting daemon — publishes did:webvh logs over HTTP via a WebVHHosting service endpoint. No DIDComm. Use this for a node whose only role is hosting DID logs for self-managed DIDs. If the daemon also needs to accept DIDComm (admin RPC, witness coordination, control-plane traffic), use 'webvh-control' instead.",
   "methods": ["webvh", "web"],
   "requiredVars": ["URL"],
   "optionalVars": {
@@ -22,21 +22,21 @@
     "id": "{DID}",
     "verificationMethod": [
       {
-        "id": "{DID}#key-1",
+        "id": "{DID}#key-0",
         "type": "Multikey",
         "controller": "{DID}",
         "publicKeyMultibase": "{SIGNING_KEY_MB}"
       },
       {
-        "id": "{DID}#key-2",
+        "id": "{DID}#key-1",
         "type": "Multikey",
         "controller": "{DID}",
         "publicKeyMultibase": "{KA_KEY_MB}"
       }
     ],
-    "authentication": ["{DID}#key-1"],
-    "assertionMethod": ["{DID}#key-1"],
-    "keyAgreement": ["{DID}#key-2"],
+    "assertionMethod": ["{DID}#key-0"],
+    "authentication": ["{DID}#key-0"],
+    "keyAgreement": ["{DID}#key-1"],
     "service": [
       {
         "id": "{DID}#webvh-hosting",

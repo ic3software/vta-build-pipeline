@@ -3,7 +3,7 @@
 //! This module is the orchestration layer **above**
 //! [`crate::provision_integration`] (wire types) and below the consumer-side
 //! UI (TUI, headless CLI, custom). A setup tool that needs to onboard a new
-//! integration (mediator, webvh service, future app) against a running VTA
+//! integration (mediator, webvh control/daemon/server, future app) against a running VTA
 //! drives the workflow through [`run_provision`] (or the lower-level
 //! [`provision_via_didcomm`] / [`provision_via_rest`] entry points) and
 //! consumes [`VtaEvent`]s on a channel it owns.
@@ -67,8 +67,8 @@ pub use runner::{
 pub use runner_didcomm::{provision_via_didcomm, run_provision_flight};
 
 pub use ask::{
-    BUILTIN_MEDIATOR_TEMPLATE, BUILTIN_VTA_ADMIN_TEMPLATE, BUILTIN_WEBVH_HOSTING_TEMPLATE,
-    BUILTIN_WEBVH_SERVICE_TEMPLATE, DEFAULT_VALIDITY, ProvisionAsk,
+    BUILTIN_MEDIATOR_TEMPLATE, BUILTIN_VTA_ADMIN_TEMPLATE, BUILTIN_WEBVH_CONTROL_TEMPLATE,
+    BUILTIN_WEBVH_DAEMON_TEMPLATE, BUILTIN_WEBVH_SERVER_TEMPLATE, DEFAULT_VALIDITY, ProvisionAsk,
 };
 pub use diagnostics::{
     ConnectedInfo, DiagCheck, DiagEntry, DiagStatus, Protocol, apply_update, pending_list,
@@ -76,7 +76,7 @@ pub use diagnostics::{
 pub use error::ProvisionError;
 pub use event::{AttemptLog, AttemptResult, AttemptResultKind, VtaEvent};
 pub use intent::{AdminCredentialReply, VtaIntent, VtaReply};
-pub use messages::{MediatorMessages, OperatorMessages, WebvhServiceMessages};
+pub use messages::{MediatorMessages, OperatorMessages, WebvhServerMessages};
 pub use resolve::{ResolvedVta, resolve_vta};
 pub use result::{ProvisionResult, response_to_result};
 pub use setup_key::EphemeralSetupKey;

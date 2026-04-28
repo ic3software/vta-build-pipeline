@@ -257,7 +257,7 @@ pub enum TemplateError {
     ReservedVar(String),
 
     #[error(
-        "builtin template '{0}' not found (available: didcomm-mediator, vta-admin, webvh-hosting-server, webvh-service)"
+        "builtin template '{0}' not found (available: didcomm-mediator, vta-admin, webvh-control, webvh-daemon, webvh-server)"
     )]
     BuiltinNotFound(String),
 }

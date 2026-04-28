@@ -1,16 +1,16 @@
 //! Operator-facing strings supplied by the consumer.
 //!
 //! The provision-client library never hardcodes integration nouns
-//! ("mediator", "WebVH service") or full PNM commands in its own output.
+//! ("mediator", "WebVH server") or full PNM commands in its own output.
 //! Each consumer implements [`OperatorMessages`] and passes an
 //! `Arc<dyn OperatorMessages>` into [`super::run_provision`] and friends;
 //! the runners and the headless [`super::driver`] read all user-facing
 //! strings off it.
 //!
-//! [`MediatorMessages`] and [`WebvhServiceMessages`] are shipped as default
+//! [`MediatorMessages`] and [`WebvhServerMessages`] are shipped as default
 //! implementations for the two integration kinds with built-in support in
 //! the SDK ([`super::ask::ProvisionAsk::didcomm_mediator`] and
-//! [`super::ask::ProvisionAsk::webvh_service`]). Other integration kinds
+//! [`super::ask::ProvisionAsk::webvh_server`]). Other integration kinds
 //! ship their own impls.
 
 /// User-visible labels and command suggestions for a single integration
@@ -62,21 +62,21 @@ impl OperatorMessages for MediatorMessages {
     }
 }
 
-/// Default messages for [`super::ask::ProvisionAsk::webvh_service`].
-pub struct WebvhServiceMessages;
+/// Default messages for [`super::ask::ProvisionAsk::webvh_server`].
+pub struct WebvhServerMessages;
 
-impl OperatorMessages for WebvhServiceMessages {
+impl OperatorMessages for WebvhServerMessages {
     fn integration_label(&self) -> &str {
-        "WebVH service"
+        "WebVH server"
     }
 
     fn integration_label_lower(&self) -> &str {
-        "webvh service"
+        "webvh server"
     }
 
     fn pnm_admin_command_hint(&self, context_id: &str, setup_did: &str) -> String {
         format!(
-            "pnm contexts create --id {context_id} --name \"WebVH service\" \\\n  \
+            "pnm contexts create --id {context_id} --name \"WebVH server\" \\\n  \
              --admin-did {setup_did} --admin-expires 1h"
         )
     }
@@ -100,9 +100,9 @@ mod tests {
     }
 
     #[test]
-    fn webvh_service_pnm_command_uses_webvh_label() {
-        let cmd = WebvhServiceMessages.pnm_admin_command_hint("prod-webvh", "did:key:z6MkExample");
-        assert!(cmd.contains("--name \"WebVH service\""));
+    fn webvh_server_pnm_command_uses_webvh_label() {
+        let cmd = WebvhServerMessages.pnm_admin_command_hint("prod-webvh", "did:key:z6MkExample");
+        assert!(cmd.contains("--name \"WebVH server\""));
         assert!(cmd.contains("--admin-did did:key:z6MkExample"));
         assert!(cmd.contains("--id prod-webvh"));
     }
@@ -111,18 +111,18 @@ mod tests {
     fn integration_labels_are_distinct() {
         assert_ne!(
             MediatorMessages.integration_label(),
-            WebvhServiceMessages.integration_label()
+            WebvhServerMessages.integration_label()
         );
         assert_ne!(
             MediatorMessages.integration_label_lower(),
-            WebvhServiceMessages.integration_label_lower()
+            WebvhServerMessages.integration_label_lower()
         );
     }
 
     #[test]
     fn defaults_have_no_success_message() {
         assert!(MediatorMessages.success_screen_message().is_none());
-        assert!(WebvhServiceMessages.success_screen_message().is_none());
+        assert!(WebvhServerMessages.success_screen_message().is_none());
     }
 
     #[test]

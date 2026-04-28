@@ -376,8 +376,8 @@ fn vta_admin_builtin_renders_end_to_end() {
 }
 
 #[test]
-fn webvh_hosting_builtin_renders_end_to_end() {
-    let tpl = load_embedded("webvh-hosting-server").unwrap();
+fn webvh_daemon_builtin_renders_end_to_end() {
+    let tpl = load_embedded("webvh-daemon").unwrap();
     let mut vars = TemplateVars::new();
     vars.insert_string("DID", "did:webvh:example.com:host");
     vars.insert_string("SIGNING_KEY_MB", "z6MkSign");
@@ -393,7 +393,7 @@ fn webvh_hosting_builtin_renders_end_to_end() {
     );
 }
 
-// ─── webvh-service built-in ──────────────────────────────────────────
+// ─── webvh-server built-in ──────────────────────────────────────────
 //
 // The rendered-fixture comparison is a shape regression guard: if the
 // template is edited (a field renamed, a key added, an array flattened
@@ -401,10 +401,10 @@ fn webvh_hosting_builtin_renders_end_to_end() {
 // fixture deliberately. That's the point — downstream services build
 // against this shape.
 
-const WEBVH_SERVICE_RENDERED_FIXTURE: &str =
-    include_str!("../../tests/fixtures/webvh-service.rendered.json");
+const WEBVH_SERVER_RENDERED_FIXTURE: &str =
+    include_str!("../../tests/fixtures/webvh-server.rendered.json");
 
-fn webvh_service_fixture_vars() -> TemplateVars {
+fn webvh_server_fixture_vars() -> TemplateVars {
     let mut vars = TemplateVars::new();
     vars.insert_string("DID", "did:webvh:QmTEST:example.com");
     vars.insert_string("SIGNING_KEY_MB", "z6MkTESTsigning");
@@ -417,35 +417,35 @@ fn webvh_service_fixture_vars() -> TemplateVars {
 }
 
 #[test]
-fn webvh_service_builtin_loads_and_validates() {
-    let tpl = load_embedded("webvh-service").expect("load_embedded");
-    assert_eq!(tpl.name, "webvh-service");
-    assert_eq!(tpl.kind, "webvh-service");
+fn webvh_server_builtin_loads_and_validates() {
+    let tpl = load_embedded("webvh-server").expect("load_embedded");
+    assert_eq!(tpl.name, "webvh-server");
+    assert_eq!(tpl.kind, "webvh-server");
     assert_eq!(tpl.methods, vec!["webvh"]);
     assert_eq!(tpl.required_vars, vec!["MEDIATOR_DID"]);
     tpl.validate().expect("validate after load");
 }
 
 #[test]
-fn webvh_service_builtin_renders_exact_document_shape() {
-    let tpl = load_embedded("webvh-service").unwrap();
-    let out = tpl.render(&webvh_service_fixture_vars()).unwrap();
+fn webvh_server_builtin_renders_exact_document_shape() {
+    let tpl = load_embedded("webvh-server").unwrap();
+    let out = tpl.render(&webvh_server_fixture_vars()).unwrap();
     let expected: Value =
-        serde_json::from_str(WEBVH_SERVICE_RENDERED_FIXTURE).expect("fixture parses as JSON");
+        serde_json::from_str(WEBVH_SERVER_RENDERED_FIXTURE).expect("fixture parses as JSON");
     assert_eq!(
         out, expected,
-        "rendered document diverged from fixture — if intentional, update tests/fixtures/webvh-service.rendered.json"
+        "rendered document diverged from fixture — if intentional, update tests/fixtures/webvh-server.rendered.json"
     );
 }
 
 #[test]
-fn webvh_service_builtin_accept_is_native_array_not_string() {
+fn webvh_server_builtin_accept_is_native_array_not_string() {
     // The whole-string-placeholder contract: `"accept": "{ACCEPT}"` must
     // substitute to the JSON array from the var, not render the literal
     // string "[\"didcomm/v2\"]". Downstream DIDComm libraries parse the
     // accept list as an array; a stringified version breaks them silently.
-    let tpl = load_embedded("webvh-service").unwrap();
-    let doc = tpl.render(&webvh_service_fixture_vars()).unwrap();
+    let tpl = load_embedded("webvh-server").unwrap();
+    let doc = tpl.render(&webvh_server_fixture_vars()).unwrap();
     let endpoint = &doc["service"][0]["serviceEndpoint"][0];
     let accept = &endpoint["accept"];
     assert!(
@@ -456,12 +456,12 @@ fn webvh_service_builtin_accept_is_native_array_not_string() {
 }
 
 #[test]
-fn webvh_service_builtin_has_exactly_one_service_entry() {
+fn webvh_server_builtin_has_exactly_one_service_entry() {
     // Older mediator setups emitted an unnamed duplicate DIDCommMessaging
     // service alongside the named one. Lock the invariant here so this
     // template never regresses into that.
-    let tpl = load_embedded("webvh-service").unwrap();
-    let doc = tpl.render(&webvh_service_fixture_vars()).unwrap();
+    let tpl = load_embedded("webvh-server").unwrap();
+    let doc = tpl.render(&webvh_server_fixture_vars()).unwrap();
     let services = doc["service"].as_array().expect("service is array");
     assert_eq!(
         services.len(),
@@ -478,11 +478,11 @@ fn webvh_service_builtin_has_exactly_one_service_entry() {
 }
 
 #[test]
-fn webvh_service_builtin_context_is_did_v1_plus_cid_v1() {
+fn webvh_server_builtin_context_is_did_v1_plus_cid_v1() {
     // Spec: exactly these two contexts, in this order. No multikey or
     // didcomm contexts (unlike didcomm-mediator which carries them).
-    let tpl = load_embedded("webvh-service").unwrap();
-    let doc = tpl.render(&webvh_service_fixture_vars()).unwrap();
+    let tpl = load_embedded("webvh-server").unwrap();
+    let doc = tpl.render(&webvh_server_fixture_vars()).unwrap();
     assert_eq!(
         doc["@context"],
         json!([
@@ -493,8 +493,8 @@ fn webvh_service_builtin_context_is_did_v1_plus_cid_v1() {
 }
 
 #[test]
-fn webvh_service_builtin_missing_mediator_did_errors() {
-    let tpl = load_embedded("webvh-service").unwrap();
+fn webvh_server_builtin_missing_mediator_did_errors() {
+    let tpl = load_embedded("webvh-server").unwrap();
     let mut vars = TemplateVars::new();
     vars.insert_string("DID", "did:webvh:QmTEST:example.com");
     vars.insert_string("SIGNING_KEY_MB", "z6MkTESTsigning");
@@ -511,7 +511,7 @@ fn webvh_service_builtin_missing_mediator_did_errors() {
 }
 
 #[test]
-fn webvh_service_builtin_rejects_unknown_placeholder_in_template() {
+fn webvh_server_builtin_rejects_unknown_placeholder_in_template() {
     // Sanity-check that validate() (which ran implicitly on load) rejects
     // any future edit that adds an undeclared `{TOKEN}` to the document.
     // Mirrors the strictness of the other built-ins.
@@ -520,7 +520,7 @@ fn webvh_service_builtin_rejects_unknown_placeholder_in_template() {
     // confirm `from_json` refuses it — this guards the author against
     // accidentally adding a new placeholder without declaring it in
     // required/optional vars.
-    let tpl = load_embedded("webvh-service").unwrap();
+    let tpl = load_embedded("webvh-server").unwrap();
     let mut doc = tpl.document.clone();
     doc["service"][0]["serviceEndpoint"][0]["extra"] =
         Value::String("{UNDECLARED_TOKEN}".to_string());

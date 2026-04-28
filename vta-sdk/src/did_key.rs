@@ -179,4 +179,70 @@ mod tests {
         let result = decode_private_key_multibase(&encoded);
         assert!(matches!(result, Err(DidKeyError::InvalidSeedLength)));
     }
+
+    /// Pin the verification-method-ID contract for `did:key` secrets.
+    ///
+    /// Regression guard: a previous PR landed VTA `did:key` support where
+    /// downstream DIDComm consumers hardcoded `{did}#key-0` / `{did}#key-1`
+    /// as fragment IDs. For `did:key` the spec says VM IDs are the
+    /// multibase public-key fragment (`{did}#{ed_pub_mb}` /
+    /// `{did}#{x_pub_mb}`), so those lookups missed and the secrets vector
+    /// was empty. This test pins the fragment shape `secrets_from_did_key`
+    /// produces so that contract is checked at the SDK boundary, not just
+    /// at the consumer site.
+    #[cfg(feature = "didcomm")]
+    #[test]
+    fn test_secrets_from_did_key_uses_multibase_fragment_ids() {
+        use affinidi_tdk::secrets_resolver::secrets::Secret;
+
+        let seed = [42u8; 32];
+        let ed_secret = Secret::generate_ed25519(None, Some(&seed));
+        let ed_pub_mb = ed_secret.get_public_keymultibase().unwrap();
+        let did = format!("did:key:{ed_pub_mb}");
+
+        let secrets = secrets_from_did_key(&did, &seed).expect("did:key secrets");
+
+        // Signing VM ID must be {did}#{ed_pub_mb} — not the legacy
+        // #key-0 webvh convention.
+        assert_eq!(secrets.signing.id, format!("{did}#{ed_pub_mb}"));
+        assert_ne!(secrets.signing.id, format!("{did}#key-0"));
+
+        // Key-agreement VM ID must use a multibase fragment that differs
+        // from the signing fragment (X25519 ≠ Ed25519 public bytes), and
+        // must not be the legacy #key-1.
+        assert!(
+            secrets.key_agreement.id.starts_with(&format!("{did}#z")),
+            "key_agreement.id should start with `{did}#z`, got: {}",
+            secrets.key_agreement.id
+        );
+        assert_ne!(secrets.key_agreement.id, format!("{did}#key-1"));
+        assert_ne!(secrets.key_agreement.id, secrets.signing.id);
+    }
+
+    /// `secrets_from_did_key` is the only place the runtime X25519 secret
+    /// is constructed for a `did:key` VTA. Make sure repeated calls with
+    /// the same seed produce the same key-agreement ID, so a peer that
+    /// resolves the DID document encrypts to the same key the VTA holds.
+    #[cfg(feature = "didcomm")]
+    #[test]
+    fn test_secrets_from_did_key_is_deterministic() {
+        use affinidi_tdk::secrets_resolver::secrets::Secret;
+
+        let seed = [7u8; 32];
+        let ed_secret = Secret::generate_ed25519(None, Some(&seed));
+        let did = format!("did:key:{}", ed_secret.get_public_keymultibase().unwrap());
+
+        let a = secrets_from_did_key(&did, &seed).unwrap();
+        let b = secrets_from_did_key(&did, &seed).unwrap();
+        assert_eq!(a.signing.id, b.signing.id);
+        assert_eq!(a.key_agreement.id, b.key_agreement.id);
+    }
+
+    #[cfg(feature = "didcomm")]
+    #[test]
+    fn test_secrets_from_did_key_rejects_non_did_key() {
+        let seed = [1u8; 32];
+        let result = secrets_from_did_key("did:webvh:abc:example.com:vta", &seed);
+        assert!(matches!(result, Err(DidKeyError::InvalidDidKey)));
+    }
 }
