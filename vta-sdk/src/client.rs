@@ -608,10 +608,10 @@ impl VtaClient {
 
     /// Returns the token expiry timestamp, if known.
     pub async fn token_expires_at(&self) -> Option<u64> {
-        if let Transport::Rest { auth, .. } = &self.transport {
-            auth.lock().await.expires_at
-        } else {
-            None
+        match &self.transport {
+            Transport::Rest { auth, .. } => auth.lock().await.expires_at,
+            #[cfg(feature = "session")]
+            Transport::DIDComm { .. } => None,
         }
     }
 
@@ -650,18 +650,26 @@ impl VtaClient {
     /// Can be called from sync or async contexts. For async contexts, use
     /// [`set_token_async`](Self::set_token_async) to avoid potential blocking.
     pub fn set_token(&self, token: String) {
-        if let Transport::Rest { auth, .. } = &self.transport {
-            // try_lock avoids blocking the current thread if called from async
-            if let Ok(mut guard) = auth.try_lock() {
-                guard.token = Some(token);
+        match &self.transport {
+            Transport::Rest { auth, .. } => {
+                // try_lock avoids blocking the current thread if called from async
+                if let Ok(mut guard) = auth.try_lock() {
+                    guard.token = Some(token);
+                }
             }
+            #[cfg(feature = "session")]
+            Transport::DIDComm { .. } => {}
         }
     }
 
     /// Set the Bearer token (async version).
     pub async fn set_token_async(&self, token: String) {
-        if let Transport::Rest { auth, .. } = &self.transport {
-            auth.lock().await.token = Some(token);
+        match &self.transport {
+            Transport::Rest { auth, .. } => {
+                auth.lock().await.token = Some(token);
+            }
+            #[cfg(feature = "session")]
+            Transport::DIDComm { .. } => {}
         }
     }
 

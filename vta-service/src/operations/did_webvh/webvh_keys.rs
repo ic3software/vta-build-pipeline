@@ -119,6 +119,11 @@ pub async fn install(keys_ks: &KeyspaceHandle, handle: &WebvhKeyHandle) -> Resul
 
 /// Direct lookup by `(scid, version_id, role, hash)`. O(1) — every
 /// caller in the update flow has these three pieces from the log entry.
+///
+/// Test-only today: the production update flow scans by hash via
+/// [`find_handle_by_hash`] because callers don't yet thread the
+/// `version_id` through. Kept available for tests + future migration.
+#[cfg(test)]
 pub async fn load_handle(
     keys_ks: &KeyspaceHandle,
     scid: &str,

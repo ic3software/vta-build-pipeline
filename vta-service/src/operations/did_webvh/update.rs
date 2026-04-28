@@ -83,12 +83,16 @@ pub struct UpdateDidWebvhResult {
 /// it via [`install_derived_webvh_keys`] after `didwebvh_rs::update_did`
 /// returns with the real new `version_id` (the version-id is part of
 /// the storage key, and we can't predict the hash component of it).
+///
+/// The secret itself isn't stored on the struct — webvh handles are
+/// re-derivable from `(seed_id, derivation_path)`, so the caller gets
+/// what it needs to persist the handle without holding key material
+/// across the async boundary.
 pub(super) struct DerivedWebvhKey {
     pub public_key: String,
     pub hash: String,
     pub derivation_path: String,
     pub seed_id: u32,
-    pub secret: Secret,
 }
 
 /// Hard cap on per-witness DID resolution. Witnesses are typically
@@ -266,7 +270,6 @@ pub(super) async fn derive_webvh_keys(
             hash,
             derivation_path: path,
             seed_id,
-            secret,
         });
     }
 
