@@ -50,6 +50,9 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
+use crate::error::AppError;
+use crate::messaging::drain_store::{self, PersistedDrainEntry};
+use crate::store::KeyspaceHandle;
 use vti_common::telemetry::{SharedTelemetrySink, TelemetryEvent, TelemetryKind};
 
 /// Default per-listener outbound buffer capacity (responses queued
@@ -90,6 +93,10 @@ pub struct PendingResponse {
     pub thread_id: Option<String>,
 }
 
+/// Hard upper bound on a drain TTL. Spec: 30 days. Operator may
+/// renew via `migrate --to <same>` if a longer drain is needed.
+pub const MAX_DRAIN_TTL: chrono::Duration = chrono::Duration::days(30);
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RegistryError {
     #[error("mediator `{0}` is currently active; cannot drain it without a replacement")]
@@ -100,6 +107,12 @@ pub enum RegistryError {
     AlreadyDraining(String),
     #[error("mediator `{0}` is the active mediator and cannot be cancelled (use disable instead)")]
     CannotCancelActive(String),
+    #[error("drain deadline must be in the future (got `{0}`)")]
+    DrainDeadlineInPast(chrono::DateTime<chrono::Utc>),
+    #[error("drain TTL exceeds the {max_days}-day cap")]
+    DrainTtlExceeded { max_days: i64 },
+    #[error("drain persistence failed: {0}")]
+    Persistence(String),
 }
 
 /// Pure synchronous state machine — no I/O, no `await`. All
@@ -434,6 +447,180 @@ impl MediatorListenerRegistry {
             )
             .await;
         Ok(entry)
+    }
+
+    /// Begin draining a mediator AND persist the entry so it
+    /// survives restart. Validates the TTL bounds (must be in the
+    /// future and within [`MAX_DRAIN_TTL`]).
+    ///
+    /// Order of operations: validate → in-memory state mutation →
+    /// persist → telemetry. If persistence fails after the in-
+    /// memory mutation succeeded, the in-memory entry is rolled
+    /// back so disk and registry stay consistent. Callers should
+    /// hold `PROTOCOL_LOCK` to serialize against concurrent
+    /// mutations.
+    pub async fn record_drain_persisted(
+        &self,
+        ks: &KeyspaceHandle,
+        mediator_did: &str,
+        endpoint: String,
+        drains_until: DateTime<Utc>,
+    ) -> Result<u64, RegistryError> {
+        let now = Utc::now();
+        if drains_until <= now {
+            return Err(RegistryError::DrainDeadlineInPast(drains_until));
+        }
+        if drains_until - now > MAX_DRAIN_TTL {
+            return Err(RegistryError::DrainTtlExceeded {
+                max_days: MAX_DRAIN_TTL.num_days(),
+            });
+        }
+
+        // In-memory first so AlreadyDraining / ActiveMediator checks
+        // hit the cheaper path.
+        let generation = {
+            let mut s = self.state.write().await;
+            s.start_drain(mediator_did, endpoint.clone(), drains_until)?
+        };
+
+        let entry = PersistedDrainEntry {
+            mediator_did: mediator_did.to_string(),
+            endpoint: endpoint.clone(),
+            drains_until,
+        };
+        if let Err(e) = drain_store::store_drain(ks, &entry).await {
+            // Roll back the in-memory mutation. cancel_drain refuses
+            // to cancel an active mediator, but we're cancelling a
+            // brand-new drain entry so it's always in the drain map.
+            let _ = self.state.write().await.cancel_drain(mediator_did);
+            return Err(RegistryError::Persistence(e.to_string()));
+        }
+
+        let _ = self
+            .telemetry
+            .record(
+                TelemetryEvent::new(TelemetryKind::MediatorDrainStart)
+                    .with_mediator(mediator_did)
+                    .with_field("drains_until", JsonValue::from(drains_until.to_rfc3339()))
+                    .with_field("generation", JsonValue::from(generation))
+                    .with_field("persisted", JsonValue::from(true)),
+            )
+            .await;
+        Ok(generation)
+    }
+
+    /// Cancel a drain AND remove it from the keyspace.
+    pub async fn record_cancel_persisted(
+        &self,
+        ks: &KeyspaceHandle,
+        mediator_did: &str,
+    ) -> Result<DrainEntry, RegistryError> {
+        let entry = {
+            let mut s = self.state.write().await;
+            s.cancel_drain(mediator_did)?
+        };
+        if let Err(e) = drain_store::delete_drain(ks, mediator_did).await {
+            // Re-insert to keep disk and memory in sync.
+            let _ = self.state.write().await.start_drain(
+                mediator_did,
+                entry.endpoint.clone(),
+                entry.drains_until,
+            );
+            return Err(RegistryError::Persistence(e.to_string()));
+        }
+        let _ = self
+            .telemetry
+            .record(
+                TelemetryEvent::new(TelemetryKind::MediatorDrainCancel)
+                    .with_mediator(mediator_did)
+                    .with_field("persisted", JsonValue::from(true)),
+            )
+            .await;
+        Ok(entry)
+    }
+
+    /// Apply TTL expiry AND remove expired entries from the
+    /// keyspace. Returns the dropped entries.
+    pub async fn record_expiries_persisted(
+        &self,
+        ks: &KeyspaceHandle,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<DrainEntry>, RegistryError> {
+        let dropped = {
+            let mut s = self.state.write().await;
+            s.expire_drains(now)
+        };
+        for entry in &dropped {
+            if let Err(e) = drain_store::delete_drain(ks, &entry.mediator_did).await {
+                tracing::warn!(
+                    mediator = %entry.mediator_did,
+                    error = %e,
+                    "drain expiry: in-memory entry removed but keyspace delete failed; \
+                     will be re-replayed (and re-expired) on next boot"
+                );
+            }
+            let _ = self
+                .telemetry
+                .record(
+                    TelemetryEvent::new(TelemetryKind::MediatorDrainExpire)
+                        .with_mediator(&entry.mediator_did)
+                        .with_field("generation", JsonValue::from(entry.generation)),
+                )
+                .await;
+        }
+        Ok(dropped)
+    }
+
+    /// Boot-time replay: read every persisted drain entry, drop any
+    /// already-expired entries from the keyspace, and re-register
+    /// the live ones with the in-memory registry. Returns the
+    /// re-registered entries (the caller — the P2.2 sweeper — uses
+    /// this list to arm TTL timers).
+    pub async fn replay_drains(&self, ks: &KeyspaceHandle) -> Result<Vec<DrainEntry>, AppError> {
+        let now = Utc::now();
+        let persisted = drain_store::list_drains(ks).await?;
+        let mut live = Vec::with_capacity(persisted.len());
+        for entry in persisted {
+            if entry.drains_until <= now {
+                if let Err(e) = drain_store::delete_drain(ks, &entry.mediator_did).await {
+                    tracing::warn!(
+                        mediator = %entry.mediator_did,
+                        error = %e,
+                        "drain replay: failed to delete already-expired entry"
+                    );
+                }
+                let _ = self
+                    .telemetry
+                    .record(
+                        TelemetryEvent::new(TelemetryKind::MediatorDrainExpire)
+                            .with_mediator(&entry.mediator_did)
+                            .with_field("reason", JsonValue::from("already-expired-on-boot")),
+                    )
+                    .await;
+                continue;
+            }
+            // Re-register in-memory. Failure here would mean the
+            // mediator is already active or already draining, which
+            // should be impossible at boot — log and skip.
+            match self.state.write().await.start_drain(
+                &entry.mediator_did,
+                entry.endpoint.clone(),
+                entry.drains_until,
+            ) {
+                Ok(generation) => {
+                    live.push(DrainEntry {
+                        mediator_did: entry.mediator_did,
+                        endpoint: entry.endpoint,
+                        drains_until: entry.drains_until,
+                        generation,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "drain replay: skipped");
+                }
+            }
+        }
+        Ok(live)
     }
 
     /// Apply TTL expiry, returning the dropped entries. Caller (the
@@ -892,5 +1079,231 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reg.drain_count().await, 1);
+    }
+
+    // ---------- persistence-aware methods (P2.1) ----------
+
+    async fn fresh_keyspace() -> (tempfile::TempDir, KeyspaceHandle) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&vti_common::config::StoreConfig {
+            data_dir: dir.path().into(),
+        })
+        .unwrap();
+        let ks = store.keyspace("drains").unwrap();
+        (dir, ks)
+    }
+
+    #[tokio::test]
+    async fn record_drain_persisted_writes_to_keyspace() {
+        let (_d, ks) = fresh_keyspace().await;
+        let sink = telemetry();
+        let reg = MediatorListenerRegistry::new(Arc::clone(&sink));
+        reg.record_activate(binding("did:m:A", "wss://A")).await;
+        reg.record_activate(binding("did:m:B", "wss://B")).await;
+        reg.record_drain_persisted(&ks, "did:m:A", "wss://A".into(), now_plus(3600))
+            .await
+            .unwrap();
+        let persisted = drain_store::list_drains(&ks).await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].mediator_did, "did:m:A");
+        assert_eq!(reg.drain_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn record_drain_persisted_rejects_30_day_cap_exceeded() {
+        let (_d, ks) = fresh_keyspace().await;
+        let sink = telemetry();
+        let reg = MediatorListenerRegistry::new(Arc::clone(&sink));
+        reg.record_activate(binding("did:m:A", "wss://A")).await;
+        reg.record_activate(binding("did:m:B", "wss://B")).await;
+        let err = reg
+            .record_drain_persisted(
+                &ks,
+                "did:m:A",
+                "wss://A".into(),
+                Utc::now() + Duration::days(31),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RegistryError::DrainTtlExceeded { max_days: 30 }
+        ));
+        // Nothing persisted, nothing in memory.
+        assert!(drain_store::list_drains(&ks).await.unwrap().is_empty());
+        assert_eq!(reg.drain_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn record_drain_persisted_accepts_29_day_ttl() {
+        let (_d, ks) = fresh_keyspace().await;
+        let sink = telemetry();
+        let reg = MediatorListenerRegistry::new(Arc::clone(&sink));
+        reg.record_activate(binding("did:m:A", "wss://A")).await;
+        reg.record_activate(binding("did:m:B", "wss://B")).await;
+        let result = reg
+            .record_drain_persisted(
+                &ks,
+                "did:m:A",
+                "wss://A".into(),
+                Utc::now() + Duration::days(29),
+            )
+            .await;
+        assert!(result.is_ok(), "29 days under the 30-day cap");
+    }
+
+    #[tokio::test]
+    async fn record_drain_persisted_rejects_past_deadline() {
+        let (_d, ks) = fresh_keyspace().await;
+        let sink = telemetry();
+        let reg = MediatorListenerRegistry::new(Arc::clone(&sink));
+        reg.record_activate(binding("did:m:A", "wss://A")).await;
+        reg.record_activate(binding("did:m:B", "wss://B")).await;
+        let err = reg
+            .record_drain_persisted(&ks, "did:m:A", "wss://A".into(), now_plus(-10))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::DrainDeadlineInPast(_)));
+    }
+
+    #[tokio::test]
+    async fn record_cancel_persisted_removes_from_keyspace() {
+        let (_d, ks) = fresh_keyspace().await;
+        let sink = telemetry();
+        let reg = MediatorListenerRegistry::new(Arc::clone(&sink));
+        reg.record_activate(binding("did:m:A", "wss://A")).await;
+        reg.record_activate(binding("did:m:B", "wss://B")).await;
+        reg.record_drain_persisted(&ks, "did:m:A", "wss://A".into(), now_plus(60))
+            .await
+            .unwrap();
+        reg.record_cancel_persisted(&ks, "did:m:A").await.unwrap();
+        assert!(drain_store::list_drains(&ks).await.unwrap().is_empty());
+        assert_eq!(reg.drain_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn record_expiries_persisted_removes_expired_from_keyspace() {
+        let (_d, ks) = fresh_keyspace().await;
+        let sink = telemetry();
+        let reg = MediatorListenerRegistry::new(Arc::clone(&sink));
+        reg.record_activate(binding("did:m:A", "wss://A")).await;
+        reg.record_activate(binding("did:m:B", "wss://B")).await;
+        reg.record_activate(binding("did:m:C", "wss://C")).await;
+        // Persist two drains with very short TTL (a fraction of a
+        // second) so the expiry sweep below picks them up
+        // deterministically without sleeping.
+        let almost_now = Utc::now() + Duration::milliseconds(1);
+        // Sub-second TTL is below the test's tolerance for the
+        // drains_until check; instead, set deadlines in the very
+        // recent past — the TTL-bound check requires future, so we
+        // bypass it via the lower-level `record_drain` here. This
+        // simulates a state that was valid at write time but has
+        // since expired.
+        reg.record_drain("did:m:A", "wss://A".into(), almost_now)
+            .await
+            .unwrap();
+        drain_store::store_drain(
+            &ks,
+            &PersistedDrainEntry {
+                mediator_did: "did:m:A".into(),
+                endpoint: "wss://A".into(),
+                drains_until: almost_now,
+            },
+        )
+        .await
+        .unwrap();
+        // Sleep just past the deadline.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let dropped = reg
+            .record_expiries_persisted(&ks, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].mediator_did, "did:m:A");
+        assert!(drain_store::list_drains(&ks).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn replay_drains_restores_in_memory_state() {
+        // Spec criterion #8 (restart resilience): write entry, kill,
+        // restart, drain set restored from keyspace.
+        let (_d, ks) = fresh_keyspace().await;
+        let sink = telemetry();
+
+        // First registry instance: record + persist.
+        {
+            let reg1 = MediatorListenerRegistry::new(Arc::clone(&sink));
+            reg1.record_activate(binding("did:m:A", "wss://A")).await;
+            reg1.record_activate(binding("did:m:B", "wss://B")).await;
+            reg1.record_drain_persisted(&ks, "did:m:A", "wss://A".into(), now_plus(3600))
+                .await
+                .unwrap();
+            // reg1 dropped here — simulates VTA restart.
+        }
+
+        // Second registry instance: replay from keyspace.
+        let reg2 = MediatorListenerRegistry::new(Arc::clone(&sink));
+        let live = reg2.replay_drains(&ks).await.unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mediator_did, "did:m:A");
+        assert_eq!(reg2.drain_count().await, 1);
+        assert!(reg2.drain_deadline("did:m:A").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn replay_drains_drops_already_expired_entries() {
+        let (_d, ks) = fresh_keyspace().await;
+        // Backdoor an already-expired entry into the keyspace
+        // (simulates a long downtime that exceeded the TTL).
+        drain_store::store_drain(
+            &ks,
+            &PersistedDrainEntry {
+                mediator_did: "did:m:expired".into(),
+                endpoint: "wss://expired".into(),
+                drains_until: Utc::now() - Duration::seconds(60),
+            },
+        )
+        .await
+        .unwrap();
+        drain_store::store_drain(
+            &ks,
+            &PersistedDrainEntry {
+                mediator_did: "did:m:live".into(),
+                endpoint: "wss://live".into(),
+                drains_until: Utc::now() + Duration::seconds(3600),
+            },
+        )
+        .await
+        .unwrap();
+
+        let sink = telemetry();
+        let reg = MediatorListenerRegistry::new(Arc::clone(&sink));
+        let live = reg.replay_drains(&ks).await.unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mediator_did, "did:m:live");
+        // The expired entry should also be removed from disk.
+        let remaining = drain_store::list_drains(&ks).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].mediator_did, "did:m:live");
+
+        // Telemetry: an expire event should be recorded for the
+        // already-expired entry.
+        let events = sink
+            .query(&TelemetryFilter::new().kind(TelemetryKind::MediatorDrainExpire))
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].mediator_did.as_deref(), Some("did:m:expired"));
+    }
+
+    #[tokio::test]
+    async fn replay_drains_empty_keyspace_is_noop() {
+        let (_d, ks) = fresh_keyspace().await;
+        let sink = telemetry();
+        let reg = MediatorListenerRegistry::new(Arc::clone(&sink));
+        let live = reg.replay_drains(&ks).await.unwrap();
+        assert!(live.is_empty());
+        assert_eq!(reg.drain_count().await, 0);
     }
 }
