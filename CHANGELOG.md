@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Added
+
+- **DIDComm protocol management** — enable, disable, and migrate
+  the DIDComm protocol surface on a running VTA without rebuilding
+  it, re-issuing admin credentials, or rotating the VTA's
+  verification keys. Six new operator commands:
+  `pnm services {enable,disable} didcomm`, `pnm mediator {migrate,
+  rollback,drain cancel,report}`. Each protocol change publishes a
+  new WebVH LogEntry; `verificationMethod` is byte-identical
+  before and after. Mediator changes go through a drain set
+  (persisted to fjall, restart-resilient, 30-day TTL cap) so
+  in-flight messages from senders with stale DID-doc caches keep
+  landing while the new mediator picks up traffic. Telemetry sink
+  is pluggable behind a trait — default impl is a 10k-event ring
+  buffer; the `mediator report` command queries it for
+  per-mediator inbound counts and per-sender last-seen mediator.
+  See `docs/03-integrating/didcomm-protocol-management.md` and
+  `docs/05-design-notes/didcomm-protocol-management.md`. New
+  modules: `vti_common::telemetry`,
+  `vta_service::messaging::{registry, drain_store, drain_sweeper,
+  handshake}`, `vta_service::operations::protocol::*`,
+  `vta_sdk::protocol`, `vta_cli_common::commands::{services,
+  mediator}`.
+
 ### Breaking
 
 - **WebVH built-in templates renamed by deployment role.**

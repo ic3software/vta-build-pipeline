@@ -166,3 +166,113 @@ pub enum TelemetryError {
     #[error("telemetry sink backend failed: {0}")]
     Backend(String),
 }
+
+#[cfg(test)]
+mod swappability_tests {
+    //! Spec criterion #17: a downstream impl of [`TelemetrySink`]
+    //! must satisfy the same observable contract as
+    //! [`RingBufferTelemetry`]. This module ships a minimal
+    //! `Vec<Mutex<…>>` impl and runs a parametric test against
+    //! both — proving the trait boundary holds.
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Stub [`TelemetrySink`] backed by an unbounded
+    /// `Vec<TelemetryEvent>`. NOT used in production — exists only
+    /// to prove `Arc<dyn TelemetrySink>` swappability.
+    struct VecMutexSink {
+        events: Mutex<Vec<TelemetryEvent>>,
+    }
+
+    impl VecMutexSink {
+        fn new() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TelemetrySink for VecMutexSink {
+        async fn record(&self, event: TelemetryEvent) -> Result<(), TelemetryError> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+
+        async fn query(
+            &self,
+            filter: &TelemetryFilter,
+        ) -> Result<Vec<TelemetryEvent>, TelemetryError> {
+            let events = self.events.lock().unwrap();
+            Ok(events
+                .iter()
+                .rev()
+                .filter(|e| filter.matches(e))
+                .cloned()
+                .collect())
+        }
+    }
+
+    /// Same scenario — different sink. Both impls must produce the
+    /// same observable result for the same input.
+    async fn exercise(sink: &dyn TelemetrySink) -> Vec<TelemetryEvent> {
+        sink.record(
+            TelemetryEvent::new(TelemetryKind::DidcommInbound)
+                .with_mediator("did:m:A")
+                .with_sender("did:peer:alice"),
+        )
+        .await
+        .unwrap();
+        sink.record(
+            TelemetryEvent::new(TelemetryKind::MediatorMigrateStart).with_mediator("did:m:B"),
+        )
+        .await
+        .unwrap();
+        sink.record(
+            TelemetryEvent::new(TelemetryKind::DidcommInbound)
+                .with_mediator("did:m:B")
+                .with_sender("did:peer:alice"),
+        )
+        .await
+        .unwrap();
+        sink.query(&TelemetryFilter::new().kind(TelemetryKind::DidcommInbound))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ring_buffer_and_vec_mutex_produce_same_observable_results() {
+        let ring = RingBufferTelemetry::new();
+        let stub = VecMutexSink::new();
+        let from_ring = exercise(&ring).await;
+        let from_stub = exercise(&stub).await;
+        // Both impls must surface the two DidcommInbound events
+        // (filtered out of the three total recorded), in
+        // newest-first order.
+        assert_eq!(from_ring.len(), 2);
+        assert_eq!(from_stub.len(), 2);
+        for (a, b) in from_ring.iter().zip(from_stub.iter()) {
+            assert_eq!(a.kind, b.kind);
+            assert_eq!(a.mediator_did, b.mediator_did);
+            assert_eq!(a.sender_did, b.sender_did);
+        }
+        // Order: newest first.
+        assert_eq!(from_ring[0].mediator_did.as_deref(), Some("did:m:B"));
+        assert_eq!(from_stub[0].mediator_did.as_deref(), Some("did:m:B"));
+    }
+
+    #[tokio::test]
+    async fn arc_dyn_dispatch_swap_at_runtime() {
+        let sinks: Vec<SharedTelemetrySink> = vec![
+            Arc::new(RingBufferTelemetry::new()),
+            Arc::new(VecMutexSink::new()),
+        ];
+        for sink in &sinks {
+            sink.record(TelemetryEvent::new(TelemetryKind::DidcommInbound))
+                .await
+                .unwrap();
+            let out = sink.query(&TelemetryFilter::new()).await.unwrap();
+            assert_eq!(out.len(), 1);
+        }
+    }
+}

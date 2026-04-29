@@ -1,5 +1,9 @@
 # did:webvh — Update + Key Rotation
 
+> **See also:** for the operator-facing surface that drives DIDComm
+> protocol changes through this update primitive, see
+> [DIDComm Protocol Management](didcomm-protocol-management.md).
+
 Generic update + key-rotation operations for an existing webvh DID
 managed by a VTA. Two operations sit on top of `didwebvh_rs::update_did`:
 
