@@ -41,6 +41,25 @@ pub(super) fn render(tpl: &DidTemplate, vars: &TemplateVars) -> Result<Value, Te
         }
     }
 
+    // Convention: when a caller supplies URL but not WS_URL, derive
+    // WS_URL by swapping the scheme — `https://` → `wss://`, `http://`
+    // → `ws://`. The DIDComm-mediator template advertises both an
+    // HTTP and a WebSocket transport, and in practice they're served
+    // off the same host/path; making operators repeat the URL with a
+    // different scheme is friction without value. An explicitly
+    // supplied WS_URL always wins. URLs with non-http(s) schemes are
+    // left untouched so the missing-var error surfaces the operator's
+    // configuration gap rather than fabricating a wrong value.
+    if !effective.contains_key("WS_URL")
+        && let Some(url) = effective.get("URL").and_then(Value::as_str)
+    {
+        if let Some(rest) = url.strip_prefix("https://") {
+            effective.insert("WS_URL".into(), Value::String(format!("wss://{rest}")));
+        } else if let Some(rest) = url.strip_prefix("http://") {
+            effective.insert("WS_URL".into(), Value::String(format!("ws://{rest}")));
+        }
+    }
+
     // Required vars must be resolvable (either from caller or — if the caller
     // chose to treat it as optional by supplying a default — from optionalVars
     // via the earlier insert, though the validator rejects overlap, so this

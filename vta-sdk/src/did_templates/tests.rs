@@ -355,6 +355,82 @@ fn didcomm_mediator_builtin_renders_end_to_end() {
 }
 
 #[test]
+fn ws_url_is_derived_from_url_when_omitted() {
+    // The renderer auto-derives WS_URL from URL by swapping the
+    // scheme so `vta setup` and similar one-URL flows can render the
+    // mediator template without a separate `--var WS_URL=...`.
+    let tpl = load_embedded("didcomm-mediator").unwrap();
+    let mut vars = TemplateVars::new();
+    vars.insert_string("DID", "did:webvh:example.com:mediator");
+    vars.insert_string("SIGNING_KEY_MB", "z6MkSign");
+    vars.insert_string("KA_KEY_MB", "z6LSKa");
+    vars.insert_string("URL", "https://mediator.example.com/path");
+    // WS_URL deliberately omitted.
+
+    let doc = tpl.render(&vars).expect("render with derived WS_URL");
+    let endpoints = doc["service"][0]["serviceEndpoint"].as_array().unwrap();
+    assert_eq!(endpoints[0]["uri"], "https://mediator.example.com/path");
+    assert_eq!(endpoints[1]["uri"], "wss://mediator.example.com/path");
+}
+
+#[test]
+fn ws_url_derivation_handles_plain_http() {
+    let tpl = load_embedded("didcomm-mediator").unwrap();
+    let mut vars = TemplateVars::new();
+    vars.insert_string("DID", "did:webvh:example.com:mediator");
+    vars.insert_string("SIGNING_KEY_MB", "z6MkSign");
+    vars.insert_string("KA_KEY_MB", "z6LSKa");
+    vars.insert_string("URL", "http://mediator.local");
+
+    let doc = tpl.render(&vars).expect("render with derived ws://");
+    let endpoints = doc["service"][0]["serviceEndpoint"].as_array().unwrap();
+    assert_eq!(endpoints[1]["uri"], "ws://mediator.local");
+}
+
+#[test]
+fn explicit_ws_url_overrides_derivation() {
+    // A caller supplying both URL and WS_URL gets exactly what they
+    // asked for — derivation must not clobber an explicit value (e.g.
+    // an operator who terminates WS at a different host).
+    let tpl = load_embedded("didcomm-mediator").unwrap();
+    let mut vars = TemplateVars::new();
+    vars.insert_string("DID", "did:webvh:example.com:mediator");
+    vars.insert_string("SIGNING_KEY_MB", "z6MkSign");
+    vars.insert_string("KA_KEY_MB", "z6LSKa");
+    vars.insert_string("URL", "https://mediator.example.com");
+    vars.insert_string("WS_URL", "wss://ws-gateway.example.net/mediator/ws");
+
+    let doc = tpl.render(&vars).unwrap();
+    let endpoints = doc["service"][0]["serviceEndpoint"].as_array().unwrap();
+    assert_eq!(endpoints[0]["uri"], "https://mediator.example.com");
+    assert_eq!(
+        endpoints[1]["uri"],
+        "wss://ws-gateway.example.net/mediator/ws"
+    );
+}
+
+#[test]
+fn ws_url_not_derived_for_non_http_scheme() {
+    // A URL with neither http:// nor https:// can't be safely converted
+    // — surface the missing-var error instead of fabricating something.
+    let tpl = load_embedded("didcomm-mediator").unwrap();
+    let mut vars = TemplateVars::new();
+    vars.insert_string("DID", "did:webvh:example.com:mediator");
+    vars.insert_string("SIGNING_KEY_MB", "z6MkSign");
+    vars.insert_string("KA_KEY_MB", "z6LSKa");
+    vars.insert_string("URL", "didcomm://routed-only");
+
+    let err = tpl
+        .render(&vars)
+        .expect_err("render should fail with missing WS_URL");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("WS_URL"),
+        "expected WS_URL in error, got: {msg}"
+    );
+}
+
+#[test]
 fn vta_admin_builtin_renders_end_to_end() {
     // The vta-admin template is a did:key shape — no required vars beyond
     // the ambient {DID} + {SIGNING_KEY_MB} the renderer / VTA always
