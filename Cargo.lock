@@ -8453,9 +8453,11 @@ version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "affinidi-tdk",
+ "async-trait",
  "axum",
  "axum-extra",
  "base64 0.22.1",
+ "chrono",
  "ed25519-dalek",
  "fjall",
  "jsonwebtoken",

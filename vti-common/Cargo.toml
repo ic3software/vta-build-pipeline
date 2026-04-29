@@ -21,8 +21,10 @@ vsock-store = ["dep:tokio-vsock", "dep:libc"]
 cli-synthesis = []
 
 [dependencies]
+async-trait = "0.1"
 axum = { workspace = true }
 axum-extra = { workspace = true }
+chrono = { workspace = true }
 fjall = { workspace = true }
 jsonwebtoken = { workspace = true }
 serde = { workspace = true }

@@ -1500,8 +1500,7 @@ mod tests {
     async fn validate_witnesses_accepts_resolvable_did_key() {
         let r = resolver().await;
         let did = test_did_key();
-        let mb = Multibase::try_from(did.trim_start_matches("did:key:").to_string())
-            .expect("multibase parses");
+        let mb = Multibase::from(did.trim_start_matches("did:key:").to_string());
         let cfg = Witnesses::Value {
             threshold: 1,
             witnesses: vec![Witness { id: mb }],
@@ -1528,7 +1527,7 @@ mod tests {
     async fn validate_witnesses_rejects_threshold_above_count() {
         let r = resolver().await;
         let did = test_did_key();
-        let mb = Multibase::try_from(did.trim_start_matches("did:key:").to_string()).unwrap();
+        let mb = Multibase::from(did.trim_start_matches("did:key:").to_string());
         let cfg = Witnesses::Value {
             threshold: 5,
             witnesses: vec![Witness { id: mb }],

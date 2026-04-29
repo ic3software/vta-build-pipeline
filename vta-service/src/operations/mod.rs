@@ -17,6 +17,11 @@ pub mod did_webvh;
 /// reach the VTA over the network.
 pub mod export;
 pub mod keys;
+/// DIDComm protocol management: enable/disable/migrate operations that
+/// patch the VTA's own DID document service array. See
+/// `docs/05-design-notes/didcomm-protocol-management.md`.
+#[cfg(feature = "webvh")]
+pub mod protocol;
 /// Generic template-driven integration bootstrap. See
 /// `docs/03-integrating/provision-integration.md`. Feature-gated on `webvh`
 /// because the phase-1 implementation delegates minting to

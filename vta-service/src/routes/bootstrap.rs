@@ -97,11 +97,11 @@ pub async fn request(
     #[cfg(not(feature = "tee"))]
     {
         let _ = (state, client_ed25519_pub, bundle_id, now);
-        return Err(AppError::Forbidden(
+        Err(AppError::Forbidden(
             "bootstrap request requires TEE first-boot attestation, which is not available on \
              this VTA build. Non-TEE VTAs use the `pnm setup` temp-did:key + ACL flow instead."
                 .into(),
-        ));
+        ))
     }
 
     #[cfg(feature = "tee")]

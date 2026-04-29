@@ -5,3 +5,4 @@ pub mod error;
 pub mod identifier;
 pub mod seed_store;
 pub mod store;
+pub mod telemetry;
