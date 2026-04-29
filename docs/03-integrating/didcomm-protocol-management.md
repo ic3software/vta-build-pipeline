@@ -268,51 +268,44 @@ the VTA's telemetry sink (default: in-memory ring buffer of
 
 ## Known limitations
 
-These are the items still deferred for focused follow-ups.
+One item remains deferred:
 
-1. **First-enable handshake is partial.** `pnm services enable
-   didcomm` runs only step 1 of the handshake (DID resolution +
-   `DIDCommMessaging` service check + `keyAgreement` presence)
-   because there's no live DIDComm runtime yet at first-enable
-   time. The connection is validated implicitly when the
-   DIDComm runtime starts up after the next service restart. To
-   end-to-end validate a mediator pre-publish, run
-   `pnm services enable didcomm` followed by
-   `pnm mediator migrate --to <same>` — the migrate path runs
-   the full handshake.
-2. **DIDComm transport for these admin calls.** REST is the
-   only available transport today. The operations layer's
-   1-hour-min-TTL guard (when `disable` is called over DIDComm)
-   is wired and tested but has no DIDComm route handler invoking
-   it yet.
-3. **End-to-end mock-mediator integration test.** The live
-   `DIDCommServiceProver` is wired into `migrate` and exercised
-   when DIDComm is running, but the full
-   spin-up-an-in-process-mediator-and-round-trip test fixture
-   that would cover criterion #1's happy path doesn't ship yet.
-   Existing unit tests cover the operation/route/SDK/CLI shape;
-   the live runtime is genuinely exercised in production
-   migrations but doesn't have a dedicated integration test
-   yet.
+**End-to-end mock-mediator integration test.** The full handshake
+machinery (transient service for first-enable, live service-backed
+prover for migrate, DIDComm transport handlers for admin calls)
+is wired and unit-tested, but a dedicated test fixture that
+spins up an in-process WebSocket-based mock mediator to exercise
+the full ping/pong round-trip doesn't ship yet. The live runtime
+is genuinely exercised in production deployments — this gap is
+about test coverage of the happy path, not missing functionality.
+Building the mock mediator is substantial (WebSocket server +
+DIDComm envelope crypto + key management + message routing) and
+tracked separately.
 
-Resolved since the initial cut:
+Everything in the original deferred list — first-enable handshake,
+live `DIDCommService`-backed prover for migrate, DIDComm transport
+for admin calls, drain sweeper + teardown consumer — is now
+resolved:
 
-- **Live `DIDCommService`-backed handshake** is wired into the
-  `migrate` route. Falls back to a no-op prover only when
-  DIDComm isn't running or the secrets resolver isn't
-  initialised — both of which are expected non-DIDComm
-  conditions, not bugs.
+- **First-enable handshake** spins up a transient
+  `DIDCommService` just for the round-trip (see
+  `messaging::transient_handshake`). Falls back to the
+  resolve-only path only when secrets/vm_ids aren't configured
+  (expected non-DIDComm condition).
+- **Live `DIDCommService`-backed handshake** for `migrate` and
+  `rollback` runs the full 5-step preflight against a running
+  service via `messaging::live_prover::DIDCommServiceProver`.
+- **DIDComm transport for admin calls** lands the four message
+  types under `mediator-management/1.0` and `services-management/
+  1.0` (see `messaging::handlers_protocol`). `disable` over
+  DIDComm transport enforces the spec's 1h-min-TTL guard.
+  `enable` is REST-only by nature (DIDComm isn't running yet).
 - **Drain sweeper + teardown consumer** are spawned at server
-  boot. Drain TTLs fire end-to-end:
-  `record_drain_persisted` arms a `tokio::time::sleep_until`
-  task; on expiry, the sweeper signals the teardown channel
-  and the bootstrap-side consumer calls
-  `DIDCommService::remove_listener`. Persisted drains are
-  replayed on restart so reboots don't leak listeners.
+  boot. Drain TTLs fire end-to-end and persisted drains are
+  replayed on restart.
 
-None of the remaining limitations change the on-disk state
-model or the DID-document semantics — they're test-fixture and
-DIDComm-transport-handler items respectively.
+None of the remaining work changes the on-disk state model or
+the DID-document semantics — it's test-fixture work.
 
 ## Cross-references
 

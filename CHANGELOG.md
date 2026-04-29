@@ -18,13 +18,24 @@
   is pluggable behind a trait — default impl is a 10k-event ring
   buffer; the `mediator report` command queries it for
   per-mediator inbound counts and per-sender last-seen mediator.
+
+  The full pre-promotion handshake fires end-to-end:
+  `migrate`/`rollback` use a live `DIDCommServiceProver` against
+  the running service; first-enable spins up a transient
+  `DIDCommService` just for the round-trip (lifecycle managed
+  by `messaging::transient_handshake`). Drain TTLs fire
+  end-to-end via the per-mediator `JoinSet` sweeper + boot-time
+  replay. All five admin operations are available over both REST
+  and DIDComm transport (`enable` is REST-only by nature).
+
   See `docs/03-integrating/didcomm-protocol-management.md` and
   `docs/05-design-notes/didcomm-protocol-management.md`. New
   modules: `vti_common::telemetry`,
   `vta_service::messaging::{registry, drain_store, drain_sweeper,
-  handshake}`, `vta_service::operations::protocol::*`,
-  `vta_sdk::protocol`, `vta_cli_common::commands::{services,
-  mediator}`.
+  handshake, live_prover, transient_handshake, handlers_protocol}`,
+  `vta_service::operations::protocol::*`, `vta_sdk::protocol`,
+  `vta_sdk::protocols::protocol_management`,
+  `vta_cli_common::commands::{services, mediator}`.
 
 ### Breaking
 
