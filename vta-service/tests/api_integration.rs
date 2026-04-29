@@ -2235,7 +2235,10 @@ async fn create_did_webvh_via_builtin_mediator_template() {
                 "context_id": "tpl-mediator",
                 "url": "https://mediator.example.com/.well-known/did/did.jsonl",
                 "template": "didcomm-mediator",
-                "template_vars": { "URL": "https://mediator.example.com" }
+                "template_vars": {
+                    "URL": "https://mediator.example.com",
+                    "WS_URL": "wss://mediator.example.com/ws"
+                }
             }),
         ))
         .await;
@@ -2244,23 +2247,23 @@ async fn create_did_webvh_via_builtin_mediator_template() {
         "template-driven create failed: {status} {body}"
     );
 
-    // The rendered document should carry a DIDCommMessaging service with
-    // the supplied URL. `didwebvh-rs` may merge in additional entries
-    // (e.g. authentication references) but the template's service block
-    // must survive verbatim.
+    // The rendered document should carry a DIDCommMessaging service whose
+    // serviceEndpoint is an array of two endpoints — HTTP first, WSS
+    // second. The mediator template advertises both transports under one
+    // `#service` entry; clients pick whichever transport they support.
     let doc = &body["did_document"];
     assert!(doc.is_object(), "result must include did_document");
     let services = doc["service"].as_array().unwrap();
     let didcomm = services
         .iter()
-        .find(|s| s["type"] == "DIDCommMessaging")
+        .find(|s| s["type"] == json!(["DIDCommMessaging"]))
         .expect("mediator template must produce a DIDCommMessaging service");
-    assert_eq!(
-        didcomm["serviceEndpoint"]["uri"],
-        "https://mediator.example.com"
-    );
-    // Optional default `accept` flowed through as a native array.
-    assert_eq!(didcomm["serviceEndpoint"]["accept"], json!(["didcomm/v2"]));
+    let endpoints = didcomm["serviceEndpoint"].as_array().unwrap();
+    assert_eq!(endpoints.len(), 2);
+    assert_eq!(endpoints[0]["uri"], "https://mediator.example.com");
+    assert_eq!(endpoints[0]["accept"], json!(["didcomm/v2"]));
+    assert_eq!(endpoints[1]["uri"], "wss://mediator.example.com/ws");
+    assert_eq!(endpoints[1]["accept"], json!(["didcomm/v2"]));
 }
 
 #[cfg(feature = "webvh")]

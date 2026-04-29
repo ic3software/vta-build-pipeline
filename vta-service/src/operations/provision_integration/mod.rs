@@ -996,6 +996,10 @@ mod tests {
     fn mediator_template_vars() -> BTreeMap<String, Value> {
         let mut vars = BTreeMap::new();
         vars.insert("URL".into(), Value::String("https://mediator.test".into()));
+        vars.insert(
+            "WS_URL".into(),
+            Value::String("wss://mediator.test/ws".into()),
+        );
         vars.insert("ROUTING_KEYS".into(), Value::Array(vec![]));
         vars
     }

@@ -323,24 +323,31 @@ fn didcomm_mediator_builtin_renders_end_to_end() {
     vars.insert_string("SIGNING_KEY_MB", "z6MkSign");
     vars.insert_string("KA_KEY_MB", "z6LSKa");
     vars.insert_string("URL", "https://mediator.example.com");
+    vars.insert_string("WS_URL", "wss://mediator.example.com/ws");
 
     let doc = tpl.render(&vars).unwrap();
     assert_eq!(doc["id"], "did:webvh:example.com:mediator");
     let services = doc["service"].as_array().unwrap();
     assert_eq!(services.len(), 2);
-    assert_eq!(services[0]["type"], "DIDCommMessaging");
-    assert_eq!(
-        services[0]["serviceEndpoint"]["uri"],
-        "https://mediator.example.com"
-    );
-    // Optional default flowed through as a native array, not a string.
-    assert_eq!(
-        services[0]["serviceEndpoint"]["accept"],
-        json!(["didcomm/v2"])
-    );
-    assert_eq!(services[0]["serviceEndpoint"]["routingKeys"], json!([]));
+
+    // DIDComm service: id `#service`, type as a single-element array,
+    // serviceEndpoint as an array of two endpoint objects (HTTP first,
+    // WSS second). Each endpoint carries the same accept/routingKeys.
+    assert_eq!(services[0]["id"], "did:webvh:example.com:mediator#service");
+    assert_eq!(services[0]["type"], json!(["DIDCommMessaging"]));
+    let endpoints = services[0]["serviceEndpoint"].as_array().unwrap();
+    assert_eq!(endpoints.len(), 2);
+    assert_eq!(endpoints[0]["uri"], "https://mediator.example.com");
+    assert_eq!(endpoints[0]["accept"], json!(["didcomm/v2"]));
+    assert_eq!(endpoints[0]["routingKeys"], json!([]));
+    assert_eq!(endpoints[1]["uri"], "wss://mediator.example.com/ws");
+    assert_eq!(endpoints[1]["accept"], json!(["didcomm/v2"]));
+    assert_eq!(endpoints[1]["routingKeys"], json!([]));
+
+    // Authentication service: id `#auth`, type as a single-element array,
+    // serviceEndpoint as a plain string at `<URL>/authenticate`.
     assert_eq!(services[1]["id"], "did:webvh:example.com:mediator#auth");
-    assert_eq!(services[1]["type"], "Authentication");
+    assert_eq!(services[1]["type"], json!(["Authentication"]));
     assert_eq!(
         services[1]["serviceEndpoint"],
         "https://mediator.example.com/authenticate"

@@ -34,7 +34,7 @@ A template is a single JSON file:
   "kind": "mediator",
   "description": "DIDComm v2 routing mediator",
   "methods": ["webvh", "web"],
-  "requiredVars": ["URL"],
+  "requiredVars": ["URL", "WS_URL"],
   "optionalVars": { "ACCEPT": ["didcomm/v2"], "ROUTING_KEYS": [] },
   "defaults": { "preRotationCount": 2, "portable": true },
   "document": {
@@ -47,13 +47,12 @@ A template is a single JSON file:
       "publicKeyMultibase": "{SIGNING_KEY_MB}"
     }],
     "service": [{
-      "id": "{DID}#didcomm",
-      "type": "DIDCommMessaging",
-      "serviceEndpoint": {
-        "uri": "{URL}",
-        "accept": "{ACCEPT}",
-        "routingKeys": "{ROUTING_KEYS}"
-      }
+      "id": "{DID}#service",
+      "type": ["DIDCommMessaging"],
+      "serviceEndpoint": [
+        { "uri": "{URL}",    "accept": "{ACCEPT}", "routingKeys": "{ROUTING_KEYS}" },
+        { "uri": "{WS_URL}", "accept": "{ACCEPT}", "routingKeys": "{ROUTING_KEYS}" }
+      ]
     }]
   }
 }

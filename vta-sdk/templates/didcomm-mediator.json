@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "name": "didcomm-mediator",
   "kind": "mediator",
-  "description": "DIDComm v2 routing mediator with signing + key-agreement methods and a DIDCommMessaging service endpoint.",
+  "description": "DIDComm v2 routing mediator with signing + key-agreement methods and a DIDCommMessaging service exposing both HTTP(S) and WebSocket transports.",
   "methods": ["webvh", "web"],
-  "requiredVars": ["URL"],
+  "requiredVars": ["URL", "WS_URL"],
   "optionalVars": {
     "ROUTING_KEYS": [],
     "ACCEPT": ["didcomm/v2"],
@@ -41,17 +41,24 @@
     "keyAgreement": ["{DID}#key-1"],
     "service": [
       {
-        "id": "{DID}#didcomm",
-        "type": "DIDCommMessaging",
-        "serviceEndpoint": {
-          "uri": "{URL}",
-          "accept": "{ACCEPT}",
-          "routingKeys": "{ROUTING_KEYS}"
-        }
+        "id": "{DID}#service",
+        "type": ["DIDCommMessaging"],
+        "serviceEndpoint": [
+          {
+            "accept": "{ACCEPT}",
+            "routingKeys": "{ROUTING_KEYS}",
+            "uri": "{URL}"
+          },
+          {
+            "accept": "{ACCEPT}",
+            "routingKeys": "{ROUTING_KEYS}",
+            "uri": "{WS_URL}"
+          }
+        ]
       },
       {
         "id": "{DID}#auth",
-        "type": "Authentication",
+        "type": ["Authentication"],
         "serviceEndpoint": "{URL}/authenticate"
       }
     ]
