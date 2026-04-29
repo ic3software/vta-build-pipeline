@@ -7,6 +7,7 @@
 //! lands only the foundations; the operations themselves arrive in
 //! later phases.
 
+pub mod disable_didcomm;
 pub mod document;
 pub mod enable_didcomm;
 

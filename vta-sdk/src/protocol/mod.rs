@@ -52,6 +52,30 @@ pub struct EnableDidcommResponse {
     pub mediator_endpoint: String,
 }
 
+/// Request body for `POST /services/didcomm/disable`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisableDidcommRequest {
+    /// Drain TTL in seconds. 0 = immediate teardown (REST only;
+    /// over DIDComm transport, minimum 1h is enforced server-side).
+    pub drain_ttl_secs: u64,
+}
+
+impl DisableDidcommRequest {
+    pub fn new(drain_ttl_secs: u64) -> Self {
+        Self { drain_ttl_secs }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisableDidcommResponse {
+    pub new_version_id: String,
+    pub prior_mediator_did: String,
+    /// `Some(rfc3339)` when the listener entered drain state;
+    /// `None` when it was torn down immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drains_until: Option<String>,
+}
+
 impl VtaClient {
     /// Enable DIDComm on a REST-only VTA. Spec: success criterion #1.
     ///
@@ -85,6 +109,25 @@ impl VtaClient {
             "services-management/1.0/enable-not-available-via-didcomm-result",
             30,
             |c, url| c.post(format!("{url}/services/didcomm/enable")).json(&req),
+        )
+        .await
+    }
+
+    /// Disable DIDComm. Refuses if REST is also disabled
+    /// (`NoProtocolRemaining`). Drain TTL semantics:
+    /// - `0` = immediate teardown (REST transport only).
+    /// - `>= 3600` = drain window over DIDComm transport (server
+    ///   enforces 1h minimum).
+    pub async fn disable_didcomm(
+        &self,
+        req: DisableDidcommRequest,
+    ) -> Result<DisableDidcommResponse, VtaError> {
+        self.rpc(
+            "services-management/1.0/disable",
+            serde_json::to_value(&req)?,
+            "services-management/1.0/disable-result",
+            30,
+            |c, url| c.post(format!("{url}/services/didcomm/disable")).json(&req),
         )
         .await
     }

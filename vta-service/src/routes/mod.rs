@@ -207,10 +207,15 @@ pub fn router() -> Router<AppState> {
     // Protocol management routes (DIDComm enable/disable/migrate;
     // spec docs/05-design-notes/didcomm-protocol-management.md).
     #[cfg(feature = "webvh")]
-    let router = router.route(
-        "/services/didcomm/enable",
-        post(protocol::enable_didcomm_handler),
-    );
+    let router = router
+        .route(
+            "/services/didcomm/enable",
+            post(protocol::enable_didcomm_handler),
+        )
+        .route(
+            "/services/didcomm/disable",
+            post(protocol::disable_didcomm_handler),
+        );
 
     // WebVH routes (feature-gated)
     #[cfg(feature = "webvh")]

@@ -646,6 +646,14 @@ enum ServicesCommands {
         #[command(subcommand)]
         protocol: ServicesEnableProtocol,
     },
+    /// Disable a protocol on this VTA (today: only `didcomm`).
+    /// Refuses if REST is also disabled — the VTA must keep at
+    /// least one protocol surface. Use `--drain-ttl 0s` to tear
+    /// the listener down immediately.
+    Disable {
+        #[command(subcommand)]
+        protocol: ServicesDisableProtocol,
+    },
 }
 
 #[derive(Subcommand)]
@@ -663,6 +671,20 @@ enum ServicesEnableProtocol {
         /// Trust-ping round-trip timeout in seconds (default 10).
         #[arg(long)]
         handshake_timeout: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServicesDisableProtocol {
+    /// Disable DIDComm. The current mediator's listener stays up
+    /// for `drain-ttl` seconds so in-flight messages can drain
+    /// (default: 1 hour).
+    Didcomm {
+        /// Drain window in seconds. 0 = immediate teardown.
+        /// Server enforces a 1h minimum when called over DIDComm
+        /// transport; over REST any value is permitted.
+        #[arg(long, default_value_t = 3600)]
+        drain_ttl: u64,
     },
 }
 
@@ -1653,6 +1675,11 @@ async fn main() {
                         handshake_timeout,
                     )
                     .await
+                }
+            },
+            ServicesCommands::Disable { protocol } => match protocol {
+                ServicesDisableProtocol::Didcomm { drain_ttl } => {
+                    services::cmd_services_disable_didcomm(&client, drain_ttl).await
                 }
             },
         },

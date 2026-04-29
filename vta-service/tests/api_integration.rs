@@ -2766,6 +2766,48 @@ async fn enable_didcomm_already_enabled_returns_409_with_suggested_fix() {
 
 #[cfg(feature = "webvh")]
 #[tokio::test]
+async fn disable_didcomm_unauthenticated_returns_401() {
+    let (app, _ctx) = TestApp::new().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/services/didcomm/disable")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "drain_ttl_secs": 0 }).to_string()))
+        .unwrap();
+    let (status, _body) = app.request(req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[cfg(feature = "webvh")]
+#[tokio::test]
+async fn disable_didcomm_returns_typed_error_body() {
+    // The default fixture's vta_did is `did:key:...` which has no
+    // webvh record. The operation passes the didcomm-enabled and
+    // REST-enabled gates (both true by default) and reaches the
+    // VtaDidRecordMissing path → 500 with a typed error body. The
+    // contract this test enforces: every failure mode produces a
+    // typed error code + human message (no opaque 500s).
+    let (app, ctx) = TestApp::new().await;
+    let token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
+    let (_status, body) = app
+        .request(post_auth(
+            "/services/didcomm/disable",
+            &token,
+            json!({ "drain_ttl_secs": 0 }),
+        ))
+        .await;
+    assert!(
+        body.get("error").and_then(|v| v.as_str()).is_some(),
+        "error code in body: {body}"
+    );
+    assert!(
+        body.get("message").and_then(|v| v.as_str()).is_some(),
+        "message in body: {body}"
+    );
+}
+
+#[cfg(feature = "webvh")]
+#[tokio::test]
 async fn enable_didcomm_propagates_resolve_failure_with_stage() {
     // With a webvh-shaped vta_did + record, the operation reaches
     // the handshake stage. A bogus mediator DID fails resolve and

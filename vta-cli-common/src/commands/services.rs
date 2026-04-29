@@ -6,7 +6,7 @@
 //! didcomm` and `list`.
 
 use vta_sdk::client::VtaClient;
-use vta_sdk::protocol::EnableDidcommRequest;
+use vta_sdk::protocol::{DisableDidcommRequest, EnableDidcommRequest};
 
 /// `pnm services enable didcomm --mediator-did <did> [--force]
 ///                              [--handshake-timeout <secs>]`.
@@ -44,6 +44,36 @@ pub async fn cmd_services_enable_didcomm(
         println!("  The connection is validated when the DIDComm runtime starts after");
         println!("  the next service restart. To validate end-to-end pre-publish, run");
         println!("  `pnm mediator migrate --to <same>` once DIDComm is up.");
+    }
+    Ok(())
+}
+
+/// `pnm services disable didcomm [--drain-ttl <duration>]`.
+pub async fn cmd_services_disable_didcomm(
+    client: &VtaClient,
+    drain_ttl_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = DisableDidcommRequest::new(drain_ttl_secs);
+    let resp = client
+        .disable_didcomm(req)
+        .await
+        .map_err(|e| format!("{e}"))?;
+
+    println!("DIDComm disabled.");
+    println!("  Prior mediator: {}", resp.prior_mediator_did);
+    println!("  New version ID: {}", resp.new_version_id);
+    match resp.drains_until {
+        Some(deadline) => {
+            println!("  Drain deadline: {deadline}");
+            println!();
+            println!("  The listener stays up until the deadline so in-flight messages can");
+            println!(
+                "  arrive. Cancel early with `pnm mediator drain cancel --mediator-did <did>`."
+            );
+        }
+        None => {
+            println!("  Listener torn down immediately (drain TTL was 0).");
+        }
     }
     Ok(())
 }
