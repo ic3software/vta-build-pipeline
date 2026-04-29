@@ -83,6 +83,15 @@ impl TestApp {
         let mediator_registry = Arc::new(
             vta_service::messaging::registry::MediatorListenerRegistry::new(Arc::clone(&telemetry)),
         );
+        #[cfg(feature = "webvh")]
+        let drain_sweeper = {
+            let (tx, _rx) = vta_service::messaging::drain_sweeper::teardown_channel(8);
+            Arc::new(vta_service::messaging::drain_sweeper::DrainSweeper::new(
+                Arc::clone(&mediator_registry),
+                drains_ks.clone(),
+                tx,
+            ))
+        };
         let state = AppState {
             keys_ks: keys_ks.clone(),
             sessions_ks: sessions_ks.clone(),
@@ -99,6 +108,8 @@ impl TestApp {
             drains_ks,
             #[cfg(feature = "webvh")]
             mediator_registry,
+            #[cfg(feature = "webvh")]
+            drain_sweeper,
             telemetry,
             wrapping_cache: vta_service::keys::wrapping::WrappingKeyCache::new(),
             config: Arc::new(RwLock::new(config)),

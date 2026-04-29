@@ -341,6 +341,7 @@ pub async fn disable_didcomm_handler(
         &did_resolver,
         &bridge,
         &state.mediator_registry,
+        &state.drain_sweeper,
         &state.telemetry,
         &auth.0,
         DisableDidcommParams {
@@ -587,6 +588,7 @@ pub async fn migrate_mediator_handler(
         &did_resolver,
         &bridge,
         &state.mediator_registry,
+        &state.drain_sweeper,
         &state.telemetry,
         &prover,
         &auth.0,

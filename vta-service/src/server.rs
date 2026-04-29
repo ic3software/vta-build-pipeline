@@ -95,6 +95,12 @@ pub struct AppState {
     /// active/drain state machine.
     #[cfg(feature = "webvh")]
     pub mediator_registry: Arc<crate::messaging::registry::MediatorListenerRegistry>,
+    /// Per-mediator TTL sweeper. Arms a `tokio::time::sleep_until`
+    /// task per drain entry; on expiry, calls
+    /// `record_expiries_persisted` and signals upstream listener
+    /// teardown via the teardown channel.
+    #[cfg(feature = "webvh")]
+    pub drain_sweeper: Arc<crate::messaging::drain_sweeper::DrainSweeper>,
     /// Pluggable telemetry sink for mediator-attribution events.
     /// Default impl is the in-memory ring buffer; alternative
     /// backends plug in via the `TelemetrySink` trait.
@@ -171,6 +177,23 @@ pub async fn build_app_state(
     let mediator_registry = Arc::new(crate::messaging::registry::MediatorListenerRegistry::new(
         Arc::clone(&telemetry),
     ));
+    // `build_app_state` is called from non-axum front-ends (e.g.
+    // Lambda) that don't run a teardown consumer — give them a
+    // sweeper whose channel sender goes nowhere so signals
+    // become no-ops. The full `run()` path replaces this with a
+    // sweeper whose receiver is consumed by a real task that
+    // calls `DIDCommService::remove_listener`.
+    #[cfg(feature = "webvh")]
+    let drain_sweeper = {
+        let (tx, _rx) = crate::messaging::drain_sweeper::teardown_channel(
+            crate::messaging::drain_sweeper::DEFAULT_TEARDOWN_CHANNEL_CAPACITY,
+        );
+        Arc::new(crate::messaging::drain_sweeper::DrainSweeper::new(
+            Arc::clone(&mediator_registry),
+            drains_ks.clone(),
+            tx,
+        ))
+    };
 
     Ok(AppState {
         keys_ks,
@@ -188,6 +211,8 @@ pub async fn build_app_state(
         drains_ks,
         #[cfg(feature = "webvh")]
         mediator_registry,
+        #[cfg(feature = "webvh")]
+        drain_sweeper,
         telemetry,
         wrapping_cache: crate::keys::wrapping::WrappingKeyCache::new(),
         config: Arc::new(RwLock::new(config)),
@@ -280,6 +305,36 @@ pub async fn run(
         let mediator_registry = Arc::new(
             crate::messaging::registry::MediatorListenerRegistry::new(Arc::clone(&telemetry)),
         );
+        // Drain sweeper: TTL-keyed `tokio::time::sleep_until` per
+        // drain entry. On expiry, the sweeper signals the
+        // teardown channel; the consumer task spawned below
+        // translates each signal into a
+        // `DIDCommService::remove_listener` call.
+        #[cfg(feature = "webvh")]
+        let (teardown_tx, teardown_rx) = crate::messaging::drain_sweeper::teardown_channel(
+            crate::messaging::drain_sweeper::DEFAULT_TEARDOWN_CHANNEL_CAPACITY,
+        );
+        #[cfg(feature = "webvh")]
+        let drain_sweeper = Arc::new(crate::messaging::drain_sweeper::DrainSweeper::new(
+            Arc::clone(&mediator_registry),
+            drains_ks.clone(),
+            teardown_tx,
+        ));
+        // Boot replay: load any drains persisted from a previous
+        // run, drop already-expired entries, register the live
+        // ones with the registry, and arm the sweeper for each.
+        #[cfg(feature = "webvh")]
+        match mediator_registry.replay_drains(&drains_ks).await {
+            Ok(live) => {
+                if !live.is_empty() {
+                    info!(count = live.len(), "drain set replayed from keyspace");
+                }
+                drain_sweeper.arm_all(&live).await;
+            }
+            Err(e) => {
+                warn!(error = %e, "drain replay failed — starting with empty drain set");
+            }
+        }
 
         // In TEE required mode, warn if auth isn't initialized.
         #[cfg(feature = "tee")]
@@ -381,6 +436,8 @@ pub async fn run(
                 drains_ks,
                 #[cfg(feature = "webvh")]
                 mediator_registry: Arc::clone(&mediator_registry),
+                #[cfg(feature = "webvh")]
+                drain_sweeper: Arc::clone(&drain_sweeper),
                 telemetry: Arc::clone(&telemetry),
                 wrapping_cache,
                 config: Arc::new(RwLock::new(config.clone())),
@@ -513,6 +570,61 @@ pub async fn run(
         };
         #[cfg(not(feature = "didcomm"))]
         let didcomm_service: Option<()> = None;
+
+        // Spawn the teardown channel consumer. The drain sweeper
+        // sends mediator DIDs over `teardown_rx` whenever a TTL
+        // fires; this task translates each signal into a
+        // `DIDCommService::remove_listener` call. If DIDComm
+        // isn't running, the loop still runs but every recv is a
+        // no-op — drains still get cleaned up at the registry +
+        // keyspace level by the sweeper.
+        #[cfg(all(feature = "webvh", feature = "didcomm"))]
+        let _teardown_handle = {
+            let didcomm_service_ref = didcomm_service.clone();
+            let mut teardown_rx = teardown_rx;
+            let mut shutdown_rx_for_teardown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx_for_teardown.changed() => {
+                            if *shutdown_rx_for_teardown.borrow() {
+                                break;
+                            }
+                        }
+                        msg = teardown_rx.recv() => {
+                            match msg {
+                                None => break,
+                                Some(mediator_did) => {
+                                    if let Some(ref svc) = didcomm_service_ref {
+                                        if let Err(e) = svc.remove_listener(&mediator_did).await {
+                                            warn!(
+                                                mediator = %mediator_did,
+                                                error = %e,
+                                                "drain teardown: remove_listener failed"
+                                            );
+                                        } else {
+                                            info!(
+                                                mediator = %mediator_did,
+                                                "drain teardown: listener removed"
+                                            );
+                                        }
+                                    } else {
+                                        debug!(
+                                            mediator = %mediator_did,
+                                            "drain teardown: DIDComm not running, skipping remove_listener"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                debug!("teardown consumer task exiting");
+            })
+        };
+        #[cfg(not(all(feature = "webvh", feature = "didcomm")))]
+        let _teardown_handle: Option<tokio::task::JoinHandle<()>> = None;
 
         // Storage thread always runs
         let mut storage_shutdown_rx = shutdown_rx.clone();

@@ -39,6 +39,7 @@ use crate::auth::AuthClaims;
 use crate::config::AppConfig;
 use crate::didcomm_bridge::DIDCommBridge;
 use crate::error::AppError;
+use crate::messaging::drain_sweeper::DrainSweeper;
 use crate::messaging::handshake::{
     HandshakeError, HandshakeOptions, ListenerProver, mediator_handshake,
 };
@@ -148,6 +149,7 @@ pub async fn migrate_mediator(
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
     registry: &MediatorListenerRegistry,
+    sweeper: &DrainSweeper,
     telemetry: &SharedTelemetrySink,
     prover: &(dyn ListenerProver + Send + Sync),
     auth: &AuthClaims,
@@ -223,6 +225,8 @@ pub async fn migrate_mediator(
     registry
         .record_drain_persisted(drains_ks, &prior_mediator, prior_endpoint, deadline)
         .await?;
+    // Arm the sweeper so the drain TTL actually fires.
+    sweeper.arm(&prior_mediator, deadline).await;
 
     let _ = telemetry
         .record(
@@ -399,6 +403,14 @@ mod tests {
         (bridge, registry, sink)
     }
 
+    fn sweeper_for(
+        registry: Arc<MediatorListenerRegistry>,
+        drains_ks: KeyspaceHandle,
+    ) -> Arc<DrainSweeper> {
+        let (tx, _rx) = crate::messaging::drain_sweeper::teardown_channel(8);
+        Arc::new(DrainSweeper::new(registry, drains_ks, tx))
+    }
+
     async fn empty_keyspace(name: &str) -> (tempfile::TempDir, KeyspaceHandle) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&StoreConfig {
@@ -460,6 +472,7 @@ mod tests {
             &resolver,
             &bridge,
             &reg,
+            &sweeper_for(Arc::clone(&reg), drains_ks.clone()),
             &sink,
             &prover,
             &super_admin(),
@@ -497,6 +510,7 @@ mod tests {
             &resolver,
             &bridge,
             &reg,
+            &sweeper_for(Arc::clone(&reg), drains_ks.clone()),
             &sink,
             &prover,
             &super_admin(),
@@ -556,6 +570,7 @@ mod tests {
             &resolver,
             &bridge,
             &reg,
+            &sweeper_for(Arc::clone(&reg), drains_ks.clone()),
             &sink,
             &prover,
             &super_admin(),

@@ -40,6 +40,7 @@ use crate::auth::AuthClaims;
 use crate::config::AppConfig;
 use crate::didcomm_bridge::DIDCommBridge;
 use crate::error::AppError;
+use crate::messaging::drain_sweeper::DrainSweeper;
 use crate::messaging::registry::{MediatorListenerRegistry, RegistryError};
 use crate::operations::did_webvh::{UpdateDidWebvhError, UpdateDidWebvhOptions, update_did_webvh};
 use crate::operations::protocol::PROTOCOL_LOCK;
@@ -140,6 +141,7 @@ pub async fn disable_didcomm(
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
     registry: &MediatorListenerRegistry,
+    sweeper: &DrainSweeper,
     telemetry: &SharedTelemetrySink,
     auth: &AuthClaims,
     params: DisableDidcommParams,
@@ -185,9 +187,11 @@ pub async fn disable_didcomm(
     // Schedule the drain or immediate teardown.
     let drains_until = if params.drain_ttl.is_zero() {
         // Immediate: deactivate the registry so the listener stops
-        // receiving. Upstream `DIDCommService::remove_listener` is
-        // signalled by the bootstrap-side teardown channel
-        // consumer (Phase 4.2 wiring).
+        // receiving. The teardown channel consumer in server.rs
+        // calls `DIDCommService::remove_listener` when the
+        // sweeper fires; with TTL=0 we don't go through the
+        // sweeper, so deactivate is the only signal — the
+        // listener is removed on next service restart.
         registry.record_deactivate().await;
         None
     } else {
@@ -207,6 +211,10 @@ pub async fn disable_didcomm(
         registry
             .record_drain_persisted(drains_ks, &prior_mediator, endpoint, deadline)
             .await?;
+        // Arm the sweeper so the TTL actually fires. Without this
+        // call the drain entry sits in fjall + registry forever
+        // (it would be replayed on next boot but never expire).
+        sweeper.arm(&prior_mediator, deadline).await;
         Some(deadline)
     };
 
@@ -372,6 +380,14 @@ mod tests {
         (bridge, registry, sink)
     }
 
+    fn sweeper_for(
+        registry: Arc<MediatorListenerRegistry>,
+        drains_ks: KeyspaceHandle,
+    ) -> Arc<DrainSweeper> {
+        let (tx, _rx) = crate::messaging::drain_sweeper::teardown_channel(8);
+        Arc::new(DrainSweeper::new(registry, drains_ks, tx))
+    }
+
     async fn empty_keyspace(name: &str) -> (tempfile::TempDir, KeyspaceHandle) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&StoreConfig {
@@ -440,6 +456,7 @@ mod tests {
             &resolver,
             &bridge,
             &reg,
+            &sweeper_for(Arc::clone(&reg), drains_ks.clone()),
             &sink,
             &super_admin(),
             rest_params(Duration::from_secs(3600)),
@@ -480,6 +497,7 @@ mod tests {
             &resolver,
             &bridge,
             &reg,
+            &sweeper_for(Arc::clone(&reg), drains_ks.clone()),
             &sink,
             &super_admin(),
             rest_params(Duration::from_secs(3600)),
@@ -517,6 +535,7 @@ mod tests {
             &resolver,
             &bridge,
             &reg,
+            &sweeper_for(Arc::clone(&reg), drains_ks.clone()),
             &sink,
             &super_admin(),
             didcomm_params(Duration::from_secs(1800)),
@@ -558,6 +577,7 @@ mod tests {
             &resolver,
             &bridge,
             &reg,
+            &sweeper_for(Arc::clone(&reg), drains_ks.clone()),
             &sink,
             &super_admin(),
             rest_params(Duration::from_secs(0)),
@@ -595,6 +615,7 @@ mod tests {
             &resolver,
             &bridge,
             &reg,
+            &sweeper_for(Arc::clone(&reg), drains_ks.clone()),
             &sink,
             &super_admin(),
             didcomm_params(Duration::from_secs(3600)),
