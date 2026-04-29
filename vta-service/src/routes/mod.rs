@@ -14,6 +14,8 @@ mod did_templates;
 mod did_webvh;
 mod health;
 pub mod keys;
+#[cfg(feature = "webvh")]
+mod protocol;
 mod vta;
 
 use std::sync::Arc;
@@ -201,6 +203,14 @@ pub fn router() -> Router<AppState> {
         .route("/attestation/did-log", get(attestation::did_log));
     // `GET /attestation/admin-credential` retired in Phase 3 —
     // sealed-bootstrap Mode B replaces it via `POST /bootstrap/request`.
+
+    // Protocol management routes (DIDComm enable/disable/migrate;
+    // spec docs/05-design-notes/didcomm-protocol-management.md).
+    #[cfg(feature = "webvh")]
+    let router = router.route(
+        "/services/didcomm/enable",
+        post(protocol::enable_didcomm_handler),
+    );
 
     // WebVH routes (feature-gated)
     #[cfg(feature = "webvh")]

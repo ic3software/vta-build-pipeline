@@ -768,7 +768,7 @@ impl VtaClient {
     /// Dispatch an RPC call via REST (using `build_rest`) or DIDComm (using
     /// `msg_type`/`body`/`result_type`), returning a deserialized response.
     #[allow(unused_variables)]
-    async fn rpc<T: serde::de::DeserializeOwned>(
+    pub(crate) async fn rpc<T: serde::de::DeserializeOwned>(
         &self,
         msg_type: &str,
         body: serde_json::Value,

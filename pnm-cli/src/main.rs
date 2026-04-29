@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use vta_sdk::client::VtaClient;
 
 use vta_cli_common::commands::{
-    acl, audit, config as config_cmd, contexts, credentials, did_templates, keys, webvh,
+    acl, audit, config as config_cmd, contexts, credentials, did_templates, keys, services, webvh,
 };
 use vta_cli_common::render::{CYAN, DIM, GREEN, RED, RESET};
 
@@ -89,6 +89,14 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+
+    /// Manage which protocol surfaces (REST, DIDComm) the VTA exposes.
+    ///
+    /// Spec: docs/05-design-notes/didcomm-protocol-management.md
+    Services {
+        #[command(subcommand)]
+        command: ServicesCommands,
     },
 
     /// Key management
@@ -628,6 +636,33 @@ enum ConfigCommands {
         /// Public URL for this VTA
         #[arg(long)]
         public_url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServicesCommands {
+    /// Enable a protocol on this VTA (today: only `didcomm`).
+    Enable {
+        #[command(subcommand)]
+        protocol: ServicesEnableProtocol,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServicesEnableProtocol {
+    /// Enable DIDComm. Requires a mediator DID and super-admin auth.
+    /// The VTA must currently be REST-only.
+    Didcomm {
+        /// Mediator's DID (e.g. did:webvh:scid:host:path)
+        #[arg(long)]
+        mediator_did: String,
+        /// Skip handshake steps 2-5 (DID resolution always runs).
+        /// Use only when reachability has been validated out-of-band.
+        #[arg(long)]
+        force: bool,
+        /// Trust-ping round-trip timeout in seconds (default 10).
+        #[arg(long)]
+        handshake_timeout: Option<u64>,
     },
 }
 
@@ -1603,6 +1638,23 @@ async fn main() {
                 )
                 .await
             }
+        },
+        Commands::Services { command } => match command {
+            ServicesCommands::Enable { protocol } => match protocol {
+                ServicesEnableProtocol::Didcomm {
+                    mediator_did,
+                    force,
+                    handshake_timeout,
+                } => {
+                    services::cmd_services_enable_didcomm(
+                        &client,
+                        mediator_did,
+                        force,
+                        handshake_timeout,
+                    )
+                    .await
+                }
+            },
         },
         Commands::Contexts { command } => match command {
             ContextCommands::List => contexts::cmd_context_list(&client).await,

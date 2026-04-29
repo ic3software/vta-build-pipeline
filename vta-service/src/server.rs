@@ -85,6 +85,20 @@ pub struct AppState {
     pub sealed_nonces_ks: KeyspaceHandle,
     #[cfg(feature = "webvh")]
     pub webvh_ks: KeyspaceHandle,
+    /// Persisted drain set for the protocol-management feature
+    /// (`docs/05-design-notes/didcomm-protocol-management.md`).
+    /// Keyed by mediator DID; replayed at boot.
+    #[cfg(feature = "webvh")]
+    pub drains_ks: KeyspaceHandle,
+    /// In-process registry of active + draining mediator listeners.
+    /// Owns the per-listener bounded outbound buffer and the
+    /// active/drain state machine.
+    #[cfg(feature = "webvh")]
+    pub mediator_registry: Arc<crate::messaging::registry::MediatorListenerRegistry>,
+    /// Pluggable telemetry sink for mediator-attribution events.
+    /// Default impl is the in-memory ring buffer; alternative
+    /// backends plug in via the `TelemetrySink` trait.
+    pub telemetry: vti_common::telemetry::SharedTelemetrySink,
     pub wrapping_cache: crate::keys::wrapping::WrappingKeyCache,
     pub config: Arc<RwLock<AppConfig>>,
     pub seed_store: Arc<dyn SeedStore>,
@@ -146,8 +160,17 @@ pub async fn build_app_state(
     let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
     #[cfg(feature = "webvh")]
     let webvh_ks = apply_encryption(store.keyspace("webvh")?);
+    #[cfg(feature = "webvh")]
+    let drains_ks = apply_encryption(store.keyspace("drains")?);
 
     let auth = init_auth(&config, &*seed_store, &keys_ks).await;
+
+    let telemetry: vti_common::telemetry::SharedTelemetrySink =
+        Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
+    #[cfg(feature = "webvh")]
+    let mediator_registry = Arc::new(crate::messaging::registry::MediatorListenerRegistry::new(
+        Arc::clone(&telemetry),
+    ));
 
     Ok(AppState {
         keys_ks,
@@ -161,6 +184,11 @@ pub async fn build_app_state(
         sealed_nonces_ks,
         #[cfg(feature = "webvh")]
         webvh_ks,
+        #[cfg(feature = "webvh")]
+        drains_ks,
+        #[cfg(feature = "webvh")]
+        mediator_registry,
+        telemetry,
         wrapping_cache: crate::keys::wrapping::WrappingKeyCache::new(),
         config: Arc::new(RwLock::new(config)),
         seed_store,
@@ -236,9 +264,22 @@ pub async fn run(
         let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
         #[cfg(feature = "webvh")]
         let webvh_ks = apply_encryption(store.keyspace("webvh")?);
+        #[cfg(feature = "webvh")]
+        let drains_ks = apply_encryption(store.keyspace("drains")?);
 
         // Initialize auth infrastructure
         let auth = init_auth(&config, &*seed_store, &keys_ks).await;
+
+        // Pluggable telemetry sink + multi-mediator listener registry.
+        // The registry holds active/drain state and the per-mediator
+        // bounded outbound buffer; spec
+        // `docs/05-design-notes/didcomm-protocol-management.md`.
+        let telemetry: vti_common::telemetry::SharedTelemetrySink =
+            Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
+        #[cfg(feature = "webvh")]
+        let mediator_registry = Arc::new(
+            crate::messaging::registry::MediatorListenerRegistry::new(Arc::clone(&telemetry)),
+        );
 
         // In TEE required mode, warn if auth isn't initialized.
         #[cfg(feature = "tee")]
@@ -336,6 +377,11 @@ pub async fn run(
                 sealed_nonces_ks,
                 #[cfg(feature = "webvh")]
                 webvh_ks,
+                #[cfg(feature = "webvh")]
+                drains_ks,
+                #[cfg(feature = "webvh")]
+                mediator_registry: Arc::clone(&mediator_registry),
+                telemetry: Arc::clone(&telemetry),
                 wrapping_cache,
                 config: Arc::new(RwLock::new(config.clone())),
                 seed_store: seed_store.clone(),

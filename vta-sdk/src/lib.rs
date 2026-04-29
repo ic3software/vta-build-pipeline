@@ -19,6 +19,8 @@ pub mod didcomm_light;
 pub mod didcomm_session;
 pub mod keys;
 pub mod prelude;
+#[cfg(feature = "client")]
+pub mod protocol;
 pub mod protocols;
 #[cfg(feature = "provision-client")]
 pub mod provision_client;
