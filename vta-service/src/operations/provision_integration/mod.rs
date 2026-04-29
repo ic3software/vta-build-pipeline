@@ -434,17 +434,45 @@ pub async fn provision_integration(
         )
         .await?;
 
+        // The bundle's `key_id` strings must equal the `verificationMethod.id`
+        // entries in the *published* DID document, not the VTA's internal
+        // storage convention (`{did}#key-0` / `#key-1`). Templates are free
+        // to declare different fragments — `didcomm-mediator` uses
+        // `#key-1` / `#key-2`, which previously diverged from the bundle
+        // (silently producing keys consumers couldn't resolve). Look up
+        // the kid by matching publicKeyMultibase so each template gets
+        // bundle entries that match its own VM ids.
+        let signing_kid =
+            published_kid_for(&did_document, &signing_secret_resp.public_key_multibase)
+                .ok_or_else(|| {
+                    AppError::Internal(format!(
+                        "rendered DID document for '{integration_did}' has no \
+                 verificationMethod matching the minted signing publicKeyMultibase \
+                 — template '{template_name}' likely references a different \
+                 SIGNING_KEY_MB binding"
+                    ))
+                })?;
+        let ka_kid = published_kid_for(&did_document, &ka_secret_resp.public_key_multibase)
+            .ok_or_else(|| {
+                AppError::Internal(format!(
+                    "rendered DID document for '{integration_did}' has no \
+                     verificationMethod matching the minted key-agreement \
+                     publicKeyMultibase — template '{template_name}' likely \
+                     references a different KA_KEY_MB binding"
+                ))
+            })?;
+
         secrets.insert(
             integration_did.clone(),
             DidKeyMaterial {
                 did: integration_did.clone(),
                 signing_key: KeyPair {
-                    key_id: signing_key_id.clone(),
+                    key_id: signing_kid,
                     public_key_multibase: signing_secret_resp.public_key_multibase.clone(),
                     private_key_multibase: signing_secret_resp.private_key_multibase.clone(),
                 },
                 ka_key: KeyPair {
-                    key_id: ka_key_id.clone(),
+                    key_id: ka_kid,
                     public_key_multibase: ka_secret_resp.public_key_multibase.clone(),
                     private_key_multibase: ka_secret_resp.private_key_multibase.clone(),
                 },
@@ -653,6 +681,23 @@ pub async fn provision_integration(
 }
 
 use vta_sdk::hex::lower as hex_lower;
+
+/// Find a `verificationMethod.id` whose `publicKeyMultibase` matches
+/// `target_mb`. Used to align bundle `key_id` fields with the published
+/// DID document so a consumer storing the bundle verbatim can resolve
+/// the kid against the live document and find a matching private key.
+fn published_kid_for(doc: &Value, target_mb: &str) -> Option<String> {
+    doc.get("verificationMethod")?
+        .as_array()?
+        .iter()
+        .find(|vm| {
+            vm.get("publicKeyMultibase")
+                .and_then(Value::as_str)
+                .is_some_and(|mb| mb == target_mb)
+        })
+        .and_then(|vm| vm.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1303,5 +1348,125 @@ mod tests {
             Some(output.summary.integration_did.as_str()),
             "did:key path must set context primary when ctx.did was None"
         );
+    }
+
+    #[tokio::test]
+    async fn provision_integration_bundle_kids_match_published_did_document() {
+        // Regression test for the kid-numbering mismatch: the canonical
+        // `didcomm-mediator` template publishes verificationMethod ids
+        // `#key-1` (signing) and `#key-2` (key-agreement), but the
+        // bundle previously exported `#key-0` / `#key-1` from the VTA's
+        // internal storage convention. Consumers stored the bundle
+        // verbatim and then couldn't match an inbound JWE for `#key-2`
+        // to any private key.
+        //
+        // Asserts (a) the bundle's kids equal `#key-1` / `#key-2`
+        // exactly — the literal strings the canonical template
+        // declares — and (b) every kid in `payload.secrets` equals a
+        // `verificationMethod.id` in `payload.config.did_document`. If
+        // either side drifts, this fails on the diff so the regression
+        // is obvious.
+        use super::sealed_transfer_open::open_for_test;
+
+        let ts = open_test_store().await;
+        let (_vta_did, deps) = bootstrap_test_vta(&ts).await;
+        crate::contexts::create_context(&ts.contexts_ks, "prod-mediator", "Prod")
+            .await
+            .expect("create context");
+
+        let auth = super_admin_claims();
+        let request = signed_request_with_vars(
+            "didcomm-mediator",
+            "prod-mediator",
+            mediator_template_vars(),
+        )
+        .await;
+
+        let output = provision_integration(
+            &deps,
+            &auth,
+            ProvisionIntegrationParams {
+                request,
+                context: "prod-mediator".into(),
+                assertion_mode: AssertionMode::PinnedOnly,
+                vc_validity: None,
+            },
+        )
+        .await
+        .expect("provision_integration");
+
+        // Open the sealed bundle with the holder's seed (the same
+        // `[7u8; 32]` `signed_request_with_vars` signs with).
+        let payload = open_for_test(&output.armored, &output.digest, &[7u8; 32]);
+
+        let integration_did = output.summary.integration_did.as_str();
+        let material = payload
+            .secrets
+            .get(integration_did)
+            .expect("integration DID secrets present");
+
+        // (a) Literal kid assertion. Spelled out so a future regression
+        // shows up directly in the diff.
+        let expected_signing_kid = format!("{integration_did}#key-1");
+        let expected_ka_kid = format!("{integration_did}#key-2");
+        assert_eq!(
+            material.signing_key.key_id, expected_signing_kid,
+            "signing kid must be the canonical didcomm-mediator template's \
+             1-indexed `#key-1` to match the published DID doc"
+        );
+        assert_eq!(
+            material.ka_key.key_id, expected_ka_kid,
+            "key-agreement kid must be the canonical didcomm-mediator \
+             template's 1-indexed `#key-2` to match the published DID doc"
+        );
+
+        // (b) Every kid in the bundle must appear as a
+        // `verificationMethod.id` in the published doc — no off-by-one,
+        // no dangling references.
+        let doc = &payload.config.did_document;
+        let vm_ids: Vec<String> = doc["verificationMethod"]
+            .as_array()
+            .expect("verificationMethod array")
+            .iter()
+            .filter_map(|vm| vm["id"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            vm_ids.contains(&material.signing_key.key_id),
+            "signing kid {} not in published verificationMethod ids {:?}",
+            material.signing_key.key_id,
+            vm_ids
+        );
+        assert!(
+            vm_ids.contains(&material.ka_key.key_id),
+            "key-agreement kid {} not in published verificationMethod ids {:?}",
+            material.ka_key.key_id,
+            vm_ids
+        );
+    }
+}
+
+/// Test-only helper: open a PinnedOnly armored bundle to a holder seed.
+/// Lives in a tiny submodule so the test that needs it can `use` the
+/// function directly without re-implementing armor decode + HPKE open.
+#[cfg(test)]
+mod sealed_transfer_open {
+    use vta_sdk::sealed_transfer::template_bootstrap::TemplateBootstrapPayload;
+    use vta_sdk::sealed_transfer::{
+        SealedPayloadV1, armor, ed25519_seed_to_x25519_secret, open_bundle,
+    };
+
+    pub fn open_for_test(
+        armored: &str,
+        digest: &str,
+        holder_seed: &[u8; 32],
+    ) -> TemplateBootstrapPayload {
+        let bundles = armor::decode(armored).expect("armor decode");
+        assert_eq!(bundles.len(), 1, "expected single bundle");
+        let x_secret = ed25519_seed_to_x25519_secret(holder_seed);
+        let opened = open_bundle(&x_secret, &bundles[0], Some(digest)).expect("open bundle");
+        match opened.payload {
+            SealedPayloadV1::TemplateBootstrap(boxed) => *boxed,
+            other => panic!("expected TemplateBootstrap, got {other:?}"),
+        }
     }
 }
