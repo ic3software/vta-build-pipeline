@@ -8,6 +8,7 @@
 //! later phases.
 
 pub mod document;
+pub mod enable_didcomm;
 
 /// Process-wide lock serializing every protocol-state mutation
 /// (enable / disable / migrate / drain-cancel). Modeled on
