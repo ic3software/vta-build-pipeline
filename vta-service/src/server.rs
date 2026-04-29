@@ -110,6 +110,16 @@ pub struct AppState {
     pub seed_store: Arc<dyn SeedStore>,
     pub did_resolver: Option<DIDCacheClient>,
     pub secrets_resolver: Option<Arc<ThreadedSecretsResolver>>,
+    /// Verification-method id for the VTA's signing key (e.g.
+    /// `{did}#key-0`). Populated by `init_auth`. Needed by the
+    /// live mediator-handshake prover to fetch the corresponding
+    /// secret out of [`Self::secrets_resolver`].
+    #[cfg(feature = "didcomm")]
+    pub signing_vm_id: Option<String>,
+    /// Verification-method id for the VTA's key-agreement key
+    /// (e.g. `{did}#key-1`). Populated by `init_auth`.
+    #[cfg(feature = "didcomm")]
+    pub ka_vm_id: Option<String>,
     #[cfg(feature = "didcomm")]
     pub didcomm_bridge: Arc<DIDCommBridge>,
     pub jwt_keys: Option<Arc<JwtKeys>>,
@@ -219,6 +229,10 @@ pub async fn build_app_state(
         seed_store,
         did_resolver: auth.did_resolver,
         secrets_resolver: auth.secrets_resolver,
+        #[cfg(feature = "didcomm")]
+        signing_vm_id: auth.signing_vm_id,
+        #[cfg(feature = "didcomm")]
+        ka_vm_id: auth.ka_vm_id,
         #[cfg(feature = "didcomm")]
         didcomm_bridge: Arc::new(DIDCommBridge::placeholder()),
 
@@ -444,6 +458,10 @@ pub async fn run(
                 seed_store: seed_store.clone(),
                 did_resolver: auth.did_resolver,
                 secrets_resolver: auth.secrets_resolver.clone(),
+                #[cfg(feature = "didcomm")]
+                signing_vm_id: auth.signing_vm_id.clone(),
+                #[cfg(feature = "didcomm")]
+                ka_vm_id: auth.ka_vm_id.clone(),
                 #[cfg(feature = "didcomm")]
                 didcomm_bridge: didcomm_bridge.clone(),
                 jwt_keys: auth.jwt_keys,

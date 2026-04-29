@@ -552,8 +552,12 @@ pub struct MigrateMediatorResponse {
 
 /// `POST /mediators/migrate` — change the active mediator. Auth:
 /// super-admin. Runs the full pre-promotion handshake against the
-/// new mediator (steps 2-5 currently bypassed via `AlwaysOkProver`
-/// — live `DIDCommService`-backed prover is a follow-up).
+/// new mediator. Uses the live `DIDCommServiceProver` when the
+/// upstream DIDComm service is running and the VTA's secrets
+/// resolver + verification-method ids are available; otherwise
+/// falls back to [`AlwaysOkProver`]. The fallback path is hit
+/// when DIDComm hasn't started yet or when secrets aren't
+/// configured (e.g. mock test fixtures).
 pub async fn migrate_mediator_handler(
     auth: SuperAdminAuth,
     State(state): State<AppState>,
@@ -566,7 +570,11 @@ pub async fn migrate_mediator_handler(
         .ok_or(MigrateMediatorHttpError::DidResolverUnavailable)?
         .clone();
 
-    let prover = AlwaysOkProver;
+    // Try to assemble a live prover. Falls back to AlwaysOk if
+    // any of the required pieces (running DIDComm service,
+    // secrets resolver, verification-method ids, vta_did)
+    // aren't ready.
+    let live_prover = build_live_prover(&state, &bridge).await;
     let timeout = Duration::from_secs(
         req.handshake_timeout_secs
             .unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT_SECS),
@@ -576,6 +584,16 @@ pub async fn migrate_mediator_handler(
     } else {
         MigrateAuditKind::Forward
     };
+
+    // The migrate_mediator op takes a `&dyn ListenerProver` so
+    // both branches need to materialize a concrete reference
+    // before the call.
+    let always_ok = AlwaysOkProver;
+    let prover_ref: &(dyn crate::messaging::handshake::ListenerProver + Send + Sync) =
+        match live_prover.as_ref() {
+            Some(p) => p,
+            None => &always_ok,
+        };
 
     let result = migrate_mediator(
         &state.config,
@@ -590,7 +608,7 @@ pub async fn migrate_mediator_handler(
         &state.mediator_registry,
         &state.drain_sweeper,
         &state.telemetry,
-        &prover,
+        prover_ref,
         &auth.0,
         MigrateMediatorParams {
             new_mediator_did: req.new_mediator_did,
@@ -992,4 +1010,55 @@ impl IntoResponse for MediatorReportHttpError {
         };
         (status, Json(body)).into_response()
     }
+}
+
+/// Best-effort assembly of a live `DIDCommServiceProver`.
+/// Returns `None` (so the route falls back to `AlwaysOkProver`)
+/// when any of these pieces aren't ready:
+/// - DIDComm service hasn't been started yet (the bridge's
+///   service slot is empty),
+/// - the VTA hasn't been fully configured (no `vta_did`),
+/// - the secrets resolver hasn't been initialised, or
+/// - the verification-method ids haven't been computed
+///   (`init_auth` left them `None` because there's no `vta_did`
+///   yet).
+///
+/// The fallback isn't a code-quality cop-out — it's the
+/// intended behaviour when DIDComm isn't running. The live prover
+/// is only meaningful for `migrate_mediator` and `mediator
+/// rollback`, where DIDComm is by definition already up.
+async fn build_live_prover(
+    state: &AppState,
+    bridge: &Arc<crate::didcomm_bridge::DIDCommBridge>,
+) -> Option<crate::messaging::live_prover::DIDCommServiceProver> {
+    use affinidi_tdk::secrets_resolver::SecretsResolver;
+
+    let service = bridge.try_get_service()?;
+    let secrets_resolver = state.secrets_resolver.as_ref()?;
+    let signing_vm_id = state.signing_vm_id.as_ref()?;
+    let ka_vm_id = state.ka_vm_id.as_ref()?;
+    let vta_did = {
+        let cfg = state.config.read().await;
+        cfg.vta_did.clone()?
+    };
+
+    let mut secrets = Vec::with_capacity(2);
+    if let Some(s) = secrets_resolver.get_secret(signing_vm_id).await {
+        secrets.push(s);
+    }
+    if let Some(s) = secrets_resolver.get_secret(ka_vm_id).await {
+        secrets.push(s);
+    }
+    if secrets.is_empty() {
+        return None;
+    }
+
+    let builder = std::sync::Arc::new(
+        crate::messaging::live_prover::StaticListenerConfigBuilder::new(vta_did, secrets, None),
+    );
+    Some(crate::messaging::live_prover::DIDCommServiceProver::new(
+        service,
+        Arc::clone(bridge),
+        builder,
+    ))
 }
