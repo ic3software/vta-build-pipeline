@@ -232,9 +232,14 @@ async fn prompt_aws_secrets() -> Result<SecretsConfig, Box<dyn std::error::Error
     })
 }
 
-/// List secret names from AWS Secrets Manager (single page).
+/// List all secret names from AWS Secrets Manager, paginating through
+/// every page so the wizard sees the full set rather than just the
+/// first 100 (the default page size). Caps at 10k secrets to bound
+/// memory + the operator picker, which gets unusable past that anyway.
 #[cfg(feature = "aws-secrets")]
 async fn list_aws_secrets(region: Option<&str>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    const MAX_SECRETS: usize = 10_000;
+
     let mut config_loader = aws_config::from_env();
     if let Some(region) = region {
         config_loader = config_loader.region(aws_config::Region::new(region.to_owned()));
@@ -242,12 +247,29 @@ async fn list_aws_secrets(region: Option<&str>) -> Result<Vec<String>, Box<dyn s
     let sdk_config = config_loader.load().await;
     let client = aws_sdk_secretsmanager::Client::new(&sdk_config);
 
-    let output = client.list_secrets().send().await?;
-    let names: Vec<String> = output
-        .secret_list()
-        .iter()
-        .filter_map(|entry| entry.name().map(String::from))
-        .collect();
+    let mut names: Vec<String> = Vec::new();
+    let mut next_token: Option<String> = None;
+    loop {
+        let mut req = client.list_secrets();
+        if let Some(token) = next_token.as_ref() {
+            req = req.next_token(token.clone());
+        }
+        let output = req.send().await?;
+        names.extend(
+            output
+                .secret_list()
+                .iter()
+                .filter_map(|entry| entry.name().map(String::from)),
+        );
+        if names.len() >= MAX_SECRETS {
+            names.truncate(MAX_SECRETS);
+            break;
+        }
+        match output.next_token() {
+            Some(t) if !t.is_empty() => next_token = Some(t.to_string()),
+            _ => break,
+        }
+    }
     Ok(names)
 }
 
@@ -297,24 +319,43 @@ async fn prompt_gcp_secrets() -> Result<SecretsConfig, Box<dyn std::error::Error
     })
 }
 
-/// List secret names from GCP Secret Manager (single page).
+/// List all secret names from GCP Secret Manager, paginating through
+/// every page via the response's `next_page_token`. Capped at 10k for
+/// the same reasons as `list_aws_secrets`.
 #[cfg(feature = "gcp-secrets")]
 async fn list_gcp_secrets(project: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    const MAX_SECRETS: usize = 10_000;
+
     let client = google_cloud_secretmanager_v1::client::SecretManagerService::builder()
         .build()
         .await?;
-    let response = client
-        .list_secrets()
-        .set_parent(format!("projects/{project}"))
-        .send()
-        .await?;
-
     let prefix = format!("projects/{project}/secrets/");
-    let names: Vec<String> = response
-        .secrets
-        .iter()
-        .map(|s| s.name.strip_prefix(&prefix).unwrap_or(&s.name).to_owned())
-        .collect();
+
+    let mut names: Vec<String> = Vec::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut req = client
+            .list_secrets()
+            .set_parent(format!("projects/{project}"));
+        if let Some(token) = page_token.as_ref() {
+            req = req.set_page_token(token.clone());
+        }
+        let response = req.send().await?;
+        names.extend(
+            response
+                .secrets
+                .iter()
+                .map(|s| s.name.strip_prefix(&prefix).unwrap_or(&s.name).to_owned()),
+        );
+        if names.len() >= MAX_SECRETS {
+            names.truncate(MAX_SECRETS);
+            break;
+        }
+        if response.next_page_token.is_empty() {
+            break;
+        }
+        page_token = Some(response.next_page_token);
+    }
     Ok(names)
 }
 
