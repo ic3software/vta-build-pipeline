@@ -64,7 +64,9 @@ pub mod test_helpers;
 pub use runner::{
     InitialChoice, provision_via_rest, run_connection_test, run_provision, select_initial_transport,
 };
-pub use runner_didcomm::{provision_via_didcomm, run_provision_flight};
+pub use runner_didcomm::{
+    provision_admin_rotation_via_didcomm, provision_via_didcomm, run_provision_flight,
+};
 
 pub use ask::{
     BUILTIN_MEDIATOR_TEMPLATE, BUILTIN_VTA_ADMIN_TEMPLATE, BUILTIN_WEBVH_CONTROL_TEMPLATE,
@@ -78,5 +80,5 @@ pub use event::{AttemptLog, AttemptResult, AttemptResultKind, VtaEvent};
 pub use intent::{AdminCredentialReply, VtaIntent, VtaReply};
 pub use messages::{MediatorMessages, OperatorMessages, WebvhServerMessages};
 pub use resolve::{ResolvedVta, resolve_vta};
-pub use result::{ProvisionResult, response_to_result};
+pub use result::{ProvisionResult, admin_rotation_response_to_reply, response_to_result};
 pub use setup_key::EphemeralSetupKey;

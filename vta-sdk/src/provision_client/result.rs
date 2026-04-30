@@ -46,9 +46,15 @@ impl ProvisionResult {
         &self.summary.admin_did
     }
 
-    /// The integration's own DID (rendered from the integration template).
-    pub fn integration_did(&self) -> &str {
-        &self.summary.integration_did
+    /// The integration's own DID (rendered from the integration
+    /// template). Always `Some(_)` when this `ProvisionResult` came
+    /// from a `TemplateBootstrap` ask — `ProvisionResult` is only
+    /// constructed by the `TemplateBootstrap` decode path, so callers
+    /// can safely `.expect(...)` here in flows they know took the
+    /// integration-mint route. The `Option` exists so the field can
+    /// share a wire shape with the admin-only flows.
+    pub fn integration_did(&self) -> Option<&str> {
+        self.summary.integration_did.as_deref()
     }
 
     /// Private key material the integration needs to authenticate as its
@@ -60,21 +66,25 @@ impl ProvisionResult {
     }
 
     /// Private key material for the integration DID (the integration's
-    /// own service identity).
+    /// own service identity). `None` when no integration DID was
+    /// minted (e.g. the `AdminRotation` ask, though that flow does
+    /// not produce a `ProvisionResult`).
     pub fn integration_key(&self) -> Option<&DidKeyMaterial> {
-        self.payload.secrets.get(self.integration_did())
+        self.payload.secrets.get(self.integration_did()?)
     }
 
     /// `did.jsonl` content for the integration DID when the integration
     /// template targets webvh. The integration writes this to its
-    /// `/.well-known/did.jsonl` at startup.
+    /// `/.well-known/did.jsonl` at startup. `None` when no integration
+    /// DID exists.
     pub fn webvh_log(&self) -> Option<&str> {
+        let integration_did = self.integration_did()?;
         self.payload
             .config
             .outputs
             .iter()
             .find_map(|out| match out {
-                TemplateOutput::WebvhLog { did, log } if did == self.integration_did() => {
+                TemplateOutput::WebvhLog { did, log } if did == integration_did => {
                     Some(log.as_str())
                 }
                 _ => None,
@@ -141,6 +151,49 @@ pub fn response_to_result(
     })
 }
 
+/// Translate a [`ProvisionIntegrationResponse`] from the
+/// `BootstrapAsk::AdminRotation` flow into an
+/// [`super::intent::AdminCredentialReply`].
+///
+/// Shared by both transport runners. Decodes the armored bundle, opens
+/// the payload, and asserts it is a [`SealedPayloadV1::AdminRotation`]
+/// — anything else is a wiring bug. The opaque VC + VTA trust bundle
+/// inside the payload are dropped; consumers only need the rotated
+/// admin DID + its private key for the long-term credential.
+pub fn admin_rotation_response_to_reply(
+    seed: &[u8; 32],
+    vp_nonce: [u8; 16],
+    response: ProvisionIntegrationResponse,
+) -> Result<super::intent::AdminCredentialReply, ProvisionError> {
+    let bundles =
+        armor::decode(&response.bundle).map_err(|e| ProvisionError::Armor(e.to_string()))?;
+    if bundles.len() != 1 {
+        return Err(ProvisionError::Armor(format!(
+            "expected exactly one armored bundle, found {}",
+            bundles.len()
+        )));
+    }
+    let bundle = &bundles[0];
+    if bundle.bundle_id != vp_nonce {
+        return Err(ProvisionError::Armor(
+            "returned bundle_id does not match the VP nonce".into(),
+        ));
+    }
+
+    let x_secret = crate::sealed_transfer::ed25519_seed_to_x25519_secret(seed);
+    let opened = open_bundle(&x_secret, bundle, Some(&response.digest))?;
+
+    let payload = match opened.payload {
+        SealedPayloadV1::AdminRotation(boxed) => *boxed,
+        _ => return Err(ProvisionError::WrongPayload),
+    };
+
+    Ok(super::intent::AdminCredentialReply {
+        admin_did: payload.admin.did.clone(),
+        admin_private_key_mb: payload.admin.signing_key.private_key_multibase.clone(),
+    })
+}
+
 /// Decode a base64url-no-pad VP nonce string (as carried on
 /// `BootstrapRequest::nonce`) back to the 16-byte sealed-bundle id.
 ///
@@ -175,7 +228,10 @@ mod tests {
     fn result_accessors_with_admin_rollover() {
         let r = sample_provision_result(true);
         assert_eq!(r.admin_did(), "did:key:z6MkAdmin");
-        assert_eq!(r.integration_did(), "did:webvh:integration.example.com");
+        assert_eq!(
+            r.integration_did(),
+            Some("did:webvh:integration.example.com")
+        );
         assert!(r.admin_key().is_some());
         assert!(r.integration_key().is_some());
         assert!(r.webvh_log().is_some());

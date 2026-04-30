@@ -169,9 +169,9 @@ impl Respond for SealResponder {
                 client_did: req.request.holder.clone(),
                 admin_did: self.admin_did.clone(),
                 admin_rolled_over: req.request.holder != self.admin_did,
-                integration_did: self.integration_did.clone(),
-                template_name: self.template_name.clone(),
-                template_kind: self.template_kind.clone(),
+                integration_did: Some(self.integration_did.clone()),
+                template_name: Some(self.template_name.clone()),
+                template_kind: Some(self.template_kind.clone()),
                 admin_template_name: Some("vta-admin".into()),
                 bundle_id_hex: hex_lower(&nonce),
                 secret_count: 2,
@@ -267,10 +267,13 @@ async fn provision_via_rest_didcomm_mediator_round_trip() {
     .await
     .expect("REST round-trip succeeds");
 
-    assert_eq!(result.integration_did(), integration_did);
+    assert_eq!(result.integration_did(), Some(integration_did.as_str()));
     assert_eq!(result.admin_did(), admin_did);
-    assert_eq!(result.summary.template_name, "didcomm-mediator");
-    assert_eq!(result.summary.template_kind, "mediator");
+    assert_eq!(
+        result.summary.template_name.as_deref(),
+        Some("didcomm-mediator")
+    );
+    assert_eq!(result.summary.template_kind.as_deref(), Some("mediator"));
     assert!(result.summary.admin_rolled_over);
     assert!(result.integration_key().is_some());
     assert!(result.admin_key().is_some());
@@ -313,8 +316,311 @@ async fn provision_via_rest_webvh_server_round_trip() {
     .await
     .expect("REST round-trip succeeds");
 
-    assert_eq!(result.integration_did(), integration_did);
+    assert_eq!(result.integration_did(), Some(integration_did.as_str()));
     assert_eq!(result.admin_did(), admin_did);
-    assert_eq!(result.summary.template_name, "webvh-server");
-    assert_eq!(result.summary.template_kind, "webvh-server");
+    assert_eq!(
+        result.summary.template_name.as_deref(),
+        Some("webvh-server")
+    );
+    assert_eq!(
+        result.summary.template_kind.as_deref(),
+        Some("webvh-server")
+    );
+}
+
+// ── AdminRotated path ────────────────────────────────────────────────
+
+/// Fake VTA responder for the [`vta_sdk::provision_client::VtaIntent::AdminRotated`]
+/// flow. Mirrors [`SealResponder`] but seals an
+/// [`SealedPayloadV1::AdminRotation`] payload — the new admin DID +
+/// keys, no integration material — and reports `integration_did = None`
+/// in the wire summary.
+struct AdminRotationResponder {
+    recipient_x_pub: [u8; 32],
+    /// What the synthetic VTA "rotated to" — drives the assertions in
+    /// the test bodies.
+    admin_did: String,
+    admin_private_key_mb: String,
+    producer_did: String,
+}
+
+impl Respond for AdminRotationResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let req: ProvisionIntegrationRequest =
+            serde_json::from_slice(&request.body).expect("decode ProvisionIntegrationRequest body");
+
+        let nonce: [u8; 16] = {
+            use base64::Engine;
+            use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+            let raw = B64URL.decode(&req.request.nonce).expect("nonce b64");
+            raw.try_into().expect("nonce 16 bytes")
+        };
+
+        let payload = vta_sdk::sealed_transfer::AdminRotationPayload {
+            authorization: json!({
+                "type": ["VerifiableCredential", "VtaAuthorizationCredential"],
+                "credentialSubject": { "id": self.admin_did }
+            }),
+            admin: DidKeyMaterial {
+                did: self.admin_did.clone(),
+                signing_key: KeyPair {
+                    key_id: format!("{}#{}", self.admin_did, "key-0"),
+                    public_key_multibase: "z6MkSyntheticAdminSig".into(),
+                    private_key_multibase: self.admin_private_key_mb.clone(),
+                },
+                ka_key: KeyPair {
+                    key_id: format!("{}#{}", self.admin_did, "key-1"),
+                    public_key_multibase: "z6LSSyntheticAdminKa".into(),
+                    private_key_multibase: "zSyntheticAdminKaPriv".into(),
+                },
+            },
+            vta_url: Some("https://vta.example.com".into()),
+            vta_trust: VtaTrustBundle {
+                vta_did: self.producer_did.clone(),
+                vta_did_document: json!({ "id": self.producer_did }),
+                vta_did_log: None,
+            },
+        };
+
+        let producer_assertion = ProducerAssertion {
+            producer_did: self.producer_did.clone(),
+            proof: AssertionProof::PinnedOnly,
+        };
+
+        // seal_payload is async; wiremock's Respond is sync and runs
+        // from a context where the current runtime's blocking helpers
+        // aren't available — same pattern as SealResponder.
+        let recipient_x_pub = self.recipient_x_pub;
+        let sealed = SealedPayloadV1::AdminRotation(Box::new(payload));
+        let bundle = std::thread::scope(|s| {
+            s.spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build runtime")
+                    .block_on(seal_payload(
+                        &recipient_x_pub,
+                        nonce,
+                        producer_assertion,
+                        &sealed,
+                        &InMemoryNonceStore::new(),
+                    ))
+            })
+            .join()
+            .expect("seal thread join")
+        })
+        .expect("seal AdminRotation payload");
+
+        let armored = armor::encode(&bundle);
+        let digest = bundle_digest(&bundle);
+
+        let response = ProvisionIntegrationResponse {
+            bundle: armored,
+            digest,
+            summary: ProvisionSummary {
+                client_did: req.request.holder.clone(),
+                admin_did: self.admin_did.clone(),
+                admin_rolled_over: true,
+                integration_did: None,
+                template_name: None,
+                template_kind: None,
+                admin_template_name: Some("vta-admin".into()),
+                bundle_id_hex: hex_lower(&nonce),
+                secret_count: 1,
+                output_count: 0,
+                webvh_server_id: None,
+            },
+        };
+
+        ResponseTemplate::new(200).set_body_json(response)
+    }
+}
+
+/// REST AdminRotated round-trip: send a `BootstrapAsk::AdminRotation`
+/// VP through the public `VtaClient::provision_integration` entry
+/// point against a wiremock that returns a sealed `AdminRotation`
+/// payload, then decode it via `admin_rotation_response_to_reply`.
+///
+/// Pins three contract guarantees:
+/// 1. `admin_did` in the reply is the rotated DID — *not* the setup
+///    key's DID (no rotation = no point).
+/// 2. `admin_private_key_mb` is the freshly-minted private key
+///    (rotated DID's signing key), not the setup key.
+/// 3. The wire summary's `integration_did` is `None` (AdminRotation
+///    payloads carry only admin material).
+///
+/// Bypasses `run_connection_test` because that path resolves the VTA
+/// DID first and a `did:key` advertises no transports. The
+/// orchestrator is exercised separately via the unit tests in
+/// `runner_rest.rs`; this e2e covers the wire shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_rotated_via_rest_round_trip() {
+    use vta_sdk::client::VtaClient;
+    use vta_sdk::provision_client::admin_rotation_response_to_reply;
+    use vta_sdk::provision_integration::ProvisionRequestBuilder;
+    use vta_sdk::provision_integration::http::ProvisionIntegrationRequest;
+
+    let server = MockServer::start().await;
+    mount_auth_mocks(&server).await;
+
+    let key = EphemeralSetupKey::generate().unwrap();
+    let seed: [u8; 32] = decode_private_key_multibase(key.private_key_multibase()).unwrap();
+    let recipient_x_pub = x25519_pub_from_setup_seed(&seed);
+
+    let rotated_admin_did = "did:key:z6MkRotatedAdminFresh".to_string();
+    let rotated_admin_private_key_mb = "zRotatedAdminFreshPriv".to_string();
+    Mock::given(method("POST"))
+        .and(path("/bootstrap/provision-integration"))
+        .respond_with(AdminRotationResponder {
+            recipient_x_pub,
+            admin_did: rotated_admin_did.clone(),
+            admin_private_key_mb: rotated_admin_private_key_mb.clone(),
+            producer_did: "did:webvh:vta.example.com".into(),
+        })
+        .mount(&server)
+        .await;
+
+    let signed = ProvisionRequestBuilder::for_admin_rotation("vta-admin")
+        .context_hint("ctx-1")
+        .sign_with(&seed, &key.did)
+        .await
+        .expect("sign VP for admin rotation");
+
+    let nonce = {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+        let raw = B64URL.decode(&signed.nonce).unwrap();
+        let arr: [u8; 16] = raw.try_into().unwrap();
+        arr
+    };
+
+    let token = vta_sdk::session::challenge_response(
+        &server.uri(),
+        &key.did,
+        key.private_key_multibase(),
+        &test_vta_did_key(),
+    )
+    .await
+    .expect("auth handshake");
+
+    let client = VtaClient::new(&server.uri());
+    client.set_token_async(token.access_token).await;
+
+    let req = ProvisionIntegrationRequest {
+        request: signed,
+        context: "ctx-1".into(),
+        assertion: None,
+        vc_validity_seconds: None,
+    };
+    let response = client
+        .provision_integration(req)
+        .await
+        .expect("provision_integration round-trip");
+
+    // Wire summary contract: AdminRotation must omit integration_did.
+    assert!(
+        response.summary.integration_did.is_none(),
+        "AdminRotation summary must omit integration_did, got {:?}",
+        response.summary.integration_did
+    );
+    assert!(response.summary.admin_rolled_over);
+
+    // Decode + reply contract: rotated DID + key, not the setup pair.
+    let reply = admin_rotation_response_to_reply(&seed, nonce, response)
+        .expect("decode AdminRotation response");
+    assert_eq!(reply.admin_did, rotated_admin_did);
+    assert_ne!(reply.admin_did, key.did, "must not be the setup DID");
+    assert_eq!(reply.admin_private_key_mb, rotated_admin_private_key_mb);
+    assert_ne!(
+        reply.admin_private_key_mb,
+        key.private_key_multibase(),
+        "rotated key must not equal the setup key"
+    );
+}
+
+/// DIDComm transport for the AdminRotated path — unit-test the
+/// `provision_admin_rotation_via_didcomm` decoder against a synthetic
+/// `ProvisionIntegrationResponse`. We don't have a wiremock for
+/// DIDComm in this suite, so we exercise the response decoder directly
+/// (the same code path the live DIDComm runner takes after receiving
+/// the result message body from the mediator).
+#[tokio::test]
+async fn admin_rotated_didcomm_response_decoder_extracts_rotated_credentials() {
+    use vta_sdk::provision_client::admin_rotation_response_to_reply;
+
+    let key = EphemeralSetupKey::generate().unwrap();
+    let seed: [u8; 32] = decode_private_key_multibase(key.private_key_multibase()).unwrap();
+    let recipient_x_pub = x25519_pub_from_setup_seed(&seed);
+
+    let rotated_admin_did = "did:key:z6MkAdminRotatedDIDComm".to_string();
+    let rotated_admin_private_key_mb = "zAdminRotatedDIDCommPriv".to_string();
+
+    // Build a synthetic AdminRotation bundle exactly like the server
+    // would emit. The decoder must surface the rotated DID + key
+    // material verbatim.
+    let mut nonce = [0u8; 16];
+    nonce[0] = 0xAA;
+    let payload = vta_sdk::sealed_transfer::AdminRotationPayload {
+        authorization: json!({
+            "type": ["VerifiableCredential", "VtaAuthorizationCredential"],
+            "credentialSubject": { "id": rotated_admin_did }
+        }),
+        admin: DidKeyMaterial {
+            did: rotated_admin_did.clone(),
+            signing_key: KeyPair {
+                key_id: format!("{rotated_admin_did}#key-0"),
+                public_key_multibase: "z6MkAdminPub".into(),
+                private_key_multibase: rotated_admin_private_key_mb.clone(),
+            },
+            ka_key: KeyPair {
+                key_id: format!("{rotated_admin_did}#key-1"),
+                public_key_multibase: "z6LSAdminKaPub".into(),
+                private_key_multibase: "zAdminKaPriv".into(),
+            },
+        },
+        vta_url: None,
+        vta_trust: VtaTrustBundle {
+            vta_did: "did:webvh:vta.example.com".into(),
+            vta_did_document: json!({ "id": "did:webvh:vta.example.com" }),
+            vta_did_log: None,
+        },
+    };
+
+    let producer_assertion = ProducerAssertion {
+        producer_did: "did:webvh:vta.example.com".into(),
+        proof: AssertionProof::PinnedOnly,
+    };
+    let nonce_store = InMemoryNonceStore::default();
+    let bundle = seal_payload(
+        &recipient_x_pub,
+        nonce,
+        producer_assertion,
+        &SealedPayloadV1::AdminRotation(Box::new(payload)),
+        &nonce_store,
+    )
+    .await
+    .expect("seal AdminRotation");
+
+    let response = ProvisionIntegrationResponse {
+        bundle: armor::encode(&bundle),
+        digest: bundle_digest(&bundle),
+        summary: ProvisionSummary {
+            client_did: key.did.clone(),
+            admin_did: rotated_admin_did.clone(),
+            admin_rolled_over: true,
+            integration_did: None,
+            template_name: None,
+            template_kind: None,
+            admin_template_name: Some("vta-admin".into()),
+            bundle_id_hex: hex_lower(&nonce),
+            secret_count: 1,
+            output_count: 0,
+            webvh_server_id: None,
+        },
+    };
+
+    let reply = admin_rotation_response_to_reply(&seed, nonce, response).expect("decode");
+    assert_eq!(reply.admin_did, rotated_admin_did);
+    assert_ne!(reply.admin_did, key.did);
+    assert_eq!(reply.admin_private_key_mb, rotated_admin_private_key_mb);
 }

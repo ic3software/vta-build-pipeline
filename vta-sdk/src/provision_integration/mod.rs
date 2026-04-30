@@ -93,6 +93,6 @@ pub use payload::{
     VtaTrustBundle,
 };
 pub use request::{
-    BootstrapAsk, BootstrapRequest, DidTemplateRef, ProvisionRequestBuilder,
+    AdminRotationAsk, BootstrapAsk, BootstrapRequest, DidTemplateRef, ProvisionRequestBuilder,
     SignedEphemeralRequest, TemplateBootstrapAsk, VerifiedBootstrapRequest,
 };

@@ -162,26 +162,41 @@ pub struct ProvisionSummary {
     /// Ephemeral DID that signed the VP and opens the sealed bundle.
     pub client_did: String,
     /// Long-term admin DID — `client_did` when no rollover, or the
-    /// VTA-minted DID when the request carried an `adminTemplate`.
+    /// VTA-minted DID when the request carried an `adminTemplate`
+    /// (or used the `AdminRotation` ask).
     pub admin_did: String,
     /// True when the VTA minted a fresh long-term admin DID for this
-    /// provisioning (i.e. `adminTemplate` was present in the VP).
+    /// provisioning (i.e. `adminTemplate` was present in the VP, or
+    /// the request used the `AdminRotation` ask).
     pub admin_rolled_over: bool,
-    pub integration_did: String,
-    pub template_name: String,
-    pub template_kind: String,
-    /// Name of the admin template, when one was requested.
+    /// Integration DID rendered from the integration template. `None`
+    /// for the `AdminRotation` ask — that flow only mints an admin
+    /// DID and does not produce an integration DID.
+    pub integration_did: Option<String>,
+    /// Name of the integration template that was rendered. `None`
+    /// for the `AdminRotation` ask.
+    pub template_name: Option<String>,
+    /// `kind` field of the integration template. `None` for the
+    /// `AdminRotation` ask.
+    pub template_kind: Option<String>,
+    /// Name of the admin template, when one was used (i.e. the
+    /// request used `adminTemplate` rollover *or* the `AdminRotation`
+    /// ask).
     pub admin_template_name: Option<String>,
     pub bundle_id_hex: String,
-    /// Number of minted secrets in the payload — at least 1
-    /// (integration). +1 when the admin DID was minted by the VTA.
+    /// Number of minted secrets in the payload. For
+    /// `TemplateBootstrap`: 1 (integration only) or 2 (integration +
+    /// rolled admin). For `AdminRotation`: always 1 (admin only).
     pub secret_count: usize,
-    /// Number of template-emitted side outputs (1 `WebvhLog` for now).
+    /// Number of template-emitted side outputs. Always 0 for
+    /// `AdminRotation`; for `TemplateBootstrap` the count of webvh
+    /// logs / DIDComm services / generic outputs.
     pub output_count: usize,
     /// Resolved id of the registered webvh hosting server the VTA
     /// published the integration's `did.jsonl` to. `None` when the
     /// integration is self-hosted (no `WEBVH_SERVER` template var, or
-    /// it was explicitly null).
+    /// it was explicitly null), or when the request was
+    /// `AdminRotation` (no integration mint at all).
     pub webvh_server_id: Option<String>,
 }
 
@@ -209,8 +224,36 @@ pub async fn provision_integration(
     // ── 1. Preconditions ────────────────────────────────────────────
     preconditions::preconditions(state, auth, &context, &request).await?;
 
-    // ── 2. Extract templates + vars from the ask ────────────────────
-    let (template_name, mut template_vars) = preconditions::extract_template(request.ask())?;
+    // ── 2. Dispatch on the bootstrap intent ─────────────────────────
+    //
+    // `AdminRotation` is the lighter sibling of `TemplateBootstrap` —
+    // mints only the admin DID, no integration template render, and
+    // returns a `SealedPayloadV1::AdminRotation` envelope. Its flow
+    // shares preconditions + key-minting helpers but skips the
+    // integration mint entirely, so we branch here rather than
+    // littering the integration path with `if integration_template`
+    // checks.
+    if matches!(
+        request.ask(),
+        vta_sdk::provision_integration::BootstrapAsk::AdminRotation(_)
+    ) {
+        return provision_admin_rotation(
+            state,
+            auth,
+            &request,
+            &context,
+            assertion_mode,
+            vc_validity,
+            bundle_id,
+            &client_did,
+            &client_x25519_pub,
+        )
+        .await;
+    }
+
+    // ── 3. Extract templates + vars from the ask ────────────────────
+    let (template_name, mut template_vars) = preconditions::extract_template(request.ask())?
+        .expect("TemplateBootstrap ask must yield an integration template");
     let admin_template_ref = preconditions::extract_admin_template(request.ask());
 
     // ── 3. Mint + render + publish via create_did_webvh ─────────────
@@ -669,9 +712,9 @@ pub async fn provision_integration(
             client_did,
             admin_did,
             admin_rolled_over,
-            integration_did,
-            template_name,
-            template_kind,
+            integration_did: Some(integration_did),
+            template_name: Some(template_name),
+            template_kind: Some(template_kind),
             admin_template_name,
             bundle_id_hex,
             secret_count,
@@ -682,6 +725,176 @@ pub async fn provision_integration(
 }
 
 use vta_sdk::hex::lower as hex_lower;
+
+/// `BootstrapAsk::AdminRotation` flow — mints a fresh long-term admin
+/// DID via the requested admin template, writes its ACL row, issues
+/// the authorization VC (no `operator_of` claim — there's no
+/// integration to operate), and seals the result as a
+/// [`SealedPayloadV1::AdminRotation`] bundle.
+///
+/// Sibling to the integration-mint path inside [`provision_integration`].
+/// Shares preconditions + key-mint + sealing helpers; differs in that
+/// no integration template is rendered, no `did.jsonl` is published,
+/// and no integration secrets land in the bundle.
+#[allow(clippy::too_many_arguments)]
+async fn provision_admin_rotation(
+    state: &ProvisionIntegrationDeps,
+    auth: &AuthClaims,
+    request: &VerifiedBootstrapRequest,
+    context: &str,
+    assertion_mode: AssertionMode,
+    vc_validity: Option<Duration>,
+    bundle_id: [u8; 16],
+    client_did: &str,
+    client_x25519_pub: &[u8; 32],
+) -> Result<ProvisionIntegrationOutput, AppError> {
+    // Extract the admin template ref (mandatory in this variant).
+    let admin_template_ref =
+        preconditions::extract_admin_template(request.ask()).ok_or_else(|| {
+            AppError::Internal(
+                "AdminRotation ask reached provision_admin_rotation without an admin template — \
+                 wiring bug; the wire shape requires it"
+                    .into(),
+            )
+        })?;
+
+    // ── 1. Mint admin DID under VTA custody ─────────────────────────
+    let minted = mint::mint_admin_via_template(state, context, &admin_template_ref).await?;
+    let admin_did = minted.material.did.clone();
+    let admin_template_name = admin_template_ref.name.clone();
+
+    // ── 2. Register admin in ACL ────────────────────────────────────
+    //
+    // Re-run safety: a second AdminRotation against the same admin_did
+    // hits a Conflict — same handling as the TemplateBootstrap path.
+    match super::acl::create_acl(
+        &state.acl_ks,
+        &state.audit_ks,
+        auth,
+        &admin_did,
+        Role::Admin,
+        request.label().map(str::to_string),
+        vec![context.to_string()],
+        None,
+        "provision-integration",
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(AppError::Conflict(_)) => {
+            info!(
+                admin_did = %admin_did,
+                context = %context,
+                "ACL row already exists — reusing for provision-integration (admin rotation)"
+            );
+        }
+        Err(e) => return Err(e),
+    }
+
+    // ── 3. VTA identity ─────────────────────────────────────────────
+    let config = state.config.read().await;
+    let vta_did = config
+        .vta_did
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("VTA DID not configured".into()))?
+        .clone();
+    drop(config);
+
+    // ── 4. Build + sign the VTA authorization VC ────────────────────
+    //
+    // No `operator_of` — there is no integration DID to operate.
+    let claim = VtaAuthorizationClaim {
+        id: admin_did.clone(),
+        admin_of: AdminOfClaim {
+            vta: vta_did.clone(),
+            context: context.to_string(),
+            role: "admin".into(),
+        },
+        operator_of: None,
+    };
+    let mut vc_params = VtaAuthorizationParams::new(claim);
+    if let Some(validity) = vc_validity {
+        vc_params = vc_params.with_validity(validity);
+    }
+
+    let vc_issuer_secret = vta_keys::load_vta_vc_issuance_secret(state, &vta_did).await?;
+    let vc = issue_vta_authorization_credential(&vc_issuer_secret, vc_params)
+        .await
+        .map_err(|e| AppError::Internal(format!("issue VTA authorization VC: {e}")))?;
+    let vc_value =
+        serde_json::to_value(&vc).map_err(|e| AppError::Internal(format!("serialize VC: {e}")))?;
+
+    // ── 5. VTA trust bundle for offline VC verification at first boot
+    let vta_trust = vta_keys::load_vta_trust_bundle(state, &vta_did).await?;
+    let vta_url = state.config.read().await.public_url.clone();
+
+    // ── 6. Build payload ───────────────────────────────────────────
+    let payload = vta_sdk::sealed_transfer::AdminRotationPayload {
+        authorization: vc_value,
+        admin: minted.material.clone(),
+        vta_url,
+        vta_trust,
+    };
+
+    // ── 7. Seal ─────────────────────────────────────────────────────
+    let producer_assertion = match assertion_mode {
+        AssertionMode::DidSigned => {
+            let sealed_transfer_secret =
+                vta_keys::load_vta_sealed_transfer_secret(state, &vta_did).await?;
+            vta_keys::build_did_signed_assertion(
+                &sealed_transfer_secret,
+                client_x25519_pub,
+                bundle_id,
+            )?
+        }
+        AssertionMode::PinnedOnly => ProducerAssertion {
+            producer_did: vta_did.clone(),
+            proof: AssertionProof::PinnedOnly,
+        },
+    };
+
+    let nonce_store = PersistentNonceStore::new(state.sealed_nonces_ks.clone());
+    let bundle = seal_payload(
+        client_x25519_pub,
+        bundle_id,
+        producer_assertion,
+        &SealedPayloadV1::AdminRotation(Box::new(payload)),
+        &nonce_store,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("sealed-transfer seal failed: {e}")))?;
+
+    let armored = armor::encode(&bundle);
+    let digest = bundle_digest(&bundle);
+    let bundle_id_hex = hex_lower(&bundle_id);
+
+    info!(
+        client_did = %client_did,
+        admin_did = %admin_did,
+        context = %context,
+        admin_template = %admin_template_name,
+        bundle_id = %bundle_id_hex,
+        "provision-integration AdminRotation bundle sealed"
+    );
+
+    Ok(ProvisionIntegrationOutput {
+        armored,
+        digest,
+        summary: ProvisionSummary {
+            client_did: client_did.to_string(),
+            admin_did,
+            admin_rolled_over: true,
+            integration_did: None,
+            template_name: None,
+            template_kind: None,
+            admin_template_name: Some(admin_template_name),
+            bundle_id_hex,
+            secret_count: 1,
+            output_count: 0,
+            webvh_server_id: None,
+        },
+    })
+}
 
 /// Find a `verificationMethod.id` whose `publicKeyMultibase` matches
 /// `target_mb`. Used to align bundle `key_id` fields with the published
@@ -750,7 +963,9 @@ mod tests {
     #[test]
     fn extract_template_pulls_name_and_vars() {
         let ask = sample_ask("didcomm-mediator", true);
-        let (name, vars) = extract_template(&ask).unwrap();
+        let (name, vars) = extract_template(&ask)
+            .unwrap()
+            .expect("TemplateBootstrap ask should yield Some");
         assert_eq!(name, "didcomm-mediator");
         assert_eq!(
             vars.get("URL").and_then(|v| v.as_str()),
@@ -1144,7 +1359,7 @@ mod tests {
         );
         assert_eq!(
             ctx_after.did.as_deref(),
-            Some(output.summary.integration_did.as_str()),
+            output.summary.integration_did.as_deref(),
             "bound DID must match the minted integration DID returned in the summary"
         );
     }
@@ -1329,10 +1544,14 @@ mod tests {
         .await
         .expect("provision_integration");
 
+        let integration_did = output
+            .summary
+            .integration_did
+            .as_deref()
+            .expect("TemplateBootstrap path must yield Some(integration_did)");
         assert!(
-            output.summary.integration_did.starts_with("did:key:"),
-            "integration DID must be a did:key for templates with methods=[\"key\"], got {}",
-            output.summary.integration_did
+            integration_did.starts_with("did:key:"),
+            "integration DID must be a did:key for templates with methods=[\"key\"], got {integration_did}"
         );
         assert_eq!(
             output.summary.output_count, 0,
@@ -1350,7 +1569,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ctx_after.did.as_deref(),
-            Some(output.summary.integration_did.as_str()),
+            Some(integration_did),
             "did:key path must set context primary when ctx.did was None"
         );
     }
@@ -1406,7 +1625,11 @@ mod tests {
         // `[7u8; 32]` `signed_request_with_vars` signs with).
         let payload = open_for_test(&output.armored, &output.digest, &[7u8; 32]);
 
-        let integration_did = output.summary.integration_did.as_str();
+        let integration_did = output
+            .summary
+            .integration_did
+            .as_deref()
+            .expect("TemplateBootstrap path must yield Some(integration_did)");
         let material = payload
             .secrets
             .get(integration_did)
@@ -1448,6 +1671,144 @@ mod tests {
             "key-agreement kid {} not in published verificationMethod ids {:?}",
             material.ka_key.key_id,
             vm_ids
+        );
+    }
+
+    // ── BootstrapAsk::AdminRotation flow ────────────────────────────
+
+    use crate::test_support::signed_admin_rotation_request;
+
+    #[tokio::test]
+    async fn provision_integration_admin_rotation_mints_fresh_admin_no_integration() {
+        // Pins the AdminRotation contract end-to-end against the real
+        // server flow:
+        //   1. Returns Some(integration_did=None) — no integration mint.
+        //   2. The summary's admin_did != client_did (rotation happened).
+        //   3. The sealed bundle is a SealedPayloadV1::AdminRotation
+        //      variant carrying the rotated admin DID's key material.
+        //   4. The freshly-minted admin DID is the one written to the
+        //      ACL row (admin role, in-context).
+        let ts = open_test_store().await;
+        let (_vta_did, deps) = bootstrap_test_vta(&ts).await;
+        crate::contexts::create_context(&ts.contexts_ks, "ctx-1", "Test ctx")
+            .await
+            .expect("create context");
+
+        let auth = super_admin_claims();
+        let request = signed_admin_rotation_request("vta-admin", "ctx-1").await;
+        let client_did = request.holder().to_string();
+
+        let output = provision_integration(
+            &deps,
+            &auth,
+            ProvisionIntegrationParams {
+                request,
+                context: "ctx-1".into(),
+                assertion_mode: AssertionMode::PinnedOnly,
+                vc_validity: None,
+            },
+        )
+        .await
+        .expect("provision_integration AdminRotation");
+
+        // (1) Summary contract.
+        assert!(
+            output.summary.integration_did.is_none(),
+            "AdminRotation must not produce an integration DID"
+        );
+        assert!(
+            output.summary.template_name.is_none(),
+            "AdminRotation has no integration template"
+        );
+        assert!(
+            output.summary.template_kind.is_none(),
+            "AdminRotation has no integration template kind"
+        );
+        assert!(output.summary.admin_rolled_over);
+        assert_eq!(output.summary.secret_count, 1, "admin DID only");
+        assert_eq!(output.summary.output_count, 0, "no template outputs");
+        assert_eq!(
+            output.summary.admin_template_name.as_deref(),
+            Some("vta-admin")
+        );
+
+        // (2) Rotation must produce a fresh DID.
+        assert_ne!(
+            output.summary.admin_did, client_did,
+            "AdminRotation must mint a fresh admin DID, not echo client_did"
+        );
+
+        // (3) Sealed payload variant + key material.
+        let payload_bytes = output.armored.clone();
+        let bundles =
+            vta_sdk::sealed_transfer::armor::decode(&payload_bytes).expect("armor decode");
+        assert_eq!(bundles.len(), 1, "single bundle");
+        let x_secret = vta_sdk::sealed_transfer::ed25519_seed_to_x25519_secret(&[7u8; 32]);
+        let opened =
+            vta_sdk::sealed_transfer::open_bundle(&x_secret, &bundles[0], Some(&output.digest))
+                .expect("open AdminRotation bundle");
+        let rotation_payload = match opened.payload {
+            vta_sdk::sealed_transfer::SealedPayloadV1::AdminRotation(boxed) => *boxed,
+            other => panic!("expected AdminRotation, got {other:?}"),
+        };
+        assert_eq!(rotation_payload.admin.did, output.summary.admin_did);
+        assert!(
+            rotation_payload
+                .admin
+                .signing_key
+                .private_key_multibase
+                .starts_with('z')
+        );
+
+        // (4) ACL row is written for the rotated DID.
+        let acl_entry = crate::acl::get_acl_entry(&deps.acl_ks, &output.summary.admin_did)
+            .await
+            .expect("ACL lookup")
+            .expect("ACL row exists for rotated admin DID");
+        assert_eq!(acl_entry.role, crate::acl::Role::Admin);
+        assert!(
+            acl_entry.allowed_contexts.iter().any(|c| c == "ctx-1"),
+            "ACL row contexts must include ctx-1, got {:?}",
+            acl_entry.allowed_contexts
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_integration_admin_rotation_rejects_wrong_kind_template() {
+        // Admin rotation requires an admin-kind template. If the
+        // operator points us at e.g. didcomm-mediator (kind=mediator),
+        // mint_admin_via_template fails — confirms the kind check fires
+        // through this flow too.
+        let ts = open_test_store().await;
+        let (_vta_did, deps) = bootstrap_test_vta(&ts).await;
+        crate::contexts::create_context(&ts.contexts_ks, "ctx-2", "Test ctx 2")
+            .await
+            .expect("create context");
+
+        let auth = super_admin_claims();
+        let request = signed_admin_rotation_request("didcomm-mediator", "ctx-2").await;
+
+        let result = provision_integration(
+            &deps,
+            &auth,
+            ProvisionIntegrationParams {
+                request,
+                context: "ctx-2".into(),
+                assertion_mode: AssertionMode::PinnedOnly,
+                vc_validity: None,
+            },
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("non-admin template must be rejected"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, AppError::Validation(_)), "got: {err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("kind") && msg.contains("admin"),
+            "error must explain admin-kind requirement, got: {msg}"
         );
     }
 }

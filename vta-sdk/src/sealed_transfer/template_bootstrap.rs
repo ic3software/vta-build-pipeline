@@ -20,6 +20,42 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+/// Top-level payload for `SealedPayloadV1::AdminRotation`.
+///
+/// Carries everything an integration needs to switch its long-term
+/// admin DID from the ephemeral setup `did:key` over to a fresh,
+/// VTA-minted admin identity. Unlike [`TemplateBootstrapPayload`],
+/// there is no integration DID, no `did_document`, and no template
+/// outputs — the consumer brings (or mints elsewhere) its own
+/// integration-side DIDs and only needs an admin credential at this
+/// VTA.
+///
+/// Produced by the `BootstrapAsk::AdminRotation` flow on the VTA;
+/// opened on the consumer side by the SDK's `provision_client`
+/// runners which surface it as a `VtaReply::AdminOnly`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminRotationPayload {
+    /// VTA-issued `VtaAuthorizationCredential` (no `operator_of`
+    /// claim — there's no integration to operate). Short-lived,
+    /// verified once at bundle open, then archived.
+    pub authorization: serde_json::Value,
+
+    /// Key material for the freshly-minted admin DID. The consumer
+    /// installs this in its keystore and uses it as the long-term
+    /// authentication identity at the VTA.
+    pub admin: DidKeyMaterial,
+
+    /// URL the integration should use to reach the VTA's REST API.
+    /// `None` when the VTA is DIDComm-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vta_url: Option<String>,
+
+    /// VTA identity material — enough to verify the authorization VC
+    /// offline at first boot.
+    pub vta_trust: VtaTrustBundle,
+}
+
 /// Top-level payload for `SealedPayloadV1::TemplateBootstrap`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -294,6 +330,61 @@ mod tests {
                 assert_eq!(payload["expires"], "2026-12-31T00:00:00Z");
             }
             other => panic!("expected Generic, got {other:?}"),
+        }
+    }
+
+    fn sample_admin_rotation_payload() -> AdminRotationPayload {
+        AdminRotationPayload {
+            authorization: json!({ "type": ["VerifiableCredential", "VtaAuthorizationCredential"] }),
+            admin: DidKeyMaterial {
+                did: "did:key:z6MkAdmin".into(),
+                signing_key: KeyPair {
+                    key_id: "did:key:z6MkAdmin#z6MkAdmin".into(),
+                    public_key_multibase: "z6MkAdminSigning".into(),
+                    private_key_multibase: "zAdminSigningPriv".into(),
+                },
+                ka_key: KeyPair {
+                    key_id: "did:key:z6MkAdmin#z6LSAdmin".into(),
+                    public_key_multibase: "z6LSAdminKa".into(),
+                    private_key_multibase: "zAdminKaPriv".into(),
+                },
+            },
+            vta_url: Some("https://vta.example.com".into()),
+            vta_trust: VtaTrustBundle {
+                vta_did: "did:webvh:vta.example.com".into(),
+                vta_did_document: json!({ "id": "did:webvh:vta.example.com" }),
+                vta_did_log: None,
+            },
+        }
+    }
+
+    #[test]
+    fn admin_rotation_payload_json_round_trip() {
+        let payload = sample_admin_rotation_payload();
+        let json = serde_json::to_string(&payload).unwrap();
+        let parsed: AdminRotationPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.admin.did, "did:key:z6MkAdmin");
+        assert_eq!(parsed.vta_url.as_deref(), Some("https://vta.example.com"));
+    }
+
+    #[test]
+    fn admin_rotation_sealed_payload_variant_round_trip() {
+        let payload = SealedPayloadV1::AdminRotation(Box::new(sample_admin_rotation_payload()));
+        let json = serde_json::to_string(&payload).unwrap();
+        // Wire tag must be `admin_rotation` (snake_case) — matches the
+        // SealedPayloadV1 convention. Regression net for an accidental
+        // rename or for `serde(rename_all = "snake_case")` falling off
+        // the enum.
+        assert!(
+            json.contains("\"admin_rotation\""),
+            "wire tag must be snake_case `admin_rotation`, got: {json}"
+        );
+        let parsed: SealedPayloadV1 = serde_json::from_str(&json).unwrap();
+        match parsed {
+            SealedPayloadV1::AdminRotation(p) => {
+                assert_eq!(p.admin.did, "did:key:z6MkAdmin");
+            }
+            other => panic!("expected AdminRotation, got {other:?}"),
         }
     }
 

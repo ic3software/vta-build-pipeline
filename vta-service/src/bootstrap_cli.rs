@@ -324,6 +324,22 @@ fn print_opened(
                 }
             }
         }
+        SealedPayloadV1::AdminRotation(p) => {
+            println!("Payload: AdminRotation");
+            println!("  Admin DID:    {}", p.admin.did);
+            println!("  VTA DID:      {}", p.vta_trust.vta_did);
+            if let Some(ref u) = p.vta_url {
+                println!("  VTA URL:      {u}");
+            }
+            // End-to-end verification of the AdminRotation VC parallels
+            // the TemplateBootstrap path. Plumbing it through is left to
+            // a future patch — the digest-pinning anchor still applies
+            // by default.
+            println!();
+            println!(
+                "  \x1b[1;33m⚠ VC verification not yet wired for AdminRotation — relying on digest pinning.\x1b[0m"
+            );
+        }
     }
     Ok(())
 }
@@ -575,11 +591,17 @@ pub async fn run_provision_integration(
             output.summary.admin_did
         );
     }
-    eprintln!("  Integration DID: {}", output.summary.integration_did);
-    eprintln!(
-        "  Template:        {} ({})",
-        output.summary.template_name, output.summary.template_kind
-    );
+    if let Some(ref integration_did) = output.summary.integration_did {
+        eprintln!("  Integration DID: {integration_did}");
+    } else {
+        eprintln!("  Integration DID: (none — admin-rotation only)");
+    }
+    if let (Some(name), Some(kind)) = (
+        output.summary.template_name.as_deref(),
+        output.summary.template_kind.as_deref(),
+    ) {
+        eprintln!("  Template:        {name} ({kind})");
+    }
     eprintln!("  Secrets:         {}", output.summary.secret_count);
     eprintln!("  Outputs:         {}", output.summary.output_count);
     eprintln!("  SHA-256 digest:  {}", output.digest);
@@ -612,6 +634,7 @@ fn resolve_target_context(
     use vta_sdk::provision_integration::BootstrapAsk;
     let hint = match request.ask() {
         BootstrapAsk::TemplateBootstrap(ask) => ask.context_hint.clone(),
+        BootstrapAsk::AdminRotation(ask) => ask.context_hint.clone(),
     };
     match (explicit, hint) {
         (Some(explicit), Some(hint)) if explicit != hint => Err(format!(

@@ -38,14 +38,21 @@ pub const DEFAULT_VALIDITY: Duration = Duration::minutes(15);
 pub struct ProvisionAsk {
     /// VTA context the integration will live in. Becomes the ACL scope.
     pub context: String,
-    /// Template name for the integration's DID.
-    pub integration_template: String,
+    /// Template name for the integration's DID. `None` selects the
+    /// `BootstrapAsk::AdminRotation` wire shape — no integration DID
+    /// is minted, only a long-term admin DID via [`Self::admin_template`].
+    /// Set via [`Self::for_template`] / curated builders, or left
+    /// `None` via [`Self::vta_admin_rotated`].
+    pub integration_template: Option<String>,
     /// Variables supplied to the integration template renderer. Must
-    /// satisfy the template's `requiredVars` at the VTA.
+    /// satisfy the template's `requiredVars` at the VTA. Ignored when
+    /// `integration_template` is `None`.
     pub integration_template_vars: BTreeMap<String, Value>,
-    /// Template name for the VTA-minted long-term admin DID. When `None`,
-    /// the authorization VC's subject stays the setup DID and no
-    /// rollover happens — the legacy shape; not the default.
+    /// Template name for the VTA-minted long-term admin DID. When
+    /// `Some`, the authorization VC's subject is the freshly-minted
+    /// admin DID (rollover). When `None`, the VC subject stays the
+    /// setup DID — the legacy `AdminOnly`-style shape, used by
+    /// `ProvisionAsk::vta_admin`.
     pub admin_template: Option<String>,
     /// Variables supplied to the admin template renderer. Empty in the
     /// common case; the built-in `vta-admin` template takes none.
@@ -68,7 +75,7 @@ impl ProvisionAsk {
     ) -> Self {
         Self {
             context: context.into(),
-            integration_template: name.into(),
+            integration_template: Some(name.into()),
             integration_template_vars: vars,
             admin_template: Some(BUILTIN_VTA_ADMIN_TEMPLATE.to_string()),
             admin_template_vars: BTreeMap::new(),
@@ -132,10 +139,36 @@ impl ProvisionAsk {
     /// standalone long-term admin DID without an associated integration.
     /// The admin-rollover path is disabled (the integration template *is*
     /// the admin template here).
+    ///
+    /// Pairs with [`super::intent::VtaIntent::AdminOnly`]: the setup DID
+    /// the operator already enrolled stays as the long-term admin
+    /// credential. Used by PNM's self-bootstrap, where the operator
+    /// running `pnm contexts create` is themselves the admin.
     pub fn vta_admin(context: impl Into<String>) -> Self {
         let mut ask = Self::for_template(BUILTIN_VTA_ADMIN_TEMPLATE, BTreeMap::new(), context);
         ask.admin_template = None;
         ask
+    }
+
+    /// Curated builder for the [`super::intent::VtaIntent::AdminRotated`]
+    /// path — admin-DID rotation only, no integration DID.
+    ///
+    /// Use when the consumer brings (or will mint elsewhere) its own
+    /// integration DID and only needs the VTA to roll the ephemeral
+    /// setup `did:key` over to a long-term admin identity in a single
+    /// round-trip. The setup DID's authority at the VTA expires at the
+    /// end of the bootstrap; the rotated admin DID becomes the
+    /// long-term credential.
+    pub fn vta_admin_rotated(context: impl Into<String>) -> Self {
+        Self {
+            context: context.into(),
+            integration_template: None,
+            integration_template_vars: BTreeMap::new(),
+            admin_template: Some(BUILTIN_VTA_ADMIN_TEMPLATE.to_string()),
+            admin_template_vars: BTreeMap::new(),
+            label: None,
+            validity: DEFAULT_VALIDITY,
+        }
     }
 
     /// Attach a human-readable audit label.
@@ -165,16 +198,38 @@ impl ProvisionAsk {
     /// [`ProvisionRequestBuilder`]. The caller chooses how to sign:
     /// [`ProvisionRequestBuilder::sign_with`] for an existing keypair, or
     /// [`ProvisionRequestBuilder::sign_ephemeral`] for a fresh one.
+    ///
+    /// Dispatches based on `integration_template`:
+    /// - `Some(name)` → [`ProvisionRequestBuilder::new`] (TemplateBootstrap)
+    /// - `None` → [`ProvisionRequestBuilder::for_admin_rotation`]
+    ///   (AdminRotation). `admin_template` must be `Some` in that case;
+    ///   the curated [`Self::vta_admin_rotated`] builder enforces it.
     pub(crate) fn to_builder(&self) -> ProvisionRequestBuilder {
-        let mut builder = ProvisionRequestBuilder::new(self.integration_template.clone())
-            .vars(self.integration_template_vars.clone())
+        let mut builder = match &self.integration_template {
+            Some(name) => ProvisionRequestBuilder::new(name.clone())
+                .vars(self.integration_template_vars.clone()),
+            None => ProvisionRequestBuilder::for_admin_rotation(
+                self.admin_template
+                    .clone()
+                    .expect("ProvisionAsk with integration_template=None must set admin_template"),
+            ),
+        };
+        builder = builder
             .context_hint(self.context.clone())
             .validity(self.validity);
-        if let Some(ref name) = self.admin_template {
+        // Admin-template extras: only meaningful for TemplateBootstrap
+        // (which uses `admin_template` as the rollover template). For
+        // AdminRotation the admin_template is already locked in by
+        // `for_admin_rotation`; `admin_template()` is a no-op there
+        // (the ProvisionRequestBuilder docs note this), but bulk vars
+        // still apply.
+        if self.integration_template.is_some()
+            && let Some(ref name) = self.admin_template
+        {
             builder = builder.admin_template(name.clone());
-            for (k, v) in &self.admin_template_vars {
-                builder = builder.admin_template_var(k.clone(), v.clone());
-            }
+        }
+        for (k, v) in &self.admin_template_vars {
+            builder = builder.admin_template_var(k.clone(), v.clone());
         }
         if let Some(ref label) = self.label {
             builder = builder.label(label.clone()).note(label.clone());
@@ -211,7 +266,10 @@ mod tests {
     fn didcomm_mediator_sets_url_var_and_template() {
         let ask = ProvisionAsk::didcomm_mediator("ctx", "https://m.example.com");
         assert_eq!(ask.context, "ctx");
-        assert_eq!(ask.integration_template, BUILTIN_MEDIATOR_TEMPLATE);
+        assert_eq!(
+            ask.integration_template.as_deref(),
+            Some(BUILTIN_MEDIATOR_TEMPLATE)
+        );
         assert_eq!(
             ask.integration_template_vars["URL"],
             Value::String("https://m.example.com".into())
@@ -226,7 +284,10 @@ mod tests {
     #[test]
     fn webvh_server_sets_mediator_did_var() {
         let ask = ProvisionAsk::webvh_server("ctx", "did:webvh:m.example.com");
-        assert_eq!(ask.integration_template, BUILTIN_WEBVH_SERVER_TEMPLATE);
+        assert_eq!(
+            ask.integration_template.as_deref(),
+            Some(BUILTIN_WEBVH_SERVER_TEMPLATE)
+        );
         assert_eq!(
             ask.integration_template_vars["MEDIATOR_DID"],
             Value::String("did:webvh:m.example.com".into())
@@ -236,7 +297,10 @@ mod tests {
     #[test]
     fn webvh_daemon_sets_url_var() {
         let ask = ProvisionAsk::webvh_daemon("ctx", "https://h.example.com");
-        assert_eq!(ask.integration_template, BUILTIN_WEBVH_DAEMON_TEMPLATE);
+        assert_eq!(
+            ask.integration_template.as_deref(),
+            Some(BUILTIN_WEBVH_DAEMON_TEMPLATE)
+        );
         assert_eq!(
             ask.integration_template_vars["URL"],
             Value::String("https://h.example.com".into())
@@ -247,7 +311,10 @@ mod tests {
     fn webvh_control_sets_url_and_mediator_did_vars() {
         let ask =
             ProvisionAsk::webvh_control("ctx", "https://h.example.com", "did:webvh:m.example.com");
-        assert_eq!(ask.integration_template, BUILTIN_WEBVH_CONTROL_TEMPLATE);
+        assert_eq!(
+            ask.integration_template.as_deref(),
+            Some(BUILTIN_WEBVH_CONTROL_TEMPLATE)
+        );
         assert_eq!(
             ask.integration_template_vars["URL"],
             Value::String("https://h.example.com".into())
@@ -261,7 +328,10 @@ mod tests {
     #[test]
     fn vta_admin_disables_rollover() {
         let ask = ProvisionAsk::vta_admin("ctx");
-        assert_eq!(ask.integration_template, BUILTIN_VTA_ADMIN_TEMPLATE);
+        assert_eq!(
+            ask.integration_template.as_deref(),
+            Some(BUILTIN_VTA_ADMIN_TEMPLATE)
+        );
         assert!(ask.integration_template_vars.is_empty());
         assert!(ask.admin_template.is_none());
     }
@@ -269,7 +339,7 @@ mod tests {
     #[test]
     fn for_template_defaults_to_admin_rollover_via_vta_admin() {
         let ask = ProvisionAsk::for_template("custom-template", BTreeMap::new(), "ctx");
-        assert_eq!(ask.integration_template, "custom-template");
+        assert_eq!(ask.integration_template.as_deref(), Some("custom-template"));
         assert_eq!(
             ask.admin_template.as_deref(),
             Some(BUILTIN_VTA_ADMIN_TEMPLATE)
@@ -281,6 +351,44 @@ mod tests {
         let ask = ProvisionAsk::didcomm_mediator("ctx", "https://m").without_admin_rollover();
         assert!(ask.admin_template.is_none());
         assert!(ask.admin_template_vars.is_empty());
+    }
+
+    #[test]
+    fn vta_admin_rotated_yields_admin_only_ask_shape() {
+        let ask = ProvisionAsk::vta_admin_rotated("ctx");
+        // No integration template — drives the BootstrapAsk::AdminRotation
+        // wire variant.
+        assert!(ask.integration_template.is_none());
+        assert!(ask.integration_template_vars.is_empty());
+        // Admin template is mandatory and pinned to vta-admin.
+        assert_eq!(
+            ask.admin_template.as_deref(),
+            Some(BUILTIN_VTA_ADMIN_TEMPLATE)
+        );
+    }
+
+    #[tokio::test]
+    async fn vta_admin_rotated_produces_admin_rotation_wire_ask() {
+        let ask = ProvisionAsk::vta_admin_rotated("ctx").with_label("openvtc-cli2");
+        let (seed, pub_bytes) = crate::sealed_transfer::generate_ed25519_keypair();
+        let client_did = affinidi_crypto::did_key::ed25519_pub_to_did_key(&pub_bytes);
+
+        let vp = ask
+            .to_builder()
+            .sign_with(&seed, &client_did)
+            .await
+            .expect("sign vta_admin_rotated");
+
+        // Wire ask must be the AdminRotation variant, not TemplateBootstrap —
+        // this is the central guarantee of the new path.
+        match &vp.ask {
+            BootstrapAsk::AdminRotation(inner) => {
+                assert_eq!(inner.admin_template.name, BUILTIN_VTA_ADMIN_TEMPLATE);
+                assert_eq!(inner.context_hint.as_deref(), Some("ctx"));
+            }
+            other => panic!("expected AdminRotation, got {other:?}"),
+        }
+        assert_eq!(vp.label.as_deref(), Some("openvtc-cli2"));
     }
 
     /// Snapshot the builder output for one curated builder vs `for_template`
@@ -380,8 +488,12 @@ mod tests {
             .await
             .expect("sign generic");
 
-        let BootstrapAsk::TemplateBootstrap(inner_a) = &vp_a.ask;
-        let BootstrapAsk::TemplateBootstrap(inner_b) = &vp_b.ask;
+        let BootstrapAsk::TemplateBootstrap(inner_a) = &vp_a.ask else {
+            panic!("expected TemplateBootstrap ask")
+        };
+        let BootstrapAsk::TemplateBootstrap(inner_b) = &vp_b.ask else {
+            panic!("expected TemplateBootstrap ask")
+        };
 
         assert_eq!(inner_a.template.name, inner_b.template.name);
         assert_eq!(inner_a.template.vars, inner_b.template.vars);

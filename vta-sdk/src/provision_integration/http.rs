@@ -57,9 +57,10 @@ pub struct ProvisionSummary {
     /// Ephemeral DID that signed the VP and opens the sealed bundle.
     pub client_did: String,
     /// Long-term admin DID — equals `client_did` when no rollover, or
-    /// the VTA-minted DID when the request carried an `adminTemplate`.
-    /// Older VTAs that pre-date admin rollover omit this field on the
-    /// wire; we default it to `client_did` for backward compat.
+    /// the VTA-minted DID when the request carried an `adminTemplate`
+    /// (or used `AdminRotation`). Older VTAs that pre-date admin
+    /// rollover omit this field on the wire; we default it to
+    /// `client_did` for backward compat.
     #[serde(default)]
     pub admin_did: String,
     /// True when the VTA minted a fresh long-term admin DID for this
@@ -67,10 +68,22 @@ pub struct ProvisionSummary {
     /// with VTAs that pre-date admin rollover.
     #[serde(default)]
     pub admin_rolled_over: bool,
-    pub integration_did: String,
-    pub template_name: String,
-    pub template_kind: String,
-    /// Name of the admin template, when one was requested.
+    /// Integration DID rendered from the integration template. `None`
+    /// for the `AdminRotation` ask — that flow only mints an admin
+    /// DID and does not produce an integration DID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_did: Option<String>,
+    /// Name of the integration template that was rendered. `None` for
+    /// the `AdminRotation` ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_name: Option<String>,
+    /// `kind` field of the integration template. `None` for the
+    /// `AdminRotation` ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_kind: Option<String>,
+    /// Name of the admin template, when one was used (i.e. the
+    /// request used `adminTemplate` rollover *or* the `AdminRotation`
+    /// ask).
     #[serde(default)]
     pub admin_template_name: Option<String>,
     pub bundle_id_hex: String,

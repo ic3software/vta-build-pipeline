@@ -83,8 +83,26 @@ pub struct BootstrapRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum BootstrapAsk {
-    /// Template-driven integration bootstrap (phase 1 sole variant).
+    /// Template-driven integration bootstrap. The VTA mints a fresh
+    /// integration DID via `template`, optionally rotates the admin DID
+    /// to a fresh `admin_template`-derived identity, and ships both
+    /// (plus the integration DID's keys, did.jsonl, VC, trust bundle)
+    /// in a [`SealedPayloadV1::TemplateBootstrap`] bundle.
     TemplateBootstrap(TemplateBootstrapAsk),
+    /// Admin-DID rotation only — no integration DID minted. The VTA
+    /// renders `admin_template`, mints a fresh long-term admin DID,
+    /// binds the authorization VC + ACL row to that DID, and ships
+    /// only the admin material in a [`SealedPayloadV1::AdminRotation`]
+    /// bundle.
+    ///
+    /// Use when the consumer brings (or will mint elsewhere) its own
+    /// integration DID and only needs a long-term admin credential at
+    /// this VTA — rolling the ephemeral setup did:key over to a fresh
+    /// VTA-minted admin identity in a single round-trip.
+    ///
+    /// [`SealedPayloadV1::AdminRotation`]:
+    /// crate::sealed_transfer::SealedPayloadV1::AdminRotation
+    AdminRotation(AdminRotationAsk),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +136,28 @@ pub struct TemplateBootstrapAsk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "adminTemplate")]
     pub admin_template: Option<DidTemplateRef>,
+
+    /// Free-form operator note for audit logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Admin-only rotation ask. Mints a fresh long-term admin DID via
+/// `admin_template`; no integration template, no integration DID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminRotationAsk {
+    /// VTA context the admin grant lands in. Hint for the common case;
+    /// the producer-side caller must agree with `--context` if both are
+    /// supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "contextHint")]
+    pub context_hint: Option<String>,
+
+    /// Admin-DID template — typically the built-in `vta-admin`. Must be
+    /// registered at the VTA and declare `kind: "admin"`.
+    #[serde(rename = "adminTemplate")]
+    pub admin_template: DidTemplateRef,
 
     /// Free-form operator note for audit logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,7 +440,12 @@ impl VerifiedBootstrapRequest {
 /// ```
 #[derive(Debug, Clone)]
 pub struct ProvisionRequestBuilder {
-    template: String,
+    /// Integration template name. `Some(_)` selects the
+    /// [`BootstrapAsk::TemplateBootstrap`] intent; `None` selects
+    /// [`BootstrapAsk::AdminRotation`] (admin-only path — no integration
+    /// minted). Set via [`new`](Self::new) or
+    /// [`for_admin_rotation`](Self::for_admin_rotation) respectively.
+    template: Option<String>,
     vars: BTreeMap<String, Value>,
     context_hint: Option<String>,
     admin_template_name: Option<String>,
@@ -413,13 +458,39 @@ pub struct ProvisionRequestBuilder {
 impl ProvisionRequestBuilder {
     /// Start a new builder targeting the named DID template (e.g.
     /// `"didcomm-mediator"`, `"webvh-daemon"`, or an operator-uploaded
-    /// custom template).
+    /// custom template). Selects the [`BootstrapAsk::TemplateBootstrap`]
+    /// intent — the VTA mints an integration DID via this template.
     pub fn new(template_name: impl Into<String>) -> Self {
         Self {
-            template: template_name.into(),
+            template: Some(template_name.into()),
             vars: BTreeMap::new(),
             context_hint: None,
             admin_template_name: None,
+            admin_template_vars: BTreeMap::new(),
+            validity: Duration::hours(1),
+            label: None,
+            note: None,
+        }
+    }
+
+    /// Start a new builder for the [`BootstrapAsk::AdminRotation`]
+    /// intent: the VTA renders `admin_template_name` (typically the
+    /// built-in `"vta-admin"`), mints a fresh admin DID under its own
+    /// custody, binds the authorization VC + ACL row to it, and ships
+    /// the admin DID's key material — no integration DID, no integration
+    /// template render.
+    ///
+    /// `vars`-style mutators ([`var`](Self::var), [`vars`](Self::vars))
+    /// and [`admin_template`](Self::admin_template) are no-ops in this
+    /// mode — there's no integration template to feed and the admin
+    /// template is already pinned. Pass admin-template variables via
+    /// [`admin_template_var`](Self::admin_template_var).
+    pub fn for_admin_rotation(admin_template_name: impl Into<String>) -> Self {
+        Self {
+            template: None,
+            vars: BTreeMap::new(),
+            context_hint: None,
+            admin_template_name: Some(admin_template_name.into()),
             admin_template_vars: BTreeMap::new(),
             validity: Duration::hours(1),
             label: None,
@@ -495,21 +566,39 @@ impl ProvisionRequestBuilder {
     }
 
     fn build_ask(&self) -> BootstrapAsk {
-        BootstrapAsk::TemplateBootstrap(TemplateBootstrapAsk {
-            context_hint: self.context_hint.clone(),
-            template: DidTemplateRef {
-                name: self.template.clone(),
-                vars: self.vars.clone(),
-            },
-            admin_template: self
-                .admin_template_name
-                .as_ref()
-                .map(|name| DidTemplateRef {
+        match &self.template {
+            Some(name) => BootstrapAsk::TemplateBootstrap(TemplateBootstrapAsk {
+                context_hint: self.context_hint.clone(),
+                template: DidTemplateRef {
                     name: name.clone(),
+                    vars: self.vars.clone(),
+                },
+                admin_template: self
+                    .admin_template_name
+                    .as_ref()
+                    .map(|name| DidTemplateRef {
+                        name: name.clone(),
+                        vars: self.admin_template_vars.clone(),
+                    }),
+                note: self.note.clone(),
+            }),
+            None => BootstrapAsk::AdminRotation(AdminRotationAsk {
+                context_hint: self.context_hint.clone(),
+                // `for_admin_rotation` is the only constructor that
+                // leaves `template = None`, and it requires an admin
+                // template name. A `None` here means a caller mutated
+                // the builder past that invariant, which we treat as a
+                // programmer error.
+                admin_template: DidTemplateRef {
+                    name: self
+                        .admin_template_name
+                        .clone()
+                        .expect("admin rotation builder requires an admin template name"),
                     vars: self.admin_template_vars.clone(),
-                }),
-            note: self.note.clone(),
-        })
+                },
+                note: self.note.clone(),
+            }),
+        }
     }
 
     /// Sign with a caller-supplied Ed25519 seed plus its corresponding
@@ -810,7 +899,9 @@ mod tests {
         // Round-trip through deserialize + verify; field must survive.
         let parsed: BootstrapRequest = serde_json::from_value(json).unwrap();
         let verified = parsed.verify().expect("verify");
-        let BootstrapAsk::TemplateBootstrap(ask) = verified.ask();
+        let BootstrapAsk::TemplateBootstrap(ask) = verified.ask() else {
+            panic!("expected TemplateBootstrap ask")
+        };
         let admin = ask
             .admin_template
             .as_ref()
@@ -846,7 +937,9 @@ mod tests {
 
         let parsed: BootstrapRequest = serde_json::from_value(json).unwrap();
         let verified = parsed.verify().expect("verify legacy-shape VP");
-        let BootstrapAsk::TemplateBootstrap(ask) = verified.ask();
+        let BootstrapAsk::TemplateBootstrap(ask) = verified.ask() else {
+            panic!("expected TemplateBootstrap ask")
+        };
         assert!(ask.admin_template.is_none());
     }
 
@@ -867,7 +960,9 @@ mod tests {
         .await
         .unwrap();
 
-        let BootstrapAsk::TemplateBootstrap(ref mut ask) = vp.ask;
+        let BootstrapAsk::TemplateBootstrap(ref mut ask) = vp.ask else {
+            panic!("expected TemplateBootstrap ask")
+        };
         ask.admin_template = Some(DidTemplateRef {
             name: "attacker-admin-template".into(),
             vars: BTreeMap::new(),
@@ -980,6 +1075,7 @@ mod tests {
                 assert_eq!(ask.context_hint.as_deref(), Some("mediator-prod"));
                 assert!(ask.admin_template.is_none());
             }
+            other => panic!("expected TemplateBootstrap, got {other:?}"),
         }
         assert_eq!(verified.label(), Some("builder-smoke-test"));
     }
@@ -1000,6 +1096,7 @@ mod tests {
                 assert_eq!(admin.name, "vta-admin");
                 assert!(admin.vars.is_empty());
             }
+            other => panic!("expected TemplateBootstrap, got {other:?}"),
         }
     }
 
@@ -1023,6 +1120,7 @@ mod tests {
                 );
                 assert!(ask.template.vars.get("ROUTING_KEYS").unwrap().is_array());
             }
+            other => panic!("expected TemplateBootstrap, got {other:?}"),
         }
     }
 
@@ -1130,7 +1228,9 @@ mod tests {
         // Fields inside `ask` are also signed — tampering with the
         // template name, vars, or admin_template must invalidate.
         let (mut vp, _) = build_valid_vp().await;
-        let BootstrapAsk::TemplateBootstrap(ref mut ask) = vp.ask;
+        let BootstrapAsk::TemplateBootstrap(ref mut ask) = vp.ask else {
+            panic!("expected TemplateBootstrap ask")
+        };
         ask.template.name = "swapped-template".into();
         let err = vp.verify().unwrap_err();
         assert!(
@@ -1334,5 +1434,95 @@ mod tests {
             err.to_string().contains("smugglerField") || err.to_string().contains("unknown field"),
             "error must mention the rejected nested field, got: {err}"
         );
+    }
+
+    // ── AdminRotation variant ────────────────────────────────────────
+
+    fn sample_admin_rotation_ask() -> BootstrapAsk {
+        BootstrapAsk::AdminRotation(AdminRotationAsk {
+            context_hint: Some("prod-mediator".into()),
+            admin_template: DidTemplateRef {
+                name: "vta-admin".into(),
+                vars: BTreeMap::new(),
+            },
+            note: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn admin_rotation_ask_round_trips_through_sign_verify() {
+        let (seed, client_did) = sample_client_did(0xE0);
+        let vp = BootstrapRequest::sign(
+            &seed,
+            &client_did,
+            [0xE1; 16],
+            Duration::hours(1),
+            Some("admin-rotation".into()),
+            sample_admin_rotation_ask(),
+        )
+        .await
+        .unwrap();
+
+        // VP must serialize the AdminRotation tag with its `adminTemplate`
+        // JSON name, not the snake_case Rust name.
+        let json = serde_json::to_value(&vp).unwrap();
+        assert_eq!(json["ask"]["type"], "AdminRotation");
+        assert_eq!(json["ask"]["adminTemplate"]["name"], "vta-admin");
+
+        let parsed: BootstrapRequest = serde_json::from_value(json).unwrap();
+        let verified = parsed.verify().expect("verify");
+        match verified.ask() {
+            BootstrapAsk::AdminRotation(ask) => {
+                assert_eq!(ask.admin_template.name, "vta-admin");
+                assert_eq!(ask.context_hint.as_deref(), Some("prod-mediator"));
+            }
+            other => panic!("expected AdminRotation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_rotation_tampered_template_rejected() {
+        let (seed, client_did) = sample_client_did(0xE2);
+        let mut vp = BootstrapRequest::sign(
+            &seed,
+            &client_did,
+            [0xE3; 16],
+            Duration::hours(1),
+            None,
+            sample_admin_rotation_ask(),
+        )
+        .await
+        .unwrap();
+
+        let BootstrapAsk::AdminRotation(ref mut ask) = vp.ask else {
+            panic!("expected AdminRotation ask")
+        };
+        ask.admin_template.name = "attacker-admin-template".into();
+
+        let err = vp.verify().unwrap_err();
+        assert!(
+            matches!(err, ProvisionIntegrationError::BadProof(_)),
+            "expected BadProof, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn for_admin_rotation_builder_emits_admin_rotation_variant() {
+        let signed = ProvisionRequestBuilder::for_admin_rotation("vta-admin")
+            .context_hint("ctx-1")
+            .label("openvtc-cli2 first-boot")
+            .sign_ephemeral()
+            .await
+            .expect("sign_ephemeral");
+
+        let verified = signed.request.clone().verify().expect("verify VP");
+        match verified.ask() {
+            BootstrapAsk::AdminRotation(ask) => {
+                assert_eq!(ask.admin_template.name, "vta-admin");
+                assert_eq!(ask.context_hint.as_deref(), Some("ctx-1"));
+            }
+            other => panic!("expected AdminRotation, got {other:?}"),
+        }
+        assert_eq!(verified.label(), Some("openvtc-cli2 first-boot"));
     }
 }

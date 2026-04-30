@@ -208,6 +208,23 @@ pub async fn run_open(
             println!();
             println!("Install via the provision-integration flow on the integration host.");
         }
+        SealedPayloadV1::AdminRotation(p) => {
+            println!("Payload: AdminRotation");
+            println!("  Admin DID:    {}", p.admin.did);
+            println!("  VTA DID:      {}", p.vta_trust.vta_did);
+            if let Some(ref u) = p.vta_url {
+                println!("  VTA URL:      {u}");
+            }
+            // VC verification for AdminRotation parallels the
+            // TemplateBootstrap path but isn't yet plumbed through —
+            // digest pinning remains the trust anchor for now.
+            println!();
+            println!(
+                "  \x1b[1;33m⚠ VC verification not yet wired for AdminRotation — digest-only.\x1b[0m"
+            );
+            println!();
+            println!("Install via the provision-integration flow on the integration host.");
+        }
     }
 
     Ok(())
@@ -431,11 +448,17 @@ pub async fn run_provision_integration(
     } else {
         eprintln!("  Admin DID:       {} (== client)", resp.summary.admin_did);
     }
-    eprintln!("  Integration DID: {}", resp.summary.integration_did);
-    eprintln!(
-        "  Template:        {} ({})",
-        resp.summary.template_name, resp.summary.template_kind
-    );
+    if let Some(ref integration_did) = resp.summary.integration_did {
+        eprintln!("  Integration DID: {integration_did}");
+    } else {
+        eprintln!("  Integration DID: (none — admin-rotation only)");
+    }
+    if let (Some(name), Some(kind)) = (
+        resp.summary.template_name.as_deref(),
+        resp.summary.template_kind.as_deref(),
+    ) {
+        eprintln!("  Template:        {name} ({kind})");
+    }
     eprintln!("  Secrets:         {}", resp.summary.secret_count);
     eprintln!("  Outputs:         {}", resp.summary.output_count);
     eprintln!("  SHA-256 digest:  {}", resp.digest);
@@ -456,6 +479,7 @@ fn resolve_target_context_wire(
     use vta_sdk::provision_integration::BootstrapAsk;
     let hint = match &request.ask {
         BootstrapAsk::TemplateBootstrap(ask) => ask.context_hint.clone(),
+        BootstrapAsk::AdminRotation(ask) => ask.context_hint.clone(),
     };
     match (explicit, hint) {
         (Some(explicit), Some(hint)) if explicit != hint => Err(format!(
@@ -481,6 +505,7 @@ fn variant_name(p: &SealedPayloadV1) -> &'static str {
         SealedPayloadV1::AdminKeySet(_) => "AdminKeySet",
         SealedPayloadV1::RawPrivateKey(_) => "RawPrivateKey",
         SealedPayloadV1::TemplateBootstrap(_) => "TemplateBootstrap",
+        SealedPayloadV1::AdminRotation(_) => "AdminRotation",
     }
 }
 

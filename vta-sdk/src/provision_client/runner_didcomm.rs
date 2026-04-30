@@ -72,9 +72,16 @@ pub async fn provision_via_didcomm(
 ///
 /// Pre-auth boundary: any failure before [`DIDCommSession::connect`]
 /// resolves `Ok` is pre-auth. The DIDComm attempt has no post-auth
-/// failure mode in this scope — `list_webvh_servers` errors are
-/// non-fatal (we continue serverless) and downstream
-/// `provision_integration` runs in [`run_provision_flight`].
+/// failure mode for FullSetup in this scope — `list_webvh_servers`
+/// errors are non-fatal (we continue serverless) and downstream
+/// `provision_integration` runs in [`run_provision_flight`]. The
+/// `AdminRotated` arm runs `provision_integration` inline (no
+/// preflight indirection) and reports post-auth failures here.
+///
+/// `ask` is consumed by the `AdminRotated` arm to drive the provision
+/// round-trip; the `FullSetup` and `AdminOnly` arms ignore it (their
+/// flight runs separately, or there is no flight).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_didcomm_attempt(
     intent: VtaIntent,
     vta_did: String,
@@ -82,6 +89,7 @@ pub(crate) async fn run_didcomm_attempt(
     rest_url: Option<String>,
     setup_did: String,
     setup_privkey_mb: String,
+    ask: ProvisionAsk,
     tx: &UnboundedSender<VtaEvent>,
 ) -> AttemptOutcome {
     let _ = tx.send(VtaEvent::CheckStart(DiagCheck::AuthenticateDIDComm));
@@ -225,7 +233,128 @@ pub(crate) async fn run_didcomm_attempt(
                 }
             }
         }
+        VtaIntent::AdminRotated => {
+            // AdminRotated: open a DIDComm session, then run the
+            // provision-integration round-trip with an AdminRotation
+            // ask. No webvh-server picker — this flow doesn't mint an
+            // integration DID.
+            //
+            // Authenticated session opens first; pre-auth failures here
+            // map to PreAuthFailure (different transport may succeed).
+            // Once auth completes, the round-trip itself becomes
+            // post-auth.
+            let _ = match DIDCommSession::connect(
+                &setup_did,
+                &setup_privkey_mb,
+                &vta_did,
+                &mediator_did,
+            )
+            .await
+            {
+                Ok(s) => {
+                    let _ = tx.send(VtaEvent::CheckDone(
+                        DiagCheck::AuthenticateDIDComm,
+                        DiagStatus::Ok(format!("DIDComm session as {setup_did}")),
+                    ));
+                    s
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = tx.send(VtaEvent::CheckDone(
+                        DiagCheck::AuthenticateDIDComm,
+                        DiagStatus::Failed(msg.clone()),
+                    ));
+                    let _ = tx.send(VtaEvent::CheckDone(
+                        DiagCheck::ListWebvhServers,
+                        DiagStatus::Skipped("session did not open".into()),
+                    ));
+                    let _ = tx.send(VtaEvent::CheckDone(
+                        DiagCheck::ProvisionIntegration,
+                        DiagStatus::Skipped("session did not open".into()),
+                    ));
+                    return AttemptOutcome::PreAuthFailure(format!(
+                        "Could not open an authenticated DIDComm session to the VTA. \
+                         Confirm the `pnm acl create` command ran successfully for \
+                         this setup DID and that the VTA's mediator service is reachable. \
+                         ({msg})"
+                    ));
+                }
+            };
+
+            let _ = tx.send(VtaEvent::CheckDone(
+                DiagCheck::ListWebvhServers,
+                DiagStatus::Skipped(
+                    "AdminRotated — no integration DID minted so no webvh host needed".into(),
+                ),
+            ));
+            let _ = tx.send(VtaEvent::CheckStart(DiagCheck::ProvisionIntegration));
+
+            match provision_admin_rotation_via_didcomm(
+                &setup_did,
+                &setup_privkey_mb,
+                &vta_did,
+                &mediator_did,
+                &ask,
+            )
+            .await
+            {
+                Ok(reply) => {
+                    let _ = tx.send(VtaEvent::CheckDone(
+                        DiagCheck::ProvisionIntegration,
+                        DiagStatus::Ok(format!(
+                            "admin DID rotated: {} (via {})",
+                            reply.admin_did,
+                            ask.admin_template.as_deref().unwrap_or(
+                                crate::provision_client::ask::BUILTIN_VTA_ADMIN_TEMPLATE
+                            ),
+                        )),
+                    ));
+                    AttemptOutcome::Connected(VtaReply::AdminOnly(reply))
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    let _ = tx.send(VtaEvent::CheckDone(
+                        DiagCheck::ProvisionIntegration,
+                        DiagStatus::Failed(msg.clone()),
+                    ));
+                    AttemptOutcome::PostAuthFailure(format!(
+                        "AdminRotation provisioning failed after auth. ({msg})"
+                    ))
+                }
+            }
+        }
     }
+}
+
+/// Drive a one-shot AdminRotation `provision-integration` round-trip
+/// over DIDComm. Mirrors [`provision_via_didcomm`] but decodes the
+/// returned bundle as the [`SealedPayloadV1::AdminRotation`] variant
+/// and lifts the result into an [`AdminCredentialReply`] (admin DID +
+/// private key) — discarding the VC + trust bundle.
+///
+/// [`SealedPayloadV1::AdminRotation`]:
+/// crate::sealed_transfer::SealedPayloadV1::AdminRotation
+pub async fn provision_admin_rotation_via_didcomm(
+    setup_did: &str,
+    setup_private_key_mb: &str,
+    vta_did: &str,
+    mediator_did: &str,
+    ask: &ProvisionAsk,
+) -> Result<AdminCredentialReply, ProvisionError> {
+    let seed = decode_private_key_multibase(setup_private_key_mb)
+        .map_err(|e| ProvisionError::SetupKeyMalformed(e.to_string()))?;
+
+    let session = DIDCommSession::connect(setup_did, setup_private_key_mb, vta_did, mediator_did)
+        .await
+        .map_err(|e| ProvisionError::SessionOpen(e.to_string()))?;
+
+    let vp = ask.to_builder().sign_with(&seed, setup_did).await?;
+    let nonce = decode_nonce_b64url(&vp.nonce).map_err(ProvisionError::Armor)?;
+
+    let response =
+        provision_integration_didcomm(&session, vp, ask.context.clone(), None, None).await?;
+
+    crate::provision_client::result::admin_rotation_response_to_reply(&seed, nonce, response)
 }
 
 /// FullSetup provision flight — runs after the preflight
@@ -300,7 +429,7 @@ pub async fn run_provision_flight(
                     "admin DID: {} (rolled: {}), integration DID: {}{webvh_note}",
                     result.admin_did(),
                     result.summary.admin_rolled_over,
-                    result.integration_did(),
+                    result.integration_did().unwrap_or("(none)"),
                 )),
             ));
             let _ = tx.send(VtaEvent::Connected {
@@ -332,6 +461,8 @@ pub async fn run_provision_flight(
                      is present and your `WEBVH_SERVER` (if any) matches a \
                      registered server. Details: {msg}",
                     ask.integration_template
+                        .as_deref()
+                        .unwrap_or("(admin rotation)")
                 )
             } else {
                 format!("Provisioning failed. Details: {msg}")

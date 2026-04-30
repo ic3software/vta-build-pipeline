@@ -31,7 +31,9 @@ use super::messages::OperatorMessages;
 use super::resolve::{ResolvedVta, resolve_vta};
 use super::result::ProvisionResult;
 use super::runner_didcomm::{run_didcomm_attempt, run_provision_flight};
-use super::runner_rest::{run_rest_attempt_admin_only, run_rest_attempt_full_setup};
+use super::runner_rest::{
+    run_rest_attempt_admin_only, run_rest_attempt_admin_rotated, run_rest_attempt_full_setup,
+};
 
 /// Which transport(s) the VTA advertises and how the orchestrator should
 /// treat them on this run.
@@ -182,6 +184,7 @@ pub async fn run_connection_test(
                 rest_url.clone(),
                 setup_did,
                 setup_privkey_mb,
+                ask.clone(),
                 &tx,
             )
             .await;
@@ -248,6 +251,17 @@ pub async fn run_connection_test(
                 }
                 VtaIntent::FullSetup => {
                     run_rest_attempt_full_setup(
+                        &rest_url_str,
+                        &vta_did,
+                        setup_did,
+                        setup_privkey_mb,
+                        ask,
+                        &tx,
+                    )
+                    .await
+                }
+                VtaIntent::AdminRotated => {
+                    run_rest_attempt_admin_rotated(
                         &rest_url_str,
                         &vta_did,
                         setup_did,

@@ -15,6 +15,7 @@ use crate::provision_integration::payload::{
     VtaTrustBundle,
 };
 
+use super::intent::AdminCredentialReply;
 use super::result::ProvisionResult;
 
 /// Build a synthetic [`ProvisionResult`] for tests that need a fully-
@@ -89,9 +90,9 @@ pub fn sample_provision_result(rolled_over: bool) -> ProvisionResult {
             client_did: "did:key:z6MkSetup".into(),
             admin_did: admin_did.into(),
             admin_rolled_over: rolled_over,
-            integration_did: integration_did.into(),
-            template_name: "didcomm-mediator".into(),
-            template_kind: "mediator".into(),
+            integration_did: Some(integration_did.into()),
+            template_name: Some("didcomm-mediator".into()),
+            template_kind: Some("mediator".into()),
             admin_template_name: if rolled_over {
                 Some("vta-admin".into())
             } else {
@@ -103,5 +104,15 @@ pub fn sample_provision_result(rolled_over: bool) -> ProvisionResult {
             webvh_server_id: None,
         },
         payload,
+    }
+}
+
+/// Build a synthetic [`AdminCredentialReply`] for tests that mock the
+/// [`super::intent::VtaIntent::AdminRotated`] path's terminal reply
+/// shape — admin DID + rotated private key.
+pub fn sample_admin_rotation_reply() -> AdminCredentialReply {
+    AdminCredentialReply {
+        admin_did: "did:key:z6MkRotatedAdmin".into(),
+        admin_private_key_mb: "zRotatedAdminPrivate".into(),
     }
 }

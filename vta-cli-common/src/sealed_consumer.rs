@@ -330,6 +330,12 @@ pub fn extract_admin_credential(
              flow to install"
                 .into(),
         ),
+        SealedPayloadV1::AdminRotation(_) => Err(
+            "AdminRotation payloads carry a VC-issued admin authorization, not a \
+             CredentialBundle — open via `pnm bootstrap open` and use the provision-integration \
+             flow to install"
+                .into(),
+        ),
     }
 }
 
@@ -486,6 +492,7 @@ mod tests {
                     Some("vta-admin")
                 );
             }
+            other => panic!("expected TemplateBootstrap, got {other:?}"),
         }
 
         // client_did returned matches the VP holder.

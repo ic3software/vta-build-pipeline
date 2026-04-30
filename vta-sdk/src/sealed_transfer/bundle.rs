@@ -46,6 +46,15 @@ pub enum SealedPayloadV1 {
     ///
     /// See `docs/03-integrating/provision-integration.md` for the full design.
     TemplateBootstrap(Box<super::template_bootstrap::TemplateBootstrapPayload>),
+    /// Admin-DID rotation only — no integration DID. Carries the
+    /// VTA-issued admin authorization VC + freshly-minted admin DID
+    /// key material + VTA trust anchor. Produced by the
+    /// `BootstrapAsk::AdminRotation` server flow.
+    ///
+    /// Use this when the consumer brings its own integration DID and
+    /// only needs to roll the ephemeral setup `did:key` over to a
+    /// long-term admin identity at the VTA.
+    AdminRotation(Box<super::template_bootstrap::AdminRotationPayload>),
 }
 
 /// A single raw private key transferred inside a sealed bundle. The

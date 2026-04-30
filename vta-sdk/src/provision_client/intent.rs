@@ -1,14 +1,23 @@
 //! Shared VTA request / reply types for the online provisioning workflow.
 //!
-//! Two intents are supported:
+//! Three intents are supported:
 //!
 //! - [`VtaIntent::FullSetup`] — the VTA mints the integration's DID via a
 //!   template render, rolls over an admin DID, and returns a
 //!   [`super::result::ProvisionResult`] with keys, `did.jsonl`,
 //!   authorization VC, and VTA trust bundle.
 //! - [`VtaIntent::AdminOnly`] — the integration brings its own DID; the
-//!   VTA only issues an admin credential and an ACL row. The reply carries
-//!   an admin DID + matching private key.
+//!   VTA only issues an admin credential and an ACL row. The setup DID
+//!   *is* the long-term admin DID — no rotation. The reply carries an
+//!   admin DID + matching private key.
+//! - [`VtaIntent::AdminRotated`] — the integration brings its own
+//!   integration DID **and** wants the admin DID rotated to a fresh
+//!   VTA-minted identity. Same wire flow as `FullSetup` minus the
+//!   integration mint. The setup DID authenticates the bootstrap and
+//!   loses its authority at the end of the round-trip; the rotated
+//!   admin DID becomes the long-term credential. The reply shape
+//!   mirrors `AdminOnly` (admin DID + private key), just with a
+//!   different DID.
 //!
 //! Each intent produces a [`VtaReply`] that downstream consumers handle
 //! uniformly. The runners in this module produce these replies; the
@@ -26,9 +35,18 @@ pub enum VtaIntent {
     /// an admin DID, and returns a [`ProvisionResult`].
     FullSetup,
     /// The integration brings its own DID (out of band); the VTA only
-    /// issues an admin credential and an ACL row. The reply carries an
+    /// issues an admin credential and an ACL row. The setup DID *is*
+    /// the long-term admin DID — no rotation. The reply carries an
     /// admin DID + matching private key.
     AdminOnly,
+    /// The integration brings its own DID **and** wants the admin DID
+    /// rotated. The setup did:key authenticates the bootstrap and is
+    /// then dropped; the VTA mints a fresh admin DID via the
+    /// `vta-admin` template, binds the authorization VC + ACL row to
+    /// it, and returns the rotated DID + key material. Use this when
+    /// a short-lived setup ACL grant should be replaced with a
+    /// long-term VTA-minted admin identity in one round-trip.
+    AdminRotated,
 }
 
 /// Unified reply from the online runners.

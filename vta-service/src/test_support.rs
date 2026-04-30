@@ -181,6 +181,43 @@ pub async fn signed_request_with_vars(
     req.verify().expect("verify bootstrap request")
 }
 
+/// Build + sign + verify a `BootstrapAsk::AdminRotation` request — the
+/// admin-only-rotation wire shape. Uses the same `[7u8; 32]` setup
+/// seed as the TemplateBootstrap helpers so `bootstrap_test_vta`'s
+/// pre-installed ACL row authenticates this request too.
+pub async fn signed_admin_rotation_request(
+    admin_template_name: &str,
+    context_hint: &str,
+) -> VerifiedBootstrapRequest {
+    use vta_sdk::provision_integration::AdminRotationAsk;
+
+    let seed = [7u8; 32];
+    let signing = SigningKey::from_bytes(&seed);
+    let pub_bytes: [u8; 32] = signing.verifying_key().to_bytes();
+    let client_did = affinidi_crypto::did_key::ed25519_pub_to_did_key(&pub_bytes);
+
+    let ask = BootstrapAsk::AdminRotation(AdminRotationAsk {
+        context_hint: Some(context_hint.into()),
+        admin_template: DidTemplateRef {
+            name: admin_template_name.into(),
+            vars: BTreeMap::new(),
+        },
+        note: None,
+    });
+
+    let req = BootstrapRequest::sign(
+        &seed,
+        &client_did,
+        [0u8; 16],
+        Duration::minutes(10),
+        None,
+        ask,
+    )
+    .await
+    .expect("sign bootstrap request");
+    req.verify().expect("verify bootstrap request")
+}
+
 /// Provision the minimum VTA state a full `provision_integration()`
 /// call needs: an active seed, the VTA's `{vta_did}#key-0` signing key
 /// and `#sealed-transfer-0` producer-assertion key saved in the keystore,

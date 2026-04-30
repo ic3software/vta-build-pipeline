@@ -472,9 +472,15 @@ mod provision {
         pub client_did: String,
         pub admin_did: String,
         pub admin_rolled_over: bool,
-        pub integration_did: String,
-        pub template_name: String,
-        pub template_kind: String,
+        /// `None` for the `AdminRotation` ask.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub integration_did: Option<String>,
+        /// `None` for the `AdminRotation` ask.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub template_name: Option<String>,
+        /// `None` for the `AdminRotation` ask.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub template_kind: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub admin_template_name: Option<String>,
         pub bundle_id_hex: String,

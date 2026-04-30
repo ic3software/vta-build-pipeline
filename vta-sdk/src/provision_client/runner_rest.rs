@@ -16,7 +16,7 @@ use super::ask::ProvisionAsk;
 use super::diagnostics::{DiagCheck, DiagStatus};
 use super::event::{AttemptOutcome, VtaEvent};
 use super::intent::{AdminCredentialReply, VtaReply};
-use super::result::{decode_nonce_b64url, response_to_result};
+use super::result::{admin_rotation_response_to_reply, decode_nonce_b64url, response_to_result};
 
 /// Run the REST leg of the AdminOnly auth check.
 ///
@@ -223,11 +223,150 @@ pub(crate) async fn run_rest_attempt_full_setup(
             "admin DID: {} (rolled: {}), integration DID: {}",
             result.admin_did(),
             result.summary.admin_rolled_over,
-            result.integration_did(),
+            result.integration_did().unwrap_or("(none)"),
         )),
     ));
 
     AttemptOutcome::Connected(VtaReply::Full(Box::new(result)))
+}
+
+/// Run the REST AdminRotated flow: authenticate, then POST a VP-framed
+/// `BootstrapAsk::AdminRotation` request and open the returned sealed
+/// `SealedPayloadV1::AdminRotation` bundle.
+///
+/// Mirrors [`run_rest_attempt_full_setup`] for the admin-only-rotation
+/// intent. Same pre-auth / post-auth boundary semantics. Emits the same
+/// diagnostic rows so consumer UIs don't need to fork their event
+/// handling between the two flows; `ListWebvhServers` is `Skipped` here
+/// because no integration DID is minted.
+pub(crate) async fn run_rest_attempt_admin_rotated(
+    rest_url: &str,
+    vta_did: &str,
+    setup_did: String,
+    setup_privkey_mb: String,
+    ask: ProvisionAsk,
+    tx: &UnboundedSender<VtaEvent>,
+) -> AttemptOutcome {
+    let _ = tx.send(VtaEvent::CheckStart(DiagCheck::AuthenticateREST));
+
+    let token_result =
+        match session::challenge_response(rest_url, &setup_did, &setup_privkey_mb, vta_did).await {
+            Ok(r) => {
+                let _ = tx.send(VtaEvent::CheckDone(
+                    DiagCheck::AuthenticateREST,
+                    DiagStatus::Ok(format!("REST auth as {setup_did}")),
+                ));
+                r
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let _ = tx.send(VtaEvent::CheckDone(
+                    DiagCheck::AuthenticateREST,
+                    DiagStatus::Failed(msg.clone()),
+                ));
+                let _ = tx.send(VtaEvent::CheckDone(
+                    DiagCheck::ListWebvhServers,
+                    DiagStatus::Skipped("REST auth did not complete".into()),
+                ));
+                let _ = tx.send(VtaEvent::CheckDone(
+                    DiagCheck::ProvisionIntegration,
+                    DiagStatus::Skipped("REST auth did not complete".into()),
+                ));
+                return AttemptOutcome::PreAuthFailure(format!(
+                    "Could not complete REST authentication against the VTA. \
+                     Confirm the `pnm acl create` command ran successfully for \
+                     this setup DID and that the VTA's REST endpoint is reachable. \
+                     ({msg})"
+                ));
+            }
+        };
+
+    let client = VtaClient::new(rest_url);
+    client.set_token_async(token_result.access_token).await;
+
+    let _ = tx.send(VtaEvent::CheckDone(
+        DiagCheck::ListWebvhServers,
+        DiagStatus::Skipped(
+            "AdminRotated — no integration DID minted so no webvh host needed".into(),
+        ),
+    ));
+
+    let _ = tx.send(VtaEvent::CheckStart(DiagCheck::ProvisionIntegration));
+
+    // Past the auth boundary: every failure below is post-auth.
+    let seed = match decode_private_key_multibase(&setup_privkey_mb) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = e.to_string();
+            let _ = tx.send(VtaEvent::CheckDone(
+                DiagCheck::ProvisionIntegration,
+                DiagStatus::Failed(msg.clone()),
+            ));
+            return AttemptOutcome::PostAuthFailure(format!("setup key decode failed: {msg}"));
+        }
+    };
+    let vp = match ask.to_builder().sign_with(&seed, &setup_did).await {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = e.to_string();
+            let _ = tx.send(VtaEvent::CheckDone(
+                DiagCheck::ProvisionIntegration,
+                DiagStatus::Failed(msg.clone()),
+            ));
+            return AttemptOutcome::PostAuthFailure(format!("VP signing failed: {msg}"));
+        }
+    };
+    let nonce = match decode_nonce_b64url(&vp.nonce) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = tx.send(VtaEvent::CheckDone(
+                DiagCheck::ProvisionIntegration,
+                DiagStatus::Failed(e.clone()),
+            ));
+            return AttemptOutcome::PostAuthFailure(format!("nonce decode failed: {e}"));
+        }
+    };
+
+    let req = ProvisionIntegrationRequest {
+        request: vp,
+        context: ask.context.clone(),
+        assertion: None,
+        vc_validity_seconds: None,
+    };
+    let response = match client.provision_integration(req).await {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = e.to_string();
+            let _ = tx.send(VtaEvent::CheckDone(
+                DiagCheck::ProvisionIntegration,
+                DiagStatus::Failed(msg.clone()),
+            ));
+            return AttemptOutcome::PostAuthFailure(format!(
+                "VTA rejected the REST AdminRotation request. ({msg})"
+            ));
+        }
+    };
+
+    let reply = match admin_rotation_response_to_reply(&seed, nonce, response) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = e.to_string();
+            let _ = tx.send(VtaEvent::CheckDone(
+                DiagCheck::ProvisionIntegration,
+                DiagStatus::Failed(msg.clone()),
+            ));
+            return AttemptOutcome::PostAuthFailure(format!(
+                "could not open returned AdminRotation bundle: {msg}"
+            ));
+        }
+    };
+
+    let _ = tx.send(VtaEvent::CheckDone(
+        DiagCheck::ProvisionIntegration,
+        DiagStatus::Ok(format!("admin DID rotated: {}", reply.admin_did)),
+    ));
+
+    AttemptOutcome::Connected(VtaReply::AdminOnly(reply))
 }
 
 #[cfg(test)]

@@ -30,8 +30,8 @@ pub use hpke::{HpkeSealed, generate_keypair, open as hpke_open, seal as hpke_sea
 pub use nonce::{InMemoryNonceStore, NonceStore};
 pub use request::BootstrapRequest;
 pub use template_bootstrap::{
-    DidKeyMaterial, KeyPair, TemplateBootstrapConfig, TemplateBootstrapPayload, TemplateOutput,
-    VtaTrustBundle,
+    AdminRotationPayload, DidKeyMaterial, KeyPair, TemplateBootstrapConfig,
+    TemplateBootstrapPayload, TemplateOutput, VtaTrustBundle,
 };
 
 use sha2::{Digest, Sha256};
