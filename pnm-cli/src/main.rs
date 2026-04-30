@@ -1629,18 +1629,13 @@ async fn main() {
     } else {
         // Non-auth commands (e.g. `pnm health`) build the client without
         // running the SessionStore::connect path. Honour an explicit
-        // `--url` override; otherwise resolve the VTA DID's REST endpoint
-        // at runtime. Empty string is fine for commands that don't make
-        // HTTP calls (the client is constructed but unused).
-        let url = match effective_url_override {
-            Some(u) => u.to_string(),
-            None => match vta_config.vta_did.as_deref() {
-                Some(did) => vta_sdk::session::resolve_vta_url(did)
-                    .await
-                    .unwrap_or_default(),
-                None => String::new(),
-            },
-        };
+        // `--url` override only — never silently fall back to a URL
+        // synthesized from the VTA DID. For DIDComm-only VTAs that
+        // synthesized URL points at nothing, and downstream code (e.g.
+        // `pnm health`) would then probe REST + try to authenticate
+        // against an endpoint that does not exist. Commands that need
+        // a URL and have none can decide for themselves how to react.
+        let url = effective_url_override.unwrap_or_default().to_string();
         VtaClient::new(&url)
     };
 
@@ -1708,7 +1703,7 @@ async fn main() {
             command: VtaCommands::Restart,
         } => cmd_restart(&client).await,
         Commands::Vta { .. } => unreachable!(),
-        Commands::Health => cmd_health(&client, &keyring_key).await,
+        Commands::Health => cmd_health(effective_url_override, &keyring_key).await,
         Commands::Auth { command } => match command {
             AuthCommands::Logout => {
                 auth::logout(&keyring_key);
@@ -2299,7 +2294,7 @@ use vta_cli_common::render::print_section;
 // ── Command handlers ────────────────────────────────────────────────
 
 async fn cmd_health(
-    client: &VtaClient,
+    url_override: Option<&str>,
     keyring_key: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use affinidi_did_resolver_cache_sdk::{DIDCacheClient, config::DIDCacheConfigBuilder};
@@ -2343,8 +2338,13 @@ async fn cmd_health(
     }
 
     // What the VTA's DID document actually advertises. Source of truth
-    // for the "Mode" label below. `client.base_url()` reflects what PNM
-    // was told about during `pnm setup` — not what the VTA can do.
+    // for the "Mode" label below — and for whether to show URL / probe
+    // Service / attempt REST authentication. An explicit `--url`
+    // override (or `[vta] url = "..."` in pnm config) is the only thing
+    // that can light those up when the DID document doesn't advertise
+    // REST itself; falling back to a URL synthesized from the DID
+    // string would point at a non-existent endpoint for DIDComm-only
+    // VTAs.
     let advertised = match session.as_ref().and_then(|s| s.vta_did.as_deref()) {
         Some(vta_did) => vta_sdk::session::resolve_vta_endpoint(vta_did).await.ok(),
         None => None,
@@ -2371,16 +2371,17 @@ async fn cmd_health(
     };
     println!("  {CYAN}{:<13}{RESET} {mode_label}", "Mode");
 
-    // The REST endpoint is not stored — PNM derives it from the DID
-    // document on every command. Show what was resolved (or the explicit
-    // --url override if one was passed).
+    // Effective URL = explicit override (CLI / config) OR what the DID
+    // doc advertised. When neither is present (DIDComm-only VTA, no
+    // override), `effective_rest_url` stays None and the URL / Service
+    // / Authentication rows below are suppressed entirely.
+    let override_url = url_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let url_overridden =
-        !client.base_url().is_empty() && advertised_rest_url.as_deref() != Some(client.base_url());
-    let effective_rest_url = if !client.base_url().is_empty() {
-        Some(client.base_url().to_string())
-    } else {
-        advertised_rest_url.clone()
-    };
+        override_url.is_some() && advertised_rest_url.as_deref() != override_url.as_deref();
+    let effective_rest_url = override_url.clone().or_else(|| advertised_rest_url.clone());
 
     if let Some(ref url) = effective_rest_url {
         let suffix = if url_overridden {
@@ -2390,15 +2391,7 @@ async fn cmd_health(
         };
         println!("  {CYAN}{:<13}{RESET} {url}{suffix}", "URL");
 
-        // Build a one-shot client at the effective URL for the health
-        // probe, since the outer `client` may have been built with an
-        // empty URL (no override + non-auth command path) before we
-        // resolved the DID.
-        let probe_client = if client.base_url().is_empty() {
-            VtaClient::new(url)
-        } else {
-            VtaClient::new(client.base_url())
-        };
+        let probe_client = VtaClient::new(url);
         match probe_client.health().await {
             Ok(resp) => {
                 let ver = resp
