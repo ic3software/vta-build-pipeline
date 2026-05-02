@@ -93,8 +93,14 @@ pub async fn challenge_response_light(
 
 /// Refresh an access token using the refresh token endpoint.
 ///
-/// Returns a new `AuthResult` with a fresh access token. The refresh token
-/// itself remains unchanged.
+/// Returns a new `AuthResult` carrying a fresh access token **and a fresh
+/// refresh token** — the VTA implements RFC 6749 §10.4 refresh-token
+/// rotation, so the presented refresh token is single-use. Callers MUST
+/// persist `result.refresh_token` and `result.refresh_expires_at` from
+/// the returned value before the next refresh; replaying the original
+/// token after a successful refresh fails with `Auth("refresh token not
+/// found")`. The `VtaClient` handles this automatically (see
+/// `client.rs::ensure_token_valid`).
 pub async fn refresh_token_light(
     http: &Client,
     base_url: &str,

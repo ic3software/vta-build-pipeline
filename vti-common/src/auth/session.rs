@@ -135,6 +135,14 @@ pub async fn get_session_by_refresh(
     }
 }
 
+/// Delete a refresh-token reverse index entry. Used by the rotation
+/// path on `/auth/refresh` so a presented refresh token works exactly
+/// once — replay returns "refresh token not found", same as a stolen-
+/// then-revoked token.
+pub async fn delete_refresh_index(sessions: &KeyspaceHandle, token: &str) -> Result<(), AppError> {
+    sessions.remove(refresh_key(token)).await
+}
+
 /// Returns the current UNIX epoch timestamp in seconds.
 pub fn now_epoch() -> u64 {
     SystemTime::now()
@@ -348,6 +356,48 @@ mod tests {
         let (ks, _dir) = temp_sessions_ks();
         let result = get_session_by_refresh(&ks, "bogus-token").await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_refresh_index_removes_only_the_named_token() {
+        // Rotation invariant: deleting a presented refresh token's
+        // index must not affect any other live tokens. Two sessions
+        // with separate tokens — deleting one leaves the other usable.
+        let (ks, _dir) = temp_sessions_ks();
+        store_refresh_index(&ks, "token-a", "sess-a").await.unwrap();
+        store_refresh_index(&ks, "token-b", "sess-b").await.unwrap();
+
+        delete_refresh_index(&ks, "token-a").await.unwrap();
+
+        assert!(
+            get_session_by_refresh(&ks, "token-a")
+                .await
+                .unwrap()
+                .is_none(),
+            "deleted token must no longer resolve"
+        );
+        assert_eq!(
+            get_session_by_refresh(&ks, "token-b")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("sess-b"),
+            "untouched token must still resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_refresh_index_is_idempotent() {
+        // Deleting a token that was never stored — and deleting twice —
+        // must succeed silently. The rotation path calls delete on the
+        // presented token after writing the new index; a double-call
+        // (e.g. retry after partial failure) must not error.
+        let (ks, _dir) = temp_sessions_ks();
+        delete_refresh_index(&ks, "never-existed").await.unwrap();
+
+        store_refresh_index(&ks, "once", "sess-x").await.unwrap();
+        delete_refresh_index(&ks, "once").await.unwrap();
+        delete_refresh_index(&ks, "once").await.unwrap();
     }
 
     #[tokio::test]
