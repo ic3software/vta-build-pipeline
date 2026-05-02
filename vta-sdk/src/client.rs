@@ -114,6 +114,7 @@ pub struct UpdateConfigRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[must_use]
 pub struct CreateKeyRequest {
     pub key_type: KeyType,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -213,6 +214,7 @@ pub struct WrappingKeyResponse {
 /// identically and either can be sent to the server, but the client
 /// shape is what the SDK methods take.
 #[derive(Debug, Serialize)]
+#[must_use]
 pub struct CreateContextRequest {
     pub id: String,
     pub name: String,
@@ -372,6 +374,7 @@ pub struct AclListResponse {
 }
 
 #[derive(Debug, Serialize)]
+#[must_use]
 pub struct CreateAclRequest {
     pub did: String,
     pub role: String,

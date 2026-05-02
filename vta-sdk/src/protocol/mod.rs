@@ -15,6 +15,7 @@ use crate::protocols::protocol_management;
 
 /// Request body for `POST /services/didcomm/enable`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct EnableDidcommRequest {
     pub mediator_did: String,
     /// Skip handshake steps 2-5 (DID resolution always runs).
@@ -153,6 +154,7 @@ impl VtaClient {
 
 /// Request body for `POST /mediators/migrate`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[must_use]
 pub struct MigrateMediatorRequest {
     pub new_mediator_did: String,
     pub drain_ttl_secs: u64,

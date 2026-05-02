@@ -1105,7 +1105,7 @@ enum KeyCommands {
         label: Option<String>,
         /// TARGET SCOPE: store the new key under this context. Required
         /// unless you're a super admin creating a context-less key (rare).
-        #[arg(long)]
+        #[arg(long = "context", alias = "context-id", value_name = "ID")]
         context_id: Option<String>,
     },
     /// Import an externally-created private key
@@ -1123,7 +1123,7 @@ enum KeyCommands {
         #[arg(long)]
         label: Option<String>,
         /// TARGET SCOPE: store the imported key under this context.
-        #[arg(long)]
+        #[arg(long = "context", alias = "context-id", value_name = "ID")]
         context_id: Option<String>,
     },
     /// Get a key by ID

@@ -4,7 +4,11 @@ description = "VTA binary for AWS Nitro Enclaves (TEE mode)"
 readme = "README.md"
 version = "0.5.0"
 edition.workspace = true
-publish.workspace = true
+# `vta-enclave` is a Linux-only Nitro Enclave binary (vsock-store depends
+# on `tokio-vsock`). Publishing to crates.io would surface "fails on
+# macOS/Windows" issues to operators who only need the library crates;
+# the binary is consumed via the deploy pipeline, not `cargo install`.
+publish = false
 authors.workspace = true
 rust-version.workspace = true
 license.workspace = true

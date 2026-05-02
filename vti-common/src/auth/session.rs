@@ -187,6 +187,8 @@ pub async fn cleanup_expired_sessions(
     let entries = sessions.prefix_iter_raw("session:").await?;
     let now = now_epoch();
     let mut removed = 0u64;
+    let mut live_sessions: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(entries.len());
 
     for (key, value) in entries {
         let session: Session = match serde_json::from_slice(&value) {
@@ -207,10 +209,40 @@ pub async fn cleanup_expired_sessions(
                 sessions.remove(refresh_key(token)).await?;
             }
             removed += 1;
+        } else {
+            live_sessions.insert(session.session_id);
         }
     }
 
-    debug!(removed, "session cleanup complete");
+    // GC orphan `nonce:{challenge}` index entries. `auth::challenge` writes
+    // these on every challenge issue but never deletes them, so without
+    // this sweep the keyspace grows unbounded over a long-running TEE.
+    // A nonce is orphan if its session record is gone (either expired-in-
+    // this-pass or already cleaned up). Decoding the value is safe because
+    // it's UTF-8 ASCII (the session_id) by construction.
+    let nonce_entries = sessions.prefix_iter_raw("nonce:").await?;
+    let mut nonce_removed = 0u64;
+    for (key, value) in nonce_entries {
+        let session_id = match std::str::from_utf8(&value) {
+            Ok(s) => s,
+            Err(_) => {
+                // Malformed; treat as orphan and clean up.
+                sessions.remove(key).await?;
+                nonce_removed += 1;
+                continue;
+            }
+        };
+        if !live_sessions.contains(session_id) {
+            sessions.remove(key).await?;
+            nonce_removed += 1;
+        }
+    }
+
+    debug!(
+        removed,
+        nonces_removed = nonce_removed,
+        "session cleanup complete"
+    );
 
     Ok(())
 }
@@ -565,6 +597,60 @@ mod tests {
         assert!(
             get_session(&ks, "sess-odd").await.unwrap().is_none(),
             "Authenticated session with no expiry must be garbage-collected"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_gc_orphan_nonce_indices() {
+        // Regression: `auth::challenge` writes `nonce:{challenge}` →
+        // `session_id` reverse indexes but never deletes them. Without
+        // this sweep, the keyspace grows linearly with every challenge
+        // ever issued — significant in a long-running TEE.
+        let (ks, _dir) = temp_sessions_ks();
+
+        // Live session: `nonce:` index for it must survive.
+        let live = sample_session("sess-live", "did:key:zA", SessionState::ChallengeSent);
+        store_session(&ks, &live).await.unwrap();
+        ks.insert_raw("nonce:live-challenge".to_string(), b"sess-live".to_vec())
+            .await
+            .unwrap();
+
+        // Orphan: nonce points at a session_id that doesn't exist.
+        ks.insert_raw(
+            "nonce:orphan-challenge".to_string(),
+            b"sess-vanished".to_vec(),
+        )
+        .await
+        .unwrap();
+
+        // Stale challenge: session past TTL — its nonce should be cleaned
+        // up alongside the session itself.
+        let mut stale = sample_session("sess-stale", "did:key:zB", SessionState::ChallengeSent);
+        stale.created_at = now_epoch().saturating_sub(3600);
+        store_session(&ks, &stale).await.unwrap();
+        ks.insert_raw("nonce:stale-challenge".to_string(), b"sess-stale".to_vec())
+            .await
+            .unwrap();
+
+        cleanup_expired_sessions(&ks, 300).await.unwrap();
+
+        let nonces = ks.prefix_iter_raw("nonce:").await.unwrap();
+        let nonce_keys: Vec<String> = nonces
+            .iter()
+            .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+            .collect();
+
+        assert!(
+            nonce_keys.iter().any(|k| k == "nonce:live-challenge"),
+            "live session's nonce must survive — got {nonce_keys:?}"
+        );
+        assert!(
+            !nonce_keys.iter().any(|k| k == "nonce:orphan-challenge"),
+            "orphan nonce must be removed — got {nonce_keys:?}"
+        );
+        assert!(
+            !nonce_keys.iter().any(|k| k == "nonce:stale-challenge"),
+            "stale-session nonce must be removed — got {nonce_keys:?}"
         );
     }
 

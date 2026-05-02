@@ -64,10 +64,25 @@ fn require_vta_did(session: &Session) -> Result<&str, Box<dyn std::error::Error>
 /// `vta_did` is `None` when the session is in the `PendingVtaBinding`
 /// state — the client DID was minted but the operator has not yet
 /// supplied the VTA DID.
+///
+/// The `private_key_multibase` is included so diagnostics can render
+/// the public half (via `did:key` derivation) without re-loading the
+/// session. `Debug` is hand-implemented to redact it.
+#[derive(Clone)]
 pub struct SessionInfo {
     pub client_did: String,
     pub vta_did: Option<String>,
     pub private_key_multibase: String,
+}
+
+impl std::fmt::Debug for SessionInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionInfo")
+            .field("client_did", &self.client_did)
+            .field("vta_did", &self.vta_did)
+            .field("private_key_multibase", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Status of a stored session.
@@ -76,6 +91,7 @@ pub struct SessionInfo {
 /// is not part of session state — callers resolve it from the VTA DID
 /// document at runtime via [`resolve_vta_url`] or
 /// [`resolve_vta_endpoint`].
+#[derive(Debug, Clone)]
 pub struct SessionStatus {
     pub client_did: String,
     pub vta_did: Option<String>,
@@ -83,6 +99,7 @@ pub struct SessionStatus {
 }
 
 /// Current state of a cached access token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenStatus {
     Valid { expires_in_secs: u64 },
     Expired,
@@ -95,14 +112,28 @@ pub enum TokenStatus {
 /// Kept as `Option<String>` to match the cascaded field shape across
 /// the session types; callers can `.expect("login succeeded")` if they
 /// truly need the unwrapped value.
+#[derive(Debug, Clone)]
 pub struct LoginResult {
     pub client_did: String,
     pub vta_did: Option<String>,
 }
 
+/// Result of an authentication exchange. `Debug` is hand-implemented to
+/// redact the access token — bearer-equivalent material that should not
+/// land in `tracing::debug!("{result:?}")` or panic backtraces.
+#[derive(Clone)]
 pub struct TokenResult {
     pub access_token: String,
     pub access_expires_at: u64,
+}
+
+impl std::fmt::Debug for TokenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResult")
+            .field("access_token", &"<redacted>")
+            .field("access_expires_at", &self.access_expires_at)
+            .finish()
+    }
 }
 
 // ── SessionBackend trait ────────────────────────────────────────────
