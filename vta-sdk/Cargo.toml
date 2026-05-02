@@ -35,7 +35,16 @@ session = [
   "dep:getrandom",
 ]
 integration = ["client", "session"]
-keyring = ["dep:keyring"]
+# OS keyring backend for session storage. Pulls in `keyring-core` plus
+# the per-target platform store. Each binary that enables this feature
+# must call `vta_sdk::keyring_init::install_default_store()` once at startup
+# before any `Entry::new` call.
+keyring = [
+  "dep:keyring-core",
+  "dep:apple-native-keyring-store",
+  "dep:windows-native-keyring-store",
+  "dep:dbus-secret-service-keyring-store",
+]
 config-session = []
 azure-secrets = [
   "dep:azure_security_keyvault_secrets",
@@ -104,7 +113,7 @@ reqwest = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 affinidi-did-resolver-cache-sdk = { workspace = true, optional = true }
-keyring = { version = "3", optional = true }
+keyring-core = { workspace = true, optional = true }
 azure_security_keyvault_secrets = { workspace = true, optional = true }
 azure_identity = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
@@ -127,6 +136,17 @@ nitro_attest = { version = "0.2", optional = true }
 time = { version = "0.3", optional = true, features = ["macros"] }
 # Scrub secret byte buffers on drop (sealed-transfer, key derivation).
 zeroize = { version = "1", optional = true }
+
+# Per-target platform credential stores for keyring-core. Only one is
+# active per build; the install helper picks the matching one via cfg.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service-keyring-store = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

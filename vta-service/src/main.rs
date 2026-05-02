@@ -664,6 +664,11 @@ enum AclCommands {
 async fn main() {
     let cli = Cli::parse();
 
+    #[cfg(feature = "keyring")]
+    if let Err(e) = vta_sdk::keyring_init::install_default_store() {
+        eprintln!("warning: OS keyring unavailable: {e}");
+    }
+
     print_banner();
 
     match cli.command {

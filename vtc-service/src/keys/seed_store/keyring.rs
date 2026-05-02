@@ -24,7 +24,7 @@ impl super::SecretStore for KeyringSecretStore {
         let user = self.user.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let entry = keyring::Entry::new(&service, &user).map_err(|e| {
+                let entry = keyring_core::Entry::new(&service, &user).map_err(|e| {
                     AppError::SecretStore(format!("failed to create keyring entry: {e}"))
                 })?;
                 match entry.get_password() {
@@ -35,7 +35,7 @@ impl super::SecretStore for KeyringSecretStore {
                         debug!("secret loaded from keyring");
                         Ok(Some(bytes))
                     }
-                    Err(keyring::Error::NoEntry) => {
+                    Err(keyring_core::Error::NoEntry) => {
                         debug!("no secret found in keyring");
                         Ok(None)
                     }
@@ -56,7 +56,7 @@ impl super::SecretStore for KeyringSecretStore {
         let hex_secret = hex::encode(secret);
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let entry = keyring::Entry::new(&service, &user).map_err(|e| {
+                let entry = keyring_core::Entry::new(&service, &user).map_err(|e| {
                     AppError::SecretStore(format!("failed to create keyring entry: {e}"))
                 })?;
                 entry
@@ -75,7 +75,7 @@ impl super::SecretStore for KeyringSecretStore {
         let user = self.user.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let entry = keyring::Entry::new(&service, &user).map_err(|e| {
+                let entry = keyring_core::Entry::new(&service, &user).map_err(|e| {
                     AppError::SecretStore(format!("failed to create keyring entry: {e}"))
                 })?;
                 match entry.delete_credential() {
@@ -83,7 +83,7 @@ impl super::SecretStore for KeyringSecretStore {
                         debug!("secret deleted from keyring");
                         Ok(())
                     }
-                    Err(keyring::Error::NoEntry) => Ok(()),
+                    Err(keyring_core::Error::NoEntry) => Ok(()),
                     Err(e) => Err(AppError::SecretStore(format!(
                         "failed to delete secret from keyring: {e}"
                     ))),

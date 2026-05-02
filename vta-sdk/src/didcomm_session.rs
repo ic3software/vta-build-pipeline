@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use affinidi_tdk::common::TDKSharedState;
+use affinidi_tdk::common::config::TDKConfig;
 use affinidi_tdk::didcomm::Message;
 use affinidi_tdk::messaging::ATM;
 use affinidi_tdk::messaging::config::ATMConfig;
@@ -48,9 +49,9 @@ impl DIDCommSession {
         let secrets = crate::did_key::secrets_from_did_key(client_did, &seed)?;
 
         // Create TDK shared state and insert secrets
-        let tdk = TDKSharedState::default().await;
-        tdk.secrets_resolver.insert(secrets.signing).await;
-        tdk.secrets_resolver.insert(secrets.key_agreement).await;
+        let tdk = TDKSharedState::new(TDKConfig::builder().build()?).await?;
+        tdk.secrets_resolver().insert(secrets.signing).await;
+        tdk.secrets_resolver().insert(secrets.key_agreement).await;
 
         // Build ATM (no inbound channel needed — we use REST polling)
         let atm_config = ATMConfig::builder().build()?;

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use affinidi_did_resolver_cache_sdk::{DIDCacheClient, config::DIDCacheConfigBuilder};
 use affinidi_tdk::common::TDKSharedState;
+use affinidi_tdk::common::config::TDKConfig;
 use affinidi_tdk::messaging::ATM;
 use affinidi_tdk::messaging::config::ATMConfig;
 use affinidi_tdk::messaging::profiles::ATMProfile;
@@ -257,15 +258,15 @@ async fn send_trust_ping(
     let ed25519_bytes: &[u8; 32] = key_material[..32].try_into().unwrap();
     let x25519_bytes: &[u8; 32] = key_material[32..].try_into().unwrap();
 
-    let tdk = TDKSharedState::default().await;
+    let tdk = TDKSharedState::new(TDKConfig::builder().build()?).await?;
 
     let mut signing_secret = Secret::generate_ed25519(None, Some(ed25519_bytes));
     signing_secret.id = format!("{vtc_did}#key-0");
-    tdk.secrets_resolver.insert(signing_secret).await;
+    tdk.secrets_resolver().insert(signing_secret).await;
 
     let mut ka_secret = Secret::generate_x25519(None, Some(x25519_bytes))?;
     ka_secret.id = format!("{vtc_did}#key-1");
-    tdk.secrets_resolver.insert(ka_secret).await;
+    tdk.secrets_resolver().insert(ka_secret).await;
 
     let atm = ATM::new(ATMConfig::builder().build()?, Arc::new(tdk)).await?;
 

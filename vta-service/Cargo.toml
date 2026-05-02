@@ -22,7 +22,10 @@ setup = ["webvh", "dep:tempfile"]
 # dependency is `default-features = false`), so the footgun is physically
 # absent from enclave builds.
 cli-synthesis = ["vti-common/cli-synthesis"]
-keyring = ["dep:keyring"]
+# OS keyring backend for the VTA seed. Enables vta-sdk's keyring feature
+# so the binary can register a platform store once via
+# `vta_sdk::keyring_init::install_default_store()` at startup.
+keyring = ["dep:keyring-core", "vta-sdk/keyring"]
 config-seed = []
 aws-secrets = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
 gcp-secrets = [
@@ -83,7 +86,7 @@ affinidi-tdk = { workspace = true }
 affinidi-messaging-didcomm = "0.13"
 affinidi-messaging-didcomm-service = { workspace = true }
 async-trait = "0.1"
-affinidi-tdk-common = "0.5"
+affinidi-tdk-common = "0.6"
 affinidi-did-resolver-cache-sdk = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
 base64 = { workspace = true }
@@ -103,7 +106,7 @@ bip39 = "2"
 ed25519-dalek = { workspace = true }
 ed25519-dalek-bip32 = { workspace = true }
 hex = { workspace = true }
-keyring = { version = "3", optional = true }
+keyring-core = { workspace = true, optional = true }
 aws-sdk-secretsmanager = { version = "1", optional = true }
 aws-config = { version = "1", features = [
   "behavior-version-latest",

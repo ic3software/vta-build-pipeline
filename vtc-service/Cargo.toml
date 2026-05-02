@@ -13,7 +13,10 @@ repository.workspace = true
 [features]
 default = ["setup", "keyring"]
 setup = ["dep:dialoguer", "dep:didwebvh-rs", "dep:url"]
-keyring = ["dep:keyring"]
+# OS keyring backend for the VTC secret. Enables vta-sdk's keyring feature
+# so the binary can register a platform store once via
+# `vta_sdk::keyring_init::install_default_store()` at startup.
+keyring = ["dep:keyring-core", "vta-sdk/keyring"]
 config-secret = []
 aws-secrets = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
 gcp-secrets = [
@@ -53,7 +56,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
-keyring = { version = "3", optional = true }
+keyring-core = { workspace = true, optional = true }
 aws-sdk-secretsmanager = { version = "1", optional = true }
 aws-config = { version = "1", features = [
   "behavior-version-latest",

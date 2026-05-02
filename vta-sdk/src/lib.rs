@@ -17,6 +17,8 @@ pub mod did_templates;
 pub mod didcomm_light;
 #[cfg(feature = "session")]
 pub mod didcomm_session;
+#[cfg(feature = "keyring")]
+pub mod keyring_init;
 pub mod keys;
 pub mod prelude;
 #[cfg(feature = "client")]

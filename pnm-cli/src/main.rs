@@ -1348,6 +1348,11 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    #[cfg(feature = "keyring")]
+    if let Err(e) = vta_sdk::keyring_init::install_default_store() {
+        eprintln!("warning: OS keyring unavailable: {e}");
+    }
+
     print_banner();
 
     // Load PNM config

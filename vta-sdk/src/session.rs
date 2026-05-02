@@ -135,7 +135,7 @@ struct KeyringBackend {
 #[cfg(feature = "keyring")]
 impl SessionBackend for KeyringBackend {
     fn load(&self, key: &str) -> Option<String> {
-        let entry = match keyring::Entry::new(&self.service_name, key) {
+        let entry = match keyring_core::Entry::new(&self.service_name, key) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("keyring entry creation failed for '{key}': {e}");
@@ -144,7 +144,7 @@ impl SessionBackend for KeyringBackend {
         };
         match entry.get_password() {
             Ok(v) => Some(v),
-            Err(keyring::Error::NoEntry) => None,
+            Err(keyring_core::Error::NoEntry) => None,
             Err(e) => {
                 tracing::warn!("keyring read error for '{key}': {e}");
                 None
@@ -153,7 +153,7 @@ impl SessionBackend for KeyringBackend {
     }
 
     fn save(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let entry = keyring::Entry::new(&self.service_name, key)
+        let entry = keyring_core::Entry::new(&self.service_name, key)
             .map_err(|e| format!("keyring entry error: {e}"))?;
         entry
             .set_password(value)
@@ -162,7 +162,7 @@ impl SessionBackend for KeyringBackend {
     }
 
     fn clear(&self, key: &str) {
-        match keyring::Entry::new(&self.service_name, key) {
+        match keyring_core::Entry::new(&self.service_name, key) {
             Ok(entry) => {
                 if let Err(e) = entry.delete_credential() {
                     tracing::debug!("keyring clear for '{key}': {e}");
@@ -1211,8 +1211,8 @@ pub async fn challenge_response(
     let seed = crate::did_key::decode_private_key_multibase(private_key_multibase)?;
     let secrets = crate::did_key::secrets_from_did_key(client_did, &seed)?;
     debug!(signing_id = %secrets.signing.id, ka_id = %secrets.key_agreement.id, "inserting DIDComm secrets");
-    tdk.secrets_resolver.insert(secrets.signing).await;
-    tdk.secrets_resolver.insert(secrets.key_agreement).await;
+    tdk.secrets_resolver().insert(secrets.signing).await;
+    tdk.secrets_resolver().insert(secrets.key_agreement).await;
 
     let atm = ATM::new(
         ATMConfig::builder()
@@ -1422,6 +1422,7 @@ pub async fn send_trust_ping(
     use std::time::Instant;
 
     use affinidi_tdk::common::TDKSharedState;
+    use affinidi_tdk::common::config::TDKConfig;
     use affinidi_tdk::messaging::ATM;
     use affinidi_tdk::messaging::config::ATMConfig;
     use affinidi_tdk::messaging::profiles::ATMProfile;
@@ -1430,9 +1431,9 @@ pub async fn send_trust_ping(
     let seed = crate::did_key::decode_private_key_multibase(private_key_multibase)?;
     let secrets = crate::did_key::secrets_from_did_key(client_did, &seed)?;
 
-    let tdk = TDKSharedState::default().await;
-    tdk.secrets_resolver.insert(secrets.signing).await;
-    tdk.secrets_resolver.insert(secrets.key_agreement).await;
+    let tdk = TDKSharedState::new(TDKConfig::builder().build()?).await?;
+    tdk.secrets_resolver().insert(secrets.signing).await;
+    tdk.secrets_resolver().insert(secrets.key_agreement).await;
 
     let atm = ATM::new(ATMConfig::builder().build()?, Arc::new(tdk)).await?;
 
@@ -1520,6 +1521,7 @@ impl TrustPingSession {
         mediator_did: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         use affinidi_tdk::common::TDKSharedState;
+        use affinidi_tdk::common::config::TDKConfig;
         use affinidi_tdk::messaging::ATM;
         use affinidi_tdk::messaging::config::ATMConfig;
         use affinidi_tdk::messaging::profiles::ATMProfile;
@@ -1528,9 +1530,9 @@ impl TrustPingSession {
         let seed = crate::did_key::decode_private_key_multibase(private_key_multibase)?;
         let secrets = crate::did_key::secrets_from_did_key(client_did, &seed)?;
 
-        let tdk = TDKSharedState::default().await;
-        tdk.secrets_resolver.insert(secrets.signing).await;
-        tdk.secrets_resolver.insert(secrets.key_agreement).await;
+        let tdk = TDKSharedState::new(TDKConfig::builder().build()?).await?;
+        tdk.secrets_resolver().insert(secrets.signing).await;
+        tdk.secrets_resolver().insert(secrets.key_agreement).await;
 
         let atm = ATM::new(ATMConfig::builder().build()?, Arc::new(tdk)).await?;
 

@@ -165,8 +165,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Insert secrets directly into the TDK's resolver with their did:key fragment IDs
-    tdk.secrets_resolver.insert(secrets.signing).await;
-    tdk.secrets_resolver.insert(secrets.key_agreement).await;
+    tdk.secrets_resolver().insert(secrets.signing).await;
+    tdk.secrets_resolver().insert(secrets.key_agreement).await;
     info!("secrets inserted into TDK resolver");
 
     // Create ATM with inbound message channel
