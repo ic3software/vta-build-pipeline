@@ -71,7 +71,10 @@ impl SecretCache for FileCache {
         &self,
         bundle: &DidSecretsBundle,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let encoded = bundle.encode()?;
+        // DidSecretsBundle is plain serde — JSON is the canonical wire form.
+        // For at-rest secrecy, layer your own encryption (e.g. age, AES-GCM
+        // keyed off OS-keyring) or front this with a secret manager.
+        let encoded = serde_json::to_string(bundle)?;
         tokio::fs::write(&self.path, encoded).await?;
         Ok(())
     }
@@ -80,7 +83,7 @@ impl SecretCache for FileCache {
         &self,
     ) -> Result<Option<DidSecretsBundle>, Box<dyn std::error::Error + Send + Sync>> {
         match tokio::fs::read_to_string(&self.path).await {
-            Ok(data) => Ok(Some(DidSecretsBundle::decode(&data)?)),
+            Ok(data) => Ok(Some(serde_json::from_str(&data)?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }

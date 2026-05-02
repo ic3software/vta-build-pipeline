@@ -149,19 +149,32 @@ cargo run --package pnm-cli -- health --url http://localhost:3000
 
 ### Authenticate a CLI
 
-Use the admin credential printed during setup:
+Two flows are supported, depending on whether the VTA is already running:
+
+**Mode A — credential printed by the VTA setup wizard.** Apply the printed
+credential directly:
 
 ```sh
-# CNM -- multi-community, interactive setup
+# CNM -- multi-community
 cargo run --package cnm-cli -- auth login <credential>
 
-# PNM -- single VTA, non-interactive setup
-cargo run --package pnm-cli -- setup --url http://localhost:3000 --credential <credential>
+# PNM -- single VTA
+cargo run --package pnm-cli -- auth login <credential>
 ```
 
-This imports the credential into the OS keyring, performs a DIDComm
+**Mode B — TEE-attested first-boot.** Run against a freshly-started Nitro
+Enclave VTA (or any VTA whose `/bootstrap/request` carve-out is still
+open):
+
+```sh
+cargo run --package pnm-cli -- bootstrap connect \
+    --vta-url https://enclave.example.com
+```
+
+Either path imports a credential into the OS keyring, performs a DIDComm
 challenge-response handshake, and caches the resulting tokens. Subsequent
-commands authenticate automatically.
+commands authenticate automatically. See `pnm-cli/README.md` for the full
+multi-phase `pnm setup` flow used when minting the admin DID locally.
 
 ## Example: Creating a New Application Context
 

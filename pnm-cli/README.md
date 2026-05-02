@@ -56,17 +56,34 @@ substitute `cargo run --package pnm-cli --` for `pnm`.
 
 ### 1. Set up the VTA connection
 
-```sh
-pnm setup --url http://localhost:3000 --credential <credential>
-```
-
-This saves the URL to `~/.config/pnm/config.toml` and authenticates using the
-provided credential. You can also set up without a credential and log in later:
+`pnm setup` mints an ephemeral `did:key` locally and parks it as a
+"pending VTA binding" entry in your OS keyring. You then provide the VTA's
+URL, the operator running the VTA grants your DID admin in their ACL, and
+`pnm` finalises the binding.
 
 ```sh
-pnm setup --url http://localhost:3000
-pnm auth login <credential>
+# Phase 1: mint local did:key, name the VTA you'll connect to
+pnm setup --name "my-vta"
+
+# Phase 2 (after the VTA operator adds your did:key to their ACL):
+#   bind the VTA's DID to the local entry, then connect
+pnm setup continue my-vta --vta-did did:webvh:abc:vta.example.com:primary
+pnm bootstrap connect --vta-url https://vta.example.com
 ```
+
+Cold-start operators (running `vta` themselves) pair this with
+`vta import-did --did <pnm-did> --role admin` on the VTA host before
+phase 2. See `docs/02-operating/cold-start.md` for the full script.
+
+For a TEE-attested first-boot against a fresh Nitro Enclave VTA, the
+single-step path is:
+
+```sh
+pnm bootstrap connect --vta-url https://enclave.example.com
+```
+
+This drives `POST /bootstrap/request`, opens the sealed admin bundle, and
+imports the resulting credential into the keyring.
 
 ### 2. Verify connectivity
 
@@ -155,9 +172,12 @@ url = "http://localhost:3000"
 
 ### Setup
 
-| Command                               | Description                                   |
-| ------------------------------------- | --------------------------------------------- |
-| `setup --url URL [--credential CRED]` | Configure VTA URL and optionally authenticate |
+| Command                                                  | Description                                                                                              |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `setup --name <slug> [--overwrite]`                      | Phase 1: mint an ephemeral `did:key`, park it in the keyring as a pending VTA binding under `<slug>`. |
+| `setup continue <slug> --vta-did <did>`                  | Phase 2: bind the VTA's DID to the entry from phase 1 and mark it ready to authenticate.                  |
+| `bootstrap connect --vta-url <url>`                      | One-step TEE-attested first-boot against a Nitro Enclave VTA. Drives `POST /bootstrap/request`.           |
+| `auth login <credential>`                                | Apply a credential the VTA setup wizard printed (Mode A flow).                                            |
 
 ### Authentication
 
