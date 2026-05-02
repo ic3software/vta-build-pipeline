@@ -411,6 +411,91 @@ mod tests {
             }
         }
     }
+
+    /// Concurrency contract for [`MODE_B_LOCK`].
+    ///
+    /// Property under test: when N concurrent `mint_mode_b`-style
+    /// "lock-then-check-then-set" sequences race against the same
+    /// keyspace, exactly one writes the carve-out sentinel; the others
+    /// see the sentinel after acquiring the lock and refuse.
+    ///
+    /// This is the safety invariant CLAUDE.md highlights as load-bearing
+    /// — two concurrent `/bootstrap/request` calls without the lock
+    /// would both pass the `is_some()` check and both mint admin
+    /// credentials. The test deliberately mirrors the exact ordering
+    /// (`lock → get_raw → ... await ... → insert_raw`) including a
+    /// yield point between the check and the set, where an unprotected
+    /// implementation would interleave.
+    ///
+    /// Uses the actual `MODE_B_LOCK` static and the actual sentinel key
+    /// constant so a refactor that relocates either is caught here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mode_b_lock_serializes_carveout_check_and_set() {
+        use crate::tee::admin_bootstrap::BOOTSTRAP_CARVEOUT_CLOSED_KEY;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        use vti_common::config::StoreConfig;
+        use vti_common::store::Store;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_config = StoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        };
+        let store = Store::open(&store_config).expect("open store");
+        let keys_ks = store.keyspace("keys").expect("keyspace");
+
+        let n_tasks: usize = 16;
+        let successes = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::with_capacity(n_tasks);
+        for i in 0..n_tasks {
+            let ks = keys_ks.clone();
+            let successes = std::sync::Arc::clone(&successes);
+            handles.push(tokio::spawn(async move {
+                // Same shape as `mint_mode_b`: take MODE_B_LOCK, check
+                // the sentinel, do "work", write the sentinel. The yield
+                // between check and set models the TEE attestation +
+                // mint window an unprotected impl would race in.
+                let _guard = MODE_B_LOCK.lock().await;
+                if ks
+                    .get_raw(BOOTSTRAP_CARVEOUT_CLOSED_KEY)
+                    .await
+                    .expect("get_raw sentinel")
+                    .is_some()
+                {
+                    return; // carve-out already used
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                ks.insert_raw(
+                    BOOTSTRAP_CARVEOUT_CLOSED_KEY,
+                    format!("admin-{i}").into_bytes(),
+                )
+                .await
+                .expect("insert sentinel");
+                successes.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        for h in handles {
+            h.await.expect("task joined");
+        }
+
+        assert_eq!(
+            successes.load(Ordering::SeqCst),
+            1,
+            "MODE_B_LOCK must serialize the carve-out check-and-set so \
+             exactly one task writes the sentinel; got {} successes",
+            successes.load(Ordering::SeqCst),
+        );
+        assert!(
+            keys_ks
+                .get_raw(BOOTSTRAP_CARVEOUT_CLOSED_KEY)
+                .await
+                .unwrap()
+                .is_some(),
+            "sentinel must be set after the run"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────

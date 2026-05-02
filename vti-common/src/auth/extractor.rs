@@ -310,6 +310,7 @@ impl<S: AuthState> FromRequestParts<S> for WriteAuth {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cli-synthesis")]
     use super::*;
 
     #[cfg(feature = "cli-synthesis")]
