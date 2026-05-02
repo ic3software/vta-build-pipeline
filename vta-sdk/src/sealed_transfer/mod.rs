@@ -551,6 +551,117 @@ mod tests {
         assert!(matches!(err, SealedTransferError::Hpke(_)));
     }
 
+    /// Helper: round-trip a SealedBundle through armor → mutate text →
+    /// decode → open. Returns the open error.
+    async fn roundtrip_with_armor_mutation(
+        mutate: impl FnOnce(&mut String),
+    ) -> SealedTransferError {
+        let (recip_sk, recip_pk) = generate_keypair();
+        let (_prod_sk, prod_pk) = generate_ed25519_keypair();
+        let assertion =
+            sample_assertion(affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_pk));
+        let store = InMemoryNonceStore::new();
+
+        let bundle = seal_payload(&recip_pk, [7u8; 16], assertion, &sample_payload(), &store)
+            .await
+            .expect("seal");
+
+        let mut armored = armor::encode(&bundle);
+        mutate(&mut armored);
+
+        // Some mutations cause armor::decode to fail (e.g. Bundle-Id hex
+        // invalidation); others land at AEAD-open. Either is acceptable —
+        // the test asserts the open path NEVER returns an OpenedBundle for
+        // mutated armor.
+        match armor::decode(&armored) {
+            Ok(bundles) => {
+                let merged = bundles.into_iter().next().expect("at least one bundle");
+                open_bundle(&recip_sk, &merged, None).expect_err("open must fail")
+            }
+            Err(e) => e,
+        }
+    }
+
+    #[tokio::test]
+    async fn armor_bundle_id_tamper_caught() {
+        // Flip a hex char in the Bundle-Id header. Either the parser
+        // rejects (still valid hex but different bytes) or AEAD fails on
+        // open because AAD is built from the (tampered) armor header.
+        let err = roundtrip_with_armor_mutation(|s| {
+            let line = s.find("Bundle-Id: ").expect("Bundle-Id present");
+            let hex_start = line + "Bundle-Id: ".len();
+            let bytes = unsafe { s.as_bytes_mut() };
+            // Flip one hex nibble. Valid hex → parser accepts → AEAD rejects.
+            bytes[hex_start] = if bytes[hex_start] == b'0' { b'1' } else { b'0' };
+        })
+        .await;
+        // Could be Hpke (AEAD AAD mismatch) or Armor (less likely path).
+        // Both are acceptable — the test asserts open does not succeed.
+        assert!(matches!(
+            err,
+            SealedTransferError::Hpke(_) | SealedTransferError::Armor(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn armor_chunk_count_tamper_caught() {
+        // Mutate the Chunk header's total to claim more chunks than were
+        // produced. Triggers either an "out of range" armor error (1/2 with
+        // only one block) or chunk-mismatch on reassembly.
+        let err = roundtrip_with_armor_mutation(|s| {
+            let line = s.find("Chunk: 1/1").expect("Chunk: 1/1 present");
+            let bytes = unsafe { s.as_bytes_mut() };
+            // Rewrite "Chunk: 1/1" → "Chunk: 1/9" (claim 9 total chunks
+            // when only 1 was sealed). AAD includes total_chunks → AEAD
+            // open fails on the AAD mismatch.
+            bytes[line + "Chunk: 1/".len()] = b'9';
+        })
+        .await;
+        assert!(
+            matches!(
+                err,
+                SealedTransferError::Hpke(_)
+                    | SealedTransferError::ChunkMismatch(_)
+                    | SealedTransferError::MissingChunks { .. }
+                    | SealedTransferError::Armor(_)
+            ),
+            "expected Hpke / ChunkMismatch / MissingChunks / Armor, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn armor_digest_algo_tamper_caught() {
+        // Swap "Digest-Algo: sha256" for a different (but plausible) algo.
+        // AAD includes digest_algo → AEAD open fails on AAD mismatch.
+        let err = roundtrip_with_armor_mutation(|s| {
+            *s = s.replace("Digest-Algo: sha256", "Digest-Algo: sha512");
+        })
+        .await;
+        assert!(matches!(err, SealedTransferError::Hpke(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn armor_unknown_header_rejected() {
+        // Forward-compat hazard: prior to this guard, unknown headers were
+        // silently dropped by the parser. A future header that participates
+        // in AAD would be ignored on older parsers; an attacker could also
+        // inject a header today with no covering AEAD. Reject at parse.
+        let err = roundtrip_with_armor_mutation(|s| {
+            // Insert a bogus header right after Version.
+            *s = s.replace("Version: 1\n", "Version: 1\nX-Trust-Me: yes\n");
+        })
+        .await;
+        match err {
+            SealedTransferError::Armor(msg) => {
+                assert!(
+                    msg.contains("X-Trust-Me") || msg.contains("unknown header"),
+                    "got {msg}"
+                );
+            }
+            other => panic!("expected Armor(unknown header), got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn missing_chunk_rejected() {
         let (recip_sk, recip_pk) = generate_keypair();

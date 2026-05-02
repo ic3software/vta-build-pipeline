@@ -159,8 +159,17 @@ fn parse_block(lines: &[&str]) -> Result<ParsedBlock, SealedTransferError> {
                 chunk = Some((one_based - 1, total));
             }
             "Digest-Algo" => digest_algo = Some(value.to_string()),
-            // Unknown headers are ignored — forward compatibility.
-            _ => {}
+            // Reject unknown headers. Tolerating them is a forward-compat
+            // hazard: a future header that participates in AAD would be
+            // silently dropped on older parsers, and a malicious header
+            // injection has no covering AEAD until we add it. The wire
+            // format already carries a `Version` header; bumping it is the
+            // path for adding new headers.
+            unknown => {
+                return Err(SealedTransferError::Armor(format!(
+                    "unknown header: '{unknown}'"
+                )));
+            }
         }
         iter.next();
     }
