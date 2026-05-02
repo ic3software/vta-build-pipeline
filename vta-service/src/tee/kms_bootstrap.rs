@@ -1487,4 +1487,167 @@ mod tests {
         assert_eq!(fp1, fp2);
         assert_eq!(fp1.len(), 32); // 16 bytes = 32 hex chars
     }
+
+    // ── decrypt_cms_envelope failure paths ──────────────────────────────
+    //
+    // Negative tests for CMS unwrap. The happy path is covered by
+    // `test_cms_envelope_roundtrip`; these tests assert each failure
+    // surface returns a typed `AppError` rather than panicking, and
+    // catches the specific class of corruption an attacker (or an
+    // unreliable network) might introduce between KMS and the enclave.
+
+    /// Helper: build a known-good encrypted CMS plus its matching PKCS#8
+    /// private key, then return both. Tests then mutate one or the
+    /// other to test specific tamper classes.
+    fn cms_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        use aes_gcm::aead::generic_array::GenericArray;
+        use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+        use aws_lc_rs::encoding::AsDer;
+        use aws_lc_rs::rsa::{
+            KeySize, OAEP_SHA256_MGF1SHA256, OaepPublicEncryptingKey, PrivateDecryptingKey,
+        };
+
+        let private_key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+        let plaintext = b"this is a secret seed value!!!!!"; // 32 bytes
+        let mut cek = [0u8; 32];
+        rand::fill(&mut cek);
+        let mut nonce_bytes = [0u8; 12];
+        rand::fill(&mut nonce_bytes);
+
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&cek));
+        let aes_ct = cipher
+            .encrypt(GenericArray::from_slice(&nonce_bytes), plaintext.as_ref())
+            .unwrap();
+
+        let oaep_pub = OaepPublicEncryptingKey::new(private_key.public_key().clone()).unwrap();
+        let mut buf = vec![0u8; private_key.key_size_bytes()];
+        let enc_cek = oaep_pub
+            .encrypt(&OAEP_SHA256_MGF1SHA256, &cek, &mut buf, None)
+            .unwrap()
+            .to_vec();
+
+        let cms = build_test_cms_envelope(&enc_cek, &nonce_bytes, &aes_ct);
+        let pkcs8 = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&private_key)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+        (cms, pkcs8, plaintext.to_vec())
+    }
+
+    #[test]
+    fn cms_decrypt_with_wrong_private_key_fails() {
+        // Threat: an attacker substitutes a different KMS response. The
+        // CEK was OAEP-encrypted to the enclave's ephemeral pubkey;
+        // decrypting with any other private key MUST fail at the OAEP
+        // unwrap before AES decryption is attempted.
+        use aws_lc_rs::encoding::AsDer;
+        use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
+
+        let (cms, _correct_pkcs8, _) = cms_fixture();
+
+        // Generate a *different* private key — the OAEP unwrap will fail.
+        let wrong_key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+        let wrong_pkcs8 = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&wrong_key)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+
+        let err = decrypt_cms_envelope(&cms, &wrong_pkcs8).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RSA-OAEP") || msg.contains("CEK") || msg.contains("decryption"),
+            "expected OAEP-unwrap error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cms_decrypt_with_corrupted_cek_fails() {
+        // Threat: in-flight tampering of the encrypted CEK. OAEP carries
+        // padding-style integrity, so a single bit flip in the encrypted
+        // CEK causes unwrap to fail with very high probability. This
+        // catches a regression where someone moves to a non-OAEP padding
+        // scheme without updating the assumption.
+        let (mut cms, pkcs8, _) = cms_fixture();
+        // Corrupt a byte in the middle of the structure. Any byte will
+        // do; we choose mid-buffer to avoid hitting the outer ASN.1 tags
+        // (which would surface as a parse error rather than an unwrap
+        // error — also a valid failure mode but a different one).
+        let mid = cms.len() / 2;
+        cms[mid] ^= 0xFF;
+        let err = decrypt_cms_envelope(&cms, &pkcs8).unwrap_err();
+        // Either a parse failure (if the byte was structural) or an
+        // OAEP-unwrap failure (if the byte was inside the encrypted
+        // CEK). Both are typed errors, neither is a panic.
+        let _ = format!("{err}");
+    }
+
+    #[test]
+    fn cms_decrypt_with_tampered_aes_ciphertext_fails() {
+        // Threat: in-flight modification of the encrypted plaintext.
+        // AES-GCM's auth tag must catch this regardless of where the
+        // bit flip lands inside the ciphertext. Without the tag check,
+        // tampered key material would be loaded silently — fatal.
+        use aes_gcm::aead::generic_array::GenericArray;
+        use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+        use aws_lc_rs::encoding::AsDer;
+        use aws_lc_rs::rsa::{
+            KeySize, OAEP_SHA256_MGF1SHA256, OaepPublicEncryptingKey, PrivateDecryptingKey,
+        };
+
+        let private_key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+        let plaintext = b"a different secret of length 32!"; // 32 bytes
+        let mut cek = [0u8; 32];
+        rand::fill(&mut cek);
+        let mut nonce_bytes = [0u8; 12];
+        rand::fill(&mut nonce_bytes);
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&cek));
+        let mut aes_ct = cipher
+            .encrypt(GenericArray::from_slice(&nonce_bytes), plaintext.as_ref())
+            .unwrap();
+        // Flip a bit inside the AES-GCM ciphertext (before the auth tag).
+        aes_ct[0] ^= 0x01;
+
+        let oaep_pub = OaepPublicEncryptingKey::new(private_key.public_key().clone()).unwrap();
+        let mut buf = vec![0u8; private_key.key_size_bytes()];
+        let enc_cek = oaep_pub
+            .encrypt(&OAEP_SHA256_MGF1SHA256, &cek, &mut buf, None)
+            .unwrap()
+            .to_vec();
+        let cms = build_test_cms_envelope(&enc_cek, &nonce_bytes, &aes_ct);
+        let pkcs8 = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&private_key)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+
+        let err = decrypt_cms_envelope(&cms, &pkcs8).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("aes") || msg.to_lowercase().contains("decrypt"),
+            "expected AES decrypt failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cms_decrypt_with_empty_envelope_fails_cleanly() {
+        // Threat: KMS returns success but the `CiphertextForRecipient`
+        // field is empty (or KMS API change drops the field). Must
+        // surface a typed parse error, not a panic.
+        let (_, pkcs8, _) = cms_fixture();
+        let err = decrypt_cms_envelope(&[], &pkcs8).unwrap_err();
+        let _ = format!("{err}");
+    }
+
+    #[test]
+    fn cms_decrypt_with_malformed_pkcs8_fails_cleanly() {
+        // Threat: the persisted ephemeral RSA key is corrupted (storage
+        // bit-flip, vsock-store proxy bug). Must surface a typed
+        // PKCS#8-deserialisation error, not a panic.
+        let (cms, _, _) = cms_fixture();
+        let err = decrypt_cms_envelope(&cms, &[0u8; 16]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("pkcs"),
+            "expected PKCS#8 parse error, got: {msg}"
+        );
+    }
 }
