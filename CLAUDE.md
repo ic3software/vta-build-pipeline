@@ -145,15 +145,6 @@ Apply to any wire form where "this came from a trusted source" is a
 precondition for subsequent work. Don't paper over with a `verified:
 bool` field; use the type system.
 
-Known offenders (do not emulate):
-- `verify_vta_authorization_credential`
-  (`vta-sdk/src/provision_integration/credential.rs`) returns
-  `Result<(), _>`. Today the only caller is `verify_template_bootstrap`,
-  which threads the result into a `VerifiedTemplateBootstrap` typestate,
-  but the function is `pub` and a future caller could miss the
-  `parse_claim` follow-up. Either tighten to `pub(crate)` or return a
-  `VerifiedAuthorizationCredential` carrying the parsed claim.
-
 Reference implementation: `verify_producer_assertion_with_pubkey`
 (`vta-sdk/src/sealed_transfer/verify.rs`) returns
 `Result<VerifiedAssertion<'a>, _>` with `DidSignedVerified`,
@@ -297,9 +288,11 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Endpoints**: `POST /backup/export`, `POST /backup/import`
   (super-admin).
 - **Crypto**: Argon2id KDF (≥12-char password) + AES-256-GCM.
-- **Watchout**: import currently does not cross-check the backup's
-  `vta_did` against the running VTA — restoring a foreign backup
-  silently replaces state. Fix before extending this surface.
+- **Compatibility check**: import cross-checks the backup's `vta_did`
+  against the running VTA via `check_vta_did_compatibility`
+  (`vta-service/src/operations/backup.rs:286-307`). A fresh-install VTA
+  accepts any backup; a configured VTA rejects backups whose `vta_did`
+  doesn't match. Tested at `backup.rs:867-911`.
 - **Code**: `vta-service/src/operations/backup.rs`.
 
 ### DID template management

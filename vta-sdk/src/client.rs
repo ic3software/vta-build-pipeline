@@ -583,7 +583,7 @@ impl VtaClient {
             crate::auth_light::authenticate_with_credential(credential, url_override).await?;
         let base_url = url_override
             .or(cred.vta_url.as_deref())
-            .ok_or("no VTA URL")?
+            .ok_or_else(|| VtaError::Validation("no VTA URL".into()))?
             .trim_end_matches('/')
             .to_string();
 
@@ -632,7 +632,8 @@ impl VtaClient {
             vta_did,
             mediator_did,
         )
-        .await?;
+        .await
+        .map_err(|e| VtaError::DidcommTransport(e.to_string()))?;
 
         let rest_client = rest_url.as_ref().map(|_| Client::new());
 
@@ -850,7 +851,9 @@ impl VtaClient {
                     let resp = client.get(format!("{url}/health")).send().await?;
                     Self::handle_response(resp).await
                 }
-                _ => Err("health check not available via DIDComm (no REST URL)".into()),
+                _ => Err(VtaError::UnsupportedTransport(
+                    "health check not available via DIDComm (no REST URL)".into(),
+                )),
             },
         }
     }
@@ -1116,7 +1119,7 @@ impl VtaClient {
                 Self::handle_response(resp).await
             }
             #[cfg(feature = "session")]
-            Transport::DIDComm { .. } => Err(VtaError::Other(
+            Transport::DIDComm { .. } => Err(VtaError::UnsupportedTransport(
                 "wrapping key not needed for DIDComm transport".into(),
             )),
         }

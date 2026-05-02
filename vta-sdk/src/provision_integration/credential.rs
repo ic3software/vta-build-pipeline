@@ -154,23 +154,55 @@ pub async fn issue_vta_authorization_credential(
     Ok(vc)
 }
 
+/// A `VtaAuthorizationCredential` whose proof, validity window, type, and
+/// `credentialSubject` shape have all been verified.
+///
+/// Constructable only via [`verify_vta_authorization_credential`]; this
+/// makes it impossible to forget the proof check or the claim-shape parse
+/// step. Downstream code that takes a `VerifiedAuthorizationCredential`
+/// is statically guaranteed to be looking at a verified VC.
+#[derive(Debug, Clone)]
+pub struct VerifiedAuthorizationCredential {
+    vc: VerifiableCredential,
+    claim: VtaAuthorizationClaim,
+}
+
+impl VerifiedAuthorizationCredential {
+    /// The verified VC.
+    pub fn vc(&self) -> &VerifiableCredential {
+        &self.vc
+    }
+
+    /// The parsed `credentialSubject` claim.
+    pub fn claim(&self) -> &VtaAuthorizationClaim {
+        &self.claim
+    }
+
+    /// Decompose into the underlying VC + parsed claim — useful for
+    /// callers that need to archive the VC and act on the claim.
+    pub fn into_parts(self) -> (VerifiableCredential, VtaAuthorizationClaim) {
+        (self.vc, self.claim)
+    }
+}
+
 /// Verify a `VtaAuthorizationCredential` using the caller's copy of the
 /// issuer's public key bytes.
 ///
-/// Checks:
-/// 1. Proof verifies.
-/// 2. `validFrom` <= now + skew.
-/// 3. `validUntil` > now - skew.
-/// 4. `type` contains `VtaAuthorizationCredential`.
+/// Checks (in order):
+/// 1. `type` contains `VtaAuthorizationCredential`.
+/// 2. Proof verifies against the supplied issuer pubkey.
+/// 3. `validFrom` <= now + skew.
+/// 4. `validUntil` > now - skew.
+/// 5. `credentialSubject` parses into [`VtaAuthorizationClaim`].
 ///
-/// Does **not** parse `credentialSubject` into [`VtaAuthorizationClaim`]
-/// — call [`parse_claim`] on the returned value for that, so the caller
-/// can choose their own claim-shape error handling.
+/// Returns a [`VerifiedAuthorizationCredential`] carrying both the VC
+/// and the parsed claim. There is no separate "parse claim" step; the
+/// typestate guarantees verification and parsing both happened.
 pub fn verify_vta_authorization_credential(
     vc: &VerifiableCredential,
     issuer_public_key_bytes: &[u8],
     clock_skew: Duration,
-) -> Result<(), ProvisionIntegrationError> {
+) -> Result<VerifiedAuthorizationCredential, ProvisionIntegrationError> {
     if !vc.types.iter().any(|t| t == "VtaAuthorizationCredential") {
         return Err(ProvisionIntegrationError::InvalidClaim(
             "type array must include 'VtaAuthorizationCredential'".into(),
@@ -203,13 +235,19 @@ pub fn verify_vta_authorization_credential(
         clock_skew,
     )?;
 
-    Ok(())
+    let claim = parse_claim(vc)?;
+
+    Ok(VerifiedAuthorizationCredential {
+        vc: vc.clone(),
+        claim,
+    })
 }
 
 /// Parse the VC's `credentialSubject` into a typed
-/// [`VtaAuthorizationClaim`]. Returns [`ProvisionIntegrationError::InvalidClaim`]
-/// if the shape doesn't match.
-pub fn parse_claim(
+/// [`VtaAuthorizationClaim`]. Internal helper invoked eagerly by
+/// [`verify_vta_authorization_credential`] — external consumers should
+/// always go through the verified path.
+pub(crate) fn parse_claim(
     vc: &VerifiableCredential,
 ) -> Result<VtaAuthorizationClaim, ProvisionIntegrationError> {
     // `credential_subject` is a `SubjectValue` (Single or Multiple). Our
@@ -338,10 +376,10 @@ mod tests {
         let json = serde_json::to_string(&vc).unwrap();
         let parsed: VerifiableCredential = serde_json::from_str(&json).unwrap();
 
-        verify_vta_authorization_credential(&parsed, &pk, Duration::minutes(5))
+        let verified = verify_vta_authorization_credential(&parsed, &pk, Duration::minutes(5))
             .expect("verify round-trip VC");
 
-        let claim = parse_claim(&parsed).unwrap();
+        let claim = verified.claim();
         assert_eq!(claim.id, subject_did);
         assert_eq!(claim.admin_of.vta, vta_did);
         assert_eq!(claim.admin_of.role, "admin");

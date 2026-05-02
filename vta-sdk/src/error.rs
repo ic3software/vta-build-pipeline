@@ -51,15 +51,19 @@ pub enum VtaError {
     #[error("didcomm transport error: {0}")]
     DidcommTransport(String),
 
-    /// Remote endpoint returned an error message over DIDComm. The VTA
-    /// (or the peer) encoded a specific status; prefer matching on
-    /// this variant before falling back to [`Self::Protocol`].
+    /// Remote endpoint returned a DIDComm problem-report whose `code`
+    /// did not match any of the standard `e.p.msg.*` taxonomy variants
+    /// (which map to the typed REST-aligned variants above). Inspect
+    /// `code` to handle it; a typed [`Self::Conflict`] / [`Self::NotFound`]
+    /// / [`Self::Auth`] / [`Self::Validation`] / [`Self::Server`] will
+    /// already have been emitted for the standard codes.
     #[error("didcomm remote error ({code}): {comment}")]
     DidcommRemote { code: String, comment: String },
 
-    /// Catch-all for protocol-level errors that don't map to a typed
-    /// variant above. Prefer a typed variant when adding new call
-    /// sites — this exists so legacy dispatch paths still compile.
+    /// Programmer-level protocol error (response shape did not match
+    /// what the SDK expected — version mismatch or bug). Distinct from
+    /// remote-error: a peer that returned a problem-report becomes a
+    /// typed variant via [`Self::from_problem_report`], not this one.
     #[error("protocol error: {0}")]
     Protocol(String),
 
@@ -74,8 +78,12 @@ pub enum VtaError {
 
 impl VtaError {
     /// Create from an HTTP response status and error body.
+    ///
+    /// Public so a downstream SDK consumer wiring its own HTTP transport
+    /// (e.g. a wasm `gloo-net` client) can produce typed `VtaError`s
+    /// from status codes without re-implementing the mapping.
     #[cfg(feature = "client")]
-    pub(crate) fn from_http(status: reqwest::StatusCode, body: String) -> Self {
+    pub fn from_http(status: reqwest::StatusCode, body: String) -> Self {
         match status.as_u16() {
             401 => Self::Auth(body),
             403 => Self::Forbidden(body),
@@ -85,6 +93,32 @@ impl VtaError {
             410 => Self::Gone(body),
             s if s >= 500 => Self::Server { status: s, body },
             s => Self::Other(format!("{s}: {body}")),
+        }
+    }
+
+    /// Create from a DIDComm problem-report `code` + `comment`. Mirrors
+    /// the REST [`Self::from_http`] mapping so callers can `match` on the
+    /// same variants regardless of transport.
+    ///
+    /// Standard codes (`e.p.msg.unauthorized` / `bad-request` / `not-found`
+    /// / `conflict` / `internal-error`) become typed variants. Anything
+    /// else lands in [`Self::DidcommRemote`] preserving the original code.
+    pub fn from_problem_report(code: &str, comment: impl Into<String>) -> Self {
+        use crate::protocols::problem_report_codes as c;
+        let comment = comment.into();
+        match code {
+            c::CONFLICT => Self::Conflict(comment),
+            c::NOT_FOUND => Self::NotFound(comment),
+            c::UNAUTHORIZED => Self::Auth(comment),
+            c::BAD_REQUEST => Self::Validation(comment),
+            c::INTERNAL => Self::Server {
+                status: 500,
+                body: comment,
+            },
+            other => Self::DidcommRemote {
+                code: other.to_string(),
+                comment,
+            },
         }
     }
 
@@ -118,44 +152,9 @@ impl VtaError {
     }
 }
 
-impl From<String> for VtaError {
-    fn from(s: String) -> Self {
-        Self::Other(s)
-    }
-}
-
-impl From<&str> for VtaError {
-    fn from(s: &str) -> Self {
-        Self::Other(s.to_string())
-    }
-}
-
-// Backward-compat conversion from `Box<dyn Error>` (legacy CLI handler
-// return type) into a typed `VtaError`.
-//
-// Tries `Box::downcast::<VtaError>` first — many shared-CLI handlers
-// return `Box<dyn Error>` whose inner is in fact a `VtaError` carried
-// from the SDK call. If we collapsed unconditionally to `Other(String)`,
-// the typed dispatch on `VtaError::Conflict` / `Gone` / `Forbidden` that
-// `print_cli_error` and the per-command "did you mean …" hints rely on
-// would silently fail.
-//
-// For new integrations, return a `VtaError` directly or add a typed
-// variant with `#[from]` on the underlying cause so the source chain is
-// preserved. The legacy collapse to `Other(String)` is the fallback
-// only for non-VtaError errors.
-impl From<Box<dyn std::error::Error>> for VtaError {
-    fn from(e: Box<dyn std::error::Error>) -> Self {
-        match e.downcast::<VtaError>() {
-            Ok(typed) => *typed,
-            Err(other) => Self::Other(other.to_string()),
-        }
-    }
-}
-
 impl From<crate::did_key::DidKeyError> for VtaError {
     fn from(e: crate::did_key::DidKeyError) -> Self {
-        Self::Other(e.to_string())
+        Self::Validation(e.to_string())
     }
 }
 
@@ -163,35 +162,32 @@ impl From<crate::did_key::DidKeyError> for VtaError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn boxed_vta_error_preserves_typed_variant_through_conversion() {
-        // Regression: shared CLI handlers return Box<dyn Error> whose inner
-        // is a VtaError. The From impl must downcast first so per-command
-        // hints can still match on Conflict / Gone / etc.
-        let original = VtaError::Conflict("context already exists".into());
-        let boxed: Box<dyn std::error::Error> = Box::new(original);
-        let recovered: VtaError = boxed.into();
-        assert!(
-            matches!(recovered, VtaError::Conflict(_)),
-            "From<Box<dyn Error>> must preserve the typed variant when the inner is \
-             a VtaError — got {recovered:?}"
-        );
-    }
-
-    #[test]
-    fn boxed_non_vta_error_falls_back_to_other() {
-        // Strings, io errors, etc. flow through Other(String) as before.
-        let boxed: Box<dyn std::error::Error> = "plain string error".into();
-        let recovered: VtaError = boxed.into();
-        assert!(matches!(recovered, VtaError::Other(_)));
-    }
-
+    #[cfg(feature = "client")]
     #[test]
     fn from_http_410_maps_to_gone() {
-        #[cfg(feature = "client")]
-        {
-            let err = VtaError::from_http(reqwest::StatusCode::GONE, "carve-out closed".into());
-            assert!(err.is_gone(), "410 must map to VtaError::Gone, got {err:?}");
+        let err = VtaError::from_http(reqwest::StatusCode::GONE, "carve-out closed".into());
+        assert!(err.is_gone(), "410 must map to VtaError::Gone, got {err:?}");
+    }
+
+    #[test]
+    fn problem_report_conflict_maps_to_typed_conflict() {
+        let err = VtaError::from_problem_report(
+            crate::protocols::problem_report_codes::CONFLICT,
+            "key id already exists",
+        );
+        assert!(matches!(err, VtaError::Conflict(_)), "got {err:?}");
+        assert!(err.is_conflict());
+    }
+
+    #[test]
+    fn problem_report_unknown_code_lands_in_didcomm_remote() {
+        let err = VtaError::from_problem_report("e.custom.xyz", "weird thing");
+        match err {
+            VtaError::DidcommRemote { code, comment } => {
+                assert_eq!(code, "e.custom.xyz");
+                assert_eq!(comment, "weird thing");
+            }
+            other => panic!("expected DidcommRemote, got {other:?}"),
         }
     }
 }

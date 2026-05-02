@@ -34,7 +34,7 @@ use crate::sealed_transfer::template_bootstrap::{
 };
 
 use super::ProvisionIntegrationError;
-use super::credential::{VtaAuthorizationClaim, parse_claim, verify_vta_authorization_credential};
+use super::credential::{VtaAuthorizationClaim, verify_vta_authorization_credential};
 
 /// Verified form of [`TemplateBootstrapPayload`]. Only constructable
 /// via [`verify_template_bootstrap`].
@@ -143,11 +143,11 @@ pub fn verify_template_bootstrap(
         &proof.verification_method,
     )?;
 
-    // (4) VC proof + validity window.
-    verify_vta_authorization_credential(&vc, &issuer_pubkey, clock_skew)?;
-
-    // (5) Parse the claim into a typed shape.
-    let parsed_claim = parse_claim(&vc)?;
+    // (4) VC proof + validity window — typestate guarantees the claim
+    //     was parsed too, so step (5) is the verified accessor, not a
+    //     second-chance parse.
+    let verified_vc = verify_vta_authorization_credential(&vc, &issuer_pubkey, clock_skew)?;
+    let parsed_claim = verified_vc.claim().clone();
 
     // (6) Defence-in-depth: claim's own `admin_of.vta` must match the
     //     pinned DID too. An attacker who controls both the bundle

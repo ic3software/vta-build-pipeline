@@ -208,7 +208,7 @@ async fn resolve_effective_mediator_did(
             Ok(None)
         }
         Err(e) => match config.context.transport_preference {
-            TransportPreference::DidCommOnly => Err(VtaError::Other(format!(
+            TransportPreference::DidCommOnly => Err(VtaError::UnsupportedTransport(format!(
                 "mediator DID auto-resolve failed and transport_preference is DidCommOnly \
                  (no REST fallback): {e}"
             ))),

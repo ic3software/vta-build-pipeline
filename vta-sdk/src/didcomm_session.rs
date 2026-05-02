@@ -242,7 +242,7 @@ impl DIDCommSession {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                return Err(problem_report_to_vta_error(code, comment));
+                return Err(VtaError::from_problem_report(code, comment));
             }
 
             // Verify expected type
@@ -261,27 +261,5 @@ impl DIDCommSession {
     /// Gracefully shut down the DIDComm session.
     pub async fn shutdown(&self) {
         self.atm.graceful_shutdown().await;
-    }
-}
-
-/// Map a DIDComm problem-report `code` to the matching [`VtaError`] variant.
-///
-/// Mirrors the HTTP → VtaError mapping in [`VtaError::from_http`] so a caller
-/// can use the same `match` arms whether it talks REST or DIDComm.
-fn problem_report_to_vta_error(code: &str, comment: String) -> VtaError {
-    use crate::protocols::problem_report_codes as c;
-    match code {
-        c::CONFLICT => VtaError::Conflict(comment),
-        c::NOT_FOUND => VtaError::NotFound(comment),
-        c::UNAUTHORIZED => VtaError::Auth(comment),
-        c::BAD_REQUEST => VtaError::Validation(comment),
-        c::INTERNAL => VtaError::Server {
-            status: 500,
-            body: comment,
-        },
-        other => VtaError::DidcommRemote {
-            code: other.to_string(),
-            comment,
-        },
     }
 }
