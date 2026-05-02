@@ -1,20 +1,9 @@
-mod acl;
-mod acl_cli;
-mod auth;
-mod config;
-mod did_key;
+// Module tree is declared in lib.rs (so integration tests under
+// `tests/` can pull the same modules the binary uses). Re-import the
+// pieces this binary needs at the top level.
+use vtc_service::{acl_cli, config, did_key, import_did, keys, server, status, store};
 #[cfg(feature = "setup")]
-mod did_webvh;
-mod error;
-mod import_did;
-mod keys;
-mod messaging;
-mod routes;
-mod server;
-#[cfg(feature = "setup")]
-mod setup;
-mod status;
-mod store;
+use vtc_service::{did_webvh, setup};
 
 use std::path::PathBuf;
 

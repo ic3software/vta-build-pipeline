@@ -80,6 +80,10 @@ url = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Integration tests under `tests/` exercise the route stack via
+# `Router::oneshot` — same pattern as `vta-service/tests/api_integration.rs`.
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true
