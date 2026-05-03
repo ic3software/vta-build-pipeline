@@ -64,7 +64,9 @@ async fn transient_handshake_against_live_mediator_succeeds() {
         "resolved mediator endpoint should be non-empty for a did:peer with a service URI"
     );
     assert!(
-        resolved.endpoint.contains(&mediator.bound_addr().port().to_string()),
+        resolved
+            .endpoint
+            .contains(&mediator.bound_addr().port().to_string()),
         "resolved endpoint {} should reference the mediator's bound port {}",
         resolved.endpoint,
         mediator.bound_addr().port(),

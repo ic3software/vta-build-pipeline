@@ -350,6 +350,7 @@ dependencies = [
  "hkdf 0.12.4",
  "hmac 0.12.1",
  "humantime",
+ "metrics",
  "num-format",
  "rand 0.10.1",
  "redis",
