@@ -286,7 +286,8 @@ async fn try_rest(
                 &credential.private_key_multibase,
                 &credential.vta_did,
             )
-            .await?;
+            .await
+            .map_err(|e| VtaError::Auth(format!("session challenge-response failed: {e}")))?;
 
             let client = VtaClient::new(vta_url);
             client.set_token_async(token_result.access_token).await;
