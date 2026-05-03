@@ -40,7 +40,19 @@ reqwest = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 url = "2"
+# Test process needs to install a rustls `CryptoProvider` because both
+# `rust_crypto` and `aws_lc_rs` end up in the feature graph (via
+# transitive deps) and rustls won't auto-select.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+# Same story for `jsonwebtoken` — its own `CryptoProvider` is gated on
+# matching mutually-exclusive features. The workspace pins
+# `rust_crypto` (vti-common needs ed25519-dalek-backed JWT signing) and
+# the test mediator pins `aws_lc_rs`; both end up on, so we install the
+# provider explicitly at test startup. Either provider works at the
+# call sites the test exercises; pick `aws_lc_rs` to match the mediator.
+jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs"] }
 
 [lints]
 workspace = true
