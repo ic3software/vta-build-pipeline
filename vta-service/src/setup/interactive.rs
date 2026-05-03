@@ -422,18 +422,10 @@ pub async fn run_setup_wizard(
     // 3. Services to enable
     let (enable_rest, enable_didcomm) = prompt_services()?;
 
-    // 4. Public URL, host, port (only when REST is enabled)
+    // 4. Server host + port + REST URL (only when REST is enabled).
+    // The REST URL is asked AFTER host/port so the localhost default
+    // can use the actual port the operator just chose.
     let (public_url, host, port) = if enable_rest {
-        let public_url: String = Input::new()
-            .with_prompt("Public URL for this VTA (leave empty to skip)")
-            .allow_empty(true)
-            .interact_text()?;
-        let public_url = if public_url.is_empty() {
-            None
-        } else {
-            Some(public_url)
-        };
-
         let host: String = Input::new()
             .with_prompt("Server host")
             .default("0.0.0.0".into())
@@ -444,7 +436,38 @@ pub async fn run_setup_wizard(
             .default(8100u16)
             .interact_text()?;
 
-        (public_url, host, port)
+        eprintln!();
+        eprintln!(
+            "  REST is enabled — the VTA needs a public URL to publish as a service endpoint in its DID document. Other parties (CLI clients, other VTAs) resolve the DID and use this URL to reach the REST API."
+        );
+        eprintln!("  Examples:");
+        eprintln!("    • Local development: http://localhost:{port}");
+        eprintln!("    • Production:        https://vta.example.com");
+        eprintln!();
+
+        let default_url = format!("http://localhost:{port}");
+        let public_url: String = Input::new()
+            .with_prompt("VTA REST URL")
+            .default(default_url)
+            .validate_with(|input: &String| -> Result<(), String> {
+                let s = input.trim();
+                if s.is_empty() {
+                    return Err("VTA REST URL is required when REST is enabled".into());
+                }
+                if !(s.starts_with("http://") || s.starts_with("https://")) {
+                    return Err(
+                        "URL must start with http:// or https:// (e.g. http://localhost:8100)"
+                            .into(),
+                    );
+                }
+                Ok(())
+            })
+            .interact_text()?;
+
+        // Strip any trailing slash so consumers that append paths
+        // (e.g. `<url>/auth/challenge`) don't end up with a double `//`.
+        let public_url = public_url.trim().trim_end_matches('/').to_string();
+        (Some(public_url), host, port)
     } else {
         (
             None,
@@ -727,7 +750,7 @@ pub async fn run_setup_wizard(
         eprintln!("  VTA Name: {name}");
     }
     if let Some(url) = &config.public_url {
-        eprintln!("  Public URL: {url}");
+        eprintln!("  VTA REST URL: {url}");
     }
     if let Some(did) = &config.vta_did {
         eprintln!("  VTA DID: {did}");
