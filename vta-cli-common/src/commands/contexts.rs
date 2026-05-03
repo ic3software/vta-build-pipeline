@@ -184,6 +184,10 @@ pub fn render_context_record(ctx: &ContextResponse) {
 
 pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::error::Error>> {
     let resp = client.list_contexts().await?;
+    if crate::render::is_json_output() {
+        crate::render::print_json(&resp.contexts)?;
+        return Ok(());
+    }
     render_context_list(&resp.contexts);
     Ok(())
 }

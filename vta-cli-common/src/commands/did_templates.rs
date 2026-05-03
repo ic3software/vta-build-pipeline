@@ -120,6 +120,11 @@ pub async fn cmd_list(
         None => client.list_did_templates().await?,
     };
 
+    if crate::render::is_json_output() {
+        crate::render::print_json(&records)?;
+        return Ok(());
+    }
+
     if records.is_empty() {
         match context {
             Some(ctx) => println!("No DID templates stored in context '{ctx}'."),

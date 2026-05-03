@@ -44,6 +44,11 @@ struct Cli {
     #[arg(long, global = true)]
     full_display: bool,
 
+    /// Emit list output as JSON instead of a human-readable table.
+    /// Use this for automation: `cnm acl list --json | jq …`.
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -772,6 +777,9 @@ async fn main() {
     // Propagate --full-display to the shared render module so list
     // commands from vta-cli-common pick it up.
     vta_cli_common::render::set_full_display(cli.full_display);
+    if cli.json {
+        vta_cli_common::render::set_output_format(vta_cli_common::render::OutputFormat::Json);
+    }
     vta_cli_common::render::set_bin_name("cnm");
 
     // Initialize tracing: --verbose sets cnm_cli=debug, or respect RUST_LOG

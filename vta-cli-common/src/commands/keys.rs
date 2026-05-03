@@ -254,6 +254,11 @@ pub async fn cmd_key_list(
         .list_keys(offset, limit, status.as_deref(), context_id.as_deref())
         .await?;
 
+    if crate::render::is_json_output() {
+        crate::render::print_json(&resp)?;
+        return Ok(());
+    }
+
     if resp.keys.is_empty() {
         println!("No keys found.");
         return Ok(());

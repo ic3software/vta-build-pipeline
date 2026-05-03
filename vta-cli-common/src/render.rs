@@ -5,7 +5,7 @@ use ratatui::{
     widgets::Widget,
 };
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 // ── Bin-name registration ───────────────────────────────────────────
 //
@@ -77,6 +77,62 @@ pub fn print_full_list_title(title: &str, count: usize) {
     println!();
     println!("{BOLD}{title} ({count}){RESET}");
     println!();
+}
+
+// ── Output format ───────────────────────────────────────────────────
+//
+// Global `--json` flag. When enabled, list commands emit a single JSON
+// document instead of the ratatui table / full-display rendering. This
+// is the automation entry point — scripts piping `pnm acl list --json`
+// into `jq` get a stable shape, while interactive operators get the
+// human-readable default.
+
+/// Output format selected by the operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    Human,
+    Json,
+}
+
+static OUTPUT_FORMAT: AtomicU8 = AtomicU8::new(0); // 0 = Human, 1 = Json
+
+/// Register the output format. Called once at CLI startup from the
+/// global `--json` flag.
+pub fn set_output_format(format: OutputFormat) {
+    OUTPUT_FORMAT.store(
+        match format {
+            OutputFormat::Human => 0,
+            OutputFormat::Json => 1,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// Current output format. Default `Human`.
+pub fn output_format() -> OutputFormat {
+    if OUTPUT_FORMAT.load(Ordering::Relaxed) == 1 {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Human
+    }
+}
+
+/// Returns true when the operator passed `--json`. List commands check
+/// this and dispatch to a JSON serializer instead of their human-
+/// readable renderer.
+#[must_use]
+pub fn is_json_output() -> bool {
+    output_format() == OutputFormat::Json
+}
+
+/// Pretty-print a serializable value as JSON to stdout. Used by list
+/// commands when [`is_json_output`] is true. Errors here are surfaced
+/// as a CLI error rather than a panic so the caller can render via
+/// `print_cli_error`.
+pub fn print_json<T: serde::Serialize>(value: &T) -> Result<(), serde_json::Error> {
+    let text = serde_json::to_string_pretty(value)?;
+    println!("{text}");
+    Ok(())
 }
 
 // ── ANSI constants ──────────────────────────────────────────────────

@@ -180,7 +180,7 @@ pub struct UpdateContextDidRequest {
     pub did: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ContextResponse {
     pub id: String,
     pub name: String,
@@ -241,7 +241,7 @@ pub struct SignResponse {
     pub algorithm: SignAlgorithm,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ListKeysResponse {
     pub keys: Vec<KeyRecord>,
     pub total: u64,
@@ -282,7 +282,7 @@ pub struct RotateSeedResponse {
 
 // ── ACL types ───────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AclEntryResponse {
     pub did: String,
     pub role: String,

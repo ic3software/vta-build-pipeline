@@ -36,6 +36,11 @@ struct Cli {
     #[arg(long, global = true)]
     full_display: bool,
 
+    /// Emit list output as JSON instead of a human-readable table.
+    /// Use this for automation: `pnm acl list --json | jq …`.
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -1333,6 +1338,9 @@ async fn main() {
     // handlers — picks up the setting without threading a bool through
     // every signature.
     vta_cli_common::render::set_full_display(cli.full_display);
+    if cli.json {
+        vta_cli_common::render::set_output_format(vta_cli_common::render::OutputFormat::Json);
+    }
     vta_cli_common::render::set_bin_name("pnm");
 
     // Initialize tracing: --verbose sets pnm_cli=debug, or respect RUST_LOG

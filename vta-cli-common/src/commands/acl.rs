@@ -39,6 +39,15 @@ pub async fn cmd_acl_list(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resp = client.list_acl(context).await?;
 
+    // `--json` short-circuits all rendering and emits a single JSON
+    // document. Empty result returns an empty array, NOT a printed
+    // "no entries" string — automation scripts depend on the JSON
+    // shape being consistent across populated and empty results.
+    if crate::render::is_json_output() {
+        crate::render::print_json(&resp.entries)?;
+        return Ok(());
+    }
+
     if resp.entries.is_empty() {
         println!("No ACL entries found.");
         return Ok(());
