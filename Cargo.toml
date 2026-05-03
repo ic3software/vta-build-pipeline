@@ -4,6 +4,7 @@ members = [
   "cnm-cli",
   "didcomm-test",
   "pnm-cli",
+  "tests/e2e",
   "vta-cli-common",
   "vta-sdk",
   "vta-service",
@@ -155,6 +156,42 @@ apple-native-keyring-store = { version = "1", default-features = false, features
 windows-native-keyring-store = "1"
 dbus-secret-service-keyring-store = { version = "1", default-features = false, features = ["crypto-rust"] }
 
+
+# DEV: redirect crates.io affinidi-* deps to a local checkout of
+# affinidi-tdk-rs so the e2e test crate (`tests/e2e`) can consume the
+# embeddable test mediator (`affinidi-messaging-test-mediator`) and the
+# `MediatorBuilder` / `MemoryStore` APIs that ship in the unpublished
+# v0.14 of `affinidi-messaging-mediator`. The tdk-rs workspace already
+# patches *this* repo's `vta-sdk` symmetrically.
+#
+# Revert to crates.io versions before any release cut. The relative
+# path assumes `affinidi-tdk-rs` is checked out as a sibling at
+# `../../affinidi/affinidi-tdk-rs`.
+[patch.crates-io]
+affinidi-crypto = { path = "../../affinidi/affinidi-tdk-rs/crates/core/affinidi-crypto" }
+affinidi-encoding = { path = "../../affinidi/affinidi-tdk-rs/crates/core/affinidi-encoding" }
+affinidi-secrets-resolver = { path = "../../affinidi/affinidi-tdk-rs/crates/core/affinidi-secrets-resolver" }
+affinidi-data-integrity = { path = "../../affinidi/affinidi-tdk-rs/crates/credentials/affinidi-data-integrity" }
+affinidi-did-authentication = { path = "../../affinidi/affinidi-tdk-rs/crates/identity/affinidi-did-authentication" }
+affinidi-did-common = { path = "../../affinidi/affinidi-tdk-rs/crates/identity/affinidi-did-common" }
+affinidi-did-resolver-cache-sdk = { path = "../../affinidi/affinidi-tdk-rs/crates/identity/affinidi-did-resolver-cache-sdk" }
+affinidi-did-web = { path = "../../affinidi/affinidi-tdk-rs/crates/identity/did-methods/did-web" }
+did-scid = { path = "../../affinidi/affinidi-tdk-rs/crates/identity/did-methods/did-scid" }
+affinidi-messaging-didcomm = { path = "../../affinidi/affinidi-tdk-rs/crates/messaging/affinidi-messaging-didcomm" }
+affinidi-messaging-didcomm-service = { path = "../../affinidi/affinidi-tdk-rs/crates/messaging/affinidi-messaging-didcomm-service" }
+affinidi-messaging-mediator = { path = "../../affinidi/affinidi-tdk-rs/crates/messaging/affinidi-messaging-mediator" }
+affinidi-messaging-mediator-common = { path = "../../affinidi/affinidi-tdk-rs/crates/messaging/affinidi-messaging-mediator/affinidi-messaging-mediator-common" }
+affinidi-messaging-mediator-processors = { path = "../../affinidi/affinidi-tdk-rs/crates/messaging/affinidi-messaging-mediator/affinidi-messaging-mediator-processors" }
+affinidi-messaging-sdk = { path = "../../affinidi/affinidi-tdk-rs/crates/messaging/affinidi-messaging-sdk" }
+affinidi-tdk = { path = "../../affinidi/affinidi-tdk-rs/crates/tdk/affinidi-tdk" }
+affinidi-tdk-common = { path = "../../affinidi/affinidi-tdk-rs/crates/tdk/affinidi-tdk-common" }
+affinidi-meeting-place = { path = "../../affinidi/affinidi-tdk-rs/crates/applications/affinidi-meeting-place" }
+# Local `vta-sdk` — the embeddable mediator pulled in above pins
+# `vta-sdk = "^0.5"`, which is not yet on crates.io. Redirect to our
+# in-workspace copy so the dep graph resolves through `[patch.crates-io]`
+# (cargo doesn't honor the tdk-rs workspace's own patch table when its
+# crates are consumed from outside).
+vta-sdk = { path = "vta-sdk" }
 
 [profile.release]
 lto = "thin"

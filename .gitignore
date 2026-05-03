@@ -3,6 +3,7 @@ target/
 **data/
 **config.toml
 !deploy/**/config.toml
+!.cargo/config.toml
 **.jsonl
 **.vtabak
 

@@ -1,0 +1,12 @@
+# DEV: enable `tracing`'s `valuable` field-value path. Required for
+# `affinidi-messaging-mediator` (path-pulled in via `[patch.crates-io]`
+# for the `tests/e2e` integration suite) — its `tasks::statistics`
+# module uses `tracing::field::valuable` for object-shaped log fields,
+# and that path is gated on `--cfg tracing_unstable`. Mirrors the
+# `affinidi-tdk-rs` workspace's own `.cargo/config.toml`.
+#
+# Remove (along with the workspace `[patch.crates-io]` block) before
+# any release cut — once the mediator's v0.14 + the test-mediator crate
+# are published, the patch graph goes away and so does this flag.
+[build]
+rustflags = ["--cfg", "tracing_unstable"]
