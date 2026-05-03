@@ -152,6 +152,10 @@ dbus-secret-service-keyring-store = { workspace = true, optional = true }
 name = "sealed_transfer_round_trip"
 required-features = ["sealed-transfer"]
 
+[[example]]
+name = "bootstrap_request"
+required-features = ["sealed-transfer", "provision-integration"]
+
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = "3"
