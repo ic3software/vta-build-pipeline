@@ -1,11 +1,15 @@
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
 use serde::{Deserialize, Serialize};
 
 /// A portable credential bundle issued by a VTA for client authentication.
 ///
-/// Encodes as JSON, then base64url-no-pad for safe transport.
+/// Post-Phase-5 the canonical transport for this type is
+/// [`crate::sealed_transfer`] (HPKE-sealed armored bundle); in-process it is
+/// passed as a struct. `serde_json::to_string` / `serde_json::from_str` are
+/// the canonical serialization points when a plaintext on-disk form is
+/// genuinely needed (e.g. at-rest keyring storage, where the OS already
+/// provides confidentiality).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CredentialBundle {
     pub did: String,
     #[serde(rename = "privateKeyMultibase")]
@@ -37,39 +41,46 @@ impl CredentialBundle {
         self
     }
 
-    /// Decode a base64url-no-pad encoded credential bundle.
-    pub fn decode(encoded: &str) -> Result<Self, CredentialBundleError> {
-        let json_bytes = BASE64
-            .decode(encoded)
-            .map_err(|e| CredentialBundleError::Base64(e.to_string()))?;
-        serde_json::from_slice(&json_bytes).map_err(|e| CredentialBundleError::Json(e.to_string()))
-    }
-
-    /// Encode this bundle as a base64url-no-pad string.
-    pub fn encode(&self) -> Result<String, CredentialBundleError> {
-        let json =
-            serde_json::to_vec(self).map_err(|e| CredentialBundleError::Json(e.to_string()))?;
-        Ok(BASE64.encode(&json))
+    /// Build a [`CredentialBundle`] from a private-key multibase by
+    /// deriving its `did:key`.
+    ///
+    /// Shared between the online path (`vta-cli-common::commands::contexts::credential_from_key`
+    /// → `client.get_key_secret` → this helper) and the offline path
+    /// (`vta-service::operations::export::credential_from_key_offline`
+    /// → local keystore read → this helper). Previously each side had
+    /// its own byte-for-byte copy; keeping the derivation in one place
+    /// prevents drift if the `did:key` encoding ever changes (e.g.
+    /// different multicodec, different multibase alphabet).
+    ///
+    /// `private_key_multibase` must be an Ed25519 seed (32 raw bytes,
+    /// multicodec-prefixed `0x1300` or naked) — the shape every
+    /// `get_key_secret` path returns for admin-role keys.
+    ///
+    /// Returns `(bundle, admin_did)` so the caller can reuse the
+    /// derived DID for ACL / audit without re-deriving.
+    #[cfg(feature = "sealed-transfer")]
+    pub fn from_ed25519_seed_multibase(
+        private_key_multibase: &str,
+        vta_did: &str,
+        vta_url: Option<&str>,
+    ) -> Result<(Self, String), crate::did_key::DidKeyError> {
+        let seed = crate::did_key::decode_private_key_multibase(private_key_multibase)?;
+        let public_key = ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
+        let admin_did = format!(
+            "did:key:{}",
+            crate::did_key::ed25519_multibase_pubkey(&public_key)
+        );
+        let bundle = Self {
+            did: admin_did.clone(),
+            private_key_multibase: private_key_multibase.to_string(),
+            vta_did: vta_did.to_string(),
+            vta_url: vta_url.map(String::from),
+        };
+        Ok((bundle, admin_did))
     }
 }
-
-/// Errors when decoding or encoding a [`CredentialBundle`].
-#[derive(Debug)]
-pub enum CredentialBundleError {
-    Base64(String),
-    Json(String),
-}
-
-impl std::fmt::Display for CredentialBundleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Base64(e) => write!(f, "base64 decode error: {e}"),
-            Self::Json(e) => write!(f, "JSON error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for CredentialBundleError {}
 
 #[cfg(test)]
 mod tests {
@@ -111,15 +122,15 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_decode_roundtrip() {
+    fn test_serde_json_roundtrip() {
         let bundle = CredentialBundle {
             did: "did:key:z6Mk123".to_string(),
             private_key_multibase: "z1234567890".to_string(),
             vta_did: "did:key:z6MkVTA".to_string(),
             vta_url: Some("https://vta.example.com".to_string()),
         };
-        let encoded = bundle.encode().unwrap();
-        let decoded = CredentialBundle::decode(&encoded).unwrap();
+        let json = serde_json::to_string(&bundle).unwrap();
+        let decoded: CredentialBundle = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.did, bundle.did);
         assert_eq!(decoded.private_key_multibase, bundle.private_key_multibase);
         assert_eq!(decoded.vta_did, bundle.vta_did);
@@ -127,30 +138,17 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_decode_without_url() {
+    fn test_serde_json_roundtrip_without_url() {
         let bundle = CredentialBundle {
             did: "did:key:z6Mk123".to_string(),
             private_key_multibase: "z1234567890".to_string(),
             vta_did: "did:key:z6MkVTA".to_string(),
             vta_url: None,
         };
-        let encoded = bundle.encode().unwrap();
-        let decoded = CredentialBundle::decode(&encoded).unwrap();
+        let json = serde_json::to_string(&bundle).unwrap();
+        // vta_url is skipped when None — field must be absent from output.
+        assert!(!json.contains("vtaUrl"));
+        let decoded: CredentialBundle = serde_json::from_str(&json).unwrap();
         assert!(decoded.vta_url.is_none());
-    }
-
-    #[test]
-    fn test_decode_invalid_base64() {
-        let result = CredentialBundle::decode("!!!not-base64!!!");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("base64"));
-    }
-
-    #[test]
-    fn test_decode_invalid_json() {
-        let encoded = BASE64.encode(b"not json");
-        let result = CredentialBundle::decode(&encoded);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("JSON"));
     }
 }

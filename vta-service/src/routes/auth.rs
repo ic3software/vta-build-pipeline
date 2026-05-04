@@ -8,19 +8,19 @@ use uuid::Uuid;
 use vta_sdk::protocols::auth::{
     AuthenticateData, AuthenticateResponse, ChallengeData, ChallengeRequest, ChallengeResponse,
 };
-use vta_sdk::protocols::credential_management::generate::GenerateCredentialsResultBody;
+use vta_sdk::sealed_transfer::constant_time_eq;
 
 use crate::acl::{Role, check_acl, check_acl_full};
 use crate::audit::audit;
 use crate::auth::session::{
-    Session, SessionState, delete_session, get_session, get_session_by_refresh, list_sessions,
-    now_epoch, store_refresh_index, store_session, update_session,
+    Session, SessionState, delete_refresh_index, delete_session, get_session,
+    get_session_by_refresh, list_sessions, now_epoch, store_refresh_index, store_session,
+    update_session,
 };
 use crate::auth::{AdminAuth, AuthClaims, ManageAuth};
 use crate::error::AppError;
 #[cfg(feature = "tee")]
 use crate::error::tee_attestation_error;
-use crate::operations;
 use crate::server::AppState;
 #[cfg(feature = "tee")]
 use tracing::error;
@@ -80,22 +80,13 @@ pub async fn challenge(
         .insert_raw(format!("nonce:{challenge}"), session_id.as_bytes().to_vec())
         .await?;
 
-    let session = Session {
-        session_id: session_id.clone(),
-        did: req.did,
-        challenge: challenge.clone(),
-        state: SessionState::ChallengeSent,
-        created_at: now_epoch(),
-        refresh_token: None,
-        refresh_expires_at: None,
-    };
-
-    store_session(&state.sessions_ks, &session).await?;
-
-    // Optionally bind a TEE attestation report to the challenge nonce.
-    // This proves the challenge was generated inside a trusted execution environment.
+    // Build the attestation report (if any) before persisting the
+    // session so we can record on the session whether attestation
+    // actually succeeded for THIS challenge — not just whether the
+    // binary was compiled with the TEE feature. The eventual JWT's
+    // `tee_attested` claim is sourced from this per-session bit.
     #[cfg(feature = "tee")]
-    let tee_attestation = if let Some(ref tee) = state.tee {
+    let (tee_attestation, attestation_succeeded) = if let Some(ref tee) = state.tee {
         let config = state.config.read().await;
         let vta_did = config.vta_did.clone();
         drop(config);
@@ -106,9 +97,10 @@ pub async fn challenge(
         match tee.state.provider.attest(user_data, nonce_bytes) {
             Ok(mut report) => {
                 report.vta_did = vta_did;
-                Some(serde_json::to_value(&report).map_err(|e| {
+                let value = serde_json::to_value(&report).map_err(|e| {
                     AppError::Internal(format!("failed to serialize attestation report: {e}"))
-                })?)
+                })?;
+                (Some(value), true)
             }
             Err(e) => {
                 // In TEE required mode, attestation failure is a hard error.
@@ -123,14 +115,27 @@ pub async fn challenge(
                 warn!(
                     "TEE attestation failed (mode=optional) — challenge served without attestation: {e}"
                 );
-                None
+                (None, false)
             }
         }
     } else {
-        None
+        (None, false)
     };
     #[cfg(not(feature = "tee"))]
-    let tee_attestation = None;
+    let (tee_attestation, attestation_succeeded): (Option<serde_json::Value>, bool) = (None, false);
+
+    let session = Session {
+        session_id: session_id.clone(),
+        did: req.did,
+        challenge: challenge.clone(),
+        state: SessionState::ChallengeSent,
+        created_at: now_epoch(),
+        refresh_token: None,
+        refresh_expires_at: None,
+        tee_attested: attestation_succeeded,
+    };
+
+    store_session(&state.sessions_ks, &session).await?;
 
     info!(did = %session.did, session_id = %session.session_id, "auth challenge issued");
     audit!(
@@ -210,7 +215,7 @@ pub async fn authenticate(
             "session already authenticated (replay)".into(),
         ));
     }
-    if session.challenge != challenge {
+    if !constant_time_eq(session.challenge.as_bytes(), challenge.as_bytes()) {
         warn!(session_id, "authentication rejected: challenge mismatch");
         audit!(
             "auth.authenticate",
@@ -220,9 +225,12 @@ pub async fn authenticate(
         );
         return Err(AppError::Authentication("challenge mismatch".into()));
     }
-    // Match the DID (compare base DID, ignoring any fragment)
+    // Match the DID (compare base DID, ignoring any fragment). Constant-time
+    // compare — DID bytes are not secret, but session.did is the challenge's
+    // expected holder; leaking byte-prefixes doesn't help an attacker who
+    // already knows the session, so this is defense-in-depth.
     let sender_base = sender_did.split('#').next().unwrap_or(sender_did);
-    if session.did != sender_base {
+    if !constant_time_eq(session.did.as_bytes(), sender_base.as_bytes()) {
         warn!(session_id, sender = %sender_base, expected = %session.did, "authentication rejected: DID mismatch");
         audit!(
             "auth.authenticate",
@@ -258,11 +266,11 @@ pub async fn authenticate(
     // Look up ACL entry to get role and allowed contexts for the token
     let (role, allowed_contexts) = check_acl_full(&state.acl_ks, &session.did).await?;
 
-    // Check if VTA is running in a TEE
-    #[cfg(feature = "tee")]
-    let tee_attested = state.tee.is_some();
-    #[cfg(not(feature = "tee"))]
-    let tee_attested = false;
+    // `tee_attested` is per-session, not per-binary: the session record
+    // captured whether the original `/auth/challenge` actually completed
+    // an attestation step. A TEE binary in `Optional` mode that fell
+    // through to an unattested challenge writes `false` here.
+    let tee_attested = session.tee_attested;
 
     let claims = jwt_keys.new_claims(
         session.did.clone(),
@@ -308,25 +316,22 @@ pub async fn authenticate(
 
 // ---------- POST /auth/refresh ----------
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RefreshResponse {
-    pub session_id: String,
-    pub data: RefreshData,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RefreshData {
-    pub access_token: String,
-    pub access_expires_at: u64,
-}
-
-/// POST /auth/refresh — exchange a refresh token for a new access token. Auth: unauthenticated.
+/// POST /auth/refresh — exchange a refresh token for a new access token
+/// AND a freshly-rotated refresh token. Auth: unauthenticated.
+///
+/// Implements RFC 6749 §10.4 refresh-token rotation: every successful
+/// refresh mints a new refresh token, deletes the old reverse index,
+/// and returns the new pair to the caller. The presented token works
+/// exactly once. A leaked-then-replayed token surfaces as "refresh
+/// token not found" — same shape as a token that was revoked.
+///
+/// Response shape is the same `AuthenticateResponse` returned by
+/// `POST /auth/`, so callers handle login and refresh with one
+/// deserialization path.
 pub async fn refresh(
     State(state): State<AppState>,
     body: String,
-) -> Result<Json<RefreshResponse>, AppError> {
+) -> Result<Json<AuthenticateResponse>, AppError> {
     let atm = state
         .atm
         .as_ref()
@@ -351,16 +356,16 @@ pub async fn refresh(
     }
 
     // Extract refresh_token from body
-    let refresh_token = msg.body["refresh_token"]
+    let presented_token = msg.body["refresh_token"]
         .as_str()
         .ok_or_else(|| AppError::Authentication("missing refresh_token in message body".into()))?;
 
     // Look up session by refresh token
-    let session_id = get_session_by_refresh(&state.sessions_ks, refresh_token)
+    let session_id = get_session_by_refresh(&state.sessions_ks, presented_token)
         .await?
         .ok_or_else(|| AppError::Authentication("refresh token not found".into()))?;
 
-    let session = get_session(&state.sessions_ks, &session_id)
+    let mut session = get_session(&state.sessions_ks, &session_id)
         .await?
         .ok_or_else(|| AppError::Authentication("session not found".into()))?;
 
@@ -378,15 +383,17 @@ pub async fn refresh(
     // Look up current ACL role and contexts (propagates changes at refresh time)
     let (role, allowed_contexts) = check_acl_full(&state.acl_ks, &session.did).await?;
 
-    // Generate new access token
-    let config = state.config.read().await;
-    let access_expiry = config.auth.access_token_expiry;
-    drop(config);
+    // Read current expiry knobs in a single lock acquisition.
+    let (access_expiry, refresh_expiry) = {
+        let config = state.config.read().await;
+        (
+            config.auth.access_token_expiry,
+            config.auth.refresh_token_expiry,
+        )
+    };
 
-    #[cfg(feature = "tee")]
-    let tee_attested = state.tee.is_some();
-    #[cfg(not(feature = "tee"))]
-    let tee_attested = false;
+    // tee_attested is per-session — fixed at challenge time, not per-refresh.
+    let tee_attested = session.tee_attested;
 
     let claims = jwt_keys.new_claims(
         session.did.clone(),
@@ -399,7 +406,23 @@ pub async fn refresh(
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 
-    info!(did = %session.did, session_id = %session.session_id, "token refreshed");
+    // Rotate: mint a new refresh token, write the new index, delete the
+    // old one. The order matters — write-new before delete-old so a
+    // crash between the two leaves the new token usable (operator can
+    // re-refresh) rather than a defunct session. Replay of the old
+    // token after this point fails the index lookup.
+    let new_refresh_token = Uuid::new_v4().to_string();
+    let new_refresh_expires_at = now_epoch() + refresh_expiry;
+
+    store_refresh_index(&state.sessions_ks, &new_refresh_token, &session.session_id).await?;
+
+    session.refresh_token = Some(new_refresh_token.clone());
+    session.refresh_expires_at = Some(new_refresh_expires_at);
+    update_session(&state.sessions_ks, &session).await?;
+
+    delete_refresh_index(&state.sessions_ks, presented_token).await?;
+
+    info!(did = %session.did, session_id = %session.session_id, "token refreshed and refresh-token rotated");
     audit!(
         "auth.refresh",
         actor = &session.did,
@@ -407,50 +430,18 @@ pub async fn refresh(
         outcome = "success"
     );
 
-    Ok(Json(RefreshResponse {
-        session_id: session.session_id,
-        data: RefreshData {
+    Ok(Json(AuthenticateResponse {
+        session_id: Some(session.session_id),
+        data: AuthenticateData {
             access_token,
             access_expires_at,
+            refresh_token: Some(new_refresh_token),
+            refresh_expires_at: Some(new_refresh_expires_at),
         },
     }))
 }
 
 // ---------- POST /auth/credentials ----------
-
-#[derive(Debug, Deserialize)]
-pub struct GenerateCredentialsRequest {
-    pub role: Role,
-    pub label: Option<String>,
-    #[serde(default)]
-    pub allowed_contexts: Vec<String>,
-}
-
-/// POST /auth/credentials — generate a new DID+keypair and register an ACL entry. Auth: Admin or Initiator.
-pub async fn generate_credentials(
-    auth: ManageAuth,
-    State(state): State<AppState>,
-    Json(req): Json<GenerateCredentialsRequest>,
-) -> Result<(StatusCode, Json<GenerateCredentialsResultBody>), AppError> {
-    let role_str = req.role.to_string();
-    let result = operations::credentials::generate_credentials(
-        &state.acl_ks,
-        &state.config,
-        &auth.0,
-        req.role,
-        req.label,
-        req.allowed_contexts,
-        "rest",
-    )
-    .await?;
-    audit!(
-        "credentials.generate",
-        actor = &auth.0.did,
-        resource = &role_str,
-        outcome = "success"
-    );
-    Ok((StatusCode::CREATED, Json(result)))
-}
 
 // ---------- GET /auth/sessions ----------
 

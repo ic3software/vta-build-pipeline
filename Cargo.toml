@@ -19,7 +19,7 @@ description = "Verifiable Trust Infrastructure (VTI) — VTA, VTC, and supportin
 edition = "2024"
 publish = true
 authors = ["Glenn Gore <glenn@affinidi.com>"]
-rust-version = "1.91.0"
+rust-version = "1.94.0"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/OpenVTC/verifiable-trust-infrastructure"
@@ -27,8 +27,18 @@ repository = "https://github.com/OpenVTC/verifiable-trust-infrastructure"
 [workspace.dependencies]
 
 # Affinidi Trust Development Kit
-affinidi-tdk = "0.6"
-affinidi-messaging-didcomm-service = "0.2"
+affinidi-tdk = "0.7"
+# Raw crypto primitives (ed25519↔x25519 conversion, did:key helpers). Pulled
+# directly so sealed-transfer can use `affinidi_crypto::did_key::*` without
+# going through the higher-level Secret wrapper in secrets-resolver.
+affinidi-crypto = "0.1"
+# W3C VC Data Model 2.0 + Data Integrity proofs. Used by the
+# provision-integration flow (VP-framed bootstrap request, VC-issued
+# admin authorization). See CLAUDE.md "Authorization claims" principle.
+affinidi-vc = "0.1"
+affinidi-data-integrity = "0.6"
+affinidi-secrets-resolver = "0.5"
+affinidi-messaging-didcomm-service = "0.3"
 
 # Decentralized Trust Graph Credentials
 dtg-credentials = "0.1"
@@ -68,14 +78,14 @@ chrono = { version = "0.4", features = ["serde"] }
 rand = "0.10"
 
 # DID Web with Verifiable History
-didwebvh-rs = "0.4"
+didwebvh-rs = "0.5"
 
 # URL parsing
 url = "2"
 
 # Cryptography
 ed25519-dalek = "2"
-sha2 = "0.10"
+sha2 = "0.11"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 multibase = "0.9"
 
@@ -104,8 +114,62 @@ ratatui = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# Hoisted to keep version pins consistent across the 3+ crates that use them.
+
+# Web framework — pinned at workspace level so vta-service and vtc-service
+# (and vti-common's axum extractors) never drift onto different majors.
+axum = "0.8"
+tower-http = "0.6"
+tokio-util = "0.7"
+
+# Used by every CLI (operator config) and both services (config-from-toml).
+toml = "1"
+dirs = "6"
+
+# Hex encode/decode — sealed-transfer producer keys, key fingerprints, etc.
+hex = "0.4"
+
+# Symmetric crypto helpers used by sealed-transfer + storage encryption.
+aes-gcm = "0.10"
+hkdf = "0.13"
+
+# Vsock-store deps shared by vti-common's vsock keyspace and the enclave
+# bootstrap; libc is also used by vta-service's vsock-bridge helpers.
+tokio-vsock = "0.7"
+libc = "0.2"
+
+# Azure secret-store deps shared across SDK + both services.
+azure_security_keyvault_secrets = "0.14"
+azure_identity = "0.35"
+
+# Hoist DID-resolver-cache feature drift: every crate uses 0.8 but a few
+# omit the `network` feature. The default here turns it on; dependents
+# that want the offline-only cache can opt out via `default-features = false`.
+affinidi-did-resolver-cache-sdk = { version = "0.8", features = ["network"] }
+
+# OS keyring API (replaces legacy `keyring` v3 crate). keyring-core 1.0 split
+# the API from the backend stores; each binary picks a platform-native store
+# and registers it once at startup via `vta_sdk::keyring_init::install_default_store`.
+keyring-core = "1"
+apple-native-keyring-store = { version = "1", default-features = false, features = ["keychain"] }
+windows-native-keyring-store = "1"
+dbus-secret-service-keyring-store = { version = "1", default-features = false, features = ["crypto-rust"] }
+
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Workspace-wide lint policy. Each crate inherits via `lints.workspace = true`
+# in its own Cargo.toml. Per-crate `#[allow(...)]` overrides are still possible
+# but visible in review.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+# Style/escape-hatch fences. Crates that want the broader clippy::all
+# default still get it via the `cargo clippy -- -D warnings` CI gate.
+needless_pass_by_value = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"

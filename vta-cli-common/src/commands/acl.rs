@@ -5,7 +5,7 @@ use ratatui::{
 };
 use vta_sdk::prelude::*;
 
-use crate::render::print_widget;
+use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
 
 pub fn format_contexts(contexts: &[String]) -> String {
     if contexts.is_empty() {
@@ -39,8 +39,34 @@ pub async fn cmd_acl_list(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resp = client.list_acl(context).await?;
 
+    // `--json` short-circuits all rendering and emits a single JSON
+    // document. Empty result returns an empty array, NOT a printed
+    // "no entries" string — automation scripts depend on the JSON
+    // shape being consistent across populated and empty results.
+    if crate::render::is_json_output() {
+        crate::render::print_json(&resp.entries)?;
+        return Ok(());
+    }
+
     if resp.entries.is_empty() {
         println!("No ACL entries found.");
+        return Ok(());
+    }
+
+    if is_full_display() {
+        print_full_list_title("ACL Entries", resp.entries.len());
+        for entry in &resp.entries {
+            let label = entry.label.as_deref().unwrap_or("—");
+            let contexts = format_contexts(&entry.allowed_contexts);
+            let role = format_role(&entry.role, &entry.allowed_contexts);
+            print_full_entry(&[
+                ("DID", &entry.did),
+                ("Role", &role),
+                ("Label", label),
+                ("Contexts", &contexts),
+                ("Created By", &entry.created_by),
+            ]);
+        }
         return Ok(());
     }
 
@@ -70,6 +96,9 @@ pub async fn cmd_acl_list(
 
     let title = format!(" ACL Entries ({}) ", resp.entries.len());
 
+    // `Created By` and `DID` hold full did:key values (~57 chars); use
+    // `Min` rather than fixed `Length` so they expand on wide terminals
+    // instead of truncating. Role / Contexts are short and bounded.
     let table = Table::new(
         rows,
         [
@@ -77,7 +106,7 @@ pub async fn cmd_acl_list(
             Constraint::Length(12), // Role
             Constraint::Min(16),    // Label
             Constraint::Length(24), // Contexts
-            Constraint::Length(52), // Created By
+            Constraint::Min(52),    // Created By
         ],
     )
     .header(header)
@@ -120,23 +149,35 @@ pub async fn cmd_acl_create(
     role: String,
     label: Option<String>,
     contexts: Vec<String>,
+    expires_at: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_role(&role)?;
     let mut req = CreateAclRequest::new(did, role).contexts(contexts);
     if let Some(l) = label {
         req = req.label(l);
     }
+    if let Some(secs) = expires_at {
+        req = req.expires_at(secs);
+    }
     let entry = client.create_acl(req).await?;
     println!("ACL entry created:");
-    println!("  DID:      {}", entry.did);
+    println!("  DID:        {}", entry.did);
     println!(
-        "  Role:     {}",
+        "  Role:       {}",
         format_role(&entry.role, &entry.allowed_contexts)
     );
     if let Some(label) = &entry.label {
-        println!("  Label:    {label}");
+        println!("  Label:      {label}");
     }
-    println!("  Contexts: {}", format_contexts(&entry.allowed_contexts));
+    println!("  Contexts:   {}", format_contexts(&entry.allowed_contexts));
+    match entry.expires_at {
+        Some(secs) => println!(
+            "  Expires at: {} ({})",
+            crate::duration::format_local_time(secs),
+            crate::duration::format_remaining(secs),
+        ),
+        None => println!("  Expires at: (permanent)"),
+    }
     Ok(())
 }
 

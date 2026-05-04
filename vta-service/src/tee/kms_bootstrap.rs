@@ -104,7 +104,7 @@ pub async fn bootstrap_secrets(
                     .try_into()
                     .map_err(|_| tee_attestation_error("JWT key must be exactly 32 bytes"))?;
 
-                verify_jwt_fingerprint(&bs_ks, &jwt_key).await?;
+                verify_jwt_fingerprint(&bs_ks, &jwt_key, kms_config.allow_fingerprint_init).await?;
                 info!("secrets decrypted from KMS — subsequent boot");
 
                 let storage_key = derive_storage_key(&seed, storage_key_salt);
@@ -116,15 +116,37 @@ pub async fn bootstrap_secrets(
                     is_first_boot: false,
                 });
             }
-            Err(e) => {
-                // KMS decrypt failed — likely a PCR0 mismatch after image rebuild.
-                // Clear the stale bootstrap data and fall through to first boot.
+            Err((class, e)) => {
+                // Auto-clearing the bootstrap keyspace silently re-issues the
+                // VTA's identity. Only ACCESS_DENIED is a legitimate signal
+                // for "expected after an image rebuild with a new PCR0" —
+                // every other class (KMS_INTERNAL, NETWORK, INVALID_CIPHERTEXT,
+                // UNKNOWN) could be a transient outage or active tampering,
+                // and silently nuking the identity would be the wrong move.
+                // Operators who deliberately want to reset must set
+                // `tee.kms.allow_kms_reinit = true` in config.
+                let auto_clear =
+                    matches!(class, KmsErrorClass::AccessDenied) || kms_config.allow_kms_reinit;
+                if !auto_clear {
+                    error!(
+                        error = %e,
+                        class = ?class,
+                        "KMS decrypt of existing ciphertexts failed with a non-ACCESS_DENIED \
+                         class. Refusing to auto-clear the bootstrap keyspace because doing \
+                         so would silently reset the VTA's identity. Diagnose the cause \
+                         (KMS health, vsock proxy reachability, ciphertext integrity) and, \
+                         if you are certain the existing identity is unrecoverable, set \
+                         tee.kms.allow_kms_reinit = true for a one-time reset."
+                    );
+                    return Err(e);
+                }
                 warn!(
                     error = %e,
+                    class = ?class,
                     "KMS decrypt of existing ciphertexts failed — clearing stale \
-                     bootstrap data and starting fresh. This is expected after an \
-                     image rebuild with a new PCR0. The VTA will generate a new \
-                     identity."
+                     bootstrap data and starting fresh. ACCESS_DENIED is expected after \
+                     an image rebuild with a new PCR0; other classes were authorized \
+                     by allow_kms_reinit. The VTA will generate a new identity."
                 );
                 bs_ks.remove(BOOTSTRAP_DK_CT_KEY).await?;
                 bs_ks.remove(BOOTSTRAP_SEED_CT_KEY).await?;
@@ -261,15 +283,41 @@ async fn store_jwt_fingerprint(
 }
 
 /// Verify the JWT key matches the stored fingerprint.
+///
+/// A missing fingerprint is treated the same as a mismatch by default —
+/// silently re-baselining on a missing record would let an attacker with
+/// write access to the bootstrap keyspace delete the fingerprint and
+/// substitute a rogue key that passes verification on the next restart.
+///
+/// Operators upgrading from a pre-fingerprint VTA version can opt into a
+/// one-time init by setting `tee.kms.allow_fingerprint_init = true` in
+/// config; they should disable it again after the first successful boot.
 async fn verify_jwt_fingerprint(
     bs_ks: &crate::store::KeyspaceHandle,
     key: &[u8; 32],
+    allow_init: bool,
 ) -> Result<(), AppError> {
     let stored_bytes = match bs_ks.get_raw(BOOTSTRAP_JWT_FINGERPRINT_KEY).await? {
         Some(bytes) => bytes,
-        None => {
-            warn!("no JWT fingerprint found — storing one now (first boot after upgrade)");
+        None if allow_init => {
+            warn!(
+                "no JWT fingerprint found and allow_fingerprint_init=true — storing one \
+                 now. Disable allow_fingerprint_init after this boot."
+            );
             return store_jwt_fingerprint(bs_ks, key).await;
+        }
+        None => {
+            error!(
+                "no JWT fingerprint found — refusing to silently initialize. If this is \
+                 a first boot after upgrading from a pre-fingerprint VTA, set \
+                 tee.kms.allow_fingerprint_init = true, boot once, then disable."
+            );
+            return Err(tee_attestation_error(
+                "JWT key fingerprint missing — refusing to auto-initialize. Either (a) \
+                 set tee.kms.allow_fingerprint_init = true for a one-time migration, or \
+                 (b) clear the bootstrap keyspace to start fresh if this is disaster \
+                 recovery. A missing fingerprint on a running VTA is suspicious.",
+            ));
         }
     };
 
@@ -303,7 +351,8 @@ async fn verify_jwt_fingerprint(
 /// Uses HMAC-SHA256 as the PRF. The salt and info strings ensure domain separation.
 /// Deterministic: same seed + salt → same key (survives enclave restarts).
 pub(crate) fn derive_storage_key(seed: &[u8], salt: &str) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
+    // hmac 0.13 moved `new_from_slice` behind the `KeyInit` trait.
+    use hmac::{Hmac, KeyInit, Mac};
     type HmacSha256 = Hmac<Sha256>;
 
     // HKDF-Extract: PRK = HMAC-SHA256(salt, seed)
@@ -337,20 +386,33 @@ async fn kms_client(config: &TeeKmsConfig) -> aws_sdk_kms::Client {
 }
 
 /// Generate an ephemeral RSA-2048 keypair and obtain an NSM attestation
-/// document binding the public key. Returns `(private_key, recipient_info)`
+/// document binding the public key. Returns `(pkcs8_der, recipient_info)`
 /// for use with KMS attested operations.
-fn nsm_attested_recipient()
--> Result<(rsa::RsaPrivateKey, aws_sdk_kms::types::RecipientInfo), AppError> {
-    use rsa::pkcs8::EncodePublicKey;
+///
+/// The private key is returned as PKCS#8 DER bytes rather than the
+/// `PrivateDecryptingKey` object directly because that object is `!Send`
+/// (wraps a raw BoringSSL `EVP_PKEY` pointer) and would poison the Send
+/// bound on any async future that holds it across a KMS `.await`. DER
+/// bytes are `Vec<u8>` — trivially Send — and the caller deserializes
+/// right before the synchronous OAEP decrypt step.
+fn nsm_attested_recipient() -> Result<(Vec<u8>, aws_sdk_kms::types::RecipientInfo), AppError> {
+    use aws_lc_rs::encoding::AsDer;
+    use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
 
-    let mut rng = rsa::rand_core::OsRng;
-    let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048)
+    let private_key = PrivateDecryptingKey::generate(KeySize::Rsa2048)
         .map_err(|e| tee_attestation_error(format!("RSA key generation failed: {e}")))?;
 
+    // KMS requires the pubkey as X.509 SubjectPublicKeyInfo DER.
     let public_key_der = private_key
-        .to_public_key()
-        .to_public_key_der()
+        .public_key()
+        .as_der()
         .map_err(|e| tee_attestation_error(format!("RSA public key DER encoding failed: {e}")))?;
+
+    // Private key as PKCS#8 for round-tripping across await boundaries.
+    let pkcs8_der = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&private_key)
+        .map_err(|e| tee_attestation_error(format!("RSA private key PKCS#8 encoding failed: {e}")))?
+        .as_ref()
+        .to_vec();
 
     let attestation_doc = super::nitro::request_nsm_attestation_for_kms(public_key_der.as_ref())?;
 
@@ -359,7 +421,7 @@ fn nsm_attested_recipient()
         .key_encryption_algorithm(aws_sdk_kms::types::KeyEncryptionMechanism::RsaesOaepSha256)
         .build();
 
-    Ok((private_key, recipient))
+    Ok((pkcs8_der, recipient))
 }
 
 /// Extract the plaintext from an attested KMS response's CMS envelope.
@@ -369,7 +431,7 @@ fn nsm_attested_recipient()
 /// unwraps that envelope using the ephemeral RSA private key.
 fn unwrap_cms_response(
     cms_blob: Option<&aws_sdk_kms::primitives::Blob>,
-    private_key: &rsa::RsaPrivateKey,
+    private_key_pkcs8: &[u8],
 ) -> Result<Vec<u8>, AppError> {
     let cms_bytes = cms_blob.ok_or_else(|| {
         tee_attestation_error(
@@ -377,7 +439,7 @@ fn unwrap_cms_response(
              the KMS key may not support attestation-based operations",
         )
     })?;
-    decrypt_cms_envelope(cms_bytes.as_ref(), private_key)
+    decrypt_cms_envelope(cms_bytes.as_ref(), private_key_pkcs8)
 }
 
 // ---------------------------------------------------------------------------
@@ -387,23 +449,42 @@ fn unwrap_cms_response(
 /// Decrypt a KMS data key ciphertext (the `CiphertextBlob` from `GenerateDataKey`).
 ///
 /// On real Nitro hardware (`/dev/nsm` available), uses attestation-based
-/// KMS Decrypt with the `Recipient` parameter. Falls back to direct KMS
-/// Decrypt if attestation fails.
+/// KMS Decrypt with the `Recipient` parameter. If attestation fails, the
+/// call is **terminal** unless `allow_unattested_fallback` is explicitly
+/// enabled — silent downgrade to IAM-only Decrypt would bypass the KMS
+/// key policy's PCR conditions.
+///
+/// Without `/dev/nsm` (simulated mode), uses direct KMS Decrypt.
+///
+/// Returns `(class, AppError)` on failure so the bootstrap path can
+/// branch on `KmsErrorClass::AccessDenied` (legitimate post-rebuild
+/// PCR mismatch) without auto-clearing on every other class.
 async fn kms_decrypt_data_key(
     config: &TeeKmsConfig,
     ciphertext: &[u8],
-) -> Result<Vec<u8>, AppError> {
+) -> Result<Vec<u8>, (KmsErrorClass, AppError)> {
     if std::path::Path::new("/dev/nsm").exists() {
         match kms_decrypt_attested(config, ciphertext).await {
             Ok(plaintext) => {
                 info!("KMS Decrypt succeeded with Nitro attestation");
                 return Ok(plaintext);
             }
-            Err(e) => {
+            Err((class, e)) if config.allow_unattested_fallback => {
                 warn!(
                     error = %e,
-                    "attestation-based KMS Decrypt failed — falling back to direct Decrypt"
+                    class = ?class,
+                    "attestation-based KMS Decrypt failed — falling back to direct Decrypt \
+                     (allow_unattested_fallback = true). PCR policy is NOT enforced on this call."
                 );
+            }
+            Err((class, e)) => {
+                error!(
+                    error = %e,
+                    "attestation-based KMS Decrypt failed on Nitro hardware — refusing to \
+                     fall back. Set tee.kms.allow_unattested_fallback = true only as a \
+                     break-glass measure."
+                );
+                return Err((class, e));
             }
         }
     }
@@ -415,8 +496,9 @@ async fn kms_decrypt_data_key(
 async fn kms_decrypt_attested(
     config: &TeeKmsConfig,
     ciphertext: &[u8],
-) -> Result<Vec<u8>, AppError> {
-    let (private_key, recipient) = nsm_attested_recipient()?;
+) -> Result<Vec<u8>, (KmsErrorClass, AppError)> {
+    let (private_key, recipient) =
+        nsm_attested_recipient().map_err(|e| (KmsErrorClass::Unknown, e))?;
     let client = kms_client(config).await;
 
     let resp = client
@@ -426,13 +508,17 @@ async fn kms_decrypt_attested(
         .recipient(recipient)
         .send()
         .await
-        .map_err(|e| classify_kms_error("Decrypt(attested)", e))?;
+        .map_err(|e| classify_kms_error_typed("Decrypt(attested)", e))?;
 
     unwrap_cms_response(resp.ciphertext_for_recipient(), &private_key)
+        .map_err(|e| (KmsErrorClass::InvalidCiphertext, e))
 }
 
 /// Direct KMS Decrypt without the Recipient parameter.
-async fn kms_decrypt_direct(config: &TeeKmsConfig, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
+async fn kms_decrypt_direct(
+    config: &TeeKmsConfig,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, (KmsErrorClass, AppError)> {
     let client = kms_client(config).await;
 
     let resp = client
@@ -441,11 +527,16 @@ async fn kms_decrypt_direct(config: &TeeKmsConfig, ciphertext: &[u8]) -> Result<
         .key_id(&config.key_arn)
         .send()
         .await
-        .map_err(|e| classify_kms_error("Decrypt", e))?;
+        .map_err(|e| classify_kms_error_typed("Decrypt", e))?;
 
     resp.plaintext()
         .map(|b| b.as_ref().to_vec())
-        .ok_or_else(|| tee_attestation_error("KMS Decrypt returned no plaintext"))
+        .ok_or_else(|| {
+            (
+                KmsErrorClass::InvalidCiphertext,
+                tee_attestation_error("KMS Decrypt returned no plaintext"),
+            )
+        })
 }
 
 /// Generate a KMS data key, returning (kms_ciphertext, plaintext_key).
@@ -453,9 +544,12 @@ async fn kms_decrypt_direct(config: &TeeKmsConfig, ciphertext: &[u8]) -> Result<
 /// On real Nitro hardware, uses the `Recipient` parameter so KMS enforces
 /// PCR conditions on `kms:GenerateDataKey`. The plaintext key is returned
 /// via a CMS envelope decrypted with an ephemeral RSA key inside the enclave.
+/// If attestation fails, the call is **terminal** unless
+/// `allow_unattested_fallback` is explicitly enabled — silent downgrade
+/// would let an attacker with IAM (but not PCR) access encrypt rogue data
+/// that could overwrite legitimate ciphertexts.
 ///
-/// Without NSM, calls `GenerateDataKey` directly (KMS returns plaintext in
-/// the response — suitable for development/simulated mode only).
+/// Without NSM, calls `GenerateDataKey` directly (simulated/development mode).
 async fn kms_generate_data_key(config: &TeeKmsConfig) -> Result<(Vec<u8>, [u8; 32]), AppError> {
     if std::path::Path::new("/dev/nsm").exists() {
         match kms_generate_data_key_attested(config).await {
@@ -463,11 +557,21 @@ async fn kms_generate_data_key(config: &TeeKmsConfig) -> Result<(Vec<u8>, [u8; 3
                 info!("KMS GenerateDataKey succeeded with Nitro attestation");
                 return Ok(result);
             }
-            Err(e) => {
+            Err(e) if config.allow_unattested_fallback => {
                 warn!(
                     error = %e,
-                    "attestation-based GenerateDataKey failed — falling back to direct"
+                    "attestation-based GenerateDataKey failed — falling back to direct \
+                     (allow_unattested_fallback = true). PCR policy is NOT enforced on this call."
                 );
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "attestation-based GenerateDataKey failed on Nitro hardware — refusing \
+                     to fall back. Set tee.kms.allow_unattested_fallback = true only as a \
+                     break-glass measure."
+                );
+                return Err(e);
             }
         }
     }
@@ -598,10 +702,7 @@ fn aes_gcm_decrypt(key: &[u8], blob: &[u8]) -> Result<Vec<u8>, AppError> {
 ///
 /// We parse the DER structure manually (the format from KMS is fixed), unwrap the
 /// CEK with the ephemeral RSA private key, then decrypt the content with AES-256-GCM.
-fn decrypt_cms_envelope(
-    cms_bytes: &[u8],
-    private_key: &rsa::RsaPrivateKey,
-) -> Result<Vec<u8>, AppError> {
+fn decrypt_cms_envelope(cms_bytes: &[u8], private_key_pkcs8: &[u8]) -> Result<Vec<u8>, AppError> {
     // Log first bytes for diagnosing BER structure issues with real KMS responses
     debug!(
         cms_len = cms_bytes.len(),
@@ -612,19 +713,32 @@ fn decrypt_cms_envelope(
     // Parse the CMS EnvelopedData to extract the three fields we need
     let fields = cms_der::parse_enveloped_data(cms_bytes)?;
 
-    // RSA-OAEP decrypt the content-encryption key (CEK).
-    // We request RSAES_OAEP_SHA_256 in the Recipient parameter, but KMS may
-    // use SHA-256 for the hash and SHA-1 for the MGF1 mask generation function.
-    // Try SHA-256 first, then fall back to the mixed SHA-256/SHA-1 variant.
-    use rsa::Oaep;
-    let cek = private_key
-        .decrypt(Oaep::new::<sha2::Sha256>(), &fields.encrypted_key)
-        .or_else(|_| {
-            // KMS may use SHA-256 hash + SHA-1 MGF1 (common in PKCS#11 implementations)
-            let padding = Oaep::new_with_mgf_hash::<sha2::Sha256, sha1::Sha1>();
-            private_key.decrypt(padding, &fields.encrypted_key)
-        })
-        .map_err(|e| tee_attestation_error(format!("RSA-OAEP decryption of CEK failed: {e}")))?;
+    // RSA-OAEP decrypt the content-encryption key (CEK). We request
+    // RSAES_OAEP_SHA_256 in the Recipient parameter; per AWS KMS
+    // documentation this always produces symmetric OAEP-SHA256
+    // (SHA-256 hash + MGF1-SHA-256), so no algorithm fallback is needed.
+    use aws_lc_rs::rsa::{OAEP_SHA256_MGF1SHA256, OaepPrivateDecryptingKey, PrivateDecryptingKey};
+
+    let private_key = PrivateDecryptingKey::from_pkcs8(private_key_pkcs8).map_err(|e| {
+        tee_attestation_error(format!(
+            "RSA private key PKCS#8 deserialization failed: {e:?}"
+        ))
+    })?;
+    let key_size = private_key.key_size_bytes();
+    let oaep_key = OaepPrivateDecryptingKey::new(private_key)
+        .map_err(|e| tee_attestation_error(format!("OAEP private key wrap failed: {e:?}")))?;
+    // Output buffer sized to the key modulus length (upper bound on
+    // plaintext size; OAEP overhead is subtracted internally).
+    let mut plaintext_buf = vec![0u8; key_size];
+    let cek = oaep_key
+        .decrypt(
+            &OAEP_SHA256_MGF1SHA256,
+            &fields.encrypted_key,
+            &mut plaintext_buf,
+            None,
+        )
+        .map_err(|e| tee_attestation_error(format!("RSA-OAEP decryption of CEK failed: {e:?}")))?
+        .to_vec();
 
     debug!(
         cek_len = cek.len(),
@@ -649,8 +763,11 @@ fn decrypt_cms_envelope(
     let aes_256_gcm_oid: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2e];
 
     let plaintext = if fields.content_encryption_oid == aes_256_cbc_oid {
-        // AES-256-CBC with PKCS#7 padding
-        use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+        // AES-256-CBC with PKCS#7 padding.
+        // cbc 0.2 / cipher 0.5: `BlockDecryptMut` was renamed to
+        // `BlockModeDecrypt`, and `decrypt_padded_mut` was renamed to
+        // `decrypt_padded` (which now consumes `self`).
+        use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
         type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
         if fields.iv.len() != 16 {
@@ -664,7 +781,7 @@ fn decrypt_cms_envelope(
         let decryptor = Aes256CbcDec::new_from_slices(&cek, &fields.iv)
             .map_err(|e| tee_attestation_error(format!("AES-256-CBC init failed: {e}")))?;
         let plaintext = decryptor
-            .decrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buf)
+            .decrypt_padded::<cbc::cipher::block_padding::Pkcs7>(&mut buf)
             .map_err(|e| {
                 tee_attestation_error(format!("AES-256-CBC decryption of CMS content failed: {e}"))
             })?;
@@ -1084,8 +1201,49 @@ mod cms_der {
     }
 }
 
+/// Typed classification of a KMS error. The bootstrap path branches
+/// on this to decide whether to auto-clear stale ciphertexts: only
+/// `AccessDenied` (the post-rebuild PCR-mismatch signal) is treated
+/// as legitimate; anything else preserves the VTA's identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KmsErrorClass {
+    AccessDenied,
+    KeyNotFound,
+    InvalidCiphertext,
+    KmsInternal,
+    Network,
+    Unknown,
+}
+
+impl KmsErrorClass {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AccessDenied => {
+                "ACCESS_DENIED — check KMS key policy allows this action and PCR conditions match"
+            }
+            Self::KeyNotFound => "KEY_NOT_FOUND — verify the KMS key ARN in config.toml",
+            Self::InvalidCiphertext => {
+                "INVALID_CIPHERTEXT — ciphertext may be corrupt or encrypted with a different key"
+            }
+            Self::KmsInternal => "KMS_INTERNAL — transient AWS error, retry may help",
+            Self::Network => "NETWORK — cannot reach KMS endpoint, check vsock proxy and allowlist",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+}
+
 /// Classify KMS errors for operator diagnostics.
 fn classify_kms_error<E: std::error::Error>(operation: &str, err: E) -> AppError {
+    classify_kms_error_typed(operation, err).1
+}
+
+/// Classify a KMS error into a typed class + an `AppError` ready to
+/// propagate. The class is what the bootstrap path branches on; the
+/// `AppError` is what the caller returns/logs.
+pub(crate) fn classify_kms_error_typed<E: std::error::Error>(
+    operation: &str,
+    err: E,
+) -> (KmsErrorClass, AppError) {
     // Build the full error chain string so classification catches nested causes
     // (the AWS SDK wraps the actual error type several layers deep).
     let mut full_msg = format!("{err}");
@@ -1095,25 +1253,25 @@ fn classify_kms_error<E: std::error::Error>(operation: &str, err: E) -> AppError
         source = cause.source();
     }
 
-    // Classify by error message patterns for clear operator guidance
-    let classification = if full_msg.contains("AccessDeniedException") {
-        "ACCESS_DENIED — check KMS key policy allows this action and PCR conditions match"
+    let class = if full_msg.contains("AccessDeniedException") {
+        KmsErrorClass::AccessDenied
     } else if full_msg.contains("NotFoundException") || full_msg.contains("not found") {
-        "KEY_NOT_FOUND — verify the KMS key ARN in config.toml"
+        KmsErrorClass::KeyNotFound
     } else if full_msg.contains("InvalidCiphertextException") {
-        "INVALID_CIPHERTEXT — ciphertext may be corrupt or encrypted with a different key"
+        KmsErrorClass::InvalidCiphertext
     } else if full_msg.contains("KMSInternalException") {
-        "KMS_INTERNAL — transient AWS error, retry may help"
+        KmsErrorClass::KmsInternal
     } else if full_msg.contains("connect") || full_msg.contains("timeout") {
-        "NETWORK — cannot reach KMS endpoint, check vsock proxy and allowlist"
+        KmsErrorClass::Network
     } else {
-        "UNKNOWN"
+        KmsErrorClass::Unknown
     };
 
-    let msg = format!("KMS {operation} failed [{classification}]: {full_msg}");
+    let label = class.label();
+    let msg = format!("KMS {operation} failed [{label}]: {full_msg}");
 
-    error!(operation, classification, "KMS error");
-    tee_attestation_error(msg)
+    error!(operation, classification = label, "KMS error");
+    (class, tee_attestation_error(msg))
 }
 
 #[cfg(test)]
@@ -1127,11 +1285,12 @@ mod tests {
     fn test_cms_envelope_roundtrip() {
         use aes_gcm::aead::generic_array::GenericArray;
         use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
-        use rsa::{Oaep, RsaPrivateKey};
+        use aws_lc_rs::rsa::{
+            KeySize, OAEP_SHA256_MGF1SHA256, OaepPublicEncryptingKey, PrivateDecryptingKey,
+        };
 
         // Generate RSA keypair (the "ephemeral" key the enclave would create)
-        let mut rng = rsa::rand_core::OsRng;
-        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let private_key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
 
         // The plaintext KMS would return (e.g., a 32-byte seed)
         let original_plaintext = b"this is a secret seed value!!!!!"; // 32 bytes
@@ -1147,17 +1306,30 @@ mod tests {
         let nonce = GenericArray::from_slice(&nonce_bytes);
         let aes_ciphertext = cipher.encrypt(nonce, original_plaintext.as_ref()).unwrap();
 
-        // RSA-OAEP-SHA256 encrypt the CEK
-        let encrypted_cek = private_key
-            .to_public_key()
-            .encrypt(&mut rng, Oaep::new::<sha2::Sha256>(), &cek)
+        // RSA-OAEP-SHA256 encrypt the CEK using the public key — mirrors
+        // what KMS does server-side before returning CiphertextForRecipient.
+        let oaep_pub = OaepPublicEncryptingKey::new(private_key.public_key().clone()).unwrap();
+        let mut encrypted_cek_buf = vec![0u8; private_key.key_size_bytes()];
+        let encrypted_cek_slice = oaep_pub
+            .encrypt(&OAEP_SHA256_MGF1SHA256, &cek, &mut encrypted_cek_buf, None)
             .unwrap();
+        let encrypted_cek = encrypted_cek_slice.to_vec();
 
         // Build the CMS EnvelopedData DER structure
         let cms_bytes = build_test_cms_envelope(&encrypted_cek, &nonce_bytes, &aes_ciphertext);
 
+        // Serialize the private key to PKCS#8 so decrypt_cms_envelope
+        // can round-trip it (mirrors the production path, where the key
+        // crosses async await boundaries as bytes rather than as the
+        // non-Send PrivateDecryptingKey object).
+        use aws_lc_rs::encoding::AsDer;
+        let pkcs8 = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&private_key)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+
         // Now decrypt it using our implementation
-        let recovered = decrypt_cms_envelope(&cms_bytes, &private_key).unwrap();
+        let recovered = decrypt_cms_envelope(&cms_bytes, &pkcs8).unwrap();
 
         assert_eq!(recovered, original_plaintext);
     }
@@ -1314,5 +1486,168 @@ mod tests {
         let fp2 = jwt_fingerprint(&key);
         assert_eq!(fp1, fp2);
         assert_eq!(fp1.len(), 32); // 16 bytes = 32 hex chars
+    }
+
+    // ── decrypt_cms_envelope failure paths ──────────────────────────────
+    //
+    // Negative tests for CMS unwrap. The happy path is covered by
+    // `test_cms_envelope_roundtrip`; these tests assert each failure
+    // surface returns a typed `AppError` rather than panicking, and
+    // catches the specific class of corruption an attacker (or an
+    // unreliable network) might introduce between KMS and the enclave.
+
+    /// Helper: build a known-good encrypted CMS plus its matching PKCS#8
+    /// private key, then return both. Tests then mutate one or the
+    /// other to test specific tamper classes.
+    fn cms_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        use aes_gcm::aead::generic_array::GenericArray;
+        use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+        use aws_lc_rs::encoding::AsDer;
+        use aws_lc_rs::rsa::{
+            KeySize, OAEP_SHA256_MGF1SHA256, OaepPublicEncryptingKey, PrivateDecryptingKey,
+        };
+
+        let private_key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+        let plaintext = b"this is a secret seed value!!!!!"; // 32 bytes
+        let mut cek = [0u8; 32];
+        rand::fill(&mut cek);
+        let mut nonce_bytes = [0u8; 12];
+        rand::fill(&mut nonce_bytes);
+
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&cek));
+        let aes_ct = cipher
+            .encrypt(GenericArray::from_slice(&nonce_bytes), plaintext.as_ref())
+            .unwrap();
+
+        let oaep_pub = OaepPublicEncryptingKey::new(private_key.public_key().clone()).unwrap();
+        let mut buf = vec![0u8; private_key.key_size_bytes()];
+        let enc_cek = oaep_pub
+            .encrypt(&OAEP_SHA256_MGF1SHA256, &cek, &mut buf, None)
+            .unwrap()
+            .to_vec();
+
+        let cms = build_test_cms_envelope(&enc_cek, &nonce_bytes, &aes_ct);
+        let pkcs8 = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&private_key)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+        (cms, pkcs8, plaintext.to_vec())
+    }
+
+    #[test]
+    fn cms_decrypt_with_wrong_private_key_fails() {
+        // Threat: an attacker substitutes a different KMS response. The
+        // CEK was OAEP-encrypted to the enclave's ephemeral pubkey;
+        // decrypting with any other private key MUST fail at the OAEP
+        // unwrap before AES decryption is attempted.
+        use aws_lc_rs::encoding::AsDer;
+        use aws_lc_rs::rsa::{KeySize, PrivateDecryptingKey};
+
+        let (cms, _correct_pkcs8, _) = cms_fixture();
+
+        // Generate a *different* private key — the OAEP unwrap will fail.
+        let wrong_key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+        let wrong_pkcs8 = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&wrong_key)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+
+        let err = decrypt_cms_envelope(&cms, &wrong_pkcs8).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RSA-OAEP") || msg.contains("CEK") || msg.contains("decryption"),
+            "expected OAEP-unwrap error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cms_decrypt_with_corrupted_cek_fails() {
+        // Threat: in-flight tampering of the encrypted CEK. OAEP carries
+        // padding-style integrity, so a single bit flip in the encrypted
+        // CEK causes unwrap to fail with very high probability. This
+        // catches a regression where someone moves to a non-OAEP padding
+        // scheme without updating the assumption.
+        let (mut cms, pkcs8, _) = cms_fixture();
+        // Corrupt a byte in the middle of the structure. Any byte will
+        // do; we choose mid-buffer to avoid hitting the outer ASN.1 tags
+        // (which would surface as a parse error rather than an unwrap
+        // error — also a valid failure mode but a different one).
+        let mid = cms.len() / 2;
+        cms[mid] ^= 0xFF;
+        let err = decrypt_cms_envelope(&cms, &pkcs8).unwrap_err();
+        // Either a parse failure (if the byte was structural) or an
+        // OAEP-unwrap failure (if the byte was inside the encrypted
+        // CEK). Both are typed errors, neither is a panic.
+        let _ = format!("{err}");
+    }
+
+    #[test]
+    fn cms_decrypt_with_tampered_aes_ciphertext_fails() {
+        // Threat: in-flight modification of the encrypted plaintext.
+        // AES-GCM's auth tag must catch this regardless of where the
+        // bit flip lands inside the ciphertext. Without the tag check,
+        // tampered key material would be loaded silently — fatal.
+        use aes_gcm::aead::generic_array::GenericArray;
+        use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+        use aws_lc_rs::encoding::AsDer;
+        use aws_lc_rs::rsa::{
+            KeySize, OAEP_SHA256_MGF1SHA256, OaepPublicEncryptingKey, PrivateDecryptingKey,
+        };
+
+        let private_key = PrivateDecryptingKey::generate(KeySize::Rsa2048).unwrap();
+        let plaintext = b"a different secret of length 32!"; // 32 bytes
+        let mut cek = [0u8; 32];
+        rand::fill(&mut cek);
+        let mut nonce_bytes = [0u8; 12];
+        rand::fill(&mut nonce_bytes);
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&cek));
+        let mut aes_ct = cipher
+            .encrypt(GenericArray::from_slice(&nonce_bytes), plaintext.as_ref())
+            .unwrap();
+        // Flip a bit inside the AES-GCM ciphertext (before the auth tag).
+        aes_ct[0] ^= 0x01;
+
+        let oaep_pub = OaepPublicEncryptingKey::new(private_key.public_key().clone()).unwrap();
+        let mut buf = vec![0u8; private_key.key_size_bytes()];
+        let enc_cek = oaep_pub
+            .encrypt(&OAEP_SHA256_MGF1SHA256, &cek, &mut buf, None)
+            .unwrap()
+            .to_vec();
+        let cms = build_test_cms_envelope(&enc_cek, &nonce_bytes, &aes_ct);
+        let pkcs8 = AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&private_key)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+
+        let err = decrypt_cms_envelope(&cms, &pkcs8).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("aes") || msg.to_lowercase().contains("decrypt"),
+            "expected AES decrypt failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cms_decrypt_with_empty_envelope_fails_cleanly() {
+        // Threat: KMS returns success but the `CiphertextForRecipient`
+        // field is empty (or KMS API change drops the field). Must
+        // surface a typed parse error, not a panic.
+        let (_, pkcs8, _) = cms_fixture();
+        let err = decrypt_cms_envelope(&[], &pkcs8).unwrap_err();
+        let _ = format!("{err}");
+    }
+
+    #[test]
+    fn cms_decrypt_with_malformed_pkcs8_fails_cleanly() {
+        // Threat: the persisted ephemeral RSA key is corrupted (storage
+        // bit-flip, vsock-store proxy bug). Must surface a typed
+        // PKCS#8-deserialisation error, not a panic.
+        let (cms, _, _) = cms_fixture();
+        let err = decrypt_cms_envelope(&cms, &[0u8; 16]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("pkcs"),
+            "expected PKCS#8 parse error, got: {msg}"
+        );
     }
 }

@@ -35,6 +35,30 @@ const ARGON2_P_COST: u32 = 4;
 const SALT_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 
+// ── Argon2id parameter clamps (import-side defence) ────────────────
+//
+// `decrypt_backup` reads KDF parameters from the envelope itself —
+// without bounds, an attacker who can submit a backup can force a
+// memory bomb (`m_cost = u32::MAX` ≈ 4 TiB) or a trivially-fast KDF
+// for known-plaintext probes. On a Nitro Enclave with fixed memory,
+// a memory bomb is fatal. These bounds give honest backups generous
+// headroom (the OWASP profile sits well within them) while rejecting
+// adversarial values.
+
+/// Maximum memory cost (in KiB) accepted on import. 1 GiB.
+const MAX_M_COST: u32 = 1 << 20;
+/// Minimum memory cost (in KiB) accepted on import. 8 MiB — well below
+/// the OWASP recommendation, here only to reject the m=1 footgun.
+const MIN_M_COST: u32 = 8 * 1024;
+/// Maximum iteration count.
+const MAX_T_COST: u32 = 10;
+/// Minimum iteration count.
+const MIN_T_COST: u32 = 1;
+/// Maximum parallelism factor.
+const MAX_P_COST: u32 = 16;
+/// Minimum parallelism factor.
+const MIN_P_COST: u32 = 1;
+
 // ── Export ──────────────────────────────────────────────────────────
 
 /// Assemble and encrypt a backup of the entire VTA state.
@@ -283,12 +307,47 @@ pub async fn preview_import(
     Ok((payload, result))
 }
 
+/// Reject an import if the backup's `vta_did` would overwrite a
+/// different running VTA's identity. A fresh install (no running
+/// `vta_did`) accepts any backup — this covers disaster recovery from
+/// a completely lost VTA. An identity migration (deliberately
+/// replacing one VTA DID with another) requires the operator to clear
+/// `vta_did` from the running config first.
+fn check_vta_did_compatibility(
+    running_did: Option<&str>,
+    backup_did: Option<&str>,
+) -> Result<(), AppError> {
+    let running = match running_did {
+        Some(d) if !d.is_empty() => d,
+        _ => return Ok(()),
+    };
+    let backup = backup_did.unwrap_or("");
+    if backup == running {
+        return Ok(());
+    }
+    Err(AppError::Validation(format!(
+        "backup vta_did mismatch: backup claims '{backup}' but this VTA is running \
+         as '{running}'. Refusing to overwrite identity. If this is intentional \
+         (identity migration), clear vta_did from the running config first."
+    )))
+}
+
 /// Apply an import: clears all keyspaces and writes the backup data.
 ///
 /// When `store` and TEE KMS config are provided, re-encrypts the imported
-/// seed and JWT key with KMS for the bootstrap keyspace.
+/// seed and JWT key with KMS for the bootstrap keyspace. The `store`
+/// parameter is therefore only consumed under `feature = "tee"`; non-TEE
+/// builds receive `None` and silently skip step 12.
+///
+/// **vta_did guard**: if the running VTA already has a vta_did in config
+/// and it differs from the backup's, the import is rejected — a foreign
+/// backup replacing a live VTA's state is almost certainly an operator
+/// mistake. A fresh install (no vta_did yet) accepts any backup; this
+/// covers the legitimate disaster-recovery path. To deliberately migrate
+/// an identity, clear the running config first.
 ///
 /// The caller is responsible for triggering a soft restart after this returns.
+#[cfg_attr(not(feature = "tee"), allow(unused_variables))]
 pub async fn apply_import(
     payload: &BackupPayload,
     ks: &super::Keyspaces<'_>,
@@ -296,6 +355,14 @@ pub async fn apply_import(
     config: &tokio::sync::RwLock<crate::config::AppConfig>,
     store: Option<&crate::store::Store>,
 ) -> Result<ImportResult, AppError> {
+    // vta_did cross-check: refuse to overwrite a different VTA's
+    // identity with this backup. A fresh install (running_did is None)
+    // accepts any backup.
+    {
+        let running_did = config.read().await.vta_did.clone();
+        check_vta_did_compatibility(running_did.as_deref(), payload.config.vta_did.as_deref())?;
+    }
+
     let keys_ks = ks.keys;
     let acl_ks = ks.acl;
     let contexts_ks = ks.contexts;
@@ -586,6 +653,39 @@ pub fn decrypt_backup(
         )));
     }
 
+    // Reject KDF parameters outside sane bounds. An untrusted envelope
+    // can otherwise force a memory bomb or a near-trivial KDF.
+    if envelope.kdf.algorithm != "argon2id" {
+        return Err(AppError::Validation(format!(
+            "unsupported KDF algorithm: '{}' (only 'argon2id' is accepted)",
+            envelope.kdf.algorithm
+        )));
+    }
+    if !(MIN_M_COST..=MAX_M_COST).contains(&envelope.kdf.m_cost) {
+        return Err(AppError::Validation(format!(
+            "argon2 m_cost {} out of bounds [{}, {}]",
+            envelope.kdf.m_cost, MIN_M_COST, MAX_M_COST
+        )));
+    }
+    if !(MIN_T_COST..=MAX_T_COST).contains(&envelope.kdf.t_cost) {
+        return Err(AppError::Validation(format!(
+            "argon2 t_cost {} out of bounds [{}, {}]",
+            envelope.kdf.t_cost, MIN_T_COST, MAX_T_COST
+        )));
+    }
+    if !(MIN_P_COST..=MAX_P_COST).contains(&envelope.kdf.p_cost) {
+        return Err(AppError::Validation(format!(
+            "argon2 p_cost {} out of bounds [{}, {}]",
+            envelope.kdf.p_cost, MIN_P_COST, MAX_P_COST
+        )));
+    }
+    if envelope.encryption.algorithm != "aes-256-gcm" {
+        return Err(AppError::Validation(format!(
+            "unsupported encryption algorithm: '{}' (only 'aes-256-gcm' is accepted)",
+            envelope.encryption.algorithm
+        )));
+    }
+
     let salt = BASE64
         .decode(&envelope.kdf.salt)
         .map_err(|e| AppError::Validation(format!("invalid salt: {e}")))?;
@@ -819,5 +919,104 @@ mod tests {
         // Different salts → different ciphertexts
         assert_ne!(env1.kdf.salt, env2.kdf.salt);
         assert_ne!(env1.ciphertext, env2.ciphertext);
+    }
+
+    // ── vta_did cross-check guard ───────────────────────────────────
+
+    #[test]
+    fn vta_did_guard_fresh_install_accepts_any_backup() {
+        // A VTA that has not yet configured a vta_did accepts any
+        // backup — this is the disaster-recovery case.
+        check_vta_did_compatibility(None, Some("did:key:z6MkAnything"))
+            .expect("fresh install must accept any backup");
+        check_vta_did_compatibility(None, None).expect("fresh install accepts no-did backup");
+        check_vta_did_compatibility(Some(""), Some("did:key:z6MkAnything"))
+            .expect("empty-string vta_did counts as fresh install");
+    }
+
+    #[test]
+    fn vta_did_guard_matching_dids_accepted() {
+        // Legitimate disaster recovery: restore the same VTA's backup
+        // onto a fresh host that has the expected vta_did configured.
+        check_vta_did_compatibility(Some("did:key:z6MkSame"), Some("did:key:z6MkSame"))
+            .expect("matching vta_did must pass");
+    }
+
+    #[test]
+    fn vta_did_guard_mismatch_rejected() {
+        let err = check_vta_did_compatibility(
+            Some("did:key:z6MkRunning"),
+            Some("did:key:z6MkForeignBackup"),
+        )
+        .expect_err("mismatched vta_did must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("vta_did mismatch"), "got: {msg}");
+        assert!(
+            msg.contains("z6MkForeignBackup"),
+            "must name backup did: {msg}"
+        );
+        assert!(msg.contains("z6MkRunning"), "must name running did: {msg}");
+    }
+
+    #[test]
+    fn vta_did_guard_backup_missing_did_rejected_when_running_has_did() {
+        // A backup with no vta_did can't legitimately replace a
+        // running VTA's identity — treat empty as mismatch.
+        let err = check_vta_did_compatibility(Some("did:key:z6MkRunning"), None)
+            .expect_err("missing backup vta_did must be rejected when running has one");
+        assert!(format!("{err}").contains("vta_did mismatch"), "got {err:?}");
+    }
+
+    // ── KDF parameter clamps on import ──────────────────────────────
+
+    fn make_envelope_with_kdf(m_cost: u32, t_cost: u32, p_cost: u32, alg: &str) -> BackupEnvelope {
+        // Build a real encrypted envelope, then mutate the KDF params.
+        // The ciphertext won't decrypt with the wrong params, but the
+        // bounds check fires before decrypt is attempted — that's the
+        // behaviour we're testing.
+        let payload = test_payload();
+        let config = test_config();
+        let mut env = encrypt_payload(&payload, "password-12!ok!a", false, &config).unwrap();
+        env.kdf.algorithm = alg.into();
+        env.kdf.m_cost = m_cost;
+        env.kdf.t_cost = t_cost;
+        env.kdf.p_cost = p_cost;
+        env
+    }
+
+    #[test]
+    fn kdf_m_cost_above_max_rejected() {
+        let env = make_envelope_with_kdf(MAX_M_COST + 1, ARGON2_T_COST, ARGON2_P_COST, "argon2id");
+        let err = decrypt_backup(&env, "anything").expect_err("must reject huge m_cost");
+        assert!(format!("{err}").contains("m_cost"), "got {err:?}");
+    }
+
+    #[test]
+    fn kdf_m_cost_below_min_rejected() {
+        let env = make_envelope_with_kdf(1, ARGON2_T_COST, ARGON2_P_COST, "argon2id");
+        let err = decrypt_backup(&env, "anything").expect_err("must reject m_cost = 1");
+        assert!(format!("{err}").contains("m_cost"), "got {err:?}");
+    }
+
+    #[test]
+    fn kdf_t_cost_zero_rejected() {
+        let env = make_envelope_with_kdf(ARGON2_M_COST, 0, ARGON2_P_COST, "argon2id");
+        let err = decrypt_backup(&env, "anything").expect_err("must reject t_cost = 0");
+        assert!(format!("{err}").contains("t_cost"), "got {err:?}");
+    }
+
+    #[test]
+    fn kdf_p_cost_above_max_rejected() {
+        let env = make_envelope_with_kdf(ARGON2_M_COST, ARGON2_T_COST, MAX_P_COST + 1, "argon2id");
+        let err = decrypt_backup(&env, "anything").expect_err("must reject huge p_cost");
+        assert!(format!("{err}").contains("p_cost"), "got {err:?}");
+    }
+
+    #[test]
+    fn kdf_unknown_algorithm_rejected() {
+        let env =
+            make_envelope_with_kdf(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, "scrypt-custom");
+        let err = decrypt_backup(&env, "anything").expect_err("must reject non-argon2id KDF");
+        assert!(format!("{err}").contains("KDF algorithm"), "got {err:?}");
     }
 }

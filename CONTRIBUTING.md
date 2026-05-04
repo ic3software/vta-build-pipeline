@@ -9,7 +9,7 @@ Thank you for contributing! Before you contribute, we ask some things of you:
 
 ### Prerequisites
 
-- **Rust 1.91.0+** (`rustup default stable`)
+- **Rust 1.94.0+** (`rustup default stable`)
 - **libdbus-1-dev** (Linux) or equivalent (for keyring feature)
 - **Docker** (for enclave builds only)
 
@@ -76,12 +76,14 @@ Before submitting a pull request:
 
 See [README.md](README.md) for the crate overview. Key design documents:
 
-- [Architecture & API](docs/design.md)
-- [Security Architecture](docs/security.md)
-- [Cold-Start Guide](docs/cold-start-guide.md)
-- [Integration Guide](docs/integration-guide.md)
-- [DIDComm Protocol](docs/didcomm_protocol.md)
-- [BIP-32 Paths](docs/bip32_paths.md)
-- [Feature Flags](docs/feature-flags.md)
-- [TEE Enclave Security](docs/design/tee-enclave-security.md)
-- [Store Migration](docs/design/store-migration.md)
+- [Documentation index](docs/README.md) — start here.
+- [Overview](docs/01-concepts/overview.md) and [Architecture](docs/01-concepts/architecture.md)
+- [Security model](docs/01-concepts/security-model.md)
+- [TEE architecture](docs/01-concepts/tee-architecture.md)
+- [Cold-start guide](docs/02-operating/cold-start.md)
+- [Secret-storage backends](docs/02-operating/secret-backends.md)
+- [Feature flags](docs/02-operating/feature-flags.md)
+- [Integration guide](docs/03-integrating/integration-guide.md)
+- [DIDComm protocol](docs/03-integrating/didcomm-protocol.md)
+- [BIP-32 paths](docs/04-reference/bip32-paths.md)
+- [Store migration](docs/05-design-notes/store-migration.md)

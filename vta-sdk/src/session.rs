@@ -11,37 +11,95 @@ use tracing::debug;
 use crate::credentials::CredentialBundle;
 use crate::protocols::auth::{AuthenticateResponse, ChallengeRequest, ChallengeResponse};
 
+/// Test-support types (public `SessionBackend` mock for consumers'
+/// integration tests). Compiled for unit tests and whenever the
+/// `test-support` feature is enabled by downstream crates.
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+
 // ── Session (internal) ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Session {
     client_did: String,
     private_key: String,
-    vta_did: String,
+    /// `None` in the `PendingVtaBinding` state — the client DID has been
+    /// minted locally but the operator has not yet supplied the VTA DID
+    /// to bind to. `Some` in both `PendingRotation` (combined with
+    /// `needs_rotation = true`) and `Direct` (no rotation) states. See
+    /// `SessionStore::store_pending_vta_binding` + `bind_vta_did`.
     #[serde(default)]
-    vta_url: Option<String>,
+    vta_did: Option<String>,
     access_token: Option<String>,
     access_expires_at: Option<u64>,
+    /// Marks a session whose `client_did` was minted locally with no live
+    /// VTA to register it against — the user has been told to ask their
+    /// admin to run `vta acl create --did <did>`. On the first successful
+    /// authentication we atomically rotate to a fresh did:key and drop
+    /// the original from the ACL, so the DID the user initially exposed
+    /// (maybe over chat/email) does not remain long-lived.
+    #[serde(default)]
+    needs_rotation: bool,
+}
+
+/// Pull the VTA DID out of a session or error with the deferred-setup
+/// hint. Used at every authenticated-operation entry point so a
+/// `PendingVtaBinding` session surfaces as a clean error rather than a
+/// panic when downstream code tries to unwrap.
+///
+/// This is the SDK-side defensive backstop. The CLI should gate on
+/// [`SessionStore::has_pending_vta_binding`] before reaching these
+/// functions; if it does, operators never see this string.
+fn require_vta_did(session: &Session) -> Result<&str, Box<dyn std::error::Error>> {
+    session.vta_did.as_deref().ok_or_else(|| {
+        "session is pending VTA binding — run `pnm setup continue <slug>` to supply the VTA DID"
+            .into()
+    })
 }
 
 // ── Public types ────────────────────────────────────────────────────
 
 /// Loaded session info exposed for health/diagnostics.
+///
+/// `vta_did` is `None` when the session is in the `PendingVtaBinding`
+/// state — the client DID was minted but the operator has not yet
+/// supplied the VTA DID.
+///
+/// The `private_key_multibase` is included so diagnostics can render
+/// the public half (via `did:key` derivation) without re-loading the
+/// session. `Debug` is hand-implemented to redact it.
+#[derive(Clone)]
 pub struct SessionInfo {
     pub client_did: String,
-    pub vta_did: String,
+    pub vta_did: Option<String>,
     pub private_key_multibase: String,
 }
 
+impl std::fmt::Debug for SessionInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionInfo")
+            .field("client_did", &self.client_did)
+            .field("vta_did", &self.vta_did)
+            .field("private_key_multibase", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Status of a stored session.
+///
+/// See [`SessionInfo`] for the `vta_did` semantics. The VTA's REST URL
+/// is not part of session state — callers resolve it from the VTA DID
+/// document at runtime via [`resolve_vta_url`] or
+/// [`resolve_vta_endpoint`].
+#[derive(Debug, Clone)]
 pub struct SessionStatus {
     pub client_did: String,
-    pub vta_did: String,
-    pub vta_url: Option<String>,
+    pub vta_did: Option<String>,
     pub token_status: TokenStatus,
 }
 
 /// Current state of a cached access token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenStatus {
     Valid { expires_in_secs: u64 },
     Expired,
@@ -49,15 +107,33 @@ pub enum TokenStatus {
 }
 
 /// Result of a successful login.
+///
+/// `vta_did` is always `Some` here — you cannot log in without one.
+/// Kept as `Option<String>` to match the cascaded field shape across
+/// the session types; callers can `.expect("login succeeded")` if they
+/// truly need the unwrapped value.
+#[derive(Debug, Clone)]
 pub struct LoginResult {
     pub client_did: String,
-    pub vta_did: String,
-    pub vta_url: Option<String>,
+    pub vta_did: Option<String>,
 }
 
+/// Result of an authentication exchange. `Debug` is hand-implemented to
+/// redact the access token — bearer-equivalent material that should not
+/// land in `tracing::debug!("{result:?}")` or panic backtraces.
+#[derive(Clone)]
 pub struct TokenResult {
     pub access_token: String,
     pub access_expires_at: u64,
+}
+
+impl std::fmt::Debug for TokenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResult")
+            .field("access_token", &"<redacted>")
+            .field("access_expires_at", &self.access_expires_at)
+            .finish()
+    }
 }
 
 // ── SessionBackend trait ────────────────────────────────────────────
@@ -80,273 +156,13 @@ pub trait SessionBackend: Send + Sync {
 }
 
 // ── Built-in backends ───────────────────────────────────────────────
+//
+// Each backend lives in `session/backends/<name>.rs`; the module
+// selects among them via `default_backend` based on compiled features.
 
-/// OS keyring backend (requires `keyring` feature).
-#[cfg(feature = "keyring")]
-struct KeyringBackend {
-    service_name: String,
-}
+mod backends;
 
-#[cfg(feature = "keyring")]
-impl SessionBackend for KeyringBackend {
-    fn load(&self, key: &str) -> Option<String> {
-        let entry = match keyring::Entry::new(&self.service_name, key) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("keyring entry creation failed for '{key}': {e}");
-                return None;
-            }
-        };
-        match entry.get_password() {
-            Ok(v) => Some(v),
-            Err(keyring::Error::NoEntry) => None,
-            Err(e) => {
-                tracing::warn!("keyring read error for '{key}': {e}");
-                None
-            }
-        }
-    }
-
-    fn save(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let entry = keyring::Entry::new(&self.service_name, key)
-            .map_err(|e| format!("keyring entry error: {e}"))?;
-        entry
-            .set_password(value)
-            .map_err(|e| format!("failed to store session in keyring: {e}"))?;
-        Ok(())
-    }
-
-    fn clear(&self, key: &str) {
-        match keyring::Entry::new(&self.service_name, key) {
-            Ok(entry) => {
-                if let Err(e) = entry.delete_credential() {
-                    tracing::debug!("keyring clear for '{key}': {e}");
-                }
-            }
-            Err(e) => {
-                tracing::debug!("keyring entry creation failed during clear for '{key}': {e}")
-            }
-        }
-    }
-}
-
-/// Local JSON file backend (requires `config-session` feature, or used
-/// as plaintext fallback when no secure backend is compiled in).
-struct FileBackend {
-    sessions_dir: PathBuf,
-    warn: bool,
-}
-
-impl FileBackend {
-    fn sessions_path(&self) -> PathBuf {
-        self.sessions_dir.join("sessions.json")
-    }
-
-    fn load_map(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        let path = self.sessions_path();
-        let data = match std::fs::read_to_string(&path) {
-            Ok(d) => d,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return std::collections::HashMap::new();
-            }
-            Err(e) => {
-                tracing::warn!("failed to read sessions file {}: {e}", path.display());
-                return std::collections::HashMap::new();
-            }
-        };
-        match serde_json::from_str(&data) {
-            Ok(map) => map,
-            Err(e) => {
-                tracing::warn!("failed to parse sessions file {}: {e}", path.display());
-                std::collections::HashMap::new()
-            }
-        }
-    }
-
-    fn save_map(
-        &self,
-        map: &std::collections::HashMap<String, serde_json::Value>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.sessions_path();
-        let json = serde_json::to_string_pretty(map)?;
-        std::fs::write(&path, json)?;
-        Ok(())
-    }
-}
-
-impl SessionBackend for FileBackend {
-    fn load(&self, key: &str) -> Option<String> {
-        if self.warn {
-            eprintln!("WARNING: No secure session store — using plaintext file storage");
-        }
-        let map = self.load_map();
-        map.get(key).map(|v| v.to_string())
-    }
-
-    fn save(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-        if self.warn {
-            eprintln!("WARNING: No secure session store — using plaintext file storage");
-        }
-        if let Some(parent) = self.sessions_dir.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            tracing::warn!("failed to create sessions parent dir: {e}");
-        }
-        if let Err(e) = std::fs::create_dir_all(&self.sessions_dir) {
-            tracing::warn!("failed to create sessions dir: {e}");
-        }
-        let mut map = self.load_map();
-        let parsed: serde_json::Value = serde_json::from_str(value)?;
-        map.insert(key.to_string(), parsed);
-        self.save_map(&map)
-    }
-
-    fn clear(&self, key: &str) {
-        let mut map = self.load_map();
-        map.remove(key);
-        let _ = self.save_map(&map);
-    }
-}
-
-/// Azure Key Vault backend (requires `azure-secrets` feature).
-#[cfg(all(feature = "azure-secrets", not(feature = "keyring")))]
-struct AzureBackend {
-    vault_url: String,
-    secret_prefix: String,
-}
-
-#[cfg(all(feature = "azure-secrets", not(feature = "keyring")))]
-impl AzureBackend {
-    fn secret_name(&self, key: &str) -> String {
-        format!("{}-{}", self.secret_prefix, key)
-    }
-}
-
-#[cfg(all(feature = "azure-secrets", not(feature = "keyring")))]
-impl SessionBackend for AzureBackend {
-    fn load(&self, key: &str) -> Option<String> {
-        use azure_identity::DeveloperToolsCredential;
-        use azure_security_keyvault_secrets::SecretClient;
-
-        let credential = match DeveloperToolsCredential::new(None) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Azure credential creation failed: {e}");
-                return None;
-            }
-        };
-        let client = match SecretClient::new(&self.vault_url, credential, None) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Azure Key Vault client creation failed: {e}");
-                return None;
-            }
-        };
-        let secret_name = self.secret_name(key);
-
-        let result = tokio::runtime::Handle::current()
-            .block_on(async { client.get_secret(&secret_name, None).await });
-
-        match result {
-            Ok(response) => match response.into_model() {
-                Ok(model) => model.value,
-                Err(e) => {
-                    tracing::warn!("Azure Key Vault response parsing failed: {e}");
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::debug!("Azure Key Vault secret '{secret_name}' not found: {e}");
-                None
-            }
-        }
-    }
-
-    fn save(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-        use azure_identity::DeveloperToolsCredential;
-        use azure_security_keyvault_secrets::SecretClient;
-
-        let credential = DeveloperToolsCredential::new(None)
-            .map_err(|e| format!("Azure credential error: {e}"))?;
-        let client = SecretClient::new(&self.vault_url, credential, None)
-            .map_err(|e| format!("Azure client error: {e}"))?;
-        let secret_name = self.secret_name(key);
-
-        let params = azure_security_keyvault_secrets::models::SetSecretParameters {
-            value: Some(value.to_string()),
-            ..Default::default()
-        };
-
-        tokio::runtime::Handle::current().block_on(async {
-            let body = params
-                .try_into()
-                .map_err(|e| format!("Azure request error: {e}"))?;
-            client
-                .set_secret(&secret_name, body, None)
-                .await
-                .map_err(|e| format!("failed to store session in Azure Key Vault: {e}"))?;
-            Ok::<(), Box<dyn std::error::Error>>(())
-        })?;
-        Ok(())
-    }
-
-    fn clear(&self, key: &str) {
-        use azure_identity::DeveloperToolsCredential;
-        use azure_security_keyvault_secrets::SecretClient;
-
-        let Ok(credential) = DeveloperToolsCredential::new(None) else {
-            return;
-        };
-        let Ok(client) = SecretClient::new(&self.vault_url, credential, None) else {
-            return;
-        };
-        let secret_name = self.secret_name(key);
-
-        let _ = tokio::runtime::Handle::current()
-            .block_on(async { client.delete_secret(&secret_name, None).await });
-    }
-}
-
-/// Create the default session backend based on compiled features.
-///
-/// Priority: keyring → azure-secrets → config-session → plaintext fallback.
-fn default_backend(service_name: &str, sessions_dir: PathBuf) -> Box<dyn SessionBackend> {
-    let _ = service_name;
-    let _ = &sessions_dir;
-
-    #[cfg(feature = "keyring")]
-    {
-        return Box::new(KeyringBackend {
-            service_name: service_name.to_string(),
-        });
-    }
-
-    #[cfg(all(feature = "azure-secrets", not(feature = "keyring")))]
-    {
-        return Box::new(AzureBackend {
-            vault_url: std::env::var("AZURE_KEYVAULT_URL").unwrap_or_default(),
-            secret_prefix: service_name.to_string(),
-        });
-    }
-
-    #[cfg(all(
-        feature = "config-session",
-        not(feature = "keyring"),
-        not(feature = "azure-secrets")
-    ))]
-    {
-        return Box::new(FileBackend {
-            sessions_dir,
-            warn: false,
-        });
-    }
-
-    #[allow(unreachable_code)]
-    Box::new(FileBackend {
-        sessions_dir,
-        warn: true,
-    })
-}
+use backends::default_backend;
 
 // ── SessionStore ────────────────────────────────────────────────────
 
@@ -405,33 +221,28 @@ impl SessionStore {
         self.load_session(key).is_some()
     }
 
-    /// Import a base64-encoded credential and authenticate.
+    /// Store a credential bundle and authenticate.
     ///
     /// Returns `LoginResult` on success (no printing).
     pub async fn login(
         &self,
-        credential_b64: &str,
+        bundle: &CredentialBundle,
         base_url: &str,
         key: &str,
     ) -> Result<LoginResult, Box<dyn std::error::Error>> {
-        debug!("decoding credential bundle");
-        let bundle = CredentialBundle::decode(credential_b64)
-            .map_err(|e| format!("invalid credential: {e}"))?;
-
         debug!(
             client_did = %bundle.did,
             vta_did = %bundle.vta_did,
-            vta_url = ?bundle.vta_url,
-            "credential decoded"
+            "login with credential bundle"
         );
 
         let mut session = Session {
             client_did: bundle.did.clone(),
             private_key: bundle.private_key_multibase.clone(),
-            vta_did: bundle.vta_did.clone(),
-            vta_url: bundle.vta_url.clone(),
+            vta_did: Some(bundle.vta_did.clone()),
             access_token: None,
             access_expires_at: None,
+            needs_rotation: false,
         };
         self.save_session(key, &session)?;
         debug!(keyring_key = key, "session saved");
@@ -450,30 +261,141 @@ impl SessionStore {
         self.save_session(key, &session)?;
 
         Ok(LoginResult {
-            client_did: bundle.did,
-            vta_did: bundle.vta_did,
-            vta_url: bundle.vta_url,
+            client_did: bundle.did.clone(),
+            vta_did: Some(bundle.vta_did.clone()),
         })
     }
 
     /// Store a session directly (without performing authentication).
+    ///
+    /// The VTA's REST endpoint is resolved at runtime from the VTA DID
+    /// document on every command (see [`resolve_vta_url`] /
+    /// [`resolve_vta_endpoint`]); it is no longer persisted in session
+    /// state. Per-command CLI overrides (e.g. `--url`) remain ephemeral.
     pub fn store_direct(
         &self,
         key: &str,
         did: &str,
         private_key: &str,
         vta_did: &str,
-        vta_url: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let session = Session {
             client_did: did.to_string(),
             private_key: private_key.to_string(),
-            vta_did: vta_did.to_string(),
-            vta_url: Some(vta_url.to_string()),
+            vta_did: Some(vta_did.to_string()),
             access_token: None,
             access_expires_at: None,
+            needs_rotation: false,
         };
         self.save_session(key, &session)
+    }
+
+    /// Store a session marked for rotation on first successful authentication.
+    ///
+    /// Use this when the client has generated a did:key locally and handed
+    /// it to a human to add to the VTA's ACL. Once the VTA is reachable and
+    /// the ACL entry exists, `ensure_authenticated()` will atomically rotate
+    /// to a fresh did:key and drop the temp one, so the DID that may have
+    /// been copy-pasted through a low-trust channel does not remain live.
+    pub fn store_pending_rotation(
+        &self,
+        key: &str,
+        did: &str,
+        private_key: &str,
+        vta_did: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let session = Session {
+            client_did: did.to_string(),
+            private_key: private_key.to_string(),
+            vta_did: Some(vta_did.to_string()),
+            access_token: None,
+            access_expires_at: None,
+            needs_rotation: true,
+        };
+        self.save_session(key, &session)
+    }
+
+    /// Store an ephemeral did:key with no VTA DID bound yet.
+    ///
+    /// This is the `PendingVtaBinding` state used by the deferred-VTA-DID
+    /// `pnm setup` flow: phase 1 mints the DID and parks it in the keyring;
+    /// phase 2 lifts the entry into a `PendingRotation` session via
+    /// [`Self::bind_vta_did`] once the operator supplies the VTA DID.
+    ///
+    /// A session in this state is **not** usable for authentication. Callers
+    /// should gate authenticated operations on
+    /// [`Self::has_pending_vta_binding`] and route operators to
+    /// `pnm setup continue <slug>` before attempting to authenticate.
+    pub fn store_pending_vta_binding(
+        &self,
+        key: &str,
+        did: &str,
+        private_key: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if key.trim().is_empty() {
+            return Err("keyring key must be non-empty".into());
+        }
+        if !did.starts_with("did:key:") {
+            return Err(
+                "pending ephemeral DID must be a did:key (minted locally by the SDK)".into(),
+            );
+        }
+        if private_key.trim().is_empty() {
+            return Err("private key multibase must be non-empty".into());
+        }
+        let session = Session {
+            client_did: did.to_string(),
+            private_key: private_key.to_string(),
+            vta_did: None,
+            access_token: None,
+            access_expires_at: None,
+            needs_rotation: false,
+        };
+        self.save_session(key, &session)
+    }
+
+    /// Lift a `PendingVtaBinding` session into a `PendingRotation` session
+    /// by supplying the VTA DID.
+    ///
+    /// Preserves the ephemeral did:key + private key from phase 1 and sets
+    /// `needs_rotation = true`, so the first successful authenticate triggers
+    /// the same auto-rotate-off-the-temp-DID flow as
+    /// [`Self::store_pending_rotation`].
+    ///
+    /// Errors if:
+    /// - the entry is missing at `key`;
+    /// - the entry already has a VTA DID bound (re-binding is not allowed —
+    ///   use `logout` + re-provision instead);
+    /// - `vta_did` is empty after trim, or does not start with `did:`.
+    pub fn bind_vta_did(&self, key: &str, vta_did: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let vta_did = vta_did.trim();
+        if vta_did.is_empty() {
+            return Err("VTA DID must be non-empty".into());
+        }
+        if !vta_did.starts_with("did:") {
+            return Err(
+                "VTA DID must start with `did:` (e.g. did:webvh:..., did:web:..., did:key:...)"
+                    .into(),
+            );
+        }
+        let mut session = self
+            .load_session(key)
+            .ok_or("no session found — cannot bind VTA DID to a non-existent entry")?;
+        if session.vta_did.is_some() {
+            return Err("session already has a VTA DID bound".into());
+        }
+        session.vta_did = Some(vta_did.to_string());
+        session.needs_rotation = true;
+        self.save_session(key, &session)
+    }
+
+    /// Report whether the entry at `key` is a `PendingVtaBinding` session
+    /// (exists, parses, and has `vta_did: None`). Total — no errors.
+    pub fn has_pending_vta_binding(&self, key: &str) -> bool {
+        match self.load_session(key) {
+            Some(session) => session.vta_did.is_none(),
+            None => false,
+        }
     }
 
     /// Clear stored credentials and cached tokens.
@@ -509,7 +431,6 @@ impl SessionStore {
         Some(SessionStatus {
             client_did: session.client_did,
             vta_did: session.vta_did,
-            vta_url: session.vta_url,
             token_status,
         })
     }
@@ -519,6 +440,12 @@ impl SessionStore {
     /// If no credentials are stored, returns an error.
     /// If a cached token is still valid (>30s remaining), returns it.
     /// Otherwise, performs a full challenge-response authentication.
+    ///
+    /// When the loaded session is flagged `needs_rotation`, the first
+    /// successful challenge-response triggers an automatic key roll:
+    /// a fresh did:key is minted, the VTA ACL entry for the temp DID is
+    /// mirrored onto the new DID, the temp DID is removed from the ACL,
+    /// and the session is updated in place. See `rotate_key`.
     pub async fn ensure_authenticated(
         &self,
         base_url: &str,
@@ -527,17 +454,24 @@ impl SessionStore {
         debug!(base_url, keyring_key = key, "ensuring authentication");
 
         let mut session = self.load_session(key).ok_or(
-            "Not authenticated.\n\nTo authenticate, import a credential:\n  <cli> auth login <credential-string>",
+            "Not authenticated.\n\nRun `pnm setup` (or the equivalent) to provision an admin identity.",
         )?;
+
+        let session_vta_did = require_vta_did(&session)?.to_string();
 
         debug!(
             client_did = %session.client_did,
-            vta_did = %session.vta_did,
+            vta_did = %session_vta_did,
+            needs_rotation = session.needs_rotation,
             "session loaded"
         );
 
-        // Check cached token
-        if let (Some(token), Some(expires_at)) = (&session.access_token, session.access_expires_at)
+        // Check cached token — but only if we're not pending rotation.
+        // A cached token on a pending-rotation session means we rotated in
+        // a previous call already, which `rotate_key` handled atomically.
+        if !session.needs_rotation
+            && let (Some(token), Some(expires_at)) =
+                (&session.access_token, session.access_expires_at)
             && now_epoch() + 30 < expires_at
         {
             debug!(expires_in = expires_at - now_epoch(), "using cached token");
@@ -546,14 +480,28 @@ impl SessionStore {
 
         debug!("cached token expired or missing, performing challenge-response");
 
-        // Full challenge-response
+        // Full challenge-response with the current (possibly temp) identity.
         let result = challenge_response(
             base_url,
             &session.client_did,
             &session.private_key,
-            &session.vta_did,
+            &session_vta_did,
         )
         .await?;
+
+        // If the session was provisioned as a temp did:key, rotate now —
+        // before we return the token to the caller or persist the temp
+        // token in the session.
+        if session.needs_rotation {
+            debug!("session is pending rotation, swapping to fresh did:key");
+            let (new_session, new_token_result) =
+                rotate_key(base_url, session, &result.access_token).await?;
+            session = new_session;
+            session.access_token = Some(new_token_result.access_token.clone());
+            session.access_expires_at = Some(new_token_result.access_expires_at);
+            self.save_session(key, &session)?;
+            return Ok(new_token_result.access_token);
+        }
 
         let token = result.access_token.clone();
         session.access_token = Some(result.access_token);
@@ -562,6 +510,98 @@ impl SessionStore {
         debug!("new token cached");
 
         Ok(token)
+    }
+
+    /// Authenticate to a VTA over DIDComm and return a connected
+    /// [`crate::client::VtaClient`].
+    ///
+    /// DIDComm-preferred peer of [`Self::ensure_authenticated`]. Where
+    /// the REST path issues a JWT via challenge-response, this path
+    /// uses DIDComm authcrypt as the auth: every outbound message is
+    /// encrypted to the VTA's recipient key, the VTA decrypts and
+    /// reads `from` as the authenticated sender DID, then ACL-checks
+    /// it (see `vta-service/src/messaging/auth.rs::auth_from_message`).
+    /// No JWT changes hands; no token to expire.
+    ///
+    /// Pending-rotation parity with the REST path: when the loaded
+    /// session is flagged `needs_rotation`, the first successful
+    /// connection triggers a key roll over the same DIDComm transport
+    /// — read the temp DID's ACL entry, mint a fresh did:key, create
+    /// a new ACL entry mirroring the role + contexts, probe the new
+    /// DID by opening a second DIDComm session, then drop the temp
+    /// DID. The new session is persisted in place; the returned
+    /// client is connected as the new DID.
+    ///
+    /// Errors with a clear message if the VTA's DID document does not
+    /// advertise a DIDComm service endpoint — caller should fall back
+    /// to [`Self::ensure_authenticated`] for REST.
+    #[cfg(feature = "session")]
+    pub async fn ensure_authenticated_didcomm(
+        &self,
+        key: &str,
+    ) -> Result<crate::client::VtaClient, Box<dyn std::error::Error>> {
+        let session = self.load_session(key).ok_or(
+            "Not authenticated.\n\nRun `pnm setup` (or the equivalent) to provision an admin identity.",
+        )?;
+
+        let session_vta_did = require_vta_did(&session)?.to_string();
+
+        debug!(
+            client_did = %session.client_did,
+            vta_did = %session_vta_did,
+            needs_rotation = session.needs_rotation,
+            "ensure_authenticated_didcomm: session loaded"
+        );
+
+        let (vta_did, mediator_did, rest_url) = match resolve_vta_endpoint(&session_vta_did).await?
+        {
+            VtaEndpoint::DIDComm {
+                vta_did,
+                mediator_did,
+                rest_url,
+            } => (vta_did, mediator_did, rest_url),
+            VtaEndpoint::Rest { .. } => {
+                return Err(format!(
+                    "VTA '{session_vta_did}' does not advertise a DIDComm service endpoint. \
+                     Use SessionStore::ensure_authenticated for REST, or \
+                     SessionStore::connect to auto-select."
+                )
+                .into());
+            }
+        };
+
+        // Open the DIDComm session as the (possibly temp) DID.
+        let client = crate::client::VtaClient::connect_didcomm(
+            &session.client_did,
+            &session.private_key,
+            &vta_did,
+            &mediator_did,
+            rest_url.clone(),
+        )
+        .await?;
+
+        if !session.needs_rotation {
+            return Ok(client);
+        }
+
+        debug!("session is pending rotation, swapping to fresh did:key over DIDComm");
+        let rotated =
+            rotate_key_didcomm(&client, &session, &vta_did, &mediator_did, rest_url.clone())
+                .await?;
+        // Drop the temp client; the new client below is the
+        // authoritative connection going forward.
+        client.shutdown().await;
+        self.save_session(key, &rotated)?;
+
+        let new_client = crate::client::VtaClient::connect_didcomm(
+            &rotated.client_did,
+            &rotated.private_key,
+            &vta_did,
+            &mediator_did,
+            rest_url,
+        )
+        .await?;
+        Ok(new_client)
     }
 
     /// Connect to a VTA using the preferred transport (DIDComm or REST).
@@ -589,8 +629,10 @@ impl SessionStore {
             return Ok(client);
         }
 
+        let session_vta_did = require_vta_did(&session)?.to_string();
+
         // Resolve VTA DID for transport selection
-        match resolve_vta_endpoint(&session.vta_did).await? {
+        match resolve_vta_endpoint(&session_vta_did).await? {
             VtaEndpoint::DIDComm {
                 vta_did,
                 mediator_did,
@@ -616,6 +658,261 @@ impl SessionStore {
             }
         }
     }
+}
+
+// ── Temp-key rotation ───────────────────────────────────────────────
+
+/// DIDComm-transport peer of [`rotate_key`]. Drives the same
+/// read-ACL → mint → create-ACL → probe → delete-temp-ACL sequence,
+/// but every server interaction is an authcrypt'd DIDComm message
+/// rather than a REST call.
+///
+/// Probe semantics matches the REST path: opening a fresh DIDComm
+/// session as the new DID *is* the auth check. If the new ACL row is
+/// not yet visible to the listener, `connect_didcomm` will fail and
+/// we bail before touching the temp ACL — so the temp DID still works
+/// and the caller can retry.
+#[cfg(feature = "session")]
+async fn rotate_key_didcomm(
+    client: &crate::client::VtaClient,
+    session: &Session,
+    vta_did: &str,
+    mediator_did: &str,
+    rest_url: Option<String>,
+) -> Result<Session, Box<dyn std::error::Error>> {
+    // 1. Read the ACL entry the admin granted to the temp DID.
+    debug!(temp_did = %session.client_did, "fetching ACL entry for temp DID over DIDComm");
+    let acl_entry = client.get_acl(&session.client_did).await.map_err(|e| {
+        format!(
+            "rotate (DIDComm): cannot read temp DID's ACL entry: {e} — \
+             has your admin run `vta acl create --did {} --role admin` yet?",
+            session.client_did
+        )
+    })?;
+    let role = acl_entry.role.clone();
+    let contexts = acl_entry.allowed_contexts.clone();
+    let label = acl_entry.label.clone();
+
+    // 2. Mint a new did:key.
+    let (new_did, new_private_key) = generate_did_key()?;
+    debug!(%new_did, %role, "minted rotation DID, creating ACL entry over DIDComm");
+
+    // 3. Create an ACL entry for the new DID via DIDComm.
+    let mut create_req = crate::client::CreateAclRequest::new(&new_did, role).contexts(contexts);
+    if let Some(l) = label {
+        create_req = create_req.label(l);
+    }
+    client
+        .create_acl(create_req)
+        .await
+        .map_err(|e| format!("rotate (DIDComm): failed to create ACL entry for new DID: {e}"))?;
+
+    // 4. Probe — open a fresh DIDComm session as the new DID. Fails
+    //    *before* we delete the temp DID, so a probe-failure leaves
+    //    the temp authoritative and the caller can retry.
+    let probe = crate::client::VtaClient::connect_didcomm(
+        &new_did,
+        &new_private_key,
+        vta_did,
+        mediator_did,
+        rest_url,
+    )
+    .await
+    .map_err(|e| {
+        format!(
+            "rotate (DIDComm): new DID failed authcrypt probe (ACL entry present \
+             but DIDComm session refused): {e}"
+        )
+    })?;
+
+    // 5. Drop the temp DID from the ACL using the new DID's session.
+    //    Best-effort — if it fails, the new DID is already live, so
+    //    we log and continue rather than leave the caller unauthenticated.
+    match probe.delete_acl(&session.client_did).await {
+        Ok(_) => {
+            debug!(temp_did = %session.client_did, "temp DID removed from ACL over DIDComm");
+        }
+        Err(e) => {
+            tracing::warn!(
+                temp_did = %session.client_did,
+                error = %e,
+                "could not delete temp DID from ACL after rotation (DIDComm) — \
+                 manual cleanup may be required"
+            );
+        }
+    }
+    probe.shutdown().await;
+
+    let Session { vta_did, .. } = session.clone();
+    Ok(Session {
+        client_did: new_did,
+        private_key: new_private_key,
+        vta_did,
+        access_token: None,
+        access_expires_at: None,
+        needs_rotation: false,
+    })
+}
+
+/// Generate a fresh Ed25519 did:key. Returns `(did, private_key_multibase)`.
+///
+/// The seed is sourced from `getrandom` (the OS CSPRNG). `private_key_multibase`
+/// is the raw 32-byte seed base58btc-encoded, matching the format used by the
+/// rest of the workspace (see `decode_private_key_multibase`).
+fn generate_did_key() -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed)
+        .map_err(|e| format!("CSPRNG failed while minting rotated did:key: {e}"))?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pubkey = signing.verifying_key().to_bytes();
+    let did = format!(
+        "did:key:{}",
+        crate::did_key::ed25519_multibase_pubkey(&pubkey)
+    );
+    let private_key_multibase = multibase::encode(multibase::Base::Base58Btc, seed);
+    Ok((did, private_key_multibase))
+}
+
+/// Swap a `needs_rotation=true` session's temp did:key for a fresh one.
+///
+/// Precondition: `temp_token` is a valid bearer token authenticating as
+/// `session.client_did` (the temp DID). Returned `Session` carries the new
+/// did:key and `needs_rotation=false`; caller is responsible for persisting
+/// it alongside the returned `TokenResult` (which is an auth under the new
+/// DID, confirming the ACL swap actually lived).
+///
+/// Flow:
+/// 1. `GET /acl/{temp_did}` — read role + allowed_contexts the admin granted.
+/// 2. `POST /acl` — create an entry for the new DID with the same scope.
+/// 3. Run challenge-response as the new DID to confirm the new entry is
+///    live. If that fails, we bail *before* deleting the temp — so the
+///    temp still works and the caller can retry.
+/// 4. `DELETE /acl/{temp_did}` — best-effort; warn on failure.
+async fn rotate_key(
+    base_url: &str,
+    session: Session,
+    temp_token: &str,
+) -> Result<(Session, TokenResult), Box<dyn std::error::Error>> {
+    let http = reqwest::Client::new();
+
+    // 1. Read the ACL entry the admin granted to the temp DID.
+    let acl_url = format!(
+        "{}/acl/{}",
+        base_url.trim_end_matches('/'),
+        &session.client_did
+    );
+    debug!(url = %acl_url, "fetching ACL entry for temp DID");
+    let acl_resp = http
+        .get(&acl_url)
+        .bearer_auth(temp_token)
+        .send()
+        .await
+        .map_err(|e| format!("GET {acl_url}: {e}"))?;
+    if !acl_resp.status().is_success() {
+        let status = acl_resp.status();
+        let body = acl_resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "rotate: cannot read temp DID's ACL entry ({status}): {body} — has your admin run `vta acl create --did {} --role admin` yet?",
+            session.client_did
+        )
+        .into());
+    }
+    let acl_entry: crate::client::AclEntryResponse = acl_resp
+        .json()
+        .await
+        .map_err(|e| format!("parse ACL entry: {e}"))?;
+    let role = acl_entry.role.clone();
+    let contexts = acl_entry.allowed_contexts.clone();
+    let label = acl_entry.label.clone();
+
+    // 2. Mint a new did:key and register it.
+    let (new_did, new_private_key) = generate_did_key()?;
+    debug!(%new_did, %role, "minted rotation DID, creating ACL entry");
+    let mut create_req = crate::client::CreateAclRequest::new(&new_did, role).contexts(contexts);
+    if let Some(l) = label {
+        create_req = create_req.label(l);
+    }
+    let acl_post = format!("{}/acl", base_url.trim_end_matches('/'));
+    let create_resp = http
+        .post(&acl_post)
+        .bearer_auth(temp_token)
+        .json(&create_req)
+        .send()
+        .await
+        .map_err(|e| format!("POST {acl_post}: {e}"))?;
+    if !create_resp.status().is_success() {
+        let status = create_resp.status();
+        let body = create_resp.text().await.unwrap_or_default();
+        return Err(
+            format!("rotate: failed to create ACL entry for new DID ({status}): {body}").into(),
+        );
+    }
+
+    // 3. Verify the new DID can actually authenticate. Fail *before* we
+    //    delete the temp — if this errors, the temp still works.
+    //
+    // `ensure_authenticated` has already gated `vta_did.is_some()` via
+    // `require_vta_did`; we're safe to unwrap here.
+    let session_vta_did = session
+        .vta_did
+        .as_deref()
+        .expect("ensure_authenticated gates vta_did.is_some() before calling rotate_key");
+    let new_token_result = challenge_response(
+        base_url,
+        &new_did,
+        &new_private_key,
+        session_vta_did,
+    )
+    .await
+    .map_err(|e| {
+        format!(
+            "rotate: new DID failed challenge-response (ACL entry present but login failed): {e}"
+        )
+    })?;
+
+    // 4. Drop the temp DID from the ACL. Best-effort — if this fails, the
+    //    new DID is already live, so we log and continue rather than leave
+    //    the caller unauthenticated.
+    let del_url = format!(
+        "{}/acl/{}",
+        base_url.trim_end_matches('/'),
+        &session.client_did
+    );
+    match http
+        .delete(&del_url)
+        .bearer_auth(&new_token_result.access_token)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            debug!(temp_did = %session.client_did, "temp DID removed from ACL");
+        }
+        Ok(resp) => {
+            tracing::warn!(
+                temp_did = %session.client_did,
+                status = %resp.status(),
+                "could not delete temp DID from ACL after rotation — manual cleanup may be required",
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                temp_did = %session.client_did,
+                error = %e,
+                "could not delete temp DID from ACL after rotation — manual cleanup may be required",
+            );
+        }
+    }
+
+    let Session { vta_did, .. } = session;
+    let rotated = Session {
+        client_did: new_did,
+        private_key: new_private_key,
+        vta_did,
+        access_token: None,
+        access_expires_at: None,
+        needs_rotation: false,
+    };
+    Ok((rotated, new_token_result))
 }
 
 // ── Challenge-response auth ─────────────────────────────────────────
@@ -685,8 +982,8 @@ pub async fn challenge_response(
     let seed = crate::did_key::decode_private_key_multibase(private_key_multibase)?;
     let secrets = crate::did_key::secrets_from_did_key(client_did, &seed)?;
     debug!(signing_id = %secrets.signing.id, ka_id = %secrets.key_agreement.id, "inserting DIDComm secrets");
-    tdk.secrets_resolver.insert(secrets.signing).await;
-    tdk.secrets_resolver.insert(secrets.key_agreement).await;
+    tdk.secrets_resolver().insert(secrets.signing).await;
+    tdk.secrets_resolver().insert(secrets.key_agreement).await;
 
     let atm = ATM::new(
         ATMConfig::builder()
@@ -896,6 +1193,7 @@ pub async fn send_trust_ping(
     use std::time::Instant;
 
     use affinidi_tdk::common::TDKSharedState;
+    use affinidi_tdk::common::config::TDKConfig;
     use affinidi_tdk::messaging::ATM;
     use affinidi_tdk::messaging::config::ATMConfig;
     use affinidi_tdk::messaging::profiles::ATMProfile;
@@ -904,9 +1202,9 @@ pub async fn send_trust_ping(
     let seed = crate::did_key::decode_private_key_multibase(private_key_multibase)?;
     let secrets = crate::did_key::secrets_from_did_key(client_did, &seed)?;
 
-    let tdk = TDKSharedState::default().await;
-    tdk.secrets_resolver.insert(secrets.signing).await;
-    tdk.secrets_resolver.insert(secrets.key_agreement).await;
+    let tdk = TDKSharedState::new(TDKConfig::builder().build()?).await?;
+    tdk.secrets_resolver().insert(secrets.signing).await;
+    tdk.secrets_resolver().insert(secrets.key_agreement).await;
 
     let atm = ATM::new(ATMConfig::builder().build()?, Arc::new(tdk)).await?;
 
@@ -994,6 +1292,7 @@ impl TrustPingSession {
         mediator_did: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         use affinidi_tdk::common::TDKSharedState;
+        use affinidi_tdk::common::config::TDKConfig;
         use affinidi_tdk::messaging::ATM;
         use affinidi_tdk::messaging::config::ATMConfig;
         use affinidi_tdk::messaging::profiles::ATMProfile;
@@ -1002,9 +1301,9 @@ impl TrustPingSession {
         let seed = crate::did_key::decode_private_key_multibase(private_key_multibase)?;
         let secrets = crate::did_key::secrets_from_did_key(client_did, &seed)?;
 
-        let tdk = TDKSharedState::default().await;
-        tdk.secrets_resolver.insert(secrets.signing).await;
-        tdk.secrets_resolver.insert(secrets.key_agreement).await;
+        let tdk = TDKSharedState::new(TDKConfig::builder().build()?).await?;
+        tdk.secrets_resolver().insert(secrets.signing).await;
+        tdk.secrets_resolver().insert(secrets.key_agreement).await;
 
         let atm = ATM::new(ATMConfig::builder().build()?, Arc::new(tdk)).await?;
 
@@ -1062,32 +1361,66 @@ mod tests {
         let session = Session {
             client_did: "did:key:z6Mk1".into(),
             private_key: "z_seed".into(),
-            vta_did: "did:key:z6MkVTA".into(),
-            vta_url: Some("https://vta.example.com".into()),
+            vta_did: Some("did:key:z6MkVTA".into()),
             access_token: Some("tok123".into()),
             access_expires_at: Some(1700000000),
+            needs_rotation: false,
         };
         let json = serde_json::to_string(&session).unwrap();
         let restored: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.client_did, session.client_did);
         assert_eq!(restored.private_key, session.private_key);
         assert_eq!(restored.vta_did, session.vta_did);
-        assert_eq!(restored.vta_url, session.vta_url);
         assert_eq!(restored.access_token, session.access_token);
         assert_eq!(restored.access_expires_at, session.access_expires_at);
     }
 
+    /// Older session blobs include a `vta_url` field. Serde silently drops
+    /// unknown fields on deserialise so they keep loading; the field
+    /// disappears on next save.
     #[test]
-    fn test_session_vta_url_defaults_to_none() {
+    fn test_session_legacy_vta_url_field_silently_dropped() {
         let json = r#"{
             "client_did": "did:key:z6Mk1",
             "private_key": "z_seed",
             "vta_did": "did:key:z6MkVTA",
+            "vta_url": "https://stale.example.com",
             "access_token": null,
             "access_expires_at": null
         }"#;
         let session: Session = serde_json::from_str(json).unwrap();
-        assert!(session.vta_url.is_none());
+        assert_eq!(session.vta_did.as_deref(), Some("did:key:z6MkVTA"));
+        // Field is gone — re-serializing produces no `vta_url` key.
+        let reserialised = serde_json::to_string(&session).unwrap();
+        assert!(!reserialised.contains("vta_url"));
+    }
+
+    #[test]
+    fn test_session_vta_did_defaults_to_none_when_missing() {
+        // A PendingVtaBinding session persists with `vta_did` absent.
+        let json = r#"{
+            "client_did": "did:key:z6MkPending",
+            "private_key": "z_seed",
+            "access_token": null,
+            "access_expires_at": null
+        }"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert!(session.vta_did.is_none());
+    }
+
+    #[test]
+    fn test_session_vta_did_round_trips_null() {
+        let session = Session {
+            client_did: "did:key:z6MkPending".into(),
+            private_key: "z_seed".into(),
+            vta_did: None,
+            access_token: None,
+            access_expires_at: None,
+            needs_rotation: false,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert!(restored.vta_did.is_none());
     }
 
     #[test]
@@ -1134,54 +1467,157 @@ mod tests {
         assert_eq!(url_from_did("did:key:z6MkTest"), None);
     }
 
+    fn test_store() -> SessionStore {
+        SessionStore::with_backend(Box::new(testing::InMemorySessionBackend::new()))
+    }
+
     #[test]
     fn test_in_memory_backend() {
-        use std::collections::HashMap;
-        use std::sync::Mutex;
-
-        struct InMemoryBackend {
-            data: Mutex<HashMap<String, String>>,
-        }
-
-        impl SessionBackend for InMemoryBackend {
-            fn load(&self, key: &str) -> Option<String> {
-                self.data.lock().unwrap().get(key).cloned()
-            }
-            fn save(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-                self.data
-                    .lock()
-                    .unwrap()
-                    .insert(key.to_string(), value.to_string());
-                Ok(())
-            }
-            fn clear(&self, key: &str) {
-                self.data.lock().unwrap().remove(key);
-            }
-        }
-
-        let backend = InMemoryBackend {
-            data: Mutex::new(HashMap::new()),
-        };
-        let store = SessionStore::with_backend(Box::new(backend));
+        let store = test_store();
 
         assert!(!store.has_session("test"));
 
         store
-            .store_direct(
-                "test",
-                "did:key:z6Mk1",
-                "zSeed",
-                "did:key:zVTA",
-                "https://vta.example.com",
-            )
+            .store_direct("test", "did:key:z6Mk1", "zSeed", "did:key:zVTA")
             .unwrap();
         assert!(store.has_session("test"));
 
         let info = store.loaded_session("test").unwrap();
         assert_eq!(info.client_did, "did:key:z6Mk1");
-        assert_eq!(info.vta_did, "did:key:zVTA");
+        assert_eq!(info.vta_did.as_deref(), Some("did:key:zVTA"));
 
         store.logout("test");
         assert!(!store.has_session("test"));
+    }
+
+    #[test]
+    fn store_pending_vta_binding_round_trips() {
+        let store = test_store();
+        store
+            .store_pending_vta_binding("slug", "did:key:z6MkPending", "zSeed123")
+            .unwrap();
+
+        assert!(store.has_pending_vta_binding("slug"));
+
+        let info = store.loaded_session("slug").unwrap();
+        assert_eq!(info.client_did, "did:key:z6MkPending");
+        assert!(info.vta_did.is_none());
+    }
+
+    #[test]
+    fn store_pending_vta_binding_rejects_non_did_key() {
+        let store = test_store();
+        let err = store
+            .store_pending_vta_binding("slug", "did:web:something", "zSeed")
+            .unwrap_err();
+        assert!(err.to_string().contains("did:key"));
+    }
+
+    #[test]
+    fn store_pending_vta_binding_rejects_empty_inputs() {
+        let store = test_store();
+        assert!(
+            store
+                .store_pending_vta_binding("   ", "did:key:z6Mk", "zSeed")
+                .is_err()
+        );
+        assert!(
+            store
+                .store_pending_vta_binding("slug", "did:key:z6Mk", "")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bind_vta_did_promotes_pending_to_rotation() {
+        let store = test_store();
+        store
+            .store_pending_vta_binding("slug", "did:key:z6MkPending", "zSeed")
+            .unwrap();
+
+        store
+            .bind_vta_did("slug", "did:webvh:abc:vta.example.com:primary")
+            .unwrap();
+
+        assert!(!store.has_pending_vta_binding("slug"));
+        let info = store.loaded_session("slug").unwrap();
+        assert_eq!(info.client_did, "did:key:z6MkPending");
+        assert_eq!(
+            info.vta_did.as_deref(),
+            Some("did:webvh:abc:vta.example.com:primary")
+        );
+    }
+
+    #[test]
+    fn bind_vta_did_accepts_did_key_vta() {
+        // did:key VTAs are documented in docs/02-operating/cold-start.md — keep
+        // the validation loose.
+        let store = test_store();
+        store
+            .store_pending_vta_binding("slug", "did:key:z6MkPending", "zSeed")
+            .unwrap();
+
+        store.bind_vta_did("slug", "did:key:z6MkVTA").unwrap();
+    }
+
+    #[test]
+    fn bind_vta_did_rejects_rebind() {
+        let store = test_store();
+        store
+            .store_direct("slug", "did:key:z6Mk", "zSeed", "did:web:vta.example.com")
+            .unwrap();
+        let err = store
+            .bind_vta_did("slug", "did:web:other.example.com")
+            .unwrap_err();
+        assert!(err.to_string().contains("already has a VTA DID bound"));
+    }
+
+    #[test]
+    fn bind_vta_did_rejects_missing_session() {
+        let store = test_store();
+        let err = store
+            .bind_vta_did("no-such-slug", "did:web:vta.example.com")
+            .unwrap_err();
+        assert!(err.to_string().contains("no session found"));
+    }
+
+    #[test]
+    fn bind_vta_did_rejects_malformed_input() {
+        let store = test_store();
+        store
+            .store_pending_vta_binding("slug", "did:key:z6Mk", "zSeed")
+            .unwrap();
+
+        assert!(store.bind_vta_did("slug", "   ").is_err());
+        assert!(store.bind_vta_did("slug", "not-a-did").is_err());
+    }
+
+    #[test]
+    fn has_pending_vta_binding_false_for_direct_session() {
+        let store = test_store();
+        store
+            .store_direct("slug", "did:key:z6Mk", "zSeed", "did:web:vta.example.com")
+            .unwrap();
+        assert!(!store.has_pending_vta_binding("slug"));
+    }
+
+    #[test]
+    fn has_pending_vta_binding_false_for_missing_entry() {
+        let store = test_store();
+        assert!(!store.has_pending_vta_binding("nope"));
+    }
+
+    #[test]
+    fn require_vta_did_errors_on_pending() {
+        let pending = Session {
+            client_did: "did:key:z6MkPending".into(),
+            private_key: "zSeed".into(),
+            vta_did: None,
+            access_token: None,
+            access_expires_at: None,
+            needs_rotation: false,
+        };
+        let err = require_vta_did(&pending).unwrap_err();
+        assert!(err.to_string().contains("pnm setup continue"));
     }
 }

@@ -6,7 +6,7 @@ use ratatui::{
 };
 use vta_sdk::prelude::*;
 
-use crate::render::print_widget;
+use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
 
 pub async fn cmd_key_create(
     client: &VtaClient,
@@ -19,8 +19,11 @@ pub async fn cmd_key_create(
     let key_type = match key_type {
         "ed25519" => KeyType::Ed25519,
         "x25519" => KeyType::X25519,
+        "p256" => KeyType::P256,
         other => {
-            return Err(format!("unknown key type '{other}', expected ed25519 or x25519").into());
+            return Err(
+                format!("unknown key type '{other}', expected ed25519, x25519, or p256").into(),
+            );
         }
     };
     let mut req = CreateKeyRequest::new(key_type);
@@ -46,7 +49,10 @@ pub async fn cmd_key_create(
     if let Some(label) = &resp.label {
         println!("  Label:           {label}");
     }
-    println!("  Created At:      {}", resp.created_at);
+    println!(
+        "  Created At:      {}",
+        crate::duration::format_local_datetime(resp.created_at)
+    );
     Ok(())
 }
 
@@ -86,23 +92,21 @@ pub async fn cmd_key_import(
         return Err("either --private-key or --private-key-file is required".into());
     };
 
-    // For REST transport, fetch wrapping key and create JWE
-    // For DIDComm, send multibase directly
-    let (jwe, multibase) = match client.get_wrapping_key().await {
+    // REST path: fetch the server's ephemeral wrapping pubkey and seal the
+    // private key via sealed-transfer. DIDComm path: send multibase directly.
+    let (sealed, multibase) = match client.get_wrapping_key().await {
         Ok(wrapping_key) => {
-            // REST path: wrap with ECDH-ES
-            let jwe = wrap_private_key(&wrapping_key.kid, &wrapping_key.x, &private_key_multibase)?;
-            (Some(jwe), None)
+            let sealed =
+                seal_private_key(&wrapping_key.x, &key_type, &private_key_multibase).await?;
+            (Some(sealed), None)
         }
-        Err(_) => {
-            // DIDComm path (or wrapping key not available): send multibase
-            (None, Some(private_key_multibase))
-        }
+        Err(_) => (None, Some(private_key_multibase)),
     };
 
     let req = ImportKeyRequest {
         key_type,
-        private_key_jwe: jwe,
+        private_key_sealed: sealed,
+        private_key_jwe: None,
         private_key_multibase: multibase,
         label,
         context_id,
@@ -118,7 +122,10 @@ pub async fn cmd_key_import(
     if let Some(label) = &resp.label {
         println!("  Label:      {label}");
     }
-    println!("  Created At: {}", resp.created_at);
+    println!(
+        "  Created At: {}",
+        crate::duration::format_local_datetime(resp.created_at)
+    );
     eprintln!();
     eprintln!(
         "\x1b[1;33mWarning: securely delete the source key material \u{2014} the VTA now holds this secret.\x1b[0m"
@@ -127,60 +134,50 @@ pub async fn cmd_key_import(
     Ok(())
 }
 
-/// Wrap a multibase-encoded private key with ECDH-ES+AES-256-GCM for REST transport.
-fn wrap_private_key(
-    kid: &str,
+/// Seal a multibase-encoded private key to the VTA's wrapping pubkey using
+/// HPKE via `vta_sdk::sealed_transfer`. Returns an armored bundle suitable
+/// for the `private_key_sealed` field of `ImportKeyRequest`.
+async fn seal_private_key(
     vta_pub_b64: &str,
+    key_type: &KeyType,
     private_key_multibase: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+    use vta_sdk::sealed_transfer::{
+        AssertionProof, InMemoryNonceStore, ProducerAssertion, RawPrivateKey, SealedPayloadV1,
+        armor, generate_ed25519_keypair, seal_payload,
+    };
 
-    // Decode the VTA's wrapping public key
-    let vta_pub_bytes: [u8; 32] = BASE64
+    // JWK `x` is base64url-no-pad; the server encodes with URL_SAFE_NO_PAD
+    // in wrapping.rs.
+    let vta_pub_bytes: [u8; 32] = B64URL
         .decode(vta_pub_b64)?
         .try_into()
         .map_err(|_| "wrapping public key must be 32 bytes")?;
 
-    // Decode the private key from multibase
     let (_, key_bytes) = multibase::decode(private_key_multibase)?;
 
-    // Generate ephemeral X25519 keypair for client side
-    let client_secret = x25519_dalek::StaticSecret::random_from_rng(aes_gcm::aead::OsRng);
-    let client_pub = x25519_dalek::PublicKey::from(&client_secret);
+    let payload = SealedPayloadV1::RawPrivateKey(RawPrivateKey {
+        key_type: key_type.to_string(),
+        key_bytes_b64: B64URL.encode(&key_bytes),
+    });
 
-    // ECDH
-    let vta_pub = x25519_dalek::PublicKey::from(vta_pub_bytes);
-    let shared = client_secret.diffie_hellman(&vta_pub);
+    // Producer identity is irrelevant here — the server trusts the request
+    // because it's authenticated at the request layer, and the sealed bundle
+    // is protected by HPKE bound to the server's wrapping pubkey. The
+    // PinnedOnly assertion is just a placeholder for wire-format uniformity.
+    let (_seed, producer_ed_pub) = generate_ed25519_keypair();
+    let producer = ProducerAssertion {
+        producer_did: affinidi_crypto::did_key::ed25519_pub_to_did_key(&producer_ed_pub),
+        proof: AssertionProof::PinnedOnly,
+    };
 
-    // HKDF to derive AES key
-    use sha2::Sha256;
-    let hkdf = hkdf::Hkdf::<Sha256>::new(None, shared.as_bytes());
-    let mut aes_key = [0u8; 32];
-    hkdf.expand(b"vta-key-import-wrapping", &mut aes_key)
-        .map_err(|e| format!("hkdf: {e}"))?;
+    let bundle_id: [u8; 16] = rand::random();
 
-    // AES-256-GCM encrypt
-    use aes_gcm::aead::Aead;
-    use aes_gcm::aead::rand_core::RngCore;
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-
-    let cipher = Aes256Gcm::new_from_slice(&aes_key)?;
-    let mut nonce_bytes = [0u8; 12];
-    aes_gcm::aead::OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, key_bytes.as_ref())
-        .map_err(|e| format!("encrypt: {e}"))?;
-
-    // Format: kid.ephemeral_pub.nonce.ciphertext
-    Ok(format!(
-        "{}.{}.{}.{}",
-        kid,
-        BASE64.encode(client_pub.as_bytes()),
-        BASE64.encode(nonce_bytes),
-        BASE64.encode(ciphertext),
-    ))
+    let nonce_store = InMemoryNonceStore::new();
+    let bundle = seal_payload(&vta_pub_bytes, bundle_id, producer, &payload, &nonce_store).await?;
+    Ok(armor::encode(&bundle))
 }
 
 pub async fn cmd_key_get(
@@ -204,8 +201,14 @@ pub async fn cmd_key_get(
         if let Some(label) = &resp.label {
             println!("Label:           {label}");
         }
-        println!("Created At:      {}", resp.created_at);
-        println!("Updated At:      {}", resp.updated_at);
+        println!(
+            "Created At:      {}",
+            crate::duration::format_local_datetime(resp.created_at)
+        );
+        println!(
+            "Updated At:      {}",
+            crate::duration::format_local_datetime(resp.updated_at)
+        );
     }
     Ok(())
 }
@@ -218,7 +221,10 @@ pub async fn cmd_key_revoke(
     println!("Key revoked:");
     println!("  Key ID:     {}", resp.key_id);
     println!("  Status:     {}", resp.status);
-    println!("  Updated At: {}", resp.updated_at);
+    println!(
+        "  Updated At: {}",
+        crate::duration::format_local_datetime(resp.updated_at)
+    );
     Ok(())
 }
 
@@ -230,7 +236,10 @@ pub async fn cmd_key_rename(
     let resp = client.rename_key(key_id, new_key_id).await?;
     println!("Key renamed:");
     println!("  Key ID:     {}", resp.key_id);
-    println!("  Updated At: {}", resp.updated_at);
+    println!(
+        "  Updated At: {}",
+        crate::duration::format_local_datetime(resp.updated_at)
+    );
     Ok(())
 }
 
@@ -245,12 +254,43 @@ pub async fn cmd_key_list(
         .list_keys(offset, limit, status.as_deref(), context_id.as_deref())
         .await?;
 
+    if crate::render::is_json_output() {
+        crate::render::print_json(&resp)?;
+        return Ok(());
+    }
+
     if resp.keys.is_empty() {
         println!("No keys found.");
         return Ok(());
     }
 
     let end = (offset + resp.keys.len() as u64).min(resp.total);
+
+    if is_full_display() {
+        print_full_list_title(
+            &format!("Keys (showing {}..{} of {}", offset + 1, end, resp.total),
+            resp.keys.len(),
+        );
+        for key in &resp.keys {
+            let label = key.label.as_deref().unwrap_or("—");
+            let created = key
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string();
+            let status = key.status.to_string();
+            let key_type = key.key_type.to_string();
+            print_full_entry(&[
+                ("Key ID", &key.key_id),
+                ("Label", label),
+                ("Type", &key_type),
+                ("Status", &status),
+                ("Derivation", &key.derivation_path),
+                ("Created", &created),
+            ]);
+        }
+        return Ok(());
+    }
 
     let dim = Style::default().fg(Color::DarkGray);
     let bold = Style::default()
@@ -262,7 +302,11 @@ pub async fn cmd_key_list(
         .iter()
         .map(|key| {
             let label = key.label.clone().unwrap_or_else(|| "\u{2014}".into());
-            let created = key.created_at.format("%Y-%m-%d").to_string();
+            let created = key
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string();
 
             let status_span = match key.status {
                 vta_sdk::keys::KeyStatus::Active => {
@@ -324,12 +368,12 @@ pub async fn cmd_seeds_list(client: &VtaClient) -> Result<(), Box<dyn std::error
         println!("  Status:      {}", seed.status);
         println!(
             "  Created:     {}",
-            seed.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+            crate::duration::format_local_datetime(seed.created_at)
         );
         if let Some(retired_at) = seed.retired_at {
             println!(
                 "  Retired:     {}",
-                retired_at.format("%Y-%m-%d %H:%M:%S UTC")
+                crate::duration::format_local_datetime(retired_at)
             );
         }
         println!();
@@ -355,22 +399,10 @@ pub async fn cmd_seeds_rotate(
 pub async fn cmd_key_bundle(
     client: &VtaClient,
     context: &str,
+    recipient: crate::sealed_producer::SealedRecipient,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Fetch all secrets for this context as a portable bundle
     let bundle = client.fetch_did_secrets_bundle(context).await?;
-    let encoded = bundle.encode().map_err(|e| format!("{e}"))?;
-
-    // 5. Print with security warning
-    eprintln!();
-    eprintln!("\x1b[1;33m╔══════════════════════════════════════════════════════════╗");
-    eprintln!("║  WARNING: The secrets bundle contains private keys.      ║");
-    eprintln!("║  Store it securely and do not share it publicly.         ║");
-    eprintln!("╚══════════════════════════════════════════════════════════╝\x1b[0m");
-    eprintln!();
-    println!("{encoded}");
-    eprintln!();
-
-    Ok(())
+    crate::sealed_producer::emit_did_secrets_bundle(bundle, &recipient, context, None).await
 }
 
 pub async fn cmd_key_secrets(

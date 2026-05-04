@@ -31,6 +31,7 @@ pub async fn run_create_did_webvh(
     let imported_ks = store.keyspace("imported_secrets")?;
     let contexts_ks = store.keyspace("contexts")?;
     let webvh_ks = store.keyspace("webvh")?;
+    let did_templates_ks = store.keyspace("did_templates")?;
 
     // Resolve context
     let ctx = match crate::contexts::get_context(&contexts_ks, &args.context).await? {
@@ -158,6 +159,13 @@ pub async fn run_create_did_webvh(
         set_primary: true,
         signing_key_id: None,
         ka_key_id: None,
+        template: None,
+        template_context: None,
+        template_vars: std::collections::HashMap::new(),
+        // `vta create-did-webvh` is the runtime integration-DID CLI — not
+        // used to mint the VTA's own identity (that's setup wizard /
+        // setup --from / TEE autogen).
+        is_vta_identity: false,
     };
 
     let result = operations::did_webvh::create_did_webvh(
@@ -165,6 +173,7 @@ pub async fn run_create_did_webvh(
         &imported_ks,
         &contexts_ks,
         &webvh_ks,
+        &did_templates_ks,
         &*seed_store,
         &config,
         &auth,
@@ -246,14 +255,19 @@ pub async fn run_create_did_webvh(
             did: final_did.clone(),
             secrets,
         };
-        let encoded = bundle.encode().map_err(|e| format!("{e}"))?;
+        // Local operator export to stdout: JSON, not base64. The base64
+        // wrapper offered no integrity or confidentiality — the OS
+        // filesystem (for redirected output) or terminal scrollback is the
+        // only protection here. Pretty-printed JSON is easier to audit
+        // and indexes cleanly into secure storage.
+        let json = serde_json::to_string_pretty(&bundle)?;
         eprintln!();
         eprintln!("\x1b[1;33m╔══════════════════════════════════════════════════════════╗");
         eprintln!("║  WARNING: The secrets bundle contains private keys.      ║");
-        eprintln!("║  Store it securely and do not share it publicly.         ║");
+        eprintln!("║  Redirect to a file with restrictive permissions.        ║");
         eprintln!("╚══════════════════════════════════════════════════════════╝\x1b[0m");
         eprintln!();
-        println!("{encoded}");
+        println!("{json}");
         eprintln!();
     }
 

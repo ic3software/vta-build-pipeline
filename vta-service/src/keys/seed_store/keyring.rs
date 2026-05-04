@@ -24,7 +24,7 @@ impl super::SeedStore for KeyringSeedStore {
         let user = self.user.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let entry = keyring::Entry::new(&service, &user).map_err(|e| {
+                let entry = keyring_core::Entry::new(&service, &user).map_err(|e| {
                     AppError::SecretStore(format!("failed to create keyring entry: {e}"))
                 })?;
                 match entry.get_password() {
@@ -35,7 +35,7 @@ impl super::SeedStore for KeyringSeedStore {
                         debug!("seed loaded from keyring");
                         Ok(Some(bytes))
                     }
-                    Err(keyring::Error::NoEntry) => {
+                    Err(keyring_core::Error::NoEntry) => {
                         debug!("no seed found in keyring");
                         Ok(None)
                     }
@@ -53,7 +53,7 @@ impl super::SeedStore for KeyringSeedStore {
         let hex_seed = hex::encode(seed);
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let entry = keyring::Entry::new(&service, &user).map_err(|e| {
+                let entry = keyring_core::Entry::new(&service, &user).map_err(|e| {
                     AppError::SecretStore(format!("failed to create keyring entry: {e}"))
                 })?;
                 entry

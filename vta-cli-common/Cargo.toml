@@ -2,7 +2,7 @@
 name = "vta-cli-common"
 description = "Shared CLI command handlers and rendering helpers for VTA CLIs"
 readme = "README.md"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 publish.workspace = true
 authors.workspace = true
@@ -11,14 +11,32 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-vta-sdk = { path = "../vta-sdk", version = "0.4", features = ["client"] }
+vta-sdk = { path = "../vta-sdk", version = "0.5", features = [
+  "client",
+  "sealed-transfer",
+  "provision-integration",
+] }
+affinidi-crypto = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 ratatui = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 multibase = { workspace = true }
 x25519-dalek = { workspace = true }
 sha2 = { workspace = true }
-hkdf = "0.12"
-aes-gcm = "0.10"
+hkdf = { workspace = true }
+aes-gcm = { workspace = true }
 base64 = { workspace = true }
+rand = { workspace = true }
+# Thin HTTP client used by the `webvh did-log` CLI command to hit the
+# public `GET /did/{did}/log` endpoint. VtaClient handles authenticated
+# endpoints; this one is public so a bare reqwest call is simpler than
+# threading it through VtaClient.
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

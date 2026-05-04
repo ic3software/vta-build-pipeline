@@ -11,42 +11,43 @@ fn store() -> SessionStore {
     )
 }
 
-/// Import a base64-encoded credential and authenticate.
-pub async fn login(
-    credential_b64: &str,
-    base_url: &str,
-    keyring_key: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(all(feature = "config-session", not(feature = "keyring")))]
-    eprintln!(
-        "Warning: sessions are stored unprotected on disk (~/.config/pnm/sessions.json).\n         \
-         Do not use config-session in production."
-    );
-
-    let result = store().login(credential_b64, base_url, keyring_key).await?;
-
-    println!("Credential imported:");
-    println!("  Client DID: {}", result.client_did);
-    println!("  VTA DID:    {}", result.vta_did);
-    if let Some(ref url) = result.vta_url {
-        println!("  VTA URL:    {url}");
-    }
-    println!("\nAuthentication successful.");
-    Ok(())
-}
-
 /// Store a session directly in the keyring without performing auth.
 ///
-/// Used by the TEE setup flow to save the admin credential before
-/// authenticating (the VTA may not be reachable for challenge-response yet).
+/// Used by the TEE setup flow where the admin identity is a stable key baked
+/// into the enclave config and must not be rotated.
+///
+/// The VTA's REST URL is not stored — it's resolved from the VTA DID
+/// document at runtime on every command.
 pub fn store_session(
     keyring_key: &str,
     did: &str,
     private_key: &str,
     vta_did: &str,
-    vta_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    store().store_direct(keyring_key, did, private_key, vta_did, vta_url)
+    store().store_direct(keyring_key, did, private_key, vta_did)
+}
+
+/// Park a phase-1 ephemeral identity with no VTA DID bound yet.
+///
+/// Used by the deferred-VTA-DID `pnm setup` flow. Phase 2
+/// (`pnm setup continue <slug>`) lifts the entry into a
+/// `PendingRotation` session via [`bind_vta_did`].
+pub fn store_pending_vta_binding(
+    keyring_key: &str,
+    did: &str,
+    private_key: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    store().store_pending_vta_binding(keyring_key, did, private_key)
+}
+
+/// Lift a `PendingVtaBinding` entry into a `PendingRotation` session.
+pub fn bind_vta_did(keyring_key: &str, vta_did: &str) -> Result<(), Box<dyn std::error::Error>> {
+    store().bind_vta_did(keyring_key, vta_did)
+}
+
+/// Report whether `keyring_key` identifies a `PendingVtaBinding` session.
+pub fn has_pending_vta_binding(keyring_key: &str) -> bool {
+    store().has_pending_vta_binding(keyring_key)
 }
 
 /// Clear stored credentials and cached tokens.
@@ -66,14 +67,17 @@ pub fn session_status(keyring_key: &str) -> Option<vta_sdk::session::SessionStat
 }
 
 /// Show current authentication status.
+///
+/// The VTA's REST URL isn't shown here — it's derived from the VTA DID
+/// at runtime, not stored by PNM. Use `pnm health` or `pnm vta info` to
+/// see the resolved URL.
 pub fn status(keyring_key: &str) {
     match store().session_status(keyring_key) {
         Some(status) => {
             println!("Client DID: {}", status.client_did);
-            println!("VTA DID:    {}", status.vta_did);
             println!(
-                "VTA URL:    {}",
-                status.vta_url.as_deref().unwrap_or("(not set)")
+                "VTA DID:    {}",
+                status.vta_did.as_deref().unwrap_or("(pending setup)")
             );
             match status.token_status {
                 TokenStatus::Valid { expires_in_secs } => {
@@ -89,8 +93,7 @@ pub fn status(keyring_key: &str) {
         }
         None => {
             println!("Not authenticated.");
-            println!("\nTo authenticate, import a credential:");
-            println!("  pnm auth login <credential-string>");
+            println!("\nRun `pnm setup` to provision an admin identity for a VTA.");
         }
     }
 }

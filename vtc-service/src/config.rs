@@ -252,3 +252,110 @@ impl AppConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Parse contract ──────────────────────────────────────────────
+    //
+    // These tests guard the on-disk config shape. A rename or a
+    // missing #[serde(default)] here breaks every operator's
+    // config.toml on upgrade.
+
+    #[test]
+    fn empty_toml_parses_with_all_defaults() {
+        let config: AppConfig = toml::from_str("").expect("empty TOML must parse");
+        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.server.port, 8200, "VTC default port is 8200");
+        assert!(config.vtc_did.is_none());
+        assert!(config.vta_did.is_none());
+        assert!(config.messaging.is_none());
+    }
+
+    #[test]
+    fn minimal_toml_parses() {
+        let toml_src = r#"
+            vtc_did = "did:key:zVTC"
+            vta_did = "did:key:zVTA"
+        "#;
+        let config: AppConfig = toml::from_str(toml_src).expect("minimal TOML must parse");
+        assert_eq!(config.vtc_did.as_deref(), Some("did:key:zVTC"));
+        assert_eq!(config.vta_did.as_deref(), Some("did:key:zVTA"));
+    }
+
+    #[test]
+    fn community_name_alias_is_accepted() {
+        // Backward-compat: older configs used `community_name` before
+        // the rename to `vtc_name`. The serde alias preserves their
+        // configs. Breaking this breaks existing operators.
+        let toml_src = r#"
+            community_name = "Alpha Community"
+            community_description = "First VTC"
+        "#;
+        let config: AppConfig = toml::from_str(toml_src).expect("alias must parse");
+        assert_eq!(config.vtc_name.as_deref(), Some("Alpha Community"));
+        assert_eq!(config.vtc_description.as_deref(), Some("First VTC"));
+    }
+
+    #[test]
+    fn vtc_name_canonical_field_is_accepted() {
+        let toml_src = r#"
+            vtc_name = "Alpha"
+            vtc_description = "Canonical"
+        "#;
+        let config: AppConfig = toml::from_str(toml_src).expect("canonical name parses");
+        assert_eq!(config.vtc_name.as_deref(), Some("Alpha"));
+    }
+
+    #[test]
+    fn invalid_toml_produces_config_error() {
+        let err = toml::from_str::<AppConfig>("server.port = \"not-a-number\"")
+            .expect_err("invalid port type must fail parse");
+        let msg = format!("{err}");
+        assert!(msg.contains("port"), "error must name the field: {msg}");
+    }
+
+    #[test]
+    fn server_port_bounds() {
+        // u16 range enforced by serde — 70000 must fail.
+        let toml_src = r#"
+            [server]
+            port = 70000
+        "#;
+        let err =
+            toml::from_str::<AppConfig>(toml_src).expect_err("out-of-range port must not parse");
+        assert!(format!("{err}").contains("port"), "got {err}");
+    }
+
+    #[test]
+    fn secrets_config_keyring_service_defaults_to_vtc() {
+        // Keyring service name is per-service — VTC uses "vtc" so it
+        // doesn't collide with a VTA running on the same host.
+        let empty: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(empty.secrets.keyring_service, "vtc");
+    }
+
+    #[test]
+    fn config_round_trip_preserves_fields() {
+        // Serialize then parse — catches field additions that break
+        // serialization symmetry (e.g. a serialize-only field that
+        // can't parse back).
+        let original: AppConfig = toml::from_str(
+            r#"
+            vtc_did = "did:key:zVTC"
+            vta_did = "did:key:zVTA"
+            vtc_name = "Round Trip"
+            public_url = "https://vtc.example.com"
+        "#,
+        )
+        .unwrap();
+
+        let serialized = toml::to_string_pretty(&original).expect("serialize ok");
+        let parsed: AppConfig = toml::from_str(&serialized).expect("re-parse ok");
+        assert_eq!(parsed.vtc_did, original.vtc_did);
+        assert_eq!(parsed.vta_did, original.vta_did);
+        assert_eq!(parsed.vtc_name, original.vtc_name);
+        assert_eq!(parsed.public_url, original.public_url);
+    }
+}

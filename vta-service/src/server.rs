@@ -76,16 +76,50 @@ pub struct AppState {
     pub sessions_ks: KeyspaceHandle,
     pub acl_ks: KeyspaceHandle,
     pub contexts_ks: KeyspaceHandle,
+    pub did_templates_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub imported_ks: KeyspaceHandle,
     pub cache_ks: KeyspaceHandle,
+    /// Anti-replay log for sealed-bootstrap `bundle_id`s. One row per seal;
+    /// `PersistentNonceStore` refuses duplicates.
+    pub sealed_nonces_ks: KeyspaceHandle,
     #[cfg(feature = "webvh")]
     pub webvh_ks: KeyspaceHandle,
+    /// Persisted drain set for the protocol-management feature
+    /// (`docs/05-design-notes/didcomm-protocol-management.md`).
+    /// Keyed by mediator DID; replayed at boot.
+    #[cfg(feature = "webvh")]
+    pub drains_ks: KeyspaceHandle,
+    /// In-process registry of active + draining mediator listeners.
+    /// Owns the per-listener bounded outbound buffer and the
+    /// active/drain state machine.
+    #[cfg(feature = "webvh")]
+    pub mediator_registry: Arc<crate::messaging::registry::MediatorListenerRegistry>,
+    /// Per-mediator TTL sweeper. Arms a `tokio::time::sleep_until`
+    /// task per drain entry; on expiry, calls
+    /// `record_expiries_persisted` and signals upstream listener
+    /// teardown via the teardown channel.
+    #[cfg(feature = "webvh")]
+    pub drain_sweeper: Arc<crate::messaging::drain_sweeper::DrainSweeper>,
+    /// Pluggable telemetry sink for mediator-attribution events.
+    /// Default impl is the in-memory ring buffer; alternative
+    /// backends plug in via the `TelemetrySink` trait.
+    pub telemetry: vti_common::telemetry::SharedTelemetrySink,
     pub wrapping_cache: crate::keys::wrapping::WrappingKeyCache,
     pub config: Arc<RwLock<AppConfig>>,
     pub seed_store: Arc<dyn SeedStore>,
     pub did_resolver: Option<DIDCacheClient>,
     pub secrets_resolver: Option<Arc<ThreadedSecretsResolver>>,
+    /// Verification-method id for the VTA's signing key (e.g.
+    /// `{did}#key-0`). Populated by `init_auth`. Needed by the
+    /// live mediator-handshake prover to fetch the corresponding
+    /// secret out of [`Self::secrets_resolver`].
+    #[cfg(feature = "didcomm")]
+    pub signing_vm_id: Option<String>,
+    /// Verification-method id for the VTA's key-agreement key
+    /// (e.g. `{did}#key-1`). Populated by `init_auth`.
+    #[cfg(feature = "didcomm")]
+    pub ka_vm_id: Option<String>,
     #[cfg(feature = "didcomm")]
     pub didcomm_bridge: Arc<DIDCommBridge>,
     pub jwt_keys: Option<Arc<JwtKeys>>,
@@ -132,35 +166,78 @@ pub async fn build_app_state(
     let sessions_ks = apply_encryption(store.keyspace("sessions")?);
     let acl_ks = apply_encryption(store.keyspace("acl")?);
     let contexts_ks = apply_encryption(store.keyspace("contexts")?);
+    let did_templates_ks = apply_encryption(store.keyspace("did_templates")?);
     let audit_ks = apply_encryption(store.keyspace("audit")?);
     let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
     let cache_ks = store.keyspace("cache")?;
+    // Sealed-transfer anti-replay store. Bundle_ids are not secret and the
+    // row is a one-byte sentinel, so the keyspace is intentionally
+    // unencrypted — saves a decrypt hop on every request.
+    let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
     #[cfg(feature = "webvh")]
     let webvh_ks = apply_encryption(store.keyspace("webvh")?);
+    #[cfg(feature = "webvh")]
+    let drains_ks = apply_encryption(store.keyspace("drains")?);
 
-    let (did_resolver, secrets_resolver, jwt_keys, atm) =
-        init_auth(&config, &*seed_store, &keys_ks).await;
+    let auth = init_auth(&config, &*seed_store, &keys_ks).await;
+
+    let telemetry: vti_common::telemetry::SharedTelemetrySink =
+        Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
+    #[cfg(feature = "webvh")]
+    let mediator_registry = Arc::new(crate::messaging::registry::MediatorListenerRegistry::new(
+        Arc::clone(&telemetry),
+    ));
+    // `build_app_state` is called from non-axum front-ends (e.g.
+    // Lambda) that don't run a teardown consumer — give them a
+    // sweeper whose channel sender goes nowhere so signals
+    // become no-ops. The full `run()` path replaces this with a
+    // sweeper whose receiver is consumed by a real task that
+    // calls `DIDCommService::remove_listener`.
+    #[cfg(feature = "webvh")]
+    let drain_sweeper = {
+        let (tx, _rx) = crate::messaging::drain_sweeper::teardown_channel(
+            crate::messaging::drain_sweeper::DEFAULT_TEARDOWN_CHANNEL_CAPACITY,
+        );
+        Arc::new(crate::messaging::drain_sweeper::DrainSweeper::new(
+            Arc::clone(&mediator_registry),
+            drains_ks.clone(),
+            tx,
+        ))
+    };
 
     Ok(AppState {
         keys_ks,
         sessions_ks,
         acl_ks,
         contexts_ks,
+        did_templates_ks,
         audit_ks,
         imported_ks,
         cache_ks,
+        sealed_nonces_ks,
         #[cfg(feature = "webvh")]
         webvh_ks,
+        #[cfg(feature = "webvh")]
+        drains_ks,
+        #[cfg(feature = "webvh")]
+        mediator_registry,
+        #[cfg(feature = "webvh")]
+        drain_sweeper,
+        telemetry,
         wrapping_cache: crate::keys::wrapping::WrappingKeyCache::new(),
         config: Arc::new(RwLock::new(config)),
         seed_store,
-        did_resolver,
-        secrets_resolver,
+        did_resolver: auth.did_resolver,
+        secrets_resolver: auth.secrets_resolver,
+        #[cfg(feature = "didcomm")]
+        signing_vm_id: auth.signing_vm_id,
+        #[cfg(feature = "didcomm")]
+        ka_vm_id: auth.ka_vm_id,
         #[cfg(feature = "didcomm")]
         didcomm_bridge: Arc::new(DIDCommBridge::placeholder()),
 
-        jwt_keys,
-        atm,
+        jwt_keys: auth.jwt_keys,
+        atm: auth.atm,
         tee: tee_context,
         restart_tx,
         #[cfg(feature = "rest")]
@@ -219,19 +296,63 @@ pub async fn run(
         let sessions_ks = apply_encryption(store.keyspace("sessions")?);
         let acl_ks = apply_encryption(store.keyspace("acl")?);
         let contexts_ks = apply_encryption(store.keyspace("contexts")?);
+        let did_templates_ks = apply_encryption(store.keyspace("did_templates")?);
         let audit_ks = apply_encryption(store.keyspace("audit")?);
         let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
         let cache_ks = store.keyspace("cache")?;
+        let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
         #[cfg(feature = "webvh")]
         let webvh_ks = apply_encryption(store.keyspace("webvh")?);
+        #[cfg(feature = "webvh")]
+        let drains_ks = apply_encryption(store.keyspace("drains")?);
 
         // Initialize auth infrastructure
-        let (did_resolver, secrets_resolver, jwt_keys, atm) =
-            init_auth(&config, &*seed_store, &keys_ks).await;
+        let auth = init_auth(&config, &*seed_store, &keys_ks).await;
+
+        // Pluggable telemetry sink + multi-mediator listener registry.
+        // The registry holds active/drain state and the per-mediator
+        // bounded outbound buffer; spec
+        // `docs/05-design-notes/didcomm-protocol-management.md`.
+        let telemetry: vti_common::telemetry::SharedTelemetrySink =
+            Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
+        #[cfg(feature = "webvh")]
+        let mediator_registry = Arc::new(
+            crate::messaging::registry::MediatorListenerRegistry::new(Arc::clone(&telemetry)),
+        );
+        // Drain sweeper: TTL-keyed `tokio::time::sleep_until` per
+        // drain entry. On expiry, the sweeper signals the
+        // teardown channel; the consumer task spawned below
+        // translates each signal into a
+        // `DIDCommService::remove_listener` call.
+        #[cfg(feature = "webvh")]
+        let (teardown_tx, teardown_rx) = crate::messaging::drain_sweeper::teardown_channel(
+            crate::messaging::drain_sweeper::DEFAULT_TEARDOWN_CHANNEL_CAPACITY,
+        );
+        #[cfg(feature = "webvh")]
+        let drain_sweeper = Arc::new(crate::messaging::drain_sweeper::DrainSweeper::new(
+            Arc::clone(&mediator_registry),
+            drains_ks.clone(),
+            teardown_tx,
+        ));
+        // Boot replay: load any drains persisted from a previous
+        // run, drop already-expired entries, register the live
+        // ones with the registry, and arm the sweeper for each.
+        #[cfg(feature = "webvh")]
+        match mediator_registry.replay_drains(&drains_ks).await {
+            Ok(live) => {
+                if !live.is_empty() {
+                    info!(count = live.len(), "drain set replayed from keyspace");
+                }
+                drain_sweeper.arm_all(&live).await;
+            }
+            Err(e) => {
+                warn!(error = %e, "drain replay failed — starting with empty drain set");
+            }
+        }
 
         // In TEE required mode, warn if auth isn't initialized.
         #[cfg(feature = "tee")]
-        if config.tee.mode == crate::config::TeeMode::Required && jwt_keys.is_none() {
+        if config.tee.mode == crate::config::TeeMode::Required && auth.jwt_keys.is_none() {
             warn!(
                 "TEE mode is 'required' but authentication is not initialized \
                  (vta_did not configured). The VTA will start but authenticated \
@@ -246,16 +367,24 @@ pub async fn run(
         #[cfg(feature = "didcomm")]
         let didcomm_shutdown = CancellationToken::new();
 
-        // Spawn signal handler
+        // Spawn signal handler. First signal triggers cooperative shutdown;
+        // a second signal forces an immediate exit so an operator can always
+        // bail out if cleanup hangs (e.g., a mediator handshake that won't
+        // complete before its timeout fires).
         tokio::spawn({
             let shutdown_tx = shutdown_tx.clone();
             #[cfg(feature = "didcomm")]
             let didcomm_shutdown = didcomm_shutdown.clone();
             async move {
                 shutdown_signal().await;
+                info!("shutting down — press Ctrl-C again to force exit");
                 let _ = shutdown_tx.send(true);
                 #[cfg(feature = "didcomm")]
                 didcomm_shutdown.cancel();
+
+                shutdown_signal().await;
+                eprintln!("\nForcing exit.");
+                std::process::exit(130);
             }
         });
 
@@ -263,9 +392,10 @@ pub async fn run(
         let storage_store = store.clone();
         let storage_sessions_ks = sessions_ks.clone();
         let storage_audit_ks = audit_ks.clone();
+        let storage_acl_ks = acl_ks.clone();
         let storage_audit_config = config.audit.clone();
         let storage_auth_config = config.auth.clone();
-        let has_auth = jwt_keys.is_some();
+        let has_auth = auth.jwt_keys.is_some();
 
         // Shared DIDComm bridge for outbound request-response messaging.
         // The service reference is set after DIDCommService::start().
@@ -279,13 +409,22 @@ pub async fn run(
                 keys_ks: keys_ks.clone(),
                 acl_ks: acl_ks.clone(),
                 contexts_ks: contexts_ks.clone(),
+                did_templates_ks: did_templates_ks.clone(),
                 audit_ks: audit_ks.clone(),
                 imported_ks: imported_ks.clone(),
                 #[cfg(feature = "webvh")]
                 webvh_ks: webvh_ks.clone(),
+                sealed_nonces_ks: sealed_nonces_ks.clone(),
+                #[cfg(feature = "webvh")]
+                drains_ks: drains_ks.clone(),
+                #[cfg(feature = "webvh")]
+                mediator_registry: Arc::clone(&mediator_registry),
+                #[cfg(feature = "webvh")]
+                drain_sweeper: Arc::clone(&drain_sweeper),
+                telemetry: Arc::clone(&telemetry),
                 seed_store: seed_store.clone(),
                 config: Arc::new(RwLock::new(config.clone())),
-                did_resolver: did_resolver.clone(),
+                did_resolver: auth.did_resolver.clone(),
                 didcomm_bridge: didcomm_bridge.clone(),
                 #[cfg(feature = "tee")]
                 tee_state: tee_context.as_ref().map(|tc| tc.state.clone()),
@@ -307,20 +446,33 @@ pub async fn run(
                 sessions_ks,
                 acl_ks,
                 contexts_ks,
+                did_templates_ks,
                 audit_ks,
                 imported_ks,
                 cache_ks,
+                sealed_nonces_ks,
                 #[cfg(feature = "webvh")]
                 webvh_ks,
+                #[cfg(feature = "webvh")]
+                drains_ks,
+                #[cfg(feature = "webvh")]
+                mediator_registry: Arc::clone(&mediator_registry),
+                #[cfg(feature = "webvh")]
+                drain_sweeper: Arc::clone(&drain_sweeper),
+                telemetry: Arc::clone(&telemetry),
                 wrapping_cache,
                 config: Arc::new(RwLock::new(config.clone())),
                 seed_store: seed_store.clone(),
-                did_resolver,
-                secrets_resolver: secrets_resolver.clone(),
+                did_resolver: auth.did_resolver,
+                secrets_resolver: auth.secrets_resolver.clone(),
+                #[cfg(feature = "didcomm")]
+                signing_vm_id: auth.signing_vm_id.clone(),
+                #[cfg(feature = "didcomm")]
+                ka_vm_id: auth.ka_vm_id.clone(),
                 #[cfg(feature = "didcomm")]
                 didcomm_bridge: didcomm_bridge.clone(),
-                jwt_keys,
-                atm,
+                jwt_keys: auth.jwt_keys,
+                atm: auth.atm,
                 tee: tee_context.clone(),
                 restart_tx: restart_tx.clone(),
                 metrics_handle: None, // Set in REST thread after install
@@ -341,16 +493,19 @@ pub async fn run(
         // Start DIDComm service (conditional)
         #[cfg(feature = "didcomm")]
         let didcomm_service: Option<DIDCommService> = if let Some(ref vta_state) = vta_state {
-            match (&secrets_resolver, &config.vta_did, &config.messaging) {
+            match (&auth.secrets_resolver, &config.vta_did, &config.messaging) {
                 (Some(sr), Some(vta_did), Some(messaging_config)) => {
-                    // Collect secrets from the resolver for the TDKProfile
+                    // Collect secrets using the VM IDs from init_auth (correct for both
+                    // did:key and did:webvh — avoids hardcoding #key-0/#key-1 fragments).
                     let mut secrets = Vec::new();
-                    let signing_id = format!("{vta_did}#key-0");
-                    let ka_id = format!("{vta_did}#key-1");
-                    if let Some(s) = sr.get_secret(&signing_id).await {
+                    if let Some(ref signing_id) = auth.signing_vm_id
+                        && let Some(s) = sr.get_secret(signing_id).await
+                    {
                         secrets.push(s);
                     }
-                    if let Some(s) = sr.get_secret(&ka_id).await {
+                    if let Some(ref ka_id) = auth.ka_vm_id
+                        && let Some(s) = sr.get_secret(ka_id).await
+                    {
                         secrets.push(s);
                     }
 
@@ -402,12 +557,22 @@ pub async fn run(
                         .await
                     {
                         Ok(service) => {
-                            // Wait for the mediator connection before accepting traffic
-                            if let Err(e) = service
-                                .wait_connected("vta-main", Duration::from_secs(30))
-                                .await
-                            {
-                                warn!("DIDComm listener not connected after 30s: {e}");
+                            // Wait for the mediator connection before accepting traffic.
+                            // Race the wait against shutdown so a Ctrl-C while the
+                            // mediator is unreachable doesn't park us here for the full
+                            // 30s — `wait_connected` is itself signal-deaf upstream.
+                            tokio::select! {
+                                res = service.wait_connected(
+                                    "vta-main",
+                                    Duration::from_secs(30),
+                                ) => {
+                                    if let Err(e) = res {
+                                        warn!("DIDComm listener not connected after 30s: {e}");
+                                    }
+                                }
+                                _ = didcomm_shutdown.cancelled() => {
+                                    info!("shutdown received before mediator connected");
+                                }
                             }
                             didcomm_bridge.set_service(service.clone());
                             spawn_event_logger(service.clone());
@@ -431,6 +596,61 @@ pub async fn run(
         #[cfg(not(feature = "didcomm"))]
         let didcomm_service: Option<()> = None;
 
+        // Spawn the teardown channel consumer. The drain sweeper
+        // sends mediator DIDs over `teardown_rx` whenever a TTL
+        // fires; this task translates each signal into a
+        // `DIDCommService::remove_listener` call. If DIDComm
+        // isn't running, the loop still runs but every recv is a
+        // no-op — drains still get cleaned up at the registry +
+        // keyspace level by the sweeper.
+        #[cfg(all(feature = "webvh", feature = "didcomm"))]
+        let _teardown_handle = {
+            let didcomm_service_ref = didcomm_service.clone();
+            let mut teardown_rx = teardown_rx;
+            let mut shutdown_rx_for_teardown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx_for_teardown.changed() => {
+                            if *shutdown_rx_for_teardown.borrow() {
+                                break;
+                            }
+                        }
+                        msg = teardown_rx.recv() => {
+                            match msg {
+                                None => break,
+                                Some(mediator_did) => {
+                                    if let Some(ref svc) = didcomm_service_ref {
+                                        if let Err(e) = svc.remove_listener(&mediator_did).await {
+                                            warn!(
+                                                mediator = %mediator_did,
+                                                error = %e,
+                                                "drain teardown: remove_listener failed"
+                                            );
+                                        } else {
+                                            info!(
+                                                mediator = %mediator_did,
+                                                "drain teardown: listener removed"
+                                            );
+                                        }
+                                    } else {
+                                        debug!(
+                                            mediator = %mediator_did,
+                                            "drain teardown: DIDComm not running, skipping remove_listener"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                debug!("teardown consumer task exiting");
+            })
+        };
+        #[cfg(not(all(feature = "webvh", feature = "didcomm")))]
+        let _teardown_handle: Option<tokio::task::JoinHandle<()>> = None;
+
         // Storage thread always runs
         let mut storage_shutdown_rx = shutdown_rx.clone();
         let storage_handle = std::thread::Builder::new()
@@ -440,6 +660,7 @@ pub async fn run(
                     storage_store,
                     storage_sessions_ks,
                     storage_audit_ks,
+                    storage_acl_ks,
                     storage_audit_config,
                     storage_auth_config,
                     has_auth,
@@ -494,7 +715,7 @@ pub async fn run(
             info!("DIDComm service stopped");
         }
         #[cfg(not(feature = "didcomm"))]
-        drop(didcomm_service);
+        let _ = didcomm_service;
 
         if any_panic {
             let _ = shutdown_tx.send(true);
@@ -528,10 +749,12 @@ pub async fn run(
 }
 
 /// Storage thread: runs session cleanup loop and persists the store on shutdown.
+#[allow(clippy::too_many_arguments)]
 fn run_storage_thread(
     store: Store,
     sessions_ks: KeyspaceHandle,
     audit_ks: KeyspaceHandle,
+    acl_ks: KeyspaceHandle,
     audit_config: crate::config::AuditConfig,
     auth_config: AuthConfig,
     has_auth: bool,
@@ -561,6 +784,10 @@ fn run_storage_thread(
                         let audit_retention = audit_config.retention_days;
                         if let Err(e) = crate::audit::cleanup_expired_logs(&audit_ks, audit_retention).await {
                             warn!("audit cleanup error: {e}");
+                        }
+                        // Prune expired AclEntry rows and PendingBootstrap rows.
+                        if let Err(e) = crate::acl_sweeper::sweep_expired(&acl_ks).await {
+                            warn!("acl sweeper error: {e}");
                         }
                     }
                     _ = shutdown_rx.changed() => {
@@ -619,13 +846,16 @@ fn run_rest_thread(
         let app = traced_routes.merge(routes::health_router().with_state(state));
 
         let shutdown_rx = shutdown_rx.clone();
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let mut rx = shutdown_rx;
-                let _ = rx.changed().await;
-            })
-            .await
-            .expect("axum serve failed");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let mut rx = shutdown_rx;
+            let _ = rx.changed().await;
+        })
+        .await
+        .expect("axum serve failed");
 
         info!("REST thread shutting down");
     });
@@ -635,21 +865,46 @@ fn run_rest_thread(
 ///
 /// Returns `None` values if the VTA DID is not configured (server still starts
 /// so the setup wizard can be run first).
+/// Result of auth initialization, bundling all outputs including the
+/// verification-method IDs that were inserted into the secrets resolver.
+struct AuthInit {
+    did_resolver: Option<DIDCacheClient>,
+    secrets_resolver: Option<Arc<ThreadedSecretsResolver>>,
+    jwt_keys: Option<Arc<JwtKeys>>,
+    atm: Option<ATM>,
+    /// Signing verification method ID (e.g. `{did}#key-0` or `{did}#{ed_pub_mb}`).
+    /// Consumed only by the DIDComm secret-collection path; cfg-gated to
+    /// keep non-didcomm builds warning-free.
+    #[cfg_attr(not(feature = "didcomm"), allow(dead_code))]
+    signing_vm_id: Option<String>,
+    /// Key-agreement verification method ID (e.g. `{did}#key-1` or `{did}#{x_pub_mb}`).
+    #[cfg_attr(not(feature = "didcomm"), allow(dead_code))]
+    ka_vm_id: Option<String>,
+}
+
+impl AuthInit {
+    fn empty() -> Self {
+        Self {
+            did_resolver: None,
+            secrets_resolver: None,
+            jwt_keys: None,
+            atm: None,
+            signing_vm_id: None,
+            ka_vm_id: None,
+        }
+    }
+}
+
 async fn init_auth(
     config: &AppConfig,
     seed_store: &dyn SeedStore,
     keys_ks: &KeyspaceHandle,
-) -> (
-    Option<DIDCacheClient>,
-    Option<Arc<ThreadedSecretsResolver>>,
-    Option<Arc<JwtKeys>>,
-    Option<ATM>,
-) {
+) -> AuthInit {
     let vta_did = match &config.vta_did {
         Some(did) => did.clone(),
         None => {
             warn!("vta_did not configured — auth endpoints will not work (run setup first)");
-            return (None, None, None, None);
+            return AuthInit::empty();
         }
     };
 
@@ -660,7 +915,7 @@ async fn init_auth(
             warn!(
                 "failed to find VTA key records: {e} — auth endpoints will not work (run setup first)"
             );
-            return (None, None, None, None);
+            return AuthInit::empty();
         }
     };
 
@@ -669,7 +924,7 @@ async fn init_auth(
         Ok(s) => s,
         Err(e) => {
             warn!("failed to load seed: {e} — auth endpoints will not work");
-            return (None, None, None, None);
+            return AuthInit::empty();
         }
     };
 
@@ -677,7 +932,7 @@ async fn init_auth(
         Ok(r) => r,
         Err(e) => {
             warn!("failed to create BIP-32 root key: {e} — auth endpoints will not work");
-            return (None, None, None, None);
+            return AuthInit::empty();
         }
     };
 
@@ -696,82 +951,140 @@ async fn init_auth(
         Ok(r) => r,
         Err(e) => {
             warn!("failed to create DID resolver: {e} — auth endpoints will not work");
-            return (None, None, None, None);
+            return AuthInit::empty();
         }
     };
 
     // 2. Secrets resolver with VTA's Ed25519 + X25519 secrets
     let (secrets_resolver, _handle) = ThreadedSecretsResolver::new(None).await;
 
-    // Load stored key records for validation
-    let stored_signing: Option<KeyRecord> = keys_ks
-        .get(crate::keys::store_key(&format!("{vta_did}#key-0")))
-        .await
-        .ok()
-        .flatten();
-    let stored_ka: Option<KeyRecord> = keys_ks
-        .get(crate::keys::store_key(&format!("{vta_did}#key-1")))
-        .await
-        .ok()
-        .flatten();
+    // Track verification-method IDs so DIDComm consumers use the right fragment.
+    let mut signing_vm_id: Option<String> = None;
+    let mut ka_vm_id: Option<String> = None;
 
-    // Derive and insert VTA signing secret (Ed25519)
-    match root.derive_ed25519(&signing_path) {
-        Ok(mut signing_secret) => {
-            // Validate: runtime key must match what was stored at DID creation time
-            if let Some(ref record) = stored_signing {
-                match signing_secret.get_public_keymultibase() {
-                    Ok(runtime_pub) if runtime_pub != record.public_key => {
-                        error!(
-                            key_id = %format!("{vta_did}#key-0"),
-                            stored = %record.public_key,
-                            runtime = %runtime_pub,
-                            "SIGNING KEY MISMATCH: runtime-derived Ed25519 public key does not match \
-                             the key stored in the key record (and published in the DID document). \
-                             DIDComm message signing/verification will fail. \
-                             This likely means the DID was created with different code or seed."
-                        );
+    if vta_did.starts_with("did:key:") {
+        // did:key uses fragment IDs like {did}#{ed_pub_mb} and {did}#{x_pub_mb},
+        // and the X25519 key is derived FROM the Ed25519 key (not independently).
+        // Use the SDK helper which handles both correctly.
+        let dp: ed25519_dalek_bip32::DerivationPath = match signing_path.parse() {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("invalid signing derivation path: {e}");
+                return AuthInit {
+                    did_resolver: Some(did_resolver),
+                    ..AuthInit::empty()
+                };
+            }
+        };
+        match root.derive(&dp) {
+            Ok(derived) => {
+                let seed_bytes: &[u8; 32] = derived.signing_key.as_bytes();
+                match vta_sdk::did_key::secrets_from_did_key(&vta_did, seed_bytes) {
+                    Ok(secrets) => {
+                        signing_vm_id = Some(secrets.signing.id.clone());
+                        ka_vm_id = Some(secrets.key_agreement.id.clone());
+                        info!(signing_id = %secrets.signing.id, ka_id = %secrets.key_agreement.id, "did:key secrets loaded");
+                        secrets_resolver.insert(secrets.signing).await;
+                        secrets_resolver.insert(secrets.key_agreement).await;
                     }
-                    Ok(runtime_pub) => {
-                        info!(key_id = %format!("{vta_did}#key-0"), pub_key = %runtime_pub, "signing key validated");
+                    Err(e) => {
+                        warn!("failed to build did:key secrets: {e} — auth will not work");
+                        return AuthInit {
+                            did_resolver: Some(did_resolver),
+                            ..AuthInit::empty()
+                        };
                     }
-                    Err(e) => warn!("could not extract signing public key for validation: {e}"),
                 }
             }
-            signing_secret.id = format!("{vta_did}#key-0");
-            secrets_resolver.insert(signing_secret).await;
+            Err(e) => warn!("failed to derive VTA signing key: {e}"),
         }
-        Err(e) => warn!("failed to derive VTA signing key: {e}"),
-    }
-
-    // Derive and insert VTA key-agreement secret (X25519)
-    match root.derive_x25519(&ka_path) {
-        Ok(mut ka_secret) => {
-            // Validate: runtime key must match what was stored at DID creation time
-            if let Some(ref record) = stored_ka {
-                match ka_secret.get_public_keymultibase() {
-                    Ok(runtime_pub) if runtime_pub != record.public_key => {
-                        error!(
-                            key_id = %format!("{vta_did}#key-1"),
-                            stored = %record.public_key,
-                            runtime = %runtime_pub,
-                            "KEY-AGREEMENT KEY MISMATCH: runtime-derived X25519 public key does not match \
-                             the key stored in the key record (and published in the DID document). \
-                             DIDComm encryption/decryption will fail. Others will encrypt to the DID \
-                             document key but this VTA holds a different private key. \
-                             The DID document must be updated or the VTA identity must be regenerated."
-                        );
-                    }
-                    Ok(runtime_pub) => {
-                        info!(key_id = %format!("{vta_did}#key-1"), pub_key = %runtime_pub, "key-agreement key validated");
-                    }
-                    Err(e) => warn!("could not extract KA public key for validation: {e}"),
-                }
+    } else {
+        // did:webvh / other methods: use #key-0 / #key-1 fragment convention
+        // with independently derived Ed25519 + X25519 keys.
+        let ka_path = match ka_path {
+            Some(p) => p,
+            None => {
+                warn!(
+                    "VTA key-agreement record missing — auth endpoints will not work (run setup first)"
+                );
+                return AuthInit {
+                    did_resolver: Some(did_resolver),
+                    ..AuthInit::empty()
+                };
             }
-            ka_secret.id = format!("{vta_did}#key-1");
-            secrets_resolver.insert(ka_secret).await;
+        };
+
+        signing_vm_id = Some(format!("{vta_did}#key-0"));
+        ka_vm_id = Some(format!("{vta_did}#key-1"));
+
+        // Load stored key records for validation
+        let stored_signing: Option<KeyRecord> = keys_ks
+            .get(crate::keys::store_key(&format!("{vta_did}#key-0")))
+            .await
+            .ok()
+            .flatten();
+        let stored_ka: Option<KeyRecord> = keys_ks
+            .get(crate::keys::store_key(&format!("{vta_did}#key-1")))
+            .await
+            .ok()
+            .flatten();
+
+        // Derive and insert VTA signing secret (Ed25519)
+        match root.derive_ed25519(&signing_path) {
+            Ok(mut signing_secret) => {
+                if let Some(ref record) = stored_signing {
+                    match signing_secret.get_public_keymultibase() {
+                        Ok(runtime_pub) if runtime_pub != record.public_key => {
+                            error!(
+                                key_id = %format!("{vta_did}#key-0"),
+                                stored = %record.public_key,
+                                runtime = %runtime_pub,
+                                "SIGNING KEY MISMATCH: runtime-derived Ed25519 public key does not match \
+                                 the key stored in the key record (and published in the DID document). \
+                                 DIDComm message signing/verification will fail. \
+                                 This likely means the DID was created with different code or seed."
+                            );
+                        }
+                        Ok(runtime_pub) => {
+                            info!(key_id = %format!("{vta_did}#key-0"), pub_key = %runtime_pub, "signing key validated");
+                        }
+                        Err(e) => warn!("could not extract signing public key for validation: {e}"),
+                    }
+                }
+                signing_secret.id = format!("{vta_did}#key-0");
+                secrets_resolver.insert(signing_secret).await;
+            }
+            Err(e) => warn!("failed to derive VTA signing key: {e}"),
         }
-        Err(e) => warn!("failed to derive VTA key-agreement key: {e}"),
+
+        // Derive and insert VTA key-agreement secret (X25519)
+        match root.derive_x25519(&ka_path) {
+            Ok(mut ka_secret) => {
+                if let Some(ref record) = stored_ka {
+                    match ka_secret.get_public_keymultibase() {
+                        Ok(runtime_pub) if runtime_pub != record.public_key => {
+                            error!(
+                                key_id = %format!("{vta_did}#key-1"),
+                                stored = %record.public_key,
+                                runtime = %runtime_pub,
+                                "KEY-AGREEMENT KEY MISMATCH: runtime-derived X25519 public key does not match \
+                                 the key stored in the key record (and published in the DID document). \
+                                 DIDComm encryption/decryption will fail. Others will encrypt to the DID \
+                                 document key but this VTA holds a different private key. \
+                                 The DID document must be updated or the VTA identity must be regenerated."
+                            );
+                        }
+                        Ok(runtime_pub) => {
+                            info!(key_id = %format!("{vta_did}#key-1"), pub_key = %runtime_pub, "key-agreement key validated");
+                        }
+                        Err(e) => warn!("could not extract KA public key for validation: {e}"),
+                    }
+                }
+                ka_secret.id = format!("{vta_did}#key-1");
+                secrets_resolver.insert(ka_secret).await;
+            }
+            Err(e) => warn!("failed to derive VTA key-agreement key: {e}"),
+        }
     }
 
     // 3. JWT signing key from config (random key, not BIP-32 derived)
@@ -780,24 +1093,26 @@ async fn init_auth(
             Ok(k) => k,
             Err(e) => {
                 warn!("failed to load JWT signing key: {e} — auth endpoints will not work");
-                return (
-                    Some(did_resolver),
-                    Some(Arc::new(secrets_resolver)),
-                    None,
-                    None,
-                );
+                return AuthInit {
+                    did_resolver: Some(did_resolver),
+                    secrets_resolver: Some(Arc::new(secrets_resolver)),
+                    signing_vm_id,
+                    ka_vm_id,
+                    ..AuthInit::empty()
+                };
             }
         },
         None => {
             warn!(
                 "auth.jwt_signing_key not configured — auth endpoints will not work (run setup first)"
             );
-            return (
-                Some(did_resolver),
-                Some(Arc::new(secrets_resolver)),
-                None,
-                None,
-            );
+            return AuthInit {
+                did_resolver: Some(did_resolver),
+                secrets_resolver: Some(Arc::new(secrets_resolver)),
+                signing_vm_id,
+                ka_vm_id,
+                ..AuthInit::empty()
+            };
         }
     };
 
@@ -834,38 +1149,49 @@ async fn init_auth(
 
     info!("auth initialized for DID {vta_did}");
 
-    (
-        Some(did_resolver),
-        Some(secrets_resolver),
-        Some(Arc::new(jwt_keys)),
+    AuthInit {
+        did_resolver: Some(did_resolver),
+        secrets_resolver: Some(secrets_resolver),
+        jwt_keys: Some(Arc::new(jwt_keys)),
         atm,
-    )
+        signing_vm_id,
+        ka_vm_id,
+    }
 }
 
 /// Look up VTA signing and key-agreement derivation paths from stored key records.
 ///
-/// Uses direct lookups by `{vta_did}#key-0` and `{vta_did}#key-1`.
+/// `did:webvh` (and other methods with independently-derived X25519) stores
+/// records at both `#key-0` and `#key-1`. `did:key` stores only `#key-0`
+/// because its X25519 key is curve-converted from Ed25519 at runtime, not
+/// independently derived — there is no separate path to record.
 ///
-/// Returns `(signing_path, ka_path, seed_id)` where `seed_id` comes from
-/// the signing key record.
+/// Returns `(signing_path, ka_path, seed_id)` where `ka_path` is `None` for
+/// `did:key` and `seed_id` comes from the signing key record.
 async fn find_vta_key_paths(
     vta_did: &str,
     keys_ks: &KeyspaceHandle,
-) -> Result<(String, String, Option<u32>), AppError> {
+) -> Result<(String, Option<String>, Option<u32>), AppError> {
     let signing_key_id = format!("{vta_did}#key-0");
-    let ka_key_id = format!("{vta_did}#key-1");
 
     let signing: KeyRecord = keys_ks
         .get(crate::keys::store_key(&signing_key_id))
         .await?
         .ok_or_else(|| AppError::NotFound("VTA signing key not found".into()))?;
-    let ka: KeyRecord = keys_ks
-        .get(crate::keys::store_key(&ka_key_id))
-        .await?
-        .ok_or_else(|| AppError::NotFound("VTA key-agreement key not found".into()))?;
 
-    debug!(signing_path = %signing.derivation_path, ka_path = %ka.derivation_path, "VTA key paths resolved");
-    Ok((signing.derivation_path, ka.derivation_path, signing.seed_id))
+    let ka_path = if vta_did.starts_with("did:key:") {
+        None
+    } else {
+        let ka_key_id = format!("{vta_did}#key-1");
+        let ka: KeyRecord = keys_ks
+            .get(crate::keys::store_key(&ka_key_id))
+            .await?
+            .ok_or_else(|| AppError::NotFound("VTA key-agreement key not found".into()))?;
+        Some(ka.derivation_path)
+    };
+
+    debug!(signing_path = %signing.derivation_path, ka_path = ?ka_path, "VTA key paths resolved");
+    Ok((signing.derivation_path, ka_path, signing.seed_id))
 }
 
 /// Decode a base64url-no-pad JWT signing key and construct `JwtKeys`.
@@ -942,5 +1268,123 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => info!("received SIGINT"),
         () = terminate => info!("received SIGTERM"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::{KeyType, save_key_record};
+    use crate::store::Store;
+    use vti_common::config::StoreConfig;
+
+    fn temp_keys_ks() -> (Store, KeyspaceHandle, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = Store::open(&StoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        })
+        .expect("store open");
+        let keys_ks = store.keyspace("keys").expect("keys keyspace");
+        (store, keys_ks, dir)
+    }
+
+    /// `did:key` VTAs only store the Ed25519 signing record at `#key-0`;
+    /// the X25519 key-agreement secret is curve-converted from Ed25519 at
+    /// runtime, so a `#key-1` record is intentionally absent.
+    /// `find_vta_key_paths` must succeed without it.
+    #[tokio::test]
+    async fn find_vta_key_paths_returns_none_ka_for_did_key() {
+        let (_store, keys_ks, _dir) = temp_keys_ks();
+        let did = "did:key:z6MkTestKey";
+
+        save_key_record(
+            &keys_ks,
+            &format!("{did}#key-0"),
+            "m/44'/0'/0'",
+            KeyType::Ed25519,
+            "z6MkSigningPub",
+            "VTA signing key",
+            Some("vta"),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+        let (signing_path, ka_path, seed_id) =
+            find_vta_key_paths(did, &keys_ks).await.expect("paths");
+
+        assert_eq!(signing_path, "m/44'/0'/0'");
+        assert!(ka_path.is_none(), "did:key must not require #key-1 lookup");
+        assert_eq!(seed_id, Some(0));
+    }
+
+    /// `did:webvh` (and any non-`did:key` method) keeps the
+    /// independently-derived X25519 record at `#key-1`, and
+    /// `find_vta_key_paths` must surface it.
+    #[tokio::test]
+    async fn find_vta_key_paths_loads_ka_for_did_webvh() {
+        let (_store, keys_ks, _dir) = temp_keys_ks();
+        let did = "did:webvh:abc:example.com:vta";
+
+        save_key_record(
+            &keys_ks,
+            &format!("{did}#key-0"),
+            "m/44'/0'/0'",
+            KeyType::Ed25519,
+            "z6MkSigningPub",
+            "VTA signing key",
+            Some("vta"),
+            Some(0),
+        )
+        .await
+        .unwrap();
+        save_key_record(
+            &keys_ks,
+            &format!("{did}#key-1"),
+            "m/44'/0'/1'",
+            KeyType::X25519,
+            "z6LSKaPub",
+            "VTA key-agreement key",
+            Some("vta"),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+        let (signing_path, ka_path, _seed_id) =
+            find_vta_key_paths(did, &keys_ks).await.expect("paths");
+
+        assert_eq!(signing_path, "m/44'/0'/0'");
+        assert_eq!(ka_path.as_deref(), Some("m/44'/0'/1'"));
+    }
+
+    /// A `did:webvh` setup that is missing its `#key-1` record is broken —
+    /// `find_vta_key_paths` must return `NotFound` rather than silently
+    /// degrading to a `None` ka_path. (The `did:key` short-circuit is
+    /// keyed off the DID prefix, not off record presence, so a missing
+    /// record for non-`did:key` is genuinely an error.)
+    #[tokio::test]
+    async fn find_vta_key_paths_errors_when_did_webvh_missing_ka() {
+        let (_store, keys_ks, _dir) = temp_keys_ks();
+        let did = "did:webvh:abc:example.com:vta";
+
+        save_key_record(
+            &keys_ks,
+            &format!("{did}#key-0"),
+            "m/44'/0'/0'",
+            KeyType::Ed25519,
+            "z6MkSigningPub",
+            "VTA signing key",
+            Some("vta"),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+        let result = find_vta_key_paths(did, &keys_ks).await;
+        assert!(
+            matches!(result, Err(AppError::NotFound(_))),
+            "expected NotFound for did:webvh missing #key-1, got {result:?}"
+        );
     }
 }

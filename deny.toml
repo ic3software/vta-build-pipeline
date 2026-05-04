@@ -1,0 +1,141 @@
+# cargo-deny configuration.
+#
+# Run with:
+#   cargo install cargo-deny
+#   cargo deny check
+#
+# Primary purpose today: advisory suppression with documented justification.
+# The ignored GHSAs below are all (a) transitive-only, (b) low severity, and
+# (c) unpatched in the upstream major version we currently depend on. Each
+# entry states the attack surface, why it does not apply to our workloads,
+# and the upstream condition that would let us drop the ignore.
+
+[advisories]
+version = 2
+ignore = [
+  { id = "GHSA-cq8v-f236-94qc", reason = """
+  rand 0.8 soundness issue: `rand::rng()` is unsound when wrapped by a
+  custom logger that attempts to source entropy from `ThreadRng` during
+  signal handling. We use `rand::random()` and `rand::rng().fill_bytes()`
+  directly, with no custom logger wrapper — the unsafe interaction does
+  not occur in our code.
+
+  Pulled transitively by jsonwebtoken 10.3.0 (latest), rsa 0.9.10, and
+  ssi-crypto 0.2.1. Drop this ignore when any of those release a version
+  that depends on rand 0.9.3+.
+  """ },
+
+  { id = "RUSTSEC-2026-0099", reason = """
+  rustls-webpki 0.101.x accepts name constraints for certificates
+  asserting a wildcard name (formerly tracked as GHSA-xgp8-3hg3-c2mh).
+  Exploitable only during TLS cert verification against a CA that
+  issues such a cert; our only 0.101.x path is through AWS SDK's
+  aws-smithy-http-client → rustls 0.21 used for calls to AWS API
+  endpoints (KMS, Secrets Manager, STS, etc.) — AWS's own CAs do
+  not issue wildcard-name-constrained intermediates.
+
+  Drop when AWS SDK retires the rustls 0.21 code path (several crates
+  already have rustls 0.23 support).
+  """ },
+
+  { id = "RUSTSEC-2026-0098", reason = """
+  rustls-webpki 0.101.x incorrectly accepts name constraints on URI
+  names (formerly tracked as GHSA-965h-392x-2mh5). Same transitive
+  path as RUSTSEC-2026-0099 (AWS SDK rustls 0.21) with the same
+  narrow attack surface: AWS API endpoints are certificated by AWS
+  CAs that do not issue URI-constraint certs.
+
+  Drop when AWS SDK retires the rustls 0.21 code path.
+  """ },
+
+  { id = "RUSTSEC-2026-0104", reason = """
+  rustls-webpki 0.101.x panics when parsing a malformed certificate
+  revocation list. Reachable only when a CRL is fetched and parsed,
+  which our build does not do — `rustls-webpki` 0.101 is pulled
+  transitively through the AWS SDK rustls 0.21 path (same as the two
+  name-constraint advisories above), and AWS SDK request paths do
+  not enable CRL fetching.
+
+  Drop when AWS SDK retires the rustls 0.21 code path, or when
+  rustls-webpki 0.101 ships a fix.
+  """ },
+
+  { id = "RUSTSEC-2025-0134", reason = """
+  rustls-pemfile is unmaintained. Pulled transitively (in two
+  different versions) through the AWS SDK rustls 0.21 path —
+  `aws-smithy-http-client` and `hyper-rustls` 0.24 both depend on
+  it for parsing PEM-encoded certificates. Functional, just no
+  longer maintained; the parser is small enough that "unmaintained"
+  is the only flagged risk.
+
+  Drop when AWS SDK retires the rustls 0.21 code path; both 0.27
+  hyper-rustls and rustls 0.23 have moved to rustls-pki-types.
+  """ },
+
+  { id = "RUSTSEC-2023-0071", reason = """
+  rsa 0.9.x: Marvin Attack — potential key recovery through timing
+  sidechannels in RSA decryption. Pulled transitively by
+  jsonwebtoken 10.3.0; no other path through our graph.
+
+  Not exploitable in our code. JWT verification only checks
+  signatures, never decrypts. Our access tokens use EdDSA
+  (Ed25519), not RSA — the rsa code path is dead in our build.
+  Our only RSA decryption is the KMS CMS unwrap on the Nitro
+  attested bootstrap path, which we deliberately migrated to
+  `aws-lc-rs` in 0.5 specifically to drop this exposure.
+
+  Drop when jsonwebtoken stops depending on `rsa`, or when the
+  `rsa` crate ships a constant-time implementation.
+  """ },
+
+  { id = "RUSTSEC-2024-0370", reason = """
+  proc-macro-error 1.0.4 is unmaintained. Build-time-only proc
+  macro library; no runtime presence. Pulled transitively via
+  linked-data-derive → linked-data → json-ld → ssi-json-ld →
+  ssi-claims-core → ssi-dids-core → affinidi-did-resolver-cache-sdk.
+  We do not execute proc-macro-error code at runtime; the lint is
+  for code-hygiene, not a vulnerability.
+
+  Drop when the upstream ssi-* / json-ld stack migrates to
+  proc-macro-error2 or syn 2 native error handling.
+  """ },
+
+  { id = "RUSTSEC-2021-0127", reason = """
+  serde_cbor 0.11.x is unmaintained. Used only by
+  aws-nitro-enclaves-nsm-api for parsing Nitro attestation
+  documents (COSE_Sign1 envelope). The attestation parser is
+  read-only against quotes signed by the AWS Nitro PKI; the
+  attack surface is "AWS infrastructure produces a malicious
+  CBOR quote", which is well outside our threat model.
+
+  Drop when aws-nitro-enclaves-nsm-api migrates to ciborium (or
+  a maintained CBOR library).
+  """ },
+]
+
+# License policy. Allow-list is derived from the actual licenses present
+# in the dep graph as of 0.5.0 — every entry below appears on at least
+# one transitive crate. All are OSI-approved permissive or weak-copyleft
+# licenses compatible with our Apache-2.0 distribution.
+#
+# cargo-deny resolves OR-licensed crates against this allow list, so
+# crates licensed under e.g. `Apache-2.0 OR GPL-2.0-only` or
+# `MIT OR Apache-2.0 OR LGPL-2.1-or-later` automatically resolve to a
+# permissive branch we accept — no need to allow the copyleft alternatives.
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "Unicode-3.0",
+  "0BSD",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "Zlib",
+  "MPL-2.0",
+]

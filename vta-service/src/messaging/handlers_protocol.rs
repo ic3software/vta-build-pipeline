@@ -1,0 +1,325 @@
+//! DIDComm handlers for protocol-management operations.
+//!
+//! Spec: `docs/05-design-notes/didcomm-protocol-management.md`.
+//!
+//! Each handler is a thin adapter: parse the body, call the
+//! existing operation function with `DisableTransport::Didcomm`
+//! when applicable so the spec's 1h-min-TTL guard fires (criterion
+//! #12), and return a typed response.
+//!
+//! `enable` is intentionally NOT exposed over DIDComm — DIDComm
+//! isn't running yet at first-enable time, so the request couldn't
+//! arrive over this transport in the first place.
+
+#![cfg(feature = "webvh")]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use affinidi_messaging_didcomm::Message;
+use affinidi_messaging_didcomm_service::{
+    DIDCommResponse, DIDCommServiceError, Extension, HandlerContext, ProblemReport,
+    ServiceProblemReport,
+};
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+
+use vta_sdk::protocols::protocol_management;
+
+use super::router::VtaState;
+use crate::messaging::auth::auth_from_message;
+use crate::messaging::handshake::AlwaysOkProver;
+use crate::operations::protocol::disable_didcomm::{
+    DisableDidcommParams, DisableTransport, disable_didcomm,
+};
+use crate::operations::protocol::drain_cancel::{DrainCancelParams, drain_cancel};
+use crate::operations::protocol::migrate_mediator::{
+    MigrateAuditKind, MigrateMediatorParams, migrate_mediator,
+};
+use crate::operations::protocol::report::{ReportParams, mediator_report};
+
+type HandlerResult = Result<Option<DIDCommResponse>, DIDCommServiceError>;
+
+fn handler_err(e: impl std::fmt::Display) -> DIDCommServiceError {
+    DIDCommServiceError::Handler(e.to_string())
+}
+
+fn response<T: serde::Serialize>(msg_type: &str, result: &T) -> HandlerResult {
+    let body = serde_json::to_value(result).map_err(handler_err)?;
+    Ok(Some(DIDCommResponse::new(msg_type, body)))
+}
+
+fn problem_report_unauthorized(msg: impl Into<String>) -> DIDCommResponse {
+    DIDCommResponse::problem_report(ProblemReport::unauthorized(msg.into()))
+}
+
+fn problem_report_conflict(msg: impl Into<String>) -> DIDCommResponse {
+    DIDCommResponse::problem_report(ProblemReport::conflict(msg.into()))
+}
+
+fn problem_report_bad_request(msg: impl Into<String>) -> DIDCommResponse {
+    DIDCommResponse::problem_report(ProblemReport::bad_request(msg.into()))
+}
+
+fn problem_report_internal(msg: impl Into<String>) -> DIDCommResponse {
+    DIDCommResponse::problem_report(ProblemReport::internal_error(msg.into()))
+}
+
+// ── disable_didcomm over DIDComm ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct DisableDidcommBody {
+    #[serde(default)]
+    drain_ttl_secs: u64,
+}
+
+pub async fn handle_disable_didcomm(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = match auth_from_message(&message, &state.acl_ks).await {
+        Ok(a) => a,
+        Err(e) => return Ok(Some(problem_report_unauthorized(e.to_string()))),
+    };
+
+    let body: DisableDidcommBody = serde_json::from_value(message.body).map_err(handler_err)?;
+
+    let result = disable_didcomm(
+        &state.config,
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.drains_ks,
+        &*state.seed_store,
+        state
+            .did_resolver
+            .as_ref()
+            .ok_or_else(|| handler_err("did_resolver unavailable"))?,
+        &state.didcomm_bridge,
+        &state.mediator_registry,
+        &state.drain_sweeper,
+        &state.telemetry,
+        &auth,
+        DisableDidcommParams {
+            drain_ttl: Duration::from_secs(body.drain_ttl_secs),
+            // Critical: this is the DIDComm transport, so the
+            // 1h-min-TTL guard fires (spec criterion #12).
+            transport: DisableTransport::Didcomm,
+        },
+        "didcomm",
+    )
+    .await;
+
+    use crate::operations::protocol::disable_didcomm::DisableDidcommError;
+    match result {
+        Ok(r) => response(
+            protocol_management::DISABLE_DIDCOMM_RESULT,
+            &serde_json::json!({
+                "new_version_id": r.new_version_id,
+                "prior_mediator_did": r.prior_mediator_did,
+                "drains_until": r.drains_until.map(|t| t.to_rfc3339()),
+            }),
+        ),
+        Err(DisableDidcommError::DidcommNotEnabled) => Ok(Some(problem_report_conflict(
+            "DIDComm is not currently enabled",
+        ))),
+        Err(DisableDidcommError::NoProtocolRemaining) => Ok(Some(problem_report_conflict(
+            "cannot disable DIDComm — REST is also disabled",
+        ))),
+        Err(DisableDidcommError::DrainTtlTooShortForDidcomm) => {
+            Ok(Some(problem_report_bad_request(
+                "drain-ttl 0s over DIDComm transport is not permitted (1h minimum)",
+            )))
+        }
+        Err(DisableDidcommError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
+        Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
+    }
+}
+
+// ── migrate_mediator over DIDComm ───────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct MigrateMediatorBody {
+    new_mediator_did: String,
+    drain_ttl_secs: u64,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    handshake_timeout_secs: Option<u64>,
+    #[serde(default)]
+    rollback: bool,
+}
+
+pub async fn handle_migrate_mediator(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = match auth_from_message(&message, &state.acl_ks).await {
+        Ok(a) => a,
+        Err(e) => return Ok(Some(problem_report_unauthorized(e.to_string()))),
+    };
+
+    let body: MigrateMediatorBody = serde_json::from_value(message.body).map_err(handler_err)?;
+
+    // For DIDComm transport we use AlwaysOkProver — see comment in
+    // routes/protocol.rs::build_live_prover. Same fallback rationale
+    // applies: building a live prover from a DIDComm handler context
+    // requires plumbing secrets/vm_ids through VtaState in the same
+    // way the route layer does it. Tracked as a follow-up.
+    let prover = AlwaysOkProver;
+    let timeout = Duration::from_secs(body.handshake_timeout_secs.unwrap_or(10));
+    let audit_kind = if body.rollback {
+        MigrateAuditKind::Rollback
+    } else {
+        MigrateAuditKind::Forward
+    };
+
+    let result = migrate_mediator(
+        &state.config,
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.drains_ks,
+        &*state.seed_store,
+        state
+            .did_resolver
+            .as_ref()
+            .ok_or_else(|| handler_err("did_resolver unavailable"))?,
+        &state.didcomm_bridge,
+        &state.mediator_registry,
+        &state.drain_sweeper,
+        &state.telemetry,
+        &prover,
+        &auth,
+        MigrateMediatorParams {
+            new_mediator_did: body.new_mediator_did,
+            drain_ttl: Duration::from_secs(body.drain_ttl_secs),
+            force: body.force,
+            handshake_timeout: timeout,
+            audit_kind,
+        },
+        "didcomm",
+    )
+    .await;
+
+    use crate::operations::protocol::migrate_mediator::MigrateMediatorError;
+    match result {
+        Ok(r) => response(
+            protocol_management::MIGRATE_MEDIATOR_RESULT,
+            &serde_json::json!({
+                "new_version_id": r.new_version_id,
+                "prior_mediator_did": r.prior_mediator_did,
+                "active_mediator_did": r.active_mediator_did,
+                "active_mediator_endpoint": r.active_mediator_endpoint,
+                "drains_until": r.drains_until.to_rfc3339(),
+            }),
+        ),
+        Err(MigrateMediatorError::DidcommNotEnabled) => Ok(Some(problem_report_conflict(
+            "DIDComm is not currently enabled",
+        ))),
+        Err(MigrateMediatorError::SameAsActive(did)) => Ok(Some(problem_report_conflict(format!(
+            "{did} is already the active mediator"
+        )))),
+        Err(MigrateMediatorError::AlreadyDraining(did)) => Ok(Some(problem_report_conflict(
+            format!("{did} is currently in drain state — cancel or rollback first"),
+        ))),
+        Err(MigrateMediatorError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
+        Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
+    }
+}
+
+// ── drain_cancel over DIDComm ───────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct DrainCancelBody {
+    mediator_did: String,
+}
+
+pub async fn handle_drain_cancel(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = match auth_from_message(&message, &state.acl_ks).await {
+        Ok(a) => a,
+        Err(e) => return Ok(Some(problem_report_unauthorized(e.to_string()))),
+    };
+    let body: DrainCancelBody = serde_json::from_value(message.body).map_err(handler_err)?;
+
+    let result = drain_cancel(
+        &state.config,
+        &state.drains_ks,
+        &state.mediator_registry,
+        &state.telemetry,
+        &auth,
+        DrainCancelParams {
+            mediator_did: body.mediator_did,
+        },
+        "didcomm",
+    )
+    .await;
+
+    use crate::messaging::registry::RegistryError;
+    use crate::operations::protocol::drain_cancel::DrainCancelError;
+    match result {
+        Ok(r) => response(
+            protocol_management::DRAIN_CANCEL_RESULT,
+            &serde_json::json!({ "mediator_did": r.mediator_did }),
+        ),
+        Err(DrainCancelError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
+        Err(DrainCancelError::Registry(RegistryError::CannotCancelActive(did))) => {
+            Ok(Some(problem_report_conflict(format!(
+                "{did} is the active mediator — use disable instead",
+            ))))
+        }
+        Err(DrainCancelError::Registry(RegistryError::NotRegistered(did))) => Ok(Some(
+            problem_report_conflict(format!("{did} is not registered (no drain entry)",)),
+        )),
+        Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
+    }
+}
+
+// ── mediator_report over DIDComm ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct MediatorReportBody {
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+}
+
+pub async fn handle_mediator_report(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = match auth_from_message(&message, &state.acl_ks).await {
+        Ok(a) => a,
+        Err(e) => return Ok(Some(problem_report_unauthorized(e.to_string()))),
+    };
+    let body: MediatorReportBody = serde_json::from_value(message.body).map_err(handler_err)?;
+
+    let parse_ts = |s: Option<String>| -> Result<Option<DateTime<Utc>>, DIDCommServiceError> {
+        match s {
+            None => Ok(None),
+            Some(s) => DateTime::parse_from_rfc3339(&s)
+                .map(|d| Some(d.with_timezone(&Utc)))
+                .map_err(handler_err),
+        }
+    };
+    let since = parse_ts(body.since)?;
+    let until = parse_ts(body.until)?;
+
+    let result = mediator_report(&state.telemetry, &auth, ReportParams { since, until }).await;
+    use crate::operations::protocol::report::ReportError;
+    match result {
+        Ok(r) => response(protocol_management::MEDIATOR_REPORT_RESULT, &r),
+        Err(ReportError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
+        Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
+    }
+}

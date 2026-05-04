@@ -103,11 +103,15 @@ impl JwtKeys {
         expiry_secs: u64,
         tee_attested: bool,
     ) -> Claims {
-        let exp = SystemTime::now()
+        // Fall back to 0 if the clock is before UNIX_EPOCH — happens on
+        // recovery boots before NTP sync. Token would expire immediately
+        // in that (very unusual) state, which is safer than panicking in
+        // a hot auth path.
+        let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + expiry_secs;
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let exp = now_secs + expiry_secs;
 
         Claims {
             aud: self.audience.clone(),
@@ -226,5 +230,207 @@ mod tests {
         let token = vtc_keys.encode(&claims).unwrap();
         assert!(vtc_keys.decode(&token).is_ok());
         assert!(vta_keys.decode(&token).is_err());
+    }
+
+    // ── Rejection tests ─────────────────────────────────────────────
+    //
+    // The textbook JWT bypasses: expired tokens, `alg: none` attacks,
+    // tampered signatures, wrong signer, missing required claims.
+    // These assert the jsonwebtoken crate's defaults are actually on
+    // in our wrapper — a misconfigured Validation would silently
+    // accept any of them.
+
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+
+    /// Rewrite a JWT's payload with extra mutations applied, re-signing
+    /// with the provided keys so the signature stays valid. Used to
+    /// test that decode rejects claim-level issues (expiry, missing
+    /// fields) rather than accidentally asserting signature failure.
+    fn reencode_with<F: FnOnce(&mut serde_json::Value)>(
+        keys: &JwtKeys,
+        claims: &Claims,
+        mutate: F,
+    ) -> String {
+        let mut payload = serde_json::to_value(claims).unwrap();
+        mutate(&mut payload);
+        let header = Header::new(Algorithm::EdDSA);
+        let header_json = serde_json::to_vec(&header).unwrap();
+        let payload_json = serde_json::to_vec(&payload).unwrap();
+        let signing_input = format!(
+            "{}.{}",
+            B64URL.encode(&header_json),
+            B64URL.encode(&payload_json)
+        );
+        // Re-sign via the wrapper's own encode path by reconstructing
+        // via jsonwebtoken. Simplest: just encode a fresh Claims whose
+        // serde repr matches our mutated payload.
+        let mutated: Claims = serde_json::from_value(payload).unwrap();
+        let _ = signing_input;
+        keys.encode(&mutated).unwrap()
+    }
+
+    #[test]
+    fn decode_rejects_expired_token() {
+        let keys = test_keys();
+        let expired = keys.new_claims(
+            "did:key:z6Mk".into(),
+            "sess-expired".into(),
+            "admin".into(),
+            vec![],
+            900,
+            false,
+        );
+        // Drop exp into the past before signing.
+        let past_token = reencode_with(&keys, &expired, |payload| {
+            payload["exp"] = serde_json::json!(1);
+        });
+
+        let err = keys
+            .decode(&past_token)
+            .expect_err("expired token must be rejected");
+        assert!(matches!(err, AppError::Unauthorized(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn decode_rejects_tampered_signature() {
+        let keys = test_keys();
+        let claims = keys.new_claims(
+            "did:key:z6Mk".into(),
+            "sess-tamper".into(),
+            "admin".into(),
+            vec![],
+            900,
+            false,
+        );
+        let token = keys.encode(&claims).unwrap();
+
+        // Flip one byte in the signature segment.
+        let mut parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        let mut sig_bytes = B64URL.decode(parts[2]).unwrap();
+        sig_bytes[0] ^= 0x01;
+        let tampered_sig = B64URL.encode(&sig_bytes);
+        parts[2] = &tampered_sig;
+        let tampered = parts.join(".");
+
+        let err = keys
+            .decode(&tampered)
+            .expect_err("tampered signature must be rejected");
+        assert!(matches!(err, AppError::Unauthorized(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn decode_rejects_alg_none_header() {
+        // Classic JWT bypass: forge a header claiming alg=none and
+        // omit the signature. The decoder must reject it — only EdDSA
+        // is accepted. A naive `Validation::default()` would allow
+        // alg=none in some jsonwebtoken versions; our wrapper pins
+        // Algorithm::EdDSA which prevents that.
+        let keys = test_keys();
+        let claims = keys.new_claims(
+            "did:key:z6Mk".into(),
+            "sess-none".into(),
+            "admin".into(),
+            vec![],
+            900,
+            false,
+        );
+        let payload = serde_json::to_vec(&claims).unwrap();
+        let none_header = r#"{"typ":"JWT","alg":"none"}"#;
+        let header_b64 = B64URL.encode(none_header.as_bytes());
+        let payload_b64 = B64URL.encode(&payload);
+        // No signature — some none-accepting parsers still want the
+        // trailing dot. Try both shapes.
+        for forged in [
+            format!("{header_b64}.{payload_b64}."),
+            format!("{header_b64}.{payload_b64}"),
+        ] {
+            let err = keys.decode(&forged).expect_err("alg=none must be rejected");
+            assert!(
+                matches!(err, AppError::Unauthorized(_)),
+                "got {err:?} for shape {forged:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_rejects_foreign_signer() {
+        // A token signed by a different JWT key must not decode,
+        // regardless of audience match.
+        let genuine = test_keys();
+        let attacker = JwtKeys::from_ed25519_bytes(&[0xAAu8; 32], "VTA").unwrap();
+
+        let claims = attacker.new_claims(
+            "did:key:zForged".into(),
+            "sess-forged".into(),
+            "admin".into(),
+            vec![],
+            900,
+            false,
+        );
+        let forged = attacker.encode(&claims).unwrap();
+
+        let err = genuine
+            .decode(&forged)
+            .expect_err("token signed by foreign key must be rejected");
+        assert!(matches!(err, AppError::Unauthorized(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn decode_rejects_missing_required_claims() {
+        // set_required_spec_claims(["exp","sub","aud","session_id","role"])
+        // is load-bearing — a caller that drops any of these shouldn't
+        // slip through. Build a JWT manually with no `exp` and confirm
+        // decode rejects it.
+        let keys = test_keys();
+        let claims = keys.new_claims(
+            "did:key:z6Mk".into(),
+            "sess-missing".into(),
+            "admin".into(),
+            vec![],
+            900,
+            false,
+        );
+        // Encode normally, then rewrite the payload without `exp`.
+        let mut payload = serde_json::to_value(&claims).unwrap();
+        payload.as_object_mut().unwrap().remove("exp");
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let header = Header::new(Algorithm::EdDSA);
+        let header_bytes = serde_json::to_vec(&header).unwrap();
+
+        // Naively build + sign with the SAME keypair so only the
+        // missing-claim check can reject this.
+        let signing_input = format!(
+            "{}.{}",
+            B64URL.encode(&header_bytes),
+            B64URL.encode(&payload_bytes)
+        );
+        // Compute the raw Ed25519 signature over the signing input.
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+        use ed25519_dalek::Signer;
+        let sig = signing_key.sign(signing_input.as_bytes());
+        let forged = format!("{signing_input}.{}", B64URL.encode(sig.to_bytes()));
+
+        let err = keys
+            .decode(&forged)
+            .expect_err("token missing `exp` must be rejected");
+        assert!(matches!(err, AppError::Unauthorized(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn decode_rejects_empty_token() {
+        let keys = test_keys();
+        assert!(matches!(keys.decode(""), Err(AppError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn decode_rejects_malformed_structure() {
+        let keys = test_keys();
+        for bad in ["not-a-jwt", "only.two", "four.dot.separated.parts"] {
+            let err = keys
+                .decode(bad)
+                .expect_err(&format!("{bad:?} must be rejected"));
+            assert!(matches!(err, AppError::Unauthorized(_)), "got {err:?}");
+        }
     }
 }

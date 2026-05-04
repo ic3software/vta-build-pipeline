@@ -7,9 +7,9 @@ use tracing::info;
 
 use crate::acl::{
     AclEntry, Role, delete_acl_entry, get_acl_entry, is_acl_entry_visible, list_acl_entries,
-    store_acl_entry, validate_acl_modification,
+    store_acl_entry, validate_acl_modification, validate_role_assignment,
 };
-use crate::auth::{ManageAuth, session::now_epoch};
+use crate::auth::{AdminAuth, ManageAuth, session::now_epoch};
 use crate::error::AppError;
 use crate::server::AppState;
 
@@ -28,6 +28,8 @@ pub struct AclEntryResponse {
     pub allowed_contexts: Vec<String>,
     pub created_at: u64,
     pub created_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 impl From<AclEntry> for AclEntryResponse {
@@ -39,6 +41,7 @@ impl From<AclEntry> for AclEntryResponse {
             allowed_contexts: e.allowed_contexts,
             created_at: e.created_at,
             created_by: e.created_by,
+            expires_at: e.expires_at,
         }
     }
 }
@@ -77,6 +80,8 @@ pub struct CreateAclRequest {
     pub label: Option<String>,
     #[serde(default)]
     pub allowed_contexts: Vec<String>,
+    #[serde(default)]
+    pub expires_at: Option<u64>,
 }
 
 pub async fn create_acl(
@@ -84,6 +89,9 @@ pub async fn create_acl(
     State(state): State<AppState>,
     Json(req): Json<CreateAclRequest>,
 ) -> Result<(StatusCode, Json<AclEntryResponse>), AppError> {
+    // Block Initiators from granting Admin — role ↔ context bound checks must
+    // run before we touch storage.
+    validate_role_assignment(&auth.0, &req.role)?;
     validate_acl_modification(&auth.0, &req.allowed_contexts)?;
 
     let acl = state.acl_ks.clone();
@@ -103,6 +111,7 @@ pub async fn create_acl(
         allowed_contexts: req.allowed_contexts,
         created_at: now_epoch(),
         created_by: auth.0.did,
+        expires_at: req.expires_at,
     };
 
     store_acl_entry(&acl, &entry).await?;
@@ -141,7 +150,10 @@ pub struct UpdateAclRequest {
 }
 
 pub async fn update_acl(
-    auth: ManageAuth,
+    // Modifying an ACL entry can downgrade an existing admin or shrink their
+    // `allowed_contexts`. Gate on Admin so an Initiator can't tamper with
+    // admin entries they happen to see (creation stays on `ManageAuth`).
+    auth: AdminAuth,
     State(state): State<AppState>,
     Path(did): Path<String>,
     Json(req): Json<UpdateAclRequest>,
@@ -159,6 +171,7 @@ pub async fn update_acl(
     }
 
     if let Some(role) = req.role {
+        validate_role_assignment(&auth.0, &role)?;
         entry.role = role;
     }
     if let Some(label) = req.label {
@@ -206,4 +219,166 @@ pub async fn delete_acl(
 
     info!(caller = %auth.0.did, did = %did, "ACL entry deleted");
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Wire-shape tests for the ACL route bodies. Full route integration
+    //! (spawning the router with a real AppState) requires a test-support
+    //! harness paralleling vta-service/src/test_support.rs; that's tracked
+    //! separately. These tests catch serde regressions — e.g. someone
+    //! renaming a field, changing a default, or breaking backward
+    //! compatibility with the CLI clients that consume these types.
+    use super::*;
+    use crate::acl::Role;
+    use serde_json::json;
+
+    // ── CreateAclRequest ────────────────────────────────────────────
+
+    #[test]
+    fn create_acl_request_parses_minimal_body() {
+        let body = json!({ "did": "did:key:zABC", "role": "admin" });
+        let req: CreateAclRequest = serde_json::from_value(body).expect("minimal body");
+        assert_eq!(req.did, "did:key:zABC");
+        assert_eq!(req.role, Role::Admin);
+        assert_eq!(req.label, None);
+        assert!(req.allowed_contexts.is_empty(), "defaults to empty");
+        assert_eq!(req.expires_at, None);
+    }
+
+    #[test]
+    fn create_acl_request_parses_full_body() {
+        let body = json!({
+            "did": "did:key:zABC",
+            "role": "initiator",
+            "label": "ops lead",
+            "allowed_contexts": ["ctx1", "ctx2"],
+            "expires_at": 1_800_000_000u64,
+        });
+        let req: CreateAclRequest = serde_json::from_value(body).expect("full body");
+        assert_eq!(req.role, Role::Initiator);
+        assert_eq!(req.label.as_deref(), Some("ops lead"));
+        assert_eq!(req.allowed_contexts, vec!["ctx1", "ctx2"]);
+        assert_eq!(req.expires_at, Some(1_800_000_000));
+    }
+
+    #[test]
+    fn create_acl_request_rejects_unknown_role() {
+        let body = json!({ "did": "did:key:zA", "role": "godmode" });
+        let err = serde_json::from_value::<CreateAclRequest>(body)
+            .expect_err("unknown role must not parse");
+        // This also catches a regression where someone adds a wildcard
+        // match to Role parsing that accepts arbitrary strings.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("godmode") || msg.contains("variant"),
+            "got {msg}"
+        );
+    }
+
+    #[test]
+    fn create_acl_request_rejects_missing_required() {
+        // `did` is mandatory (no default). Dropping it must fail parse.
+        let body = json!({ "role": "admin" });
+        serde_json::from_value::<CreateAclRequest>(body)
+            .expect_err("missing `did` must be rejected");
+    }
+
+    // ── UpdateAclRequest ───────────────────────────────────────────
+
+    #[test]
+    fn update_acl_request_all_fields_optional() {
+        let empty = json!({});
+        let req: UpdateAclRequest = serde_json::from_value(empty).expect("empty body parses");
+        assert!(req.role.is_none());
+        assert!(req.label.is_none());
+        assert!(req.allowed_contexts.is_none());
+    }
+
+    #[test]
+    fn update_acl_request_parses_role_only() {
+        let body = json!({ "role": "reader" });
+        let req: UpdateAclRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.role, Some(Role::Reader));
+    }
+
+    // ── ListAclQuery ───────────────────────────────────────────────
+
+    #[test]
+    fn list_acl_query_context_is_optional() {
+        let q: ListAclQuery = serde_json::from_value(json!({})).unwrap();
+        assert!(q.context.is_none());
+
+        let q: ListAclQuery = serde_json::from_value(json!({ "context": "app1" })).unwrap();
+        assert_eq!(q.context.as_deref(), Some("app1"));
+    }
+
+    // ── AclEntryResponse ───────────────────────────────────────────
+
+    #[test]
+    fn acl_entry_response_serializes_with_stable_field_names() {
+        // Caller-facing JSON shape is a compatibility contract with CLI
+        // clients. Field renames here break CLIs in the field.
+        let entry = AclEntry {
+            did: "did:key:zABC".into(),
+            role: Role::Admin,
+            label: Some("test".into()),
+            allowed_contexts: vec!["ctx1".into()],
+            created_at: 1_700_000_000,
+            created_by: "did:key:zSetup".into(),
+            expires_at: Some(1_800_000_000),
+        };
+        let resp = AclEntryResponse::from(entry);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["did"], "did:key:zABC");
+        assert_eq!(json["role"], "admin");
+        assert_eq!(json["label"], "test");
+        assert_eq!(json["allowed_contexts"], json!(["ctx1"]));
+        assert_eq!(json["created_at"], 1_700_000_000);
+        assert_eq!(json["created_by"], "did:key:zSetup");
+        assert_eq!(json["expires_at"], 1_800_000_000);
+    }
+
+    #[test]
+    fn acl_entry_response_omits_expires_at_when_permanent() {
+        // Permanent entries (no expires_at) should not include the field
+        // at all — skip_serializing_if is load-bearing for wire
+        // compatibility with older clients.
+        let entry = AclEntry {
+            did: "did:key:zPerm".into(),
+            role: Role::Admin,
+            label: None,
+            allowed_contexts: vec![],
+            created_at: 1_700_000_000,
+            created_by: "did:key:zSetup".into(),
+            expires_at: None,
+        };
+        let resp = AclEntryResponse::from(entry);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(
+            json.get("expires_at").is_none(),
+            "permanent entries must omit expires_at — got {json}"
+        );
+    }
+
+    // ── AclListResponse round-trip ─────────────────────────────────
+
+    #[test]
+    fn acl_list_response_round_trips() {
+        let entries = vec![AclEntryResponse {
+            did: "did:key:zA".into(),
+            role: Role::Reader,
+            label: None,
+            allowed_contexts: vec![],
+            created_at: 0,
+            created_by: "did:key:zS".into(),
+            expires_at: None,
+        }];
+        let resp = AclListResponse { entries };
+        let json = serde_json::to_string(&resp).unwrap();
+        // Top-level key is `entries`, not `acl` or `items` — CLI clients
+        // parse this exact shape.
+        assert!(json.contains(r#""entries":"#), "got {json}");
+        assert!(json.contains(r#""role":"reader""#));
+    }
 }

@@ -28,6 +28,7 @@ fn to_result_body(e: &AclEntry) -> CreateAclResultBody {
         allowed_contexts: e.allowed_contexts.clone(),
         created_at: e.created_at,
         created_by: e.created_by.clone(),
+        expires_at: e.expires_at,
     }
 }
 
@@ -40,6 +41,7 @@ pub async fn create_acl(
     role: Role,
     label: Option<String>,
     allowed_contexts: Vec<String>,
+    expires_at: Option<u64>,
     channel: &str,
 ) -> Result<CreateAclResultBody, AppError> {
     auth.require_manage()?;
@@ -59,6 +61,7 @@ pub async fn create_acl(
         allowed_contexts,
         created_at: now_epoch(),
         created_by: auth.did.clone(),
+        expires_at,
     };
 
     store_acl_entry(acl_ks, &entry).await?;
@@ -133,7 +136,11 @@ pub async fn update_acl(
     params: UpdateAclParams,
     channel: &str,
 ) -> Result<CreateAclResultBody, AppError> {
-    auth.require_manage()?;
+    // Modifying an ACL entry can downgrade an existing admin's role or
+    // shrink their `allowed_contexts`. That's a privilege-tamper surface
+    // — narrow it to Admin callers (creation still accepts Initiator via
+    // `require_manage` so operators can grant Reader/Application access).
+    auth.require_admin()?;
 
     let mut entry = get_acl_entry(acl_ks, did)
         .await?

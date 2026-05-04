@@ -4,10 +4,13 @@ pub mod audit_management;
 pub mod auth;
 pub mod backup_management;
 pub mod context_management;
-pub mod credential_management;
 pub mod did_management;
+pub mod did_template_management;
 pub mod discovery;
 pub mod key_management;
+pub mod protocol_management;
+#[cfg(feature = "provision-integration")]
+pub mod provision_integration_management;
 pub mod seed_management;
 pub mod vta_management;
 
@@ -15,6 +18,17 @@ pub mod vta_management;
 pub const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
 pub const TRUST_PING_TYPE: &str = "https://didcomm.org/trust-ping/2.0/ping";
 pub const MESSAGE_PICKUP_STATUS_TYPE: &str = "https://didcomm.org/messagepickup/3.0/status";
+
+/// Problem-report `code` values emitted by VTA/VTC services. Kept in sync with
+/// the `affinidi_messaging_didcomm_service::problem_report::codes` taxonomy so
+/// the SDK can classify errors without depending on the server-side crate.
+pub mod problem_report_codes {
+    pub const UNAUTHORIZED: &str = "e.p.msg.unauthorized";
+    pub const BAD_REQUEST: &str = "e.p.msg.bad-request";
+    pub const NOT_FOUND: &str = "e.p.msg.not-found";
+    pub const CONFLICT: &str = "e.p.msg.conflict";
+    pub const INTERNAL: &str = "e.p.msg.internal-error";
+}
 
 /// Extract code and comment from a problem-report message body.
 pub fn extract_problem_report(body: &serde_json::Value) -> (String, String) {

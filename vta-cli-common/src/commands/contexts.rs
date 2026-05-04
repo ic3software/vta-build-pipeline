@@ -5,11 +5,13 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Cell, Row, Table},
 };
-use vta_sdk::client::{CreateDidWebvhRequest, UpdateContextRequest};
+use vta_sdk::client::{ContextResponse, CreateDidWebvhRequest, UpdateContextRequest};
 use vta_sdk::context_provision::{ContextProvisionBundle, ProvisionedDid};
 use vta_sdk::prelude::*;
+use vta_sdk::sealed_transfer::SealedPayloadV1;
 
-use crate::render::print_widget;
+use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
+use crate::sealed_producer::{SealedRecipient, seal_for_recipient};
 
 pub struct ProvisionDidOptions {
     pub server_id: Option<String>,
@@ -25,6 +27,7 @@ pub async fn cmd_context_bootstrap(
     name: &str,
     description: Option<String>,
     admin_label: Option<String>,
+    recipient: SealedRecipient,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx_req = CreateContextRequest::new(id, name);
     if let Some(desc) = description {
@@ -36,28 +39,72 @@ pub async fn cmd_context_bootstrap(
     println!("  Name:      {}", ctx.name);
     println!("  Base Path: {}", ctx.base_path);
 
-    let mut cred_req = GenerateCredentialsRequest::new("admin").contexts(vec![id.to_string()]);
+    // Fetch VTA config so the minted CredentialBundle carries VTA DID/URL.
+    let config = client.get_config().await?;
+    let vta_did = config
+        .community_vta_did
+        .clone()
+        .ok_or("VTA DID not configured — cannot mint admin credential")?;
+    let vta_url = config.public_url.clone();
+
+    // Mint admin did:key locally + register ACL. The VTA never sees the
+    // private half; the full bundle reaches the recipient via sealed transfer.
+    let (admin_bundle, admin_did) = crate::local_keygen::generate_admin_did_key(vta_did, vta_url);
+    let mut acl_req =
+        vta_sdk::client::CreateAclRequest::new(&admin_did, "admin").contexts(vec![id.to_string()]);
     if let Some(l) = admin_label {
-        cred_req = cred_req.label(l);
+        acl_req = acl_req.label(l);
     }
-    let resp = client.generate_credentials(cred_req).await?;
+    client.create_acl(acl_req).await?;
+
+    let sealed = seal_for_recipient(
+        &recipient,
+        &SealedPayloadV1::AdminCredential(Box::new(admin_bundle)),
+    )
+    .await?;
     println!();
     println!("Admin credential created:");
-    println!("  DID:  {}", resp.did);
+    println!("  DID:  {admin_did}");
     println!("  Role: admin");
+    if let Some(ref label) = recipient.label {
+        println!("  Recipient: {label}");
+    }
     println!();
-    println!("Credential (one-time secret — save this now):");
-    println!("{}", resp.credential);
 
+    crate::sealed_producer::emit_sealed_output(&sealed, None)?;
     Ok(())
 }
 
-pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::error::Error>> {
-    let resp = client.list_contexts().await?;
-
-    if resp.contexts.is_empty() {
+/// Render a list of context records — table view by default, full
+/// `key: value` blocks when `--full-display` is set.
+///
+/// Shared by the online (`pnm contexts list`, REST) and offline
+/// (`vta contexts list`, keystore-direct) paths so both render
+/// identically.
+pub fn render_context_list(contexts: &[ContextResponse]) {
+    if contexts.is_empty() {
         println!("No contexts found.");
-        return Ok(());
+        return;
+    }
+
+    if is_full_display() {
+        print_full_list_title("Contexts", contexts.len());
+        for ctx in contexts {
+            let did = ctx.did.as_deref().unwrap_or("—");
+            let created = ctx
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string();
+            print_full_entry(&[
+                ("ID", &ctx.id),
+                ("Name", &ctx.name),
+                ("DID", did),
+                ("Base Path", &ctx.base_path),
+                ("Created", &created),
+            ]);
+        }
+        return;
     }
 
     let header_style = Style::default()
@@ -67,12 +114,15 @@ pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::err
         .style(header_style)
         .bottom_margin(1);
 
-    let rows: Vec<Row> = resp
-        .contexts
+    let rows: Vec<Row> = contexts
         .iter()
         .map(|ctx| {
             let did = ctx.did.clone().unwrap_or_else(|| "\u{2014}".into());
-            let created = ctx.created_at.format("%Y-%m-%d").to_string();
+            let created = ctx
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string();
 
             Row::new(vec![
                 Cell::from(ctx.id.clone()),
@@ -84,14 +134,17 @@ pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::err
         })
         .collect();
 
-    let title = format!(" Contexts ({}) ", resp.contexts.len());
+    let title = format!(" Contexts ({}) ", contexts.len());
 
+    // DID field carries full did:webvh / did:key values (40+ chars).
+    // Use `Min` so it expands on wide terminals rather than truncating
+    // at the former fixed 30-char width.
     let table = Table::new(
         rows,
         [
-            Constraint::Length(16), // ID
+            Constraint::Min(16),    // ID
             Constraint::Min(20),    // Name
-            Constraint::Length(30), // DID
+            Constraint::Min(40),    // DID
             Constraint::Length(16), // Base Path
             Constraint::Length(10), // Created
         ],
@@ -104,9 +157,38 @@ pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::err
             .border_style(Style::default().fg(Color::DarkGray)),
     );
 
-    let height = resp.contexts.len() as u16 + 4;
+    let height = contexts.len() as u16 + 4;
     print_widget(table, height);
+}
 
+/// Render a single context record's details, used by `get` and the
+/// success path of `update`. Shared by online + offline call sites.
+pub fn render_context_record(ctx: &ContextResponse) {
+    println!("ID:          {}", ctx.id);
+    println!("Name:        {}", ctx.name);
+    println!("DID:         {}", ctx.did.as_deref().unwrap_or("(not set)"));
+    println!(
+        "Description: {}",
+        ctx.description.as_deref().unwrap_or("(not set)")
+    );
+    println!("Base Path:   {}", ctx.base_path);
+    println!(
+        "Created At:  {}",
+        crate::duration::format_local_datetime(ctx.created_at)
+    );
+    println!(
+        "Updated At:  {}",
+        crate::duration::format_local_datetime(ctx.updated_at)
+    );
+}
+
+pub async fn cmd_context_list(client: &VtaClient) -> Result<(), Box<dyn std::error::Error>> {
+    let resp = client.list_contexts().await?;
+    if crate::render::is_json_output() {
+        crate::render::print_json(&resp.contexts)?;
+        return Ok(());
+    }
+    render_context_list(&resp.contexts);
     Ok(())
 }
 
@@ -115,20 +197,39 @@ pub async fn cmd_context_get(
     id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resp = client.get_context(id).await?;
-    println!("ID:          {}", resp.id);
-    println!("Name:        {}", resp.name);
-    println!(
-        "DID:         {}",
-        resp.did.as_deref().unwrap_or("(not set)")
-    );
-    println!(
-        "Description: {}",
-        resp.description.as_deref().unwrap_or("(not set)")
-    );
-    println!("Base Path:   {}", resp.base_path);
-    println!("Created At:  {}", resp.created_at);
-    println!("Updated At:  {}", resp.updated_at);
+    render_context_record(&resp);
     Ok(())
+}
+
+/// Options for optionally creating a context-scoped admin ACL entry as
+/// part of `pnm contexts create`.
+///
+/// Omit the entire struct to create the context without touching the ACL —
+/// the historical behaviour. Supply a [`AdminAclOptions::did`] to atomically
+/// create an `admin`-role ACL entry scoped to the new context in the same
+/// CLI invocation.
+///
+/// Setting [`AdminAclOptions::expires_at`] flips the entry from **permanent**
+/// to a **setup ACL** that auto-expires (pruned by the VTA's ACL sweeper) if
+/// the admin never authenticates and rotates to a fresh did:key.
+#[derive(Debug, Default, Clone)]
+pub struct AdminAclOptions {
+    /// DID to grant admin access to. Must start with `did:`.
+    pub did: Option<String>,
+    /// Human-readable label stored on the ACL entry.
+    pub label: Option<String>,
+    /// Unix-epoch seconds at which the entry auto-expires. `None` = permanent.
+    pub expires_at: Option<u64>,
+    /// Raw `--admin-expires` input (e.g. `"1h"`). Preserved alongside the
+    /// resolved `expires_at` so conflict hints can re-emit the operator's
+    /// original duration verbatim instead of a drift-skewed seconds value.
+    pub expires_duration: Option<String>,
+}
+
+impl AdminAclOptions {
+    fn is_requested(&self) -> bool {
+        self.did.is_some()
+    }
 }
 
 pub async fn cmd_context_create(
@@ -136,17 +237,100 @@ pub async fn cmd_context_create(
     id: &str,
     name: &str,
     description: Option<String>,
+    admin: AdminAclOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::render::{RESET, YELLOW};
+    use vta_sdk::error::VtaError;
+
     let req = CreateContextRequest {
         id: id.to_string(),
         name: name.to_string(),
         description,
     };
-    let resp = client.create_context(req).await?;
+    let resp = match client.create_context(req).await {
+        Ok(r) => r,
+        // Friendly path when the operator's real intent was "grant this DID
+        // admin access to this context": the context already exists, so the
+        // scaffolding command is the wrong tool — point them at the ACL
+        // command and exit cleanly so repeated provisioning scripts don't
+        // choke on second runs.
+        Err(VtaError::Conflict(_)) if admin.is_requested() => {
+            let did = admin.did.as_deref().unwrap_or_default();
+            let bin = crate::render::bin_name();
+            eprintln!(
+                "{YELLOW}\u{26a0}{RESET}  Context '{id}' already exists — skipping context creation."
+            );
+            eprintln!();
+            eprintln!("  The --admin-did was NOT added. To grant admin access to an existing");
+            eprintln!("  context, use the ACL command directly:");
+            eprintln!();
+            let mut hint = format!("    {bin} acl create --did {did} --role admin --contexts {id}");
+            if let Some(label) = admin.label.as_deref() {
+                hint.push_str(&format!(" --label '{label}'"));
+            }
+            match (admin.expires_duration.as_deref(), admin.expires_at) {
+                // Prefer the raw duration the user typed — any latency between
+                // --admin-expires being parsed and the conflict firing would
+                // otherwise drift the re-rendered seconds (e.g. `1h` → `3599s`).
+                (Some(raw), _) => hint.push_str(&format!(" --expires {raw}")),
+                (None, Some(expires_at)) => {
+                    let remaining = expires_at.saturating_sub(crate::duration::now_unix());
+                    hint.push_str(&format!(" --expires {remaining}s"));
+                }
+                (None, None) => {}
+            }
+            eprintln!("{hint}");
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
     println!("Context created:");
     println!("  ID:        {}", resp.id);
     println!("  Name:      {}", resp.name);
     println!("  Base Path: {}", resp.base_path);
+
+    if admin.is_requested() {
+        let did = admin.did.as_deref().unwrap_or_default();
+        if !did.starts_with("did:") {
+            return Err(format!(
+                "--admin-did must start with `did:` (got {did:?}) — context was created but no ACL entry was added"
+            )
+            .into());
+        }
+        let mut acl_req =
+            vta_sdk::client::CreateAclRequest::new(did, "admin").contexts(vec![id.to_string()]);
+        if let Some(label) = admin.label.as_deref() {
+            acl_req = acl_req.label(label);
+        }
+        if let Some(expires_at) = admin.expires_at {
+            acl_req = acl_req.expires_at(expires_at);
+        }
+        let acl = client.create_acl(acl_req).await?;
+
+        println!();
+        println!("Admin ACL entry created:");
+        println!("  DID:        {}", acl.did);
+        println!("  Role:       {}", acl.role);
+        println!("  Contexts:   {}", acl.allowed_contexts.join(", "));
+        if let Some(ref label) = acl.label {
+            println!("  Label:      {label}");
+        }
+        match acl.expires_at {
+            Some(secs) => {
+                println!(
+                    "  Expires at: {} ({}) — setup ACL",
+                    crate::duration::format_local_time(secs),
+                    crate::duration::format_remaining(secs),
+                );
+                println!();
+                println!("  The admin should authenticate before expiry. On first successful");
+                println!("  connect PNM rotates to a fresh long-lived did:key and replaces this");
+                println!("  temporary entry with a permanent one.");
+            }
+            None => println!("  Expires at: (permanent)"),
+        }
+    }
+
     Ok(())
 }
 
@@ -164,17 +348,7 @@ pub async fn cmd_context_update(
     };
     let resp = client.update_context(id, req).await?;
     println!("Context updated:");
-    println!("  ID:          {}", resp.id);
-    println!("  Name:        {}", resp.name);
-    println!(
-        "  DID:         {}",
-        resp.did.as_deref().unwrap_or("(not set)")
-    );
-    println!(
-        "  Description: {}",
-        resp.description.as_deref().unwrap_or("(not set)")
-    );
-    println!("  Updated At:  {}", resp.updated_at);
+    render_context_record(&resp);
     Ok(())
 }
 
@@ -190,8 +364,85 @@ pub async fn cmd_context_update_did(
         "  DID:        {}",
         resp.did.as_deref().unwrap_or("(not set)")
     );
-    println!("  Updated At: {}", resp.updated_at);
+    println!(
+        "  Updated At: {}",
+        crate::duration::format_local_datetime(resp.updated_at)
+    );
     Ok(())
+}
+
+/// Print the human-readable resource preview shown before context
+/// deletion. Returns `true` when the preview lists any resources
+/// (i.e. the caller should prompt for confirmation unless `--force`).
+///
+/// Shared by online + offline delete paths so both warn about exactly
+/// the same resource classes.
+pub fn render_delete_context_preview(
+    id: &str,
+    preview: &vta_sdk::protocols::context_management::delete::DeleteContextPreviewResultBody,
+) -> bool {
+    let has_resources = !preview.keys.is_empty()
+        || !preview.webvh_dids.is_empty()
+        || !preview.acl_entries_removed.is_empty()
+        || !preview.acl_entries_updated.is_empty();
+
+    if !has_resources {
+        return false;
+    }
+
+    println!(
+        "Deleting context '{}' will remove the following resources:\n",
+        id
+    );
+
+    if !preview.keys.is_empty() {
+        println!("  Keys ({}):", preview.keys.len());
+        for key in &preview.keys {
+            println!("    - {key}");
+        }
+    }
+
+    if !preview.webvh_dids.is_empty() {
+        println!("  WebVH DIDs ({}):", preview.webvh_dids.len());
+        for did in &preview.webvh_dids {
+            println!("    - {did}");
+        }
+    }
+
+    if !preview.acl_entries_removed.is_empty() {
+        println!(
+            "  ACL entries removed ({}):",
+            preview.acl_entries_removed.len()
+        );
+        for did in &preview.acl_entries_removed {
+            println!("    - {did}");
+        }
+    }
+
+    if !preview.acl_entries_updated.is_empty() {
+        println!(
+            "  ACL entries updated (context removed from access list) ({}):",
+            preview.acl_entries_updated.len()
+        );
+        for did in &preview.acl_entries_updated {
+            println!("    - {did}");
+        }
+    }
+
+    println!();
+    true
+}
+
+/// Read a `[y/N]` reply from stdin. Returns `true` for `y` / `yes`,
+/// `false` otherwise. Shared by the destructive shared commands so
+/// the prompt wording stays consistent.
+pub fn confirm_destructive(prompt: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    print!("{prompt} [y/N] ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+    Ok(input == "y" || input == "yes")
 }
 
 pub async fn cmd_context_delete(
@@ -202,66 +453,11 @@ pub async fn cmd_context_delete(
     // Fetch a preview of what will be removed
     let preview = client.preview_delete_context(id).await?;
 
-    let has_resources = !preview.keys.is_empty()
-        || !preview.webvh_dids.is_empty()
-        || !preview.acl_entries_removed.is_empty()
-        || !preview.acl_entries_updated.is_empty();
+    let has_resources = render_delete_context_preview(id, &preview);
 
-    if has_resources {
-        println!(
-            "Deleting context '{}' will remove the following resources:\n",
-            id
-        );
-
-        if !preview.keys.is_empty() {
-            println!("  Keys ({}):", preview.keys.len());
-            for key in &preview.keys {
-                println!("    - {key}");
-            }
-        }
-
-        if !preview.webvh_dids.is_empty() {
-            println!("  WebVH DIDs ({}):", preview.webvh_dids.len());
-            for did in &preview.webvh_dids {
-                println!("    - {did}");
-            }
-        }
-
-        if !preview.acl_entries_removed.is_empty() {
-            println!(
-                "  ACL entries removed ({}):",
-                preview.acl_entries_removed.len()
-            );
-            for did in &preview.acl_entries_removed {
-                println!("    - {did}");
-            }
-        }
-
-        if !preview.acl_entries_updated.is_empty() {
-            println!(
-                "  ACL entries updated (context removed from access list) ({}):",
-                preview.acl_entries_updated.len()
-            );
-            for did in &preview.acl_entries_updated {
-                println!("    - {did}");
-            }
-        }
-
-        println!();
-
-        if !force {
-            print!("Proceed with deletion? [y/N] ");
-            io::stdout().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            let input = input.trim().to_lowercase();
-
-            if input != "y" && input != "yes" {
-                println!("Aborted.");
-                return Ok(());
-            }
-        }
+    if has_resources && !force && !confirm_destructive("Proceed with deletion?")? {
+        println!("Aborted.");
+        return Ok(());
     }
 
     client.delete_context(id, true).await?;
@@ -276,6 +472,7 @@ pub async fn cmd_context_provision(
     description: Option<String>,
     admin_label: Option<String>,
     did_opts: Option<ProvisionDidOptions>,
+    recipient: SealedRecipient,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Create the context
     eprintln!("Creating context '{id}'...");
@@ -285,16 +482,27 @@ pub async fn cmd_context_provision(
     }
     client.create_context(ctx_req).await?;
 
-    // 2. Generate admin credentials scoped to this context
-    eprintln!("Generating admin credentials...");
-    let mut cred_req = GenerateCredentialsRequest::new("admin").contexts(vec![id.to_string()]);
-    if let Some(l) = admin_label {
-        cred_req = cred_req.label(l);
-    }
-    let cred_resp = client.generate_credentials(cred_req).await?;
-
-    // 3. Fetch VTA config for URL/DID
+    // 2. Fetch VTA config for URL/DID (needed to build the admin credential).
     let config = client.get_config().await?;
+    let vta_did = config
+        .community_vta_did
+        .clone()
+        .ok_or("VTA DID not configured — cannot mint admin credential")?;
+    let vta_url = config.public_url.clone();
+
+    // 3. Generate admin did:key locally (private key never crosses the wire)
+    //    and register it with the VTA via POST /acl. This replaces the
+    //    pre-5c6 `POST /auth/credentials` round-trip that returned a base64
+    //    CredentialBundle in a plaintext JSON body.
+    eprintln!("Minting local admin credential and registering ACL...");
+    let (admin_credential, admin_did) =
+        crate::local_keygen::generate_admin_did_key(vta_did, vta_url);
+    let mut acl_req =
+        vta_sdk::client::CreateAclRequest::new(&admin_did, "admin").contexts(vec![id.to_string()]);
+    if let Some(l) = admin_label {
+        acl_req = acl_req.label(l);
+    }
+    client.create_acl(acl_req).await?;
 
     // 4. Optionally create a DID and collect its secrets
     let provisioned_did = if let Some(opts) = did_opts {
@@ -314,6 +522,9 @@ pub async fn cmd_context_provision(
             set_primary: true,
             signing_key_id: None,
             ka_key_id: None,
+            template: None,
+            template_context: None,
+            template_vars: std::collections::HashMap::new(),
         };
         let did_result = client.create_did_webvh(req).await?;
 
@@ -351,57 +562,30 @@ pub async fn cmd_context_provision(
         context_name: name.to_string(),
         vta_url: config.public_url,
         vta_did: config.community_vta_did,
-        credential: cred_resp.credential,
-        admin_did: cred_resp.did,
+        credential: admin_credential,
+        admin_did,
         did: provisioned_did,
     };
 
-    let encoded = bundle.encode().map_err(|e| format!("{e}"))?;
-
-    // 6. Output
-    eprintln!();
-    eprintln!("\x1b[1;33m╔══════════════════════════════════════════════════════════════╗");
-    eprintln!("║  Context provision bundle (contains secrets — save securely) ║");
-    eprintln!("╚══════════════════════════════════════════════════════════════╝\x1b[0m");
-    eprintln!();
-    eprintln!("  Context:   {} ({})", id, name);
-    eprintln!("  Admin DID: {}", bundle.admin_did);
-    if let Some(ref did) = bundle.did {
-        eprintln!("  DID:       {}", did.id);
-        if did.log_entry.is_some() {
-            eprintln!("             (includes log entry for self-hosting)");
-        }
-    }
-    eprintln!();
-    println!("{encoded}");
-    eprintln!();
-
-    Ok(())
+    // 6. Seal and emit via the shared helper
+    crate::sealed_producer::emit_context_provision_bundle(bundle, &recipient, None).await
 }
 
 /// Build a `CredentialBundle` from a VTA-stored key, deriving its `did:key`.
+///
+/// The REST fetch is transport-specific; the derivation is shared via
+/// [`CredentialBundle::from_ed25519_seed_multibase`] with the offline
+/// path in `vta-service::operations::export::credential_from_key_offline`
+/// so the `did:key` encoding and bundle shape can't drift.
 async fn credential_from_key(
     client: &VtaClient,
     key_id: &str,
     vta_did: &str,
     vta_url: Option<&str>,
-) -> Result<(String, String), Box<dyn std::error::Error>> {
+) -> Result<(CredentialBundle, String), Box<dyn std::error::Error>> {
     let secret = client.get_key_secret(key_id).await?;
-    let seed = decode_private_key_multibase(&secret.private_key_multibase)
-        .map_err(|e| format!("Cannot decode key secret: {e}"))?;
-    let public_key = ed25519_dalek::SigningKey::from_bytes(&seed)
-        .verifying_key()
-        .to_bytes();
-    let did = format!("did:key:{}", ed25519_multibase_pubkey(&public_key));
-
-    let bundle = CredentialBundle {
-        did: did.clone(),
-        private_key_multibase: secret.private_key_multibase,
-        vta_did: vta_did.to_string(),
-        vta_url: vta_url.map(String::from),
-    };
-    let encoded = bundle.encode().map_err(|e| format!("{e}"))?;
-    Ok((encoded, did))
+    CredentialBundle::from_ed25519_seed_multibase(&secret.private_key_multibase, vta_did, vta_url)
+        .map_err(|e| format!("Cannot decode key secret: {e}").into())
 }
 
 pub async fn cmd_context_reprovision(
@@ -409,6 +593,7 @@ pub async fn cmd_context_reprovision(
     id: &str,
     key_id: Option<String>,
     admin_label: Option<String>,
+    recipient: SealedRecipient,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch the existing context
     eprintln!("Fetching context '{id}'...");
@@ -550,22 +735,6 @@ pub async fn cmd_context_reprovision(
         did: provisioned_did,
     };
 
-    let encoded = bundle.encode().map_err(|e| format!("{e}"))?;
-
-    // 7. Output
-    eprintln!();
-    eprintln!("\x1b[1;33m╔══════════════════════════════════════════════════════════════╗");
-    eprintln!("║  Context provision bundle (contains secrets — save securely) ║");
-    eprintln!("╚══════════════════════════════════════════════════════════════╝\x1b[0m");
-    eprintln!();
-    eprintln!("  Context:   {} ({})", id, ctx.name);
-    eprintln!("  Admin DID: {}", bundle.admin_did);
-    if let Some(ref did) = bundle.did {
-        eprintln!("  DID:       {}", did.id);
-    }
-    eprintln!();
-    println!("{encoded}");
-    eprintln!();
-
-    Ok(())
+    // 7. Seal and emit via the shared helper
+    crate::sealed_producer::emit_context_provision_bundle(bundle, &recipient, None).await
 }

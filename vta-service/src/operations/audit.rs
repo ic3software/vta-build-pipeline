@@ -70,7 +70,7 @@ pub async fn list_audit_logs(
     }
 
     // Sort by timestamp descending (newest first)
-    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
 
     let total = entries.len() as u64;
     let total_pages = total.div_ceil(page_size);

@@ -1,5 +1,6 @@
 // CLI-only modules (not part of the library)
 mod acl_cli;
+mod bootstrap_cli;
 mod did_key;
 #[cfg(feature = "setup")]
 mod did_webvh;
@@ -44,8 +45,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the interactive setup wizard
-    Setup,
+    /// Run the setup wizard.
+    ///
+    /// Without arguments, prompts interactively. With `--from <file>`, reads
+    /// a TOML setup-inputs file and runs end-to-end without prompts —
+    /// suitable for CI, immutable images, or any unattended provisioning.
+    /// See `vta_service::setup::WizardInputs` for the schema.
+    Setup {
+        /// Path to a TOML setup-inputs file. When set, setup runs
+        /// non-interactively. The file format mirrors the on-disk
+        /// `config.toml` plus a few one-shot fields (`admin_did`,
+        /// `data_dir_exists`, etc.) that the interactive wizard normally
+        /// collects via prompts.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
     /// Bootstrap the first admin and seal the VTA against offline CLI modifications.
     ///
     /// This is a ONE-TIME operation. After sealing, all CLI commands that modify
@@ -69,6 +83,11 @@ enum Commands {
     ExportAdmin,
     /// Show VTA status and statistics
     Status,
+    /// Inspect the configuration file (offline, no server required).
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     /// Create a did:key in a context (offline, no server required)
     CreateDidKey {
         /// Target context ID
@@ -115,11 +134,220 @@ enum Commands {
         #[command(subcommand)]
         command: KeyCliCommands,
     },
+    /// Manage application contexts (offline, no server required)
+    ///
+    /// Mirrors `pnm contexts` so cold-start / air-gapped operators
+    /// have an identical CLI surface (list/get/create/update/delete)
+    /// against the local keystore. The historical `vta context`
+    /// (singular) form is retained as a hidden alias for scripts
+    /// already in production.
+    #[command(alias = "context")]
+    Contexts {
+        #[command(subcommand)]
+        command: ContextCommands,
+    },
     /// Manage WebVH servers and DIDs (offline, no server required)
     #[cfg(feature = "webvh")]
     Webvh {
         #[command(subcommand)]
         command: WebvhCommands,
+    },
+    /// Sealed-transfer bootstrap — seal payloads for offline consumer
+    /// provisioning (mediators, webvh servers, and other complex clients).
+    Bootstrap {
+        #[command(subcommand)]
+        command: BootstrapCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BootstrapCommands {
+    /// Generate a fresh BootstrapRequest (consumer side).
+    ///
+    /// Mints an ephemeral Ed25519 keypair, persists the seed under
+    /// `<seed-dir>/bootstrap-secrets/<bundle_id>.key`, and writes the
+    /// `BootstrapRequest` JSON. Hand the JSON to the VTA operator; they
+    /// return an armored sealed bundle which `vta bootstrap open` decrypts
+    /// using the persisted seed.
+    ///
+    /// Used in cold-start scenarios where `pnm bootstrap request` isn't
+    /// available — same wire format, different binary.
+    Request {
+        /// Output path for the BootstrapRequest JSON.
+        #[arg(long)]
+        out: PathBuf,
+        /// Optional human-readable label echoed back in the request.
+        #[arg(long)]
+        label: Option<String>,
+        /// Override the default seed cache directory
+        /// (`~/.config/vta/bootstrap-secrets/`). Useful in CI or sealed
+        /// images where `$HOME` isn't writable.
+        #[arg(long)]
+        seed_dir: Option<PathBuf>,
+    },
+    /// Open an armored sealed bundle returned by the producer (consumer side).
+    ///
+    /// Looks up the seed by `bundle_id` under `<seed-dir>/bootstrap-secrets/`,
+    /// derives the X25519 HPKE secret, decrypts, and prints the payload.
+    /// Counterpart to `vta bootstrap request`.
+    ///
+    /// When `--expect-vta-did` is set and the payload is a
+    /// `TemplateBootstrap`, the VTA-issued authorization VC is verified
+    /// end-to-end: the pinned DID is cross-checked against the bundle's
+    /// `vta_trust.vta_did` and against `credentialSubject.adminOf.vta`,
+    /// the issuer's pubkey is extracted from the bundled DID document's
+    /// verificationMethod array, and the Data Integrity proof is
+    /// verified. The DidSigned producer assertion (when present) is
+    /// verified against the same key. Without this flag the opener
+    /// trusts only the OOB SHA-256 digest; the printed payload is
+    /// labelled "unverified trust bundle" so it's obvious.
+    Open {
+        /// Path to the armored sealed bundle.
+        #[arg(long)]
+        bundle: PathBuf,
+        /// Expected SHA-256 digest, communicated by the producer
+        /// out-of-band. Required unless `--no-verify-digest` is set.
+        #[arg(long)]
+        expect_digest: Option<String>,
+        /// Skip out-of-band digest verification. Prints a warning;
+        /// intended for testing only.
+        #[arg(long, default_value_t = false)]
+        no_verify_digest: bool,
+        /// Pin the VTA DID out-of-band. When supplied and the payload is
+        /// a `TemplateBootstrap`, the VC + producer assertion are
+        /// verified end-to-end against this DID; mismatches are
+        /// rejected (no silent fallback). Without this flag,
+        /// verification is digest-only.
+        #[arg(long)]
+        expect_vta_did: Option<String>,
+        /// Override the default seed cache directory
+        /// (`~/.config/vta/bootstrap-secrets/`). Must match the value
+        /// passed to `vta bootstrap request`.
+        #[arg(long)]
+        seed_dir: Option<PathBuf>,
+    },
+    /// Seal a payload for a consumer's BootstrapRequest (offline / Mode C).
+    ///
+    /// Reads the consumer's request (containing their ephemeral X25519 pubkey
+    /// and a nonce), seals the supplied payload to that pubkey using HPKE,
+    /// and writes an armored bundle. Prints the canonical SHA-256 digest the
+    /// operator must communicate to the consumer out-of-band so they can
+    /// pass it to `vta bootstrap open --expect-digest` (or
+    /// `pnm bootstrap open` if the consumer has pnm installed).
+    ///
+    /// Producer authenticity in this mode is `PinnedOnly`: the consumer
+    /// trusts the producer pubkey embedded in the bundle because they
+    /// pinned it out-of-band.
+    Seal {
+        /// Path to the consumer's BootstrapRequest JSON.
+        #[arg(long)]
+        request: PathBuf,
+        /// Path to a JSON file containing a SealedPayloadV1.
+        #[arg(long)]
+        payload: PathBuf,
+        /// Output path for the armored bundle.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Generate a VP-framed BootstrapRequest for the provision-integration
+    /// flow (consumer side).
+    ///
+    /// Mints an ephemeral Ed25519 keypair, persists the seed under
+    /// `<seed-dir>/bootstrap-secrets/<bundle_id>.key`, and writes a signed
+    /// VP (VC Data Model 2.0 `VerifiablePresentation` + `BootstrapRequest`
+    /// types) carrying a `TemplateBootstrap` ask naming the target
+    /// template and variables. Hand the JSON to the VTA operator; they
+    /// return an armored sealed bundle which `vta bootstrap open`
+    /// decrypts using the persisted seed.
+    ///
+    /// Used by integration operators (mediator, webvh-control, webvh-daemon,
+    /// webvh-server, etc.) to request enrollment from a VTA that may not
+    /// yet be network-reachable. See
+    /// `docs/03-integrating/provision-integration.md` for the end-to-end
+    /// flow.
+    ProvisionRequest {
+        /// DID template name the VTA should render (e.g.
+        /// `didcomm-mediator`, `webvh-control`, `webvh-daemon`,
+        /// `webvh-server`, or an operator-uploaded custom template).
+        #[arg(long)]
+        template: String,
+        /// Template variable, repeat for each binding. Format `KEY=VALUE`.
+        /// Values are parsed as JSON when the value starts with `{`, `[`,
+        /// `"`, digit, `true`, `false`, or `null`; otherwise treated as a
+        /// string.
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        vars: Vec<String>,
+        /// Hint the target VTA context. The VTA operator may override
+        /// but if they do and the hint disagrees, the request is
+        /// rejected rather than silently normalised.
+        #[arg(long)]
+        context_hint: Option<String>,
+        /// Opt into long-term admin-DID rollover: the VTA mints a
+        /// fresh admin DID under its own key custody (default template
+        /// `vta-admin`) and binds authorization to that DID instead
+        /// of the ephemeral `client_did`. Recommended for any
+        /// integration that stays up long-term.
+        #[arg(long)]
+        admin_template: Option<String>,
+        /// Freshness window in hours for the VP's `validUntil`.
+        /// Default 168 (7 days) — setup-file shuffling between hosts
+        /// is slow.
+        #[arg(long, value_name = "HOURS", default_value_t = 168.0)]
+        validity_hours: f64,
+        /// Free-form human label echoed back in audit logs.
+        #[arg(long)]
+        label: Option<String>,
+        /// Override the default seed cache directory
+        /// (`~/.config/vta/bootstrap-secrets/`). Must match the
+        /// `--seed-dir` passed to `vta bootstrap open` on the same host.
+        #[arg(long)]
+        seed_dir: Option<PathBuf>,
+        /// Output path for the signed BootstrapRequest JSON.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Provision a template-driven integration (mediator, webvh-host,
+    /// future kinds) for a consumer's VP-framed BootstrapRequest.
+    ///
+    /// Mints integration key material, renders the named DID template,
+    /// creates an admin ACL entry for the consumer's `client_did`,
+    /// issues a VTA-signed authorization VC, and seals everything to
+    /// the consumer's X25519 pubkey (derived from `client_did`).
+    ///
+    /// See `docs/03-integrating/provision-integration.md` for the full flow.
+    #[cfg(feature = "webvh")]
+    ProvisionIntegration {
+        /// Path to the consumer's VP-framed BootstrapRequest JSON
+        /// (`pnm bootstrap request --out …`).
+        #[arg(long)]
+        request: PathBuf,
+        /// VTA context the integration will live in. Must be an
+        /// existing context the operator is admin of (or pass
+        /// `--create-context` to create it inline). If the request
+        /// carries a `contextHint`, this flag must either match it or
+        /// be omitted.
+        #[arg(long)]
+        context: Option<String>,
+        /// Create the target context if it does not already exist.
+        /// Idempotent — silently succeeds if the context exists. The
+        /// context is created with `name = <id>`; rename later via the
+        /// REST API if needed. Without this flag, a missing context
+        /// fails with operator-remediation guidance.
+        #[arg(long)]
+        create_context: bool,
+        /// Producer assertion mode on the returned sealed bundle.
+        /// `did-signed` (default) signs with the VTA's `{vta_did}#key-0`.
+        /// `pinned-only` is a dev/test escape hatch — no in-band
+        /// signature, digest-pinning only.
+        #[arg(long, default_value = "did-signed")]
+        assertion: crate::bootstrap_cli::AssertionModeFlag,
+        /// Override for the VC's `validUntil` window, in hours. Default
+        /// is 1h. Fractional hours accepted (e.g. `0.25` for 15min).
+        #[arg(long, value_name = "HOURS")]
+        vc_validity_hours: Option<f64>,
+        /// Output path for the armored bundle.
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -149,6 +377,151 @@ enum KeyCliCommands {
         /// BIP-39 mnemonic for the new seed (generates random if omitted)
         #[arg(long)]
         mnemonic: Option<String>,
+    },
+    /// Export all active keys in a context as a sealed DidSecrets bundle.
+    ///
+    /// Reads the local keystore directly — no running VTA or network
+    /// required. Mirrors `pnm keys bundle` but works in cold-start /
+    /// air-gapped environments where PNM cannot reach the VTA.
+    Bundle {
+        /// Context ID whose active keys should be exported.
+        #[arg(long)]
+        context: String,
+        /// Path to the consumer's BootstrapRequest JSON (v1). Mutually
+        /// exclusive with `--recipient-did` / `--recipient-nonce`.
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
+        recipient: Option<PathBuf>,
+        /// Inline consumer DID (`did:key:z6Mk...`). Requires `--recipient-nonce`.
+        #[arg(long, requires = "recipient_nonce")]
+        recipient_did: Option<String>,
+        /// Inline consumer nonce (32 hex chars == 16 bytes). Requires
+        /// `--recipient-did`.
+        #[arg(long, requires = "recipient_did")]
+        recipient_nonce: Option<String>,
+        /// Output path for the armored sealed bundle. If omitted, the
+        /// armor is written to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContextCommands {
+    /// List all application contexts.
+    List,
+    /// Get a context by ID.
+    Get {
+        /// Context ID.
+        id: String,
+    },
+    /// Create an application context (offline, no running VTA required).
+    ///
+    /// Allocates the next BIP-32 context index and writes the context
+    /// record. Mirrors the online `POST /contexts` endpoint (and
+    /// `pnm contexts create`) for cold-start / air-gapped operators
+    /// who need to provision a context before standing the service up.
+    ///
+    /// Without `--admin-did` no keys, ACL entries, or DID are minted —
+    /// pair with `vta bootstrap provision-integration` (or run it with
+    /// `--create-context`) to populate the context. Supplying
+    /// `--admin-did` writes an admin ACL entry scoped to the new
+    /// context atomically with the context record, mirroring the
+    /// `pnm contexts create --admin-did` shorthand.
+    Create {
+        /// Context ID (slug). Lowercase alphanumeric + hyphens, ≤64
+        /// chars, no leading/trailing hyphen.
+        #[arg(long)]
+        id: String,
+        /// Human-readable name. Defaults to the id when omitted.
+        #[arg(long)]
+        name: Option<String>,
+        /// Free-form description.
+        #[arg(long)]
+        description: Option<String>,
+        /// DID to grant admin access to (must start with `did:`). When
+        /// set, atomically creates an ACL entry with role=admin scoped
+        /// to this context.
+        #[arg(long)]
+        admin_did: Option<String>,
+        /// Human-readable label for the admin ACL entry.
+        #[arg(long)]
+        admin_label: Option<String>,
+        /// Setup-ACL expiry — accepts `N[s|m|h|d|w]` (e.g. `24h`, `7d`).
+        /// When set, the admin ACL entry auto-expires via the server's
+        /// ACL sweeper. Without this flag the entry is permanent.
+        /// Requires `--admin-did`.
+        #[arg(long, requires = "admin_did")]
+        admin_expires: Option<String>,
+    },
+    /// Update an existing context.
+    Update {
+        /// Context ID.
+        id: String,
+        /// New name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Set the DID for this context.
+        #[arg(long)]
+        did: Option<String>,
+        /// New description.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Delete a context and all associated resources (keys, ACL
+    /// entries, DID records, scoped templates).
+    Delete {
+        /// Context ID.
+        id: String,
+        /// Skip confirmation and delete immediately.
+        #[arg(long, short)]
+        force: bool,
+    },
+    /// Export an existing context — its admin credential + all DID
+    /// keys (signing + KA + any pre-rotation) + DID document + log —
+    /// as a sealed ContextProvision bundle for a new/backup admin to
+    /// import.
+    ///
+    /// Reads the local keystore directly — no running VTA or network
+    /// required. Mirrors `pnm context reprovision` but works in
+    /// cold-start / air-gapped environments where PNM cannot reach the
+    /// VTA.
+    ///
+    /// The bundle always contains every key tied to the context's DID
+    /// document (operational keys are auto-included). `--admin-key`
+    /// separately names the existing Ed25519 seed that becomes the
+    /// **admin credential** — the `did:key` the mediator operator uses
+    /// to authenticate back to the VTA for ACL-gated operations.
+    /// When omitted, a fresh admin key is minted in the context and
+    /// the derived `did:key` is granted admin access automatically.
+    Reprovision {
+        /// Context ID to export.
+        #[arg(long)]
+        id: String,
+        /// Existing Ed25519 key whose seed backs the exported admin
+        /// credential. When omitted, a fresh admin key is minted in
+        /// the context. Kept as `--key` for backward compatibility.
+        #[arg(long = "admin-key", alias = "key")]
+        admin_key: Option<String>,
+        /// Label applied to the freshly-minted admin key when
+        /// `--admin-key` is omitted. Defaults to
+        /// `"admin-reprovision"`.
+        #[arg(long)]
+        admin_label: Option<String>,
+        /// Path to the consumer's BootstrapRequest JSON (v1). Mutually
+        /// exclusive with `--recipient-did` / `--recipient-nonce`.
+        #[arg(long, conflicts_with_all = ["recipient_did", "recipient_nonce"])]
+        recipient: Option<PathBuf>,
+        /// Inline consumer DID (`did:key:z6Mk...`). Requires `--recipient-nonce`.
+        #[arg(long, requires = "recipient_nonce")]
+        recipient_did: Option<String>,
+        /// Inline consumer nonce (32 hex chars == 16 bytes). Requires
+        /// `--recipient-did`.
+        #[arg(long, requires = "recipient_did")]
+        recipient_nonce: Option<String>,
+        /// Output path for the armored sealed bundle. If omitted, the
+        /// armor is written to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -208,6 +581,14 @@ enum WebvhCommands {
         /// Number of pre-rotation keys to generate
         #[arg(long)]
         pre_rotation: Option<u32>,
+        /// Print the generated mnemonic to stderr. **Off by default** —
+        /// printing puts the master seed in shell history, terminal
+        /// scrollback, CI log collectors, and tmux/screen buffers. The
+        /// mnemonic is also persisted via the configured seed-store; if
+        /// you need it for paper backup, run `vta export-mnemonic`
+        /// instead so it goes through the time-bounded export guard.
+        #[arg(long)]
+        print_mnemonic: bool,
     },
     /// List WebVH DIDs
     ListDids {
@@ -223,6 +604,28 @@ enum WebvhCommands {
         /// The DID to delete
         did: String,
     },
+    /// Print the raw `did.jsonl` log for a webvh DID the VTA knows.
+    ///
+    /// Snapshot from provisioning time — use this for audit or
+    /// republication fallback, not as a live resolver (the integration
+    /// itself becomes the live source once it publishes).
+    DidLog {
+        /// The DID to retrieve the log for.
+        did: String,
+        /// Optional output file. Stdout if omitted.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Print the VTA's identity and service settings.
+    ///
+    /// Output matches what `pnm setup` asks for (VTA DID, public URL,
+    /// mediator) plus the config/data paths. No network calls; the data
+    /// store is not opened, so this works while the VTA is running.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -269,19 +672,29 @@ enum AclCommands {
 async fn main() {
     let cli = Cli::parse();
 
+    #[cfg(feature = "keyring")]
+    if let Err(e) = vta_sdk::keyring_init::install_default_store() {
+        eprintln!("warning: OS keyring unavailable: {e}");
+    }
+
     print_banner();
 
     match cli.command {
-        Some(Commands::Setup) => {
+        Some(Commands::Setup { from }) => {
             #[cfg(feature = "setup")]
             {
-                if let Err(e) = setup::run_setup_wizard(cli.config).await {
+                let result = match from {
+                    Some(path) => setup::run_setup_from_file(path).await,
+                    None => setup::run_setup_wizard(cli.config).await,
+                };
+                if let Err(e) = result {
                     eprintln!("Setup failed: {e}");
                     std::process::exit(1);
                 }
             }
             #[cfg(not(feature = "setup"))]
             {
+                let _ = from;
                 eprintln!("Setup wizard not available (compiled without 'setup' feature)");
                 std::process::exit(1);
             }
@@ -319,6 +732,15 @@ async fn main() {
                 init_tracing(&config);
             }
             if let Err(e) = status::run_status(cli.config).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Config { command }) => {
+            let result = match command {
+                ConfigCommands::Show => run_config_show(cli.config),
+            };
+            if let Err(e) = result {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
@@ -387,7 +809,9 @@ async fn main() {
             // SEALED CHECK: secrets export and seed rotation
             match &command {
                 KeyCliCommands::List { .. } | KeyCliCommands::Seeds => {}
-                KeyCliCommands::Secrets { .. } | KeyCliCommands::RotateSeed { .. } => {
+                KeyCliCommands::Secrets { .. }
+                | KeyCliCommands::RotateSeed { .. }
+                | KeyCliCommands::Bundle { .. } => {
                     check_seal(&cli.config).await;
                 }
             }
@@ -401,6 +825,95 @@ async fn main() {
                 KeyCliCommands::Seeds => keys_cli::run_keys_seeds_list(cli.config).await,
                 KeyCliCommands::RotateSeed { mnemonic } => {
                     keys_cli::run_rotate_seed(cli.config, mnemonic).await
+                }
+                KeyCliCommands::Bundle {
+                    context,
+                    recipient,
+                    recipient_did,
+                    recipient_nonce,
+                    out,
+                } => {
+                    bootstrap_cli::run_keys_bundle(
+                        cli.config,
+                        context,
+                        recipient,
+                        recipient_did,
+                        recipient_nonce,
+                        out,
+                    )
+                    .await
+                }
+            };
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Contexts { command }) => {
+            // SEALED CHECK: only commands that mutate state need the
+            // unsealed-store guard. List/Get are read-only.
+            match &command {
+                ContextCommands::List | ContextCommands::Get { .. } => {}
+                ContextCommands::Create { .. }
+                | ContextCommands::Update { .. }
+                | ContextCommands::Delete { .. }
+                | ContextCommands::Reprovision { .. } => {
+                    check_seal(&cli.config).await;
+                }
+            }
+            let result = match command {
+                ContextCommands::List => bootstrap_cli::run_context_list(cli.config).await,
+                ContextCommands::Get { id } => bootstrap_cli::run_context_get(cli.config, id).await,
+                ContextCommands::Create {
+                    id,
+                    name,
+                    description,
+                    admin_did,
+                    admin_label,
+                    admin_expires,
+                } => {
+                    bootstrap_cli::run_context_create(
+                        cli.config,
+                        id,
+                        name,
+                        description,
+                        admin_did,
+                        admin_label,
+                        admin_expires,
+                    )
+                    .await
+                }
+                ContextCommands::Update {
+                    id,
+                    name,
+                    did,
+                    description,
+                } => {
+                    bootstrap_cli::run_context_update(cli.config, id, name, did, description).await
+                }
+                ContextCommands::Delete { id, force } => {
+                    bootstrap_cli::run_context_delete(cli.config, id, force).await
+                }
+                ContextCommands::Reprovision {
+                    id,
+                    admin_key,
+                    admin_label,
+                    recipient,
+                    recipient_did,
+                    recipient_nonce,
+                    out,
+                } => {
+                    bootstrap_cli::run_context_reprovision(
+                        cli.config,
+                        id,
+                        admin_key,
+                        admin_label,
+                        recipient,
+                        recipient_did,
+                        recipient_nonce,
+                        out,
+                    )
+                    .await
                 }
             };
             if let Err(e) = result {
@@ -440,7 +953,9 @@ async fn main() {
         Some(Commands::Webvh { command }) => {
             // SEALED CHECK: webvh commands modify servers and DIDs
             match &command {
-                WebvhCommands::ListServers | WebvhCommands::ListDids { .. } => {}
+                WebvhCommands::ListServers
+                | WebvhCommands::ListDids { .. }
+                | WebvhCommands::DidLog { .. } => {}
                 _ => check_seal(&cli.config).await,
             }
             let result = match command {
@@ -463,6 +978,7 @@ async fn main() {
                     mediator_service,
                     services,
                     pre_rotation,
+                    print_mnemonic,
                 } => {
                     webvh_cli::run_create_did(
                         cli.config,
@@ -474,6 +990,7 @@ async fn main() {
                         mediator_service,
                         services,
                         pre_rotation,
+                        print_mnemonic,
                     )
                     .await
                 }
@@ -482,6 +999,85 @@ async fn main() {
                 }
                 WebvhCommands::DeleteDid { did } => {
                     webvh_cli::run_delete_did(cli.config, did).await
+                }
+                WebvhCommands::DidLog { did, out } => {
+                    webvh_cli::run_did_log(cli.config, did, out).await
+                }
+            };
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Bootstrap { command }) => {
+            let result = match command {
+                BootstrapCommands::Seal {
+                    request,
+                    payload,
+                    out,
+                } => bootstrap_cli::run_seal(cli.config.clone(), request, payload, out).await,
+                BootstrapCommands::Request {
+                    out,
+                    label,
+                    seed_dir,
+                } => bootstrap_cli::run_request(out, label, seed_dir).await,
+                BootstrapCommands::Open {
+                    bundle,
+                    expect_digest,
+                    no_verify_digest,
+                    expect_vta_did,
+                    seed_dir,
+                } => {
+                    bootstrap_cli::run_open(
+                        bundle,
+                        expect_digest,
+                        no_verify_digest,
+                        expect_vta_did,
+                        seed_dir,
+                    )
+                    .await
+                }
+                BootstrapCommands::ProvisionRequest {
+                    template,
+                    vars,
+                    context_hint,
+                    admin_template,
+                    validity_hours,
+                    label,
+                    seed_dir,
+                    out,
+                } => {
+                    bootstrap_cli::run_provision_request(
+                        template,
+                        vars,
+                        context_hint,
+                        admin_template,
+                        validity_hours,
+                        label,
+                        seed_dir,
+                        out,
+                    )
+                    .await
+                }
+                #[cfg(feature = "webvh")]
+                BootstrapCommands::ProvisionIntegration {
+                    request,
+                    context,
+                    create_context,
+                    assertion,
+                    vc_validity_hours,
+                    out,
+                } => {
+                    bootstrap_cli::run_provision_integration(
+                        cli.config.clone(),
+                        request,
+                        context,
+                        create_context,
+                        assertion,
+                        vc_validity_hours,
+                        out,
+                    )
+                    .await
                 }
             };
             if let Err(e) = result {
@@ -576,7 +1172,10 @@ async fn run_bootstrap_admin(
         eprintln!(
             "VTA is already sealed (by {} on {}).",
             existing.sealed_by,
-            existing.sealed_at.format("%Y-%m-%d %H:%M:%S UTC")
+            existing
+                .sealed_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
         );
         eprintln!("Cannot bootstrap again. Manage admins via the REST API or DIDComm.");
         std::process::exit(1);
@@ -619,6 +1218,7 @@ async fn run_bootstrap_admin(
             .unwrap()
             .as_secs(),
         created_by: "cli:bootstrap-admin".into(),
+        expires_at: None,
     };
     acl::store_acl_entry(&acl_ks, &entry).await?;
 
@@ -633,7 +1233,10 @@ async fn run_bootstrap_admin(
     eprintln!("  Admin DID: {}", did);
     eprintln!(
         "  Sealed at: {}",
-        seal_record.sealed_at.format("%Y-%m-%d %H:%M:%S UTC")
+        seal_record
+            .sealed_at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S %:z")
     );
     eprintln!();
     eprintln!("  The VTA is now sealed. Offline CLI commands that modify state are disabled.");
@@ -647,6 +1250,76 @@ async fn run_bootstrap_admin(
 }
 
 // init_tracing is now in vta_service::init_tracing (lib.rs)
+
+/// Print the VTA's identity and service settings from `config.toml`.
+///
+/// Explicitly does NOT open the data store, so it works while the VTA
+/// process is running. Also doesn't resolve DIDs or touch the network —
+/// this is the quick, safe "what did setup write?" command.
+fn run_config_show(config_path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let config = AppConfig::load(config_path)?;
+
+    const BOLD: &str = "\x1b[1m";
+    const CYAN: &str = "\x1b[36m";
+    const DIM: &str = "\x1b[2m";
+    const RESET: &str = "\x1b[0m";
+
+    fn line(label: &str, value: Option<&str>) {
+        match value {
+            Some(v) if !v.is_empty() => {
+                println!("  {CYAN}{:<13}{RESET} {v}", label);
+            }
+            _ => {
+                println!("  {CYAN}{:<13}{RESET} {DIM}(not set){RESET}", label);
+            }
+        }
+    }
+
+    println!();
+    println!("{BOLD}VTA configuration{RESET}");
+    println!();
+    line("Name", config.vta_name.as_deref());
+    line("VTA DID", config.vta_did.as_deref());
+    line("Public URL", config.public_url.as_deref());
+
+    let mut svc_list = Vec::new();
+    if config.services.rest {
+        svc_list.push("REST");
+    }
+    if config.services.didcomm {
+        svc_list.push("DIDComm");
+    }
+    let svc_display = if svc_list.is_empty() {
+        "(none)".to_string()
+    } else {
+        svc_list.join(", ")
+    };
+    line("Services", Some(&svc_display));
+    line(
+        "Listen",
+        Some(&format!("{}:{}", config.server.host, config.server.port)),
+    );
+
+    if let Some(msg) = &config.messaging {
+        line("Mediator DID", Some(&msg.mediator_did));
+        if !msg.mediator_url.is_empty() {
+            line("Mediator URL", Some(&msg.mediator_url));
+        }
+    } else {
+        line("Mediator DID", None);
+    }
+
+    line(
+        "Config file",
+        Some(&config.config_path.display().to_string()),
+    );
+    line(
+        "Data store",
+        Some(&config.store.data_dir.display().to_string()),
+    );
+    println!();
+    Ok(())
+}
 
 async fn export_admin(config_path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::load(config_path)?;

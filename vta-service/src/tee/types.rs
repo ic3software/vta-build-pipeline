@@ -49,11 +49,3 @@ pub struct AttestationRequest {
     /// Client-provided nonce (hex, 32 bytes) to prevent replay.
     pub nonce: String,
 }
-
-/// Response body for attestation endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttestationResponse {
-    pub report: AttestationReport,
-    /// Whether the VTA self-verified its own attestation.
-    pub self_verified: bool,
-}

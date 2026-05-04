@@ -39,7 +39,7 @@ cargo build --package pnm-cli --release --no-default-features --features config-
 
 ### From source
 
-Requires **Rust 1.91.0+**.
+Requires **Rust 1.94.0+**.
 
 ```sh
 cargo build --package pnm-cli --release
@@ -56,17 +56,34 @@ substitute `cargo run --package pnm-cli --` for `pnm`.
 
 ### 1. Set up the VTA connection
 
-```sh
-pnm setup --url http://localhost:3000 --credential <credential>
-```
-
-This saves the URL to `~/.config/pnm/config.toml` and authenticates using the
-provided credential. You can also set up without a credential and log in later:
+`pnm setup` mints an ephemeral `did:key` locally and parks it as a
+"pending VTA binding" entry in your OS keyring. You then provide the VTA's
+URL, the operator running the VTA grants your DID admin in their ACL, and
+`pnm` finalises the binding.
 
 ```sh
-pnm setup --url http://localhost:3000
-pnm auth login <credential>
+# Phase 1: mint local did:key, name the VTA you'll connect to
+pnm setup --name "my-vta"
+
+# Phase 2 (after the VTA operator adds your did:key to their ACL):
+#   bind the VTA's DID to the local entry, then connect
+pnm setup continue my-vta --vta-did did:webvh:abc:vta.example.com:primary
+pnm bootstrap connect --vta-url https://vta.example.com
 ```
+
+Cold-start operators (running `vta` themselves) pair this with
+`vta import-did --did <pnm-did> --role admin` on the VTA host before
+phase 2. See `docs/02-operating/cold-start.md` for the full script.
+
+For a TEE-attested first-boot against a fresh Nitro Enclave VTA, the
+single-step path is:
+
+```sh
+pnm bootstrap connect --vta-url https://enclave.example.com
+```
+
+This drives `POST /bootstrap/request`, opens the sealed admin bundle, and
+imports the resulting credential into the keyring.
 
 ### 2. Verify connectivity
 
@@ -100,8 +117,9 @@ tokens:
    automatically when they expire.
 
 ```sh
-# Import credential and authenticate
-pnm auth login <credential>
+# Apply a sealed admin credential bundle (e.g. a backup-restore handoff
+# or a sealed transfer from another operator)
+pnm auth login --credential-bundle <file>
 
 # Check auth status
 pnm auth status
@@ -134,7 +152,7 @@ are stored in `~/.config/pnm/sessions.json` instead. See
 `~/.config/pnm/config.toml`
 
 ```toml
-url = "http://localhost:3000"
+url = "http://localhost:8100"
 ```
 
 ### Environment variables
@@ -155,17 +173,20 @@ url = "http://localhost:3000"
 
 ### Setup
 
-| Command                               | Description                                   |
-| ------------------------------------- | --------------------------------------------- |
-| `setup --url URL [--credential CRED]` | Configure VTA URL and optionally authenticate |
+| Command                                                  | Description                                                                                              |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `setup --name <slug> [--overwrite]`                      | Phase 1: mint an ephemeral `did:key`, park it in the keyring as a pending VTA binding under `<slug>`. |
+| `setup continue <slug> --vta-did <did>`                  | Phase 2: bind the VTA's DID to the entry from phase 1 and mark it ready to authenticate.                  |
+| `bootstrap connect --vta-url <url>`                      | One-step TEE-attested first-boot against a Nitro Enclave VTA. Drives `POST /bootstrap/request`.           |
+| `auth login --credential-bundle <file>`                  | Apply a sealed admin credential bundle delivered out-of-band (e.g. a backup-restore handoff or a sealed transfer from another operator). |
 
 ### Authentication
 
-| Command                   | Description                         |
-| ------------------------- | ----------------------------------- |
-| `auth login <credential>` | Import credential and authenticate  |
-| `auth logout`             | Clear stored credentials and tokens |
-| `auth status`             | Show current authentication status  |
+| Command                                 | Description                              |
+| --------------------------------------- | ---------------------------------------- |
+| `auth login --credential-bundle <file>` | Apply a sealed admin credential bundle   |
+| `auth logout`                           | Clear stored credentials and tokens      |
+| `auth status`                           | Show current authentication status       |
 
 ### Health
 
@@ -185,7 +206,7 @@ url = "http://localhost:3000"
 | Command                                                                    | Description     |
 | -------------------------------------------------------------------------- | --------------- |
 | `keys list [--status active\|revoked] [--limit N] [--offset N]`            | List keys       |
-| `keys create --key-type ed25519\|x25519 [--context-id ID] [--label LABEL]` | Create a key (BIP-32 derived) |
+| `keys create --key-type ed25519\|x25519\|p256 [--context-id ID] [--label LABEL]` | Create a key (BIP-32 derived) |
 | `keys import --key-type TYPE --private-key KEY [--label L] [--context-id ID]` | Import an external private key |
 | `keys get <key_id>`                                                        | Get a key by ID |
 | `keys revoke <key_id>`                                                     | Revoke a key               |
@@ -213,7 +234,7 @@ The `keys import` command accepts `--private-key <multibase>` or `--private-key-
 | ------------------------------------------------------------------------- | ----------------------- |
 | `acl list [--context ID]`                                                 | List ACL entries        |
 | `acl get <did>`                                                           | Get an ACL entry by DID |
-| `acl create --did DID --role ROLE [--label LABEL] [--contexts ctx1,ctx2]` | Create an ACL entry     |
+| `acl create --did DID --role ROLE [--label LABEL] [--contexts ctx1,ctx2] [--expires N[s\|m\|h\|d\|w]]` | Create an ACL entry     |
 | `acl update <did> [--role ROLE] [--label LABEL] [--contexts ctx1,ctx2]`   | Update an ACL entry     |
 | `acl delete <did>`                                                        | Delete an ACL entry     |
 
@@ -250,5 +271,6 @@ Backups are encrypted with Argon2id + AES-256-GCM using a user-provided password
 - [VTA Service & Architecture](../README.md)
 - [CNM CLI (multi-community)](../cnm-cli/README.md)
 - [First Person Network White Paper](https://www.firstperson.network/white-paper)
-- [Design Document](../docs/design.md)
-- [BIP-32 Path Specification](../docs/bip32_paths.md)
+- [Documentation index](../docs/README.md)
+- [Architecture](../docs/01-concepts/architecture.md)
+- [BIP-32 Path Specification](../docs/04-reference/bip32-paths.md)

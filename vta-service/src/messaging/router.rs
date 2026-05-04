@@ -26,9 +26,14 @@ use super::handlers;
 use vta_sdk::protocols::attestation_management;
 #[cfg(feature = "webvh")]
 use vta_sdk::protocols::did_management;
+#[cfg(feature = "webvh")]
+use vta_sdk::protocols::protocol_management;
+// `provision-integration` is unconditionally enabled via the
+// `vta-sdk` feature list in vta-service's Cargo.toml — no cfg gate.
+use vta_sdk::protocols::provision_integration_management;
 use vta_sdk::protocols::{
-    self, acl_management, audit_management, context_management, credential_management,
-    key_management, seed_management, vta_management,
+    self, acl_management, audit_management, context_management, key_management, seed_management,
+    vta_management,
 };
 
 /// Shared state injected into all DIDComm handlers via `Extension<Arc<VtaState>>`.
@@ -37,10 +42,32 @@ pub struct VtaState {
     pub keys_ks: KeyspaceHandle,
     pub acl_ks: KeyspaceHandle,
     pub contexts_ks: KeyspaceHandle,
+    pub did_templates_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub imported_ks: KeyspaceHandle,
     #[cfg(feature = "webvh")]
     pub webvh_ks: KeyspaceHandle,
+    /// Anti-replay log for sealed-bootstrap `bundle_id`s — required by
+    /// the DIDComm provision-integration handler so it can drive the
+    /// same shared library function the REST handler does.
+    pub sealed_nonces_ks: KeyspaceHandle,
+    /// Persisted drain set for the protocol-management feature
+    /// (`docs/05-design-notes/didcomm-protocol-management.md`).
+    /// Accessible from DIDComm handlers so disable/migrate over
+    /// DIDComm transport land in the same drain bookkeeping as
+    /// the REST path.
+    #[cfg(feature = "webvh")]
+    pub drains_ks: KeyspaceHandle,
+    /// In-process registry of active + draining mediator listeners.
+    #[cfg(feature = "webvh")]
+    pub mediator_registry: Arc<crate::messaging::registry::MediatorListenerRegistry>,
+    /// Per-mediator TTL sweeper.
+    #[cfg(feature = "webvh")]
+    pub drain_sweeper: Arc<crate::messaging::drain_sweeper::DrainSweeper>,
+    /// Pluggable telemetry sink — driven by both REST and DIDComm
+    /// transport handlers so `mediator report` is consistent
+    /// regardless of which transport posted the inbound event.
+    pub telemetry: vti_common::telemetry::SharedTelemetrySink,
     pub seed_store: Arc<dyn SeedStore>,
     pub config: Arc<RwLock<AppConfig>>,
     pub did_resolver: Option<DIDCacheClient>,
@@ -50,6 +77,30 @@ pub struct VtaState {
     pub tee_state: Option<crate::tee::TeeState>,
     /// Send `true` to trigger a soft restart.
     pub restart_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl From<&VtaState> for crate::operations::provision_integration::ProvisionIntegrationDeps {
+    fn from(state: &VtaState) -> Self {
+        Self {
+            keys_ks: state.keys_ks.clone(),
+            acl_ks: state.acl_ks.clone(),
+            audit_ks: state.audit_ks.clone(),
+            contexts_ks: state.contexts_ks.clone(),
+            did_templates_ks: state.did_templates_ks.clone(),
+            imported_ks: state.imported_ks.clone(),
+            #[cfg(feature = "webvh")]
+            webvh_ks: state.webvh_ks.clone(),
+            #[cfg(not(feature = "webvh"))]
+            webvh_ks: panic!(
+                "provision-integration requires the webvh feature; rebuild vta-service with --features webvh"
+            ),
+            sealed_nonces_ks: state.sealed_nonces_ks.clone(),
+            seed_store: state.seed_store.clone(),
+            config: state.config.clone(),
+            did_resolver: state.did_resolver.clone(),
+            didcomm_bridge: state.didcomm_bridge.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,11 +273,6 @@ pub fn build_handler(
             vta_management::UPDATE_CONFIG,
             handler_fn(handlers::handle_update_config),
         )?
-        // Credential management
-        .route(
-            credential_management::GENERATE_CREDENTIALS,
-            handler_fn(handlers::handle_generate_credentials),
-        )?
         // Problem reports
         .route(
             protocols::PROBLEM_REPORT_TYPE,
@@ -286,8 +332,45 @@ pub fn build_handler(
             .route(
                 did_management::REMOVE_WEBVH_SERVER,
                 handler_fn(handlers::handle_remove_webvh_server),
+            )?
+            .route(
+                did_management::UPDATE_DID_WEBVH,
+                handler_fn(handlers::handle_update_did_webvh),
+            )?
+            .route(
+                did_management::ROTATE_DID_WEBVH_KEYS,
+                handler_fn(handlers::handle_rotate_did_webvh_keys),
+            )?;
+
+        // Protocol management over DIDComm. `enable` is REST-only
+        // by nature so it has no DIDComm route; the rest go through
+        // the same operation functions as the REST handlers.
+        // Spec: docs/05-design-notes/didcomm-protocol-management.md.
+        router = router
+            .route(
+                protocol_management::DISABLE_DIDCOMM,
+                handler_fn(super::handlers_protocol::handle_disable_didcomm),
+            )?
+            .route(
+                protocol_management::MIGRATE_MEDIATOR,
+                handler_fn(super::handlers_protocol::handle_migrate_mediator),
+            )?
+            .route(
+                protocol_management::DRAIN_CANCEL,
+                handler_fn(super::handlers_protocol::handle_drain_cancel),
+            )?
+            .route(
+                protocol_management::MEDIATOR_REPORT,
+                handler_fn(super::handlers_protocol::handle_mediator_report),
             )?;
     }
+
+    // Provision-integration — always available; vta-service depends
+    // on vta-sdk with the `provision-integration` feature enabled.
+    router = router.route(
+        provision_integration_management::PROVISION_INTEGRATION,
+        handler_fn(handlers::handle_provision_integration),
+    )?;
 
     // TEE attestation handlers (feature-gated)
     #[cfg(feature = "tee")]

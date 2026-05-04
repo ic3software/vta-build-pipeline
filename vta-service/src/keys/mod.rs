@@ -150,6 +150,88 @@ pub struct PreRotationKeyData {
     pub label: String,
 }
 
+/// Derived VTA sealed-transfer key material, stored as `{vta_did}#sealed-transfer-0`.
+///
+/// The VTA mints this as a third key at DID creation (alongside `#key-0`
+/// signing and `#key-1` key-agreement). Its sole job is signing the
+/// sealed-transfer producer assertion (domain-tagged
+/// `b"vta-sealed-transfer/v1\0" || client_x25519_pub || bundle_id`).
+/// Keeping it separate from `#key-0` (which signs VC Data-Integrity
+/// proofs) means:
+///   - a compromise of one key does not void the other
+///   - each can rotate on its own cadence
+///   - audit records carry distinct `verification_method` IDs
+///
+/// Cryptographic reuse is already blocked by the domain tag, so this is
+/// a blast-radius / operational-hygiene win rather than a correctness fix.
+pub struct DerivedSealedTransferKey {
+    pub path: String,
+    pub public_key: String,
+    pub private_key: String,
+    pub label: String,
+}
+
+/// Derive the VTA's sealed-transfer key (`{vta_did}#sealed-transfer-0`)
+/// from the BIP-32 seed using a counter-allocated path under `base`.
+///
+/// Allocates a derivation-path counter but does **not** store a key record —
+/// callers must call [`save_sealed_transfer_key_record`] after the DID is known.
+pub async fn derive_sealed_transfer_key(
+    seed: &[u8],
+    base: &str,
+    label: &str,
+    keys_ks: &KeyspaceHandle,
+) -> Result<DerivedSealedTransferKey, Box<dyn std::error::Error>> {
+    let path = paths::allocate_path(keys_ks, base)
+        .await
+        .map_err(|e| format!("{e}"))?;
+
+    let root = ExtendedSigningKey::from_seed(seed)
+        .map_err(|e| format!("Failed to create BIP-32 root key: {e}"))?;
+    let derived = root
+        .derive(
+            &path
+                .parse::<DerivationPath>()
+                .map_err(|e| format!("Invalid derivation path: {e}"))?,
+        )
+        .map_err(|e| format!("Key derivation failed: {e}"))?;
+
+    let secret = Secret::generate_ed25519(None, Some(derived.signing_key.as_bytes()));
+    let public_key = secret
+        .get_public_keymultibase()
+        .map_err(|e| format!("{e}"))?;
+    let private_key = encode_private_multibase(&KeyType::Ed25519, derived.signing_key.as_bytes());
+
+    Ok(DerivedSealedTransferKey {
+        path,
+        public_key,
+        private_key,
+        label: label.to_string(),
+    })
+}
+
+/// Persist the VTA's sealed-transfer key as a `KeyRecord` at
+/// `{did}#sealed-transfer-0`.
+pub async fn save_sealed_transfer_key_record(
+    did: &str,
+    derived: &DerivedSealedTransferKey,
+    keys_ks: &KeyspaceHandle,
+    context_id: Option<&str>,
+    seed_id: Option<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    save_key_record(
+        keys_ks,
+        &format!("{did}#sealed-transfer-0"),
+        &derived.path,
+        KeyType::Ed25519,
+        &derived.public_key,
+        &derived.label,
+        context_id,
+        seed_id,
+    )
+    .await
+}
+
 /// Derive a signing key (Ed25519) and key-agreement key (X25519) from the
 /// BIP-32 seed using counter-allocated paths under `base`.
 ///

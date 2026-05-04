@@ -6,7 +6,7 @@ use ratatui::{
 use vta_sdk::client::{AddWebvhServerRequest, CreateDidWebvhRequest, UpdateWebvhServerRequest};
 use vta_sdk::prelude::*;
 
-use crate::render::print_widget;
+use crate::render::{is_full_display, print_full_entry, print_full_list_title, print_widget};
 
 pub async fn cmd_webvh_server_add(
     client: &VtaClient,
@@ -33,6 +33,25 @@ pub async fn cmd_webvh_server_list(client: &VtaClient) -> Result<(), Box<dyn std
         return Ok(());
     }
 
+    if is_full_display() {
+        print_full_list_title("WebVH Servers", resp.servers.len());
+        for s in &resp.servers {
+            let label = s.label.as_deref().unwrap_or("—");
+            let created = s
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string();
+            print_full_entry(&[
+                ("ID", &s.id),
+                ("DID", &s.did),
+                ("Label", label),
+                ("Created", &created),
+            ]);
+        }
+        return Ok(());
+    }
+
     let header_style = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
@@ -45,7 +64,11 @@ pub async fn cmd_webvh_server_list(client: &VtaClient) -> Result<(), Box<dyn std
         .iter()
         .map(|s| {
             let label = s.label.clone().unwrap_or_else(|| "\u{2014}".into());
-            let created = s.created_at.format("%Y-%m-%d %H:%M").to_string();
+            let created = s
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string();
 
             Row::new(vec![
                 Cell::from(s.id.clone()),
@@ -167,6 +190,9 @@ pub async fn cmd_webvh_did_create_with_files(
     no_primary: bool,
     signing_key_id: Option<String>,
     ka_key_id: Option<String>,
+    template: Option<String>,
+    template_context: Option<String>,
+    template_vars: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let did_document = match did_document_path {
         Some(p) => {
@@ -179,6 +205,9 @@ pub async fn cmd_webvh_did_create_with_files(
         }
         None => None,
     };
+    if template.is_some() && (did_document.is_some() || did_log_path.is_some()) {
+        return Err("--template is mutually exclusive with --did-document and --did-log".into());
+    }
     let did_log = match did_log_path {
         Some(p) => {
             Some(std::fs::read_to_string(&p).map_err(|e| format!("failed to read {p}: {e}"))?)
@@ -189,6 +218,11 @@ pub async fn cmd_webvh_did_create_with_files(
         .map(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s))
         .transpose()
         .map_err(|e| format!("invalid --services JSON: {e}"))?;
+
+    let template_vars: std::collections::HashMap<String, serde_json::Value> = template_vars
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::Value::String(v)))
+        .collect();
 
     let req = CreateDidWebvhRequest {
         context_id,
@@ -205,6 +239,9 @@ pub async fn cmd_webvh_did_create_with_files(
         set_primary: !no_primary,
         signing_key_id,
         ka_key_id,
+        template,
+        template_context,
+        template_vars,
     };
     cmd_webvh_did_create(client, req).await
 }
@@ -221,6 +258,27 @@ pub async fn cmd_webvh_did_list(
         return Ok(());
     }
 
+    if is_full_display() {
+        print_full_list_title("WebVH DIDs", resp.dids.len());
+        for d in &resp.dids {
+            let created = d
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string();
+            let portable = if d.portable { "yes" } else { "no" };
+            print_full_entry(&[
+                ("DID", &d.did),
+                ("Context", &d.context_id),
+                ("Server", &d.server_id),
+                ("SCID", &d.scid),
+                ("Portable", portable),
+                ("Created", &created),
+            ]);
+        }
+        return Ok(());
+    }
+
     let header_style = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
@@ -233,7 +291,11 @@ pub async fn cmd_webvh_did_list(
         .iter()
         .map(|d| {
             let portable = if d.portable { "yes" } else { "no" };
-            let created = d.created_at.format("%Y-%m-%d %H:%M").to_string();
+            let created = d
+                .created_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string();
 
             Row::new(vec![
                 Cell::from(d.did.clone()),
@@ -286,11 +348,11 @@ pub async fn cmd_webvh_did_get(
     println!("  Log entries:     {}", record.log_entry_count);
     println!(
         "  Created:         {}",
-        record.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        crate::duration::format_local_datetime(record.created_at)
     );
     println!(
         "  Updated:         {}",
-        record.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+        crate::duration::format_local_datetime(record.updated_at)
     );
     Ok(())
 }
@@ -301,5 +363,53 @@ pub async fn cmd_webvh_did_delete(
 ) -> Result<(), Box<dyn std::error::Error>> {
     client.delete_did_webvh(did).await?;
     println!("WebVH DID deleted: {did}");
+    Ok(())
+}
+
+/// `pnm webvh did-log <did> [--out <path>]` — fetch the raw `did.jsonl`
+/// log from the VTA's public `GET /did/{did}/log` endpoint.
+///
+/// Unauthenticated — matches webvh's world-readable log model. Reads
+/// the VTA base URL off the caller's current session (no token needed
+/// for this endpoint specifically).
+pub async fn cmd_webvh_did_log(
+    vta_base_url: &str,
+    did: &str,
+    out: Option<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Cheap URL-path-segment escaping for DIDs. DIDs use `:` (reserved
+    // but safe in a path segment) and possibly `#` / `?` — we only need
+    // to handle `#` and `?` (both would terminate the path) and `%`
+    // (escape char). Keep `:` as-is.
+    let escaped_did = did
+        .replace('%', "%25")
+        .replace('#', "%23")
+        .replace('?', "%3F");
+    let url = format!("{vta_base_url}/did/{escaped_did}/log");
+    let http = reqwest::Client::new();
+    let resp = http.get(&url).send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GET {url} failed ({status}): {body}").into());
+    }
+    let log = resp.text().await?;
+
+    match out {
+        Some(path) => {
+            std::fs::write(&path, log.as_bytes())
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+            eprintln!(
+                "DID log written to {} ({} bytes)",
+                path.display(),
+                log.len()
+            );
+        }
+        None => {
+            // Raw to stdout — pipe to a file, to `curl --data-binary`,
+            // or to `.well-known/did.jsonl` directly.
+            print!("{log}");
+        }
+    }
     Ok(())
 }

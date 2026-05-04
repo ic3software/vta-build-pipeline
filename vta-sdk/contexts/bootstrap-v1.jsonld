@@ -1,0 +1,21 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@protected": true,
+    "@vocab": "https://openvtc.org/vocab/bootstrap#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "BootstrapRequest": "https://openvtc.org/vocab/bootstrap#BootstrapRequest",
+    "nonce": {
+      "@id": "https://openvtc.org/vocab/bootstrap#nonce",
+      "@type": "xsd:string"
+    },
+    "ask": {
+      "@id": "https://openvtc.org/vocab/bootstrap#ask",
+      "@type": "@json"
+    },
+    "label": {
+      "@id": "https://openvtc.org/vocab/bootstrap#label",
+      "@type": "xsd:string"
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "name": "didcomm-mediator",
+  "kind": "mediator",
+  "description": "DIDComm v2 routing mediator with signing + key-agreement methods and a DIDCommMessaging service exposing both HTTP(S) and WebSocket transports.",
+  "methods": ["webvh", "web"],
+  "requiredVars": ["URL", "WS_URL"],
+  "optionalVars": {
+    "ROUTING_KEYS": [],
+    "ACCEPT": ["didcomm/v2"],
+    "WEBVH_SERVER": null
+  },
+  "defaults": {
+    "preRotationCount": 2,
+    "portable": true,
+    "addMediatorService": true
+  },
+  "document": {
+    "@context": [
+      "https://www.w3.org/ns/did/v1",
+      "https://w3id.org/security/multikey/v1",
+      "https://didcomm.org/messaging/v2"
+    ],
+    "id": "{DID}",
+    "verificationMethod": [
+      {
+        "id": "{DID}#key-0",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{SIGNING_KEY_MB}"
+      },
+      {
+        "id": "{DID}#key-1",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{KA_KEY_MB}"
+      }
+    ],
+    "authentication": ["{DID}#key-0"],
+    "assertionMethod": ["{DID}#key-0"],
+    "keyAgreement": ["{DID}#key-1"],
+    "service": [
+      {
+        "id": "{DID}#service",
+        "type": ["DIDCommMessaging"],
+        "serviceEndpoint": [
+          {
+            "accept": "{ACCEPT}",
+            "routingKeys": "{ROUTING_KEYS}",
+            "uri": "{URL}"
+          },
+          {
+            "accept": "{ACCEPT}",
+            "routingKeys": "{ROUTING_KEYS}",
+            "uri": "{WS_URL}"
+          }
+        ]
+      },
+      {
+        "id": "{DID}#auth",
+        "type": ["Authentication"],
+        "serviceEndpoint": "{URL}/authenticate"
+      }
+    ]
+  }
+}

@@ -13,6 +13,9 @@ use vta_sdk::webvh::WebvhDidRecord;
 use crate::auth::{AdminAuth, AuthClaims, SuperAdminAuth};
 use crate::error::AppError;
 use crate::operations;
+use crate::operations::did_webvh::{
+    RotateDidWebvhKeysOptions, UpdateDidWebvhOptions, UpdateDidWebvhResult,
+};
 use crate::server::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +112,7 @@ pub async fn create_did_handler(
         &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
+        &state.did_templates_ks,
         &*state.seed_store,
         &config,
         &auth.0,
@@ -156,6 +160,36 @@ pub async fn get_did_log_handler(
     Ok(Json(result))
 }
 
+/// `GET /did/{did}/log` — public, unauthenticated.
+///
+/// Returns the raw `did.jsonl` bytes for a DID the VTA knows. 404 if
+/// unknown. Matches webvh's native design: DID logs are world-readable
+/// (security is cryptographic via signatures + SCID anchoring, not
+/// access-gated). Rate-limited via the `unauth_layer` at the router.
+///
+/// This is a snapshot of the log at provisioning time — once the
+/// integration boots and publishes on its own webvh host, that copy
+/// becomes the live source of truth. Use this endpoint for audit,
+/// debugging, or republication fallback; not as a general DID
+/// resolver. See `docs/03-integrating/provision-integration.md` §"did.jsonl
+/// retrieval" for the full semantics.
+pub async fn get_did_log_public_handler(
+    State(state): State<AppState>,
+    Path(did): Path<String>,
+) -> Result<
+    (
+        axum::http::StatusCode,
+        [(&'static str, &'static str); 1],
+        String,
+    ),
+    AppError,
+> {
+    use axum::http::StatusCode;
+    let log = crate::webvh_store::get_did_log(&state.webvh_ks, &did).await?;
+    let log = log.ok_or_else(|| AppError::NotFound(format!("webvh DID log not found: {did}")))?;
+    Ok((StatusCode::OK, [("content-type", "application/jsonl")], log))
+}
+
 pub async fn delete_did_handler(
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -179,4 +213,65 @@ pub async fn delete_did_handler(
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /contexts/{ctx_id}/dids/{scid}/update` — apply a generic
+/// update to an existing webvh DID. The `ctx_id` path component is
+/// validated against the DID's context inside the operation; mismatches
+/// surface as 404 to avoid cross-context existence leaks.
+pub async fn update_did_handler(
+    auth: AdminAuth,
+    State(state): State<AppState>,
+    Path((_ctx_id, scid)): Path<(String, String)>,
+    Json(body): Json<UpdateDidWebvhOptions>,
+) -> Result<Json<UpdateDidWebvhResult>, AppError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let result = operations::did_webvh::update_did_webvh(
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &*state.seed_store,
+        &auth.0,
+        &scid,
+        body,
+        did_resolver,
+        &state.didcomm_bridge,
+        "rest",
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+/// `POST /contexts/{ctx_id}/dids/{scid}/rotate-keys` — rotate every
+/// verificationMethod's keys + drive an update. Mirrors
+/// [`update_did_handler`].
+pub async fn rotate_did_keys_handler(
+    auth: AdminAuth,
+    State(state): State<AppState>,
+    Path((_ctx_id, scid)): Path<(String, String)>,
+    Json(body): Json<RotateDidWebvhKeysOptions>,
+) -> Result<Json<UpdateDidWebvhResult>, AppError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let result = operations::did_webvh::rotate_did_webvh_keys(
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &*state.seed_store,
+        &auth.0,
+        &scid,
+        body,
+        did_resolver,
+        &state.didcomm_bridge,
+        "rest",
+    )
+    .await?;
+    Ok(Json(result))
 }

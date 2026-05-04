@@ -9,6 +9,7 @@
 
 use crate::credentials::CredentialBundle;
 use crate::didcomm_light;
+use crate::error::VtaError;
 use crate::protocols::auth::{AuthenticateResponse, ChallengeRequest, ChallengeResponse};
 use reqwest::Client;
 
@@ -43,19 +44,15 @@ pub async fn challenge_response_light(
             did: client_did.to_string(),
         })
         .send()
-        .await
-        .map_err(|e| format!("could not connect to VTA at {challenge_url}: {e}"))?;
+        .await?;
 
     if !challenge_resp.status().is_success() {
         let status = challenge_resp.status();
         let body = challenge_resp.text().await.unwrap_or_default();
-        return Err(format!("challenge request failed ({status}): {body}").into());
+        return Err(VtaError::from_http(status, body));
     }
 
-    let challenge: ChallengeResponse = challenge_resp
-        .json()
-        .await
-        .map_err(|e| format!("unexpected response from VTA: {e}"))?;
+    let challenge: ChallengeResponse = challenge_resp.json().await?;
 
     // Step 2: Pack encrypted authenticate message
     let packed = didcomm_light::pack_auth_message(
@@ -66,7 +63,8 @@ pub async fn challenge_response_light(
         }),
         client_did,
         vta_did,
-    )?;
+    )
+    .map_err(|e| VtaError::Validation(format!("pack auth message: {e}")))?;
 
     // Step 3: Send packed message
     let auth_url = format!("{base_url}/auth/");
@@ -75,19 +73,15 @@ pub async fn challenge_response_light(
         .header("content-type", "text/plain")
         .body(packed)
         .send()
-        .await
-        .map_err(|e| format!("could not connect to VTA at {auth_url}: {e}"))?;
+        .await?;
 
     if !auth_resp.status().is_success() {
         let status = auth_resp.status();
         let body = auth_resp.text().await.unwrap_or_default();
-        return Err(format!("authentication failed ({status}): {body}").into());
+        return Err(VtaError::from_http(status, body));
     }
 
-    let auth_data: AuthenticateResponse = auth_resp
-        .json()
-        .await
-        .map_err(|e| format!("unexpected auth response: {e}"))?;
+    let auth_data: AuthenticateResponse = auth_resp.json().await?;
 
     Ok(AuthResult {
         access_token: auth_data.data.access_token,
@@ -99,8 +93,14 @@ pub async fn challenge_response_light(
 
 /// Refresh an access token using the refresh token endpoint.
 ///
-/// Returns a new `AuthResult` with a fresh access token. The refresh token
-/// itself remains unchanged.
+/// Returns a new `AuthResult` carrying a fresh access token **and a fresh
+/// refresh token** — the VTA implements RFC 6749 §10.4 refresh-token
+/// rotation, so the presented refresh token is single-use. Callers MUST
+/// persist `result.refresh_token` and `result.refresh_expires_at` from
+/// the returned value before the next refresh; replaying the original
+/// token after a successful refresh fails with `Auth("refresh token not
+/// found")`. The `VtaClient` handles this automatically (see
+/// `client.rs::ensure_token_valid`).
 pub async fn refresh_token_light(
     http: &Client,
     base_url: &str,
@@ -115,7 +115,8 @@ pub async fn refresh_token_light(
         }),
         client_did,
         vta_did,
-    )?;
+    )
+    .map_err(|e| VtaError::Validation(format!("pack refresh message: {e}")))?;
 
     let refresh_url = format!("{base_url}/auth/refresh");
     let resp = http
@@ -123,19 +124,15 @@ pub async fn refresh_token_light(
         .header("content-type", "text/plain")
         .body(packed)
         .send()
-        .await
-        .map_err(|e| format!("refresh request failed: {e}"))?;
+        .await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("token refresh failed ({status}): {body}").into());
+        return Err(VtaError::from_http(status, body));
     }
 
-    let auth_data: AuthenticateResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("unexpected refresh response: {e}"))?;
+    let auth_data: AuthenticateResponse = resp.json().await?;
 
     Ok(AuthResult {
         access_token: auth_data.data.access_token,
@@ -145,25 +142,30 @@ pub async fn refresh_token_light(
     })
 }
 
-/// Decode a credential bundle and authenticate, returning an `AuthResult`.
+/// Authenticate using an already-decoded credential bundle, returning an
+/// `AuthResult`.
+///
+/// The second tuple element is a clone of the input bundle, echoed back for
+/// callers that want a single expression yielding auth state + identity.
 pub async fn authenticate_with_credential(
-    credential_b64: &str,
+    credential: &CredentialBundle,
     url_override: Option<&str>,
 ) -> Result<(AuthResult, CredentialBundle, Client), crate::error::VtaError> {
-    let cred = CredentialBundle::decode(credential_b64)?;
     let url = url_override
-        .or(cred.vta_url.as_deref())
-        .ok_or("no VTA URL in credential and no override provided")?;
+        .or(credential.vta_url.as_deref())
+        .ok_or_else(|| {
+            VtaError::Validation("no VTA URL in credential and no override provided".into())
+        })?;
 
     let http = Client::new();
     let result = challenge_response_light(
         &http,
         url,
-        &cred.did,
-        &cred.private_key_multibase,
-        &cred.vta_did,
+        &credential.did,
+        &credential.private_key_multibase,
+        &credential.vta_did,
     )
     .await?;
 
-    Ok((result, cred, http))
+    Ok((result, credential.clone(), http))
 }

@@ -20,9 +20,12 @@ pub struct PnmConfig {
 pub struct VtaConfig {
     pub name: String,
     #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
     pub vta_did: Option<String>,
+    /// Explicit REST URL for DIDs that cannot advertise a service endpoint
+    /// (e.g. `did:key`). Ignored for `did:webvh` where the URL is derived
+    /// from the DID document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Returns `~/.config/pnm/`, creating it if it doesn't exist.
@@ -52,22 +55,24 @@ pub fn load_config() -> Result<PnmConfig, Box<dyn std::error::Error>> {
     let mut config: PnmConfig = toml::from_str(&contents)
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
 
-    // Migrate legacy single-URL config
-    if config.vtas.is_empty()
-        && let Some(url) = config.url.take()
-    {
+    // Migrate legacy single-URL config. The URL itself is no longer
+    // persisted (PNM resolves the REST endpoint at runtime from the VTA's
+    // DID document); we just create the slug placeholder so the operator
+    // can `pnm setup continue` to bind a VTA DID.
+    if config.vtas.is_empty() && config.url.take().is_some() {
         eprintln!("\x1b[33mMigrating legacy config to multi-VTA format...\x1b[0m");
         config.vtas.insert(
             "default".to_string(),
             VtaConfig {
                 name: "Default VTA".to_string(),
-                url: Some(url),
                 vta_did: None,
+                url: None,
             },
         );
         config.default_vta = Some("default".to_string());
         save_config(&config)?;
         eprintln!("  Migrated to VTA slug: \x1b[36mdefault\x1b[0m");
+        eprintln!("  Run `pnm setup continue default` to bind a VTA DID.");
     }
 
     Ok(config)
@@ -85,6 +90,12 @@ pub fn save_config(config: &PnmConfig) -> Result<(), Box<dyn std::error::Error>>
 /// Resolve the active VTA from CLI override, env var, or config default.
 ///
 /// Returns `(slug, &VtaConfig)`.
+///
+/// Rejects pending-setup slugs with a targeted `pnm setup continue`
+/// hint. Invariant: pending ⇔ `VtaConfig.vta_did.is_none()` AND the
+/// keyring holds a `PendingVtaBinding` session for the slug. If
+/// `vta_did.is_none()` but the keyring entry is missing, the config is
+/// orphaned and we fall through to the generic not-configured error.
 pub fn resolve_vta<'a>(
     cli_override: Option<&str>,
     config: &'a PnmConfig,
@@ -104,6 +115,16 @@ pub fn resolve_vta<'a>(
         )
     })?;
 
+    if vta.vta_did.is_none() && crate::auth::has_pending_vta_binding(&vta_keyring_key(&slug)) {
+        return Err(format!(
+            "VTA '{slug}' is pending setup — the admin DID has been minted but the VTA DID \
+             has not been supplied yet.\n\n\
+             Run `pnm setup continue {slug}` once the VTA is running, or\n\
+             `pnm setup continue {slug} --vta-did <did:...>` non-interactively."
+        )
+        .into());
+    }
+
     Ok((slug, vta))
 }
 
@@ -113,6 +134,10 @@ pub fn vta_keyring_key(slug: &str) -> String {
 }
 
 /// Legacy keyring key (pre-multi-VTA). Used for migration detection.
+///
+/// `dead_code` allowed: referenced only by the migration path that runs at
+/// startup to transfer a single-VTA credential into the multi-VTA keyring
+/// layout. Deleting it would break operators upgrading from pre-0.4 pnm.
 #[allow(dead_code)]
 pub const LEGACY_SESSION_KEY: &str = "vta";
 
@@ -142,16 +167,16 @@ mod tests {
             "personal".into(),
             VtaConfig {
                 name: "Personal VTA".into(),
-                url: Some("https://vta.example.com".into()),
                 vta_did: Some("did:web:vta.example.com".into()),
+                url: None,
             },
         );
         config.vtas.insert(
             "work".into(),
             VtaConfig {
                 name: "Work VTA".into(),
-                url: None,
                 vta_did: Some("did:webvh:abc:work.example.com:vta".into()),
+                url: None,
             },
         );
 
@@ -161,10 +186,34 @@ mod tests {
         assert_eq!(restored.vtas.len(), 2);
         assert_eq!(restored.vtas["personal"].name, "Personal VTA");
         assert_eq!(
+            restored.vtas["personal"].vta_did.as_deref(),
+            Some("did:web:vta.example.com")
+        );
+    }
+
+    /// Existing config files written by older PNM versions carry a per-VTA
+    /// `url` field. After the `did:key` URL support, the field is restored
+    /// for DIDs that cannot advertise a service endpoint. Legacy configs
+    /// with a URL now round-trip correctly.
+    #[test]
+    fn test_legacy_per_vta_url_is_preserved() {
+        let toml_str = r#"
+default_vta = "personal"
+[vtas.personal]
+name = "Personal"
+url = "https://vta.example.com"
+vta_did = "did:web:vta.example.com"
+"#;
+        let restored: PnmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(restored.vtas["personal"].name, "Personal");
+        assert_eq!(
             restored.vtas["personal"].url.as_deref(),
             Some("https://vta.example.com")
         );
-        assert!(restored.vtas["work"].url.is_none());
+        assert_eq!(
+            restored.vtas["personal"].vta_did.as_deref(),
+            Some("did:web:vta.example.com")
+        );
     }
 
     #[test]
@@ -195,8 +244,8 @@ mod tests {
             "personal".into(),
             VtaConfig {
                 name: "Personal".into(),
-                url: None,
                 vta_did: None,
+                url: None,
             },
         );
         let (slug, vta) = resolve_vta(Some("personal"), &config).unwrap();
@@ -214,8 +263,8 @@ mod tests {
             "work".into(),
             VtaConfig {
                 name: "Work".into(),
-                url: None,
                 vta_did: None,
+                url: None,
             },
         );
         let (slug, _) = resolve_vta(None, &config).unwrap();

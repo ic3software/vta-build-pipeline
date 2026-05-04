@@ -2,7 +2,7 @@
 name = "vtc-service"
 description = "Service for Verifiable Trust Communities"
 readme = "README.md"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 publish.workspace = true
 authors.workspace = true
@@ -13,7 +13,10 @@ repository.workspace = true
 [features]
 default = ["setup", "keyring"]
 setup = ["dep:dialoguer", "dep:didwebvh-rs", "dep:url"]
-keyring = ["dep:keyring"]
+# OS keyring backend for the VTC secret. Enables vta-sdk's keyring feature
+# so the binary can register a platform store once via
+# `vta_sdk::keyring_init::install_default_store()` at startup.
+keyring = ["dep:keyring-core", "vta-sdk/keyring"]
 config-secret = []
 aws-secrets = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
 gcp-secrets = [
@@ -28,23 +31,23 @@ name = "vtc"
 path = "src/main.rs"
 
 [dependencies]
-vti-common = { path = "../vti-common", version = "0.3" }
-vta-sdk = { path = "../vta-sdk", version = "0.4", features = [
+vti-common = { path = "../vti-common", version = "0.5" }
+vta-sdk = { path = "../vta-sdk", version = "0.5", features = [
   "didcomm",
   "session",
   "config-session",
 ] }
 affinidi-tdk = { workspace = true }
 affinidi-messaging-didcomm-service = { workspace = true }
-tokio-util = { version = "0.7", features = ["rt"] }
-affinidi-did-resolver-cache-sdk = "0.8"
+tokio-util = { workspace = true, features = ["rt"] }
+affinidi-did-resolver-cache-sdk = { workspace = true }
 base64 = { workspace = true }
-axum = "0.8"
+axum = { workspace = true }
 axum-extra = { workspace = true }
 jsonwebtoken = { workspace = true }
 fjall = { workspace = true }
-toml = "1.0"
-tower-http = { version = "0.6", features = ["trace"] }
+toml = { workspace = true }
+tower-http = { workspace = true, features = ["trace"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -52,8 +55,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ed25519-dalek = { workspace = true }
-hex = "0.4"
-keyring = { version = "3", optional = true }
+hex = { workspace = true }
+keyring-core = { workspace = true, optional = true }
 aws-sdk-secretsmanager = { version = "1", optional = true }
 aws-config = { version = "1", features = [
   "behavior-version-latest",
@@ -67,8 +70,8 @@ clap = { workspace = true }
 didwebvh-rs = { workspace = true, optional = true }
 rand = { workspace = true }
 dialoguer = { workspace = true, optional = true }
-azure_security_keyvault_secrets = { version = "0.12", optional = true }
-azure_identity = { version = "0.33", optional = true }
+azure_security_keyvault_secrets = { workspace = true, optional = true }
+azure_identity = { workspace = true, optional = true }
 sha2 = { workspace = true }
 x25519-dalek = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }
@@ -77,3 +80,10 @@ url = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Integration tests under `tests/` exercise the route stack via
+# `Router::oneshot` — same pattern as `vta-service/tests/api_integration.rs`.
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

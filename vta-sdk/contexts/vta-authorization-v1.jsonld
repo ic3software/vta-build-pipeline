@@ -1,0 +1,24 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@protected": true,
+    "@vocab": "https://openvtc.org/vocab/vta-authorization#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "VtaAuthorizationCredential": "https://openvtc.org/vocab/vta-authorization#VtaAuthorizationCredential",
+    "adminOf": {
+      "@id": "https://openvtc.org/vocab/vta-authorization#adminOf",
+      "@context": {
+        "vta": { "@id": "https://openvtc.org/vocab/vta-authorization#vta", "@type": "@id" },
+        "context": { "@id": "https://openvtc.org/vocab/vta-authorization#context", "@type": "xsd:string" },
+        "role": { "@id": "https://openvtc.org/vocab/vta-authorization#role", "@type": "xsd:string" }
+      }
+    },
+    "operatorOf": {
+      "@id": "https://openvtc.org/vocab/vta-authorization#operatorOf",
+      "@context": {
+        "did": { "@id": "https://openvtc.org/vocab/vta-authorization#did", "@type": "@id" },
+        "template": { "@id": "https://openvtc.org/vocab/vta-authorization#template", "@type": "xsd:string" }
+      }
+    }
+  }
+}

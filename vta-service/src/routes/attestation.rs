@@ -6,7 +6,7 @@ use crate::error::{AppError, tee_attestation_error};
 use crate::operations;
 use crate::server::AppState;
 use crate::tee::mnemonic_guard::{MnemonicExportResponse, MnemonicExportStatus};
-use crate::tee::types::{AttestationRequest, AttestationResponse, TeeStatus};
+use crate::tee::types::{AttestationReport, AttestationRequest, TeeStatus};
 
 /// GET /attestation/status — TEE detection status (unauthenticated).
 pub async fn status(State(state): State<AppState>) -> Result<Json<TeeStatus>, AppError> {
@@ -23,7 +23,7 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<TeeStatus>, Ap
 pub async fn generate_report(
     State(state): State<AppState>,
     Json(body): Json<AttestationRequest>,
-) -> Result<Json<AttestationResponse>, AppError> {
+) -> Result<Json<AttestationReport>, AppError> {
     let tee_state = state
         .tee
         .as_ref()
@@ -40,7 +40,7 @@ pub async fn generate_report(
 /// GET /attestation/report — Return a cached attestation report (unauthenticated).
 pub async fn cached_report(
     State(state): State<AppState>,
-) -> Result<Json<AttestationResponse>, AppError> {
+) -> Result<Json<AttestationReport>, AppError> {
     let tee_state = state
         .tee
         .as_ref()
@@ -67,37 +67,6 @@ pub async fn did_log(State(state): State<AppState>) -> Result<String, AppError> 
 
     String::from_utf8(log_bytes)
         .map_err(|e| AppError::Internal(format!("DID log is not valid UTF-8: {e}")))
-}
-
-/// GET /attestation/admin-credential — Return and delete the bootstrapped admin credential.
-///
-/// Unauthenticated, one-time retrieval. The credential is deleted from the
-/// store after the first successful read to prevent repeated access. Subsequent
-/// calls return 404.
-///
-/// Only available when the VTA auto-bootstrapped a super-admin credential
-/// on first boot via `admin_bootstrap::maybe_bootstrap_admin()`.
-pub async fn admin_credential(State(state): State<AppState>) -> Result<String, AppError> {
-    let cred_bytes = state
-        .keys_ks
-        .get_raw("tee:admin_credential")
-        .await?
-        .ok_or_else(|| {
-            AppError::NotFound(
-                "no bootstrapped admin credential found — already retrieved or \
-                 VTA was not configured with KMS bootstrap"
-                    .into(),
-            )
-        })?;
-
-    let credential = String::from_utf8(cred_bytes)
-        .map_err(|e| AppError::Internal(format!("admin credential is not valid UTF-8: {e}")))?;
-
-    // Delete from encrypted store after retrieval (one-time access)
-    let _ = state.keys_ks.remove("tee:admin_credential").await;
-    tracing::info!("admin credential retrieved and deleted from store");
-
-    Ok(credential)
 }
 
 /// GET /attestation/mnemonic — Check mnemonic export window status (super admin only).

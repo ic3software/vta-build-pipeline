@@ -5,7 +5,7 @@ use tracing::{debug, info};
 
 use crate::error::{AppError, tee_attestation_error};
 
-use super::provider::TeeProvider;
+use super::provider::{StructuralCheckOutcome, TeeProvider};
 use super::types::{AttestationReport, TeeStatus, TeeType};
 
 /// AWS Nitro Enclaves attestation provider.
@@ -83,9 +83,12 @@ impl TeeProvider for NitroProvider {
         })
     }
 
-    fn verify(&self, report: &AttestationReport) -> Result<bool, AppError> {
+    fn smoke_check_structure(
+        &self,
+        report: &AttestationReport,
+    ) -> Result<StructuralCheckOutcome, AppError> {
         if report.tee_type != TeeType::Nitro {
-            return Ok(false);
+            return Ok(StructuralCheckOutcome::Malformed);
         }
 
         let evidence = BASE64
@@ -93,7 +96,7 @@ impl TeeProvider for NitroProvider {
             .map_err(|e| tee_attestation_error(format!("invalid evidence encoding: {e}")))?;
 
         if evidence.is_empty() {
-            return Ok(false);
+            return Ok(StructuralCheckOutcome::Malformed);
         }
 
         // Nitro attestation documents are CBOR-encoded COSE_Sign1 structures.
@@ -110,7 +113,7 @@ impl TeeProvider for NitroProvider {
                 first_byte = format!("{first_byte:#04x}"),
                 "unexpected first byte in attestation document"
             );
-            return Ok(false);
+            return Ok(StructuralCheckOutcome::Malformed);
         }
 
         // Full cryptographic verification requires:
@@ -120,10 +123,9 @@ impl TeeProvider for NitroProvider {
         // 4. Verify signature using the leaf certificate's public key
         // 5. Check PCR values match expected enclave measurements
         //
-        // Self-check validates structure only.
-
-        debug!("Nitro attestation document self-verification passed (structural)");
-        Ok(true)
+        // This smoke-check only validates the structural shape.
+        debug!("Nitro attestation document structural smoke-check passed");
+        Ok(StructuralCheckOutcome::StructurallyValid)
     }
 }
 

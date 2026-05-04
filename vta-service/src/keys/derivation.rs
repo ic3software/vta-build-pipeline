@@ -62,7 +62,7 @@ impl Bip32Extension for ExtendedSigningKey {
     }
 
     fn derive_p256(&self, path: &str) -> Result<P256Secret, AppError> {
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha512;
 
         let derivation_path: DerivationPath = path
@@ -97,6 +97,10 @@ impl Bip32Extension for ExtendedSigningKey {
 ///   64-byte seed via PBKDF2 (with an empty passphrase), then stores it.
 /// - If no mnemonic and a seed already exists, returns the existing seed.
 /// - If no mnemonic and no seed exists, generates 32 random bytes and stores them.
+///
+/// `dead_code` allowed: called by the `vta-enclave` binary's bootstrap
+/// path, which compiles in a different crate. rustc's dead-code lint
+/// doesn't see the cross-crate usage.
 #[allow(dead_code)]
 pub async fn load_or_generate_seed(
     seed_store: &dyn SeedStore,

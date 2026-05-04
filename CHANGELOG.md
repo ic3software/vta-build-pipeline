@@ -1,5 +1,488 @@
 # Changelog
 
+## 0.5.0 — 2026-05-04
+
+The `sealed-bootstrap` release: every secret-bearing transfer between
+VTA, integrations, and CLIs now moves as an HPKE-sealed bundle, DID
+minting is template-driven, and the DIDComm protocol surface can be
+enabled, disabled, or migrated on a running VTA without rebuilding it.
+
+### Added
+
+- **DIDComm protocol management** — enable, disable, and migrate
+  the DIDComm protocol surface on a running VTA without rebuilding
+  it, re-issuing admin credentials, or rotating the VTA's
+  verification keys. Six new operator commands:
+  `pnm services {enable,disable} didcomm`, `pnm mediator {migrate,
+  rollback,drain cancel,report}`. Each protocol change publishes a
+  new WebVH LogEntry; `verificationMethod` is byte-identical
+  before and after. Mediator changes go through a drain set
+  (persisted to fjall, restart-resilient, 30-day TTL cap) so
+  in-flight messages from senders with stale DID-doc caches keep
+  landing while the new mediator picks up traffic. Telemetry sink
+  is pluggable behind a trait — default impl is a 10k-event ring
+  buffer; the `mediator report` command queries it for
+  per-mediator inbound counts and per-sender last-seen mediator.
+
+  The full pre-promotion handshake fires end-to-end:
+  `migrate`/`rollback` use a live `DIDCommServiceProver` against
+  the running service; first-enable spins up a transient
+  `DIDCommService` just for the round-trip (lifecycle managed
+  by `messaging::transient_handshake`). Drain TTLs fire
+  end-to-end via the per-mediator `JoinSet` sweeper + boot-time
+  replay. All five admin operations are available over both REST
+  and DIDComm transport (`enable` is REST-only by nature).
+
+  See `docs/03-integrating/didcomm-protocol-management.md` and
+  `docs/05-design-notes/didcomm-protocol-management.md`. New
+  modules: `vti_common::telemetry`,
+  `vta_service::messaging::{registry, drain_store, drain_sweeper,
+  handshake, live_prover, transient_handshake, handlers_protocol}`,
+  `vta_service::operations::protocol::*`, `vta_sdk::protocol`,
+  `vta_sdk::protocols::protocol_management`,
+  `vta_cli_common::commands::{services, mediator}`.
+
+### Breaking
+
+- **WebVH built-in templates renamed by deployment role.**
+  `webvh-hosting-server` → `webvh-daemon`, `webvh-service` → `webvh-server`,
+  and a new `webvh-control` joins them. Three fixed shapes, one per role:
+  `webvh-control` exposes both `WebVHHosting` and `DIDCommMessaging`
+  (hosting + DIDComm); `webvh-daemon` exposes `WebVHHosting` only (no
+  DIDComm); `webvh-server` exposes `DIDCommMessaging` only (witness,
+  watcher, server consumed via DIDComm). The renderer stays declarative —
+  no conditionals — so the template name is a 1:1 promise of what comes
+  out. See `docs/03-integrating/provision-integration.md` for the
+  comparison matrix.
+- **`ProvisionAsk` builders renamed to match.** `ProvisionAsk::webvh_service`
+  → `ProvisionAsk::webvh_server`, `ProvisionAsk::webvh_hosting_server` →
+  `ProvisionAsk::webvh_daemon`, plus a new `ProvisionAsk::webvh_control`.
+  Constants follow: `BUILTIN_WEBVH_SERVICE_TEMPLATE` →
+  `BUILTIN_WEBVH_SERVER_TEMPLATE`, `BUILTIN_WEBVH_HOSTING_TEMPLATE` →
+  `BUILTIN_WEBVH_DAEMON_TEMPLATE`, plus `BUILTIN_WEBVH_CONTROL_TEMPLATE`.
+  `WebvhServiceMessages` → `WebvhServerMessages`.
+- **`webvh-daemon` document shape normalized to `key-0`/`key-1`** (was
+  `key-1`/`key-2`). Matches the other webvh templates. Existing
+  `webvh-hosting-server` deployments must re-provision against
+  `webvh-daemon`.
+- **`webvh-server`/`webvh-control` declare `URL` and `WEBVH_SERVER` in
+  `optionalVars`** for discoverability. The runtime check that "URL or
+  WEBVH_SERVER must be set for any webvh-method template" is unchanged
+  — declaring them in the template just makes the contract visible to
+  consumers.
+
+### Changed
+
+- **Provisioning error message** when neither `URL` nor `WEBVH_SERVER` is
+  supplied now names the satisfying built-in templates explicitly and
+  shows the exact `--var` flags to pass.
+
+---
+
+### Publish-readiness review
+
+A multi-agent review across software design, security, test coverage,
+and consumer ergonomics produced a punch-list of pre-publish items.
+The entries below are the actionable changes that landed.
+
+### Breaking
+
+- **`VtaError` tightened — lossy auto-conversions removed.**
+  `impl From<String>`, `impl From<&str>`, and `impl From<Box<dyn Error>>`
+  for `VtaError` are gone; every conversion path now picks a typed
+  variant explicitly. `from_http` is now `pub` (consumers wiring their
+  own HTTP transport produce typed errors directly), and a new
+  `VtaError::from_problem_report(code, comment)` mirrors the REST
+  mapping for DIDComm so callers `match` on the same variants
+  regardless of transport.
+- **`verify_vta_authorization_credential` returns a typestate.** Was
+  `Result<(), _>`; now `Result<VerifiedAuthorizationCredential, _>`
+  carrying the eagerly-parsed claim. Forgetting the `parse_claim`
+  follow-up is now a compile error. `parse_claim` itself is `pub(crate)`.
+- **Refresh tokens rotate on every `/auth/refresh`** (RFC 6749 §10.4).
+  A presented refresh token is single-use; replay surfaces as
+  "refresh token not found". Response shape unified with `POST /auth/`:
+  refresh now returns the same `AuthenticateResponse`. The bespoke
+  `RefreshResponse`/`RefreshData` types are removed.
+- **`server_internal_super_admin` removed.** Replaced with a sealed
+  `operations::internal_authority::InternalAuthority` marker whose
+  constructor is `pub(super)` to the operations module — route
+  handlers cannot reach it. `operations::keys::get_key_secret_internal`
+  is the parallel `InternalAuthority`-gated entry point. Closes a
+  type-system gap where any code path could synthesize a fake
+  super-admin claim.
+- **`SessionBackend::save` error type bound** in the trait stays sync
+  for now; the AzureBackend runtime panic that motivated an async
+  migration is fixed via `block_on_isolated` (a side-thread dedicated
+  runtime). The full async-trait migration is deferred to a later
+  cycle.
+
+### Added
+
+- **`VtaError::suggested_fix(&self) -> Option<&'static str>`** — lifts
+  the CLI's "did you mean…" hint into the SDK so non-CLI consumers
+  (web UIs, GUIs, custom dashboards) get the same operator-actionable
+  guidance without forking the dispatch logic.
+- **CLI `--json` flag** (`pnm`, `cnm`) — global flag wired into
+  `acl list`, `contexts list`, `keys list`, `did-templates list`. Empty
+  results emit the canonical empty shape so `jq` pipelines have a stable
+  contract. Uses a new `vta_cli_common::render::OutputFormat` /
+  `is_json_output` / `print_json` infrastructure that other commands
+  can opt into with a one-line guard.
+- **Two runnable examples** under `vta-sdk/examples/`:
+  `sealed_transfer_round_trip` (HPKE round-trip end-to-end) and
+  `bootstrap_request` (provision-integration request build + sign +
+  verify). Each has `required-features = […]`; both double as compile-
+  time API-surface locks.
+- **`vtc-service` library surface + integration tests.** New `lib.rs`
+  exposes the module tree so `tests/` can drive the route stack
+  end-to-end. First test file is `tests/auth_audience.rs` (3 cases:
+  VTA-audience, unknown-audience, no-token rejection through the full
+  router).
+- **`pnm did-templates list`, `pnm acl list`, etc. now respect global
+  `--json`** — emits the canonical wire shape ready for automation.
+
+### Security
+
+- **Backup KDF parameter clamps on import.** `decrypt_backup` rejects
+  `m_cost` outside `[8 MiB, 1 GiB]`, `t_cost` outside `[1, 10]`, and
+  any non-`argon2id`/`aes-256-gcm` algorithm. Closes a Nitro-fatal
+  memory-bomb vector where a hostile envelope could force `m_cost =
+  u32::MAX`.
+- **Per-route body caps on unauth endpoints** — `/bootstrap/request`
+  and the three `/auth/*` routes now share a 64 KiB cap (vs the global
+  1 MiB) so an attacker can't drive expensive crypto with 1 MiB blobs
+  ahead of any auth check.
+- **`BootstrapRequestBody.label` capped at 256 bytes** via
+  `serde(deserialize_with = ...)`. Prevents an MB-scale free-form
+  string from spilling into audit logs.
+- **`tee_attested` JWT claim is per-session.** Was sourced from
+  `state.tee.is_some()` (compile-time TEE feature on); now read from
+  the `Session` record set at challenge issue time. A TEE binary in
+  `Optional` mode that fell through to an unattested challenge writes
+  `false` here; older session JSON deserializes as `false` via
+  `#[serde(default)]`.
+- **`Session::Debug` redacts `refresh_token`.** Hand-implemented
+  `Debug` so a stray `tracing::debug!("{session:?}")` or panic
+  backtrace can't surface a bearer-equivalent secret.
+- **`SessionInfo` and `TokenResult`** also redact private-key /
+  access-token fields in `Debug`.
+- **`vta did-webvh create-did --print-mnemonic`** is now opt-in. The
+  generated mnemonic is no longer printed to stderr by default —
+  protects against shell history, scrollback, CI log collectors, and
+  tmux/screen buffers.
+- **Auth nonce GC.** `cleanup_expired_sessions` collects live
+  `session_id`s in the same pass and removes orphan `nonce:` reverse-
+  index rows. The keyspace no longer grows linearly with every
+  challenge ever issued — relevant in long-running TEEs.
+- **Reject unknown armor headers.** `vta-sdk/src/sealed_transfer/armor.rs`
+  used to silently drop unknown headers for forward compatibility;
+  now returns `SealedTransferError::Armor("unknown header: …")`. New
+  test cases mutate `Bundle-Id`/`Chunk i/N`/`Digest-Algo` through the
+  textual armor wire form and assert open fails.
+- **`AzureBackend` runtime panic isolated.** The Azure Key Vault
+  session backend used `tokio::runtime::Handle::current().block_on(…)`
+  inside a sync trait method; that panics under the current-thread
+  runtime most CLIs use. New `block_on_isolated` helper spawns a
+  dedicated OS thread with its own runtime. Cost is one thread per
+  call — acceptable for human-rate session ops.
+
+### Tests
+
+- **`MODE_B_LOCK` concurrency contract** — 16 concurrent
+  `mint_mode_b`-style "lock → check → ... await ... → write" tasks
+  race against the actual `MODE_B_LOCK` static and the actual
+  `BOOTSTRAP_CARVEOUT_CLOSED_KEY` constant. Asserts exactly one task
+  writes the sentinel.
+- **`KeyspaceHandle` behavioural conformance suite** — 14 cases that
+  define the observable contract every `KeyspaceHandle` backend must
+  satisfy (round-trip, prefix scan, large-value, binary-safe keys,
+  empty values, approximate_len). Today exercises `Local`; harness is
+  parameterised on `&KeyspaceHandle` so a future Linux-only fake
+  vsock proxy runs the same suite against `Vsock`.
+- **Nitro attestation negative-path suite** — 8 cases covering wrong
+  proof variant, unknown format, case-insensitive Nitro-format
+  matching, malformed base64, empty/random quote bytes, BadProducerDid.
+  Documents that the cryptographic-signature path requires a
+  fixture-bearing on-host harness.
+- **KMS CMS-envelope failure paths** — 5 cases (wrong RSA key,
+  corrupted CEK, tampered AES-GCM ciphertext, empty envelope,
+  malformed PKCS#8) covering the unwrap path the security review
+  flagged as fixture-only.
+- **JWT audience isolation through the full route stack** — VTA-side
+  in `vta-service/tests/api_integration.rs`, VTC-side in the new
+  `vtc-service/tests/auth_audience.rs`. Cross-audience tokens return
+  401, unknown audiences return 401.
+- **Backup KDF parameter clamps** — 5 unit tests covering each
+  out-of-bounds class.
+- **`Session::Debug` redaction regression test** — guards against a
+  future derive-`Debug` regression re-leaking refresh tokens.
+- **Refresh-rotation contract tests** — `delete_refresh_index`
+  isolation + idempotence.
+- **Sealed-transfer armor tampering** — 4 new cases through the
+  textual wire form.
+
+### Refactored
+
+- **`client.rs` → `client/types.rs` + `client.rs`.** The 2269-line
+  `client.rs` had request/response DTOs (~36 of them, plus their
+  builder impls) inline. Types now live in `client/types.rs` and are
+  re-exported via `mod types; pub use types::*;`. `client.rs` shrinks
+  to 1858 lines and is mostly methods.
+- **`session.rs` → `session/backends/{file,keyring,azure}.rs`.** Each
+  backend gets its own focused file (~80 lines apiece); a sibling
+  `mod.rs` keeps the `default_backend` selection and the `pub(super)`
+  re-exports. `session.rs` drops 260 lines.
+- **Shared seal helper for provision-integration.** The end-of-flow
+  block (`pick assertion → seal_payload → armor → digest`) was
+  copy-pasted between the `TemplateBootstrap` and `AdminRotation`
+  paths in `operations/provision_integration/`. Extracted into a
+  `pub(super)` `seal_provision_payload` helper in
+  `provision_integration/seal.rs`. New payload variants pick up the
+  same sealing contract by default.
+
+### Polish
+
+- **`#[must_use]` on every builder** — `CreateKeyRequest`,
+  `CreateContextRequest`, `CreateAclRequest`, `EnableDidcommRequest`,
+  `MigrateMediatorRequest`, `ProvisionRequestBuilder`,
+  `VtaAuthorizationParams`. Catches dropped builder chains at
+  compile time.
+- **Missing derives.** `SessionInfo`, `SessionStatus`, `LoginResult`,
+  `TokenResult`, `TokenStatus` now carry `Debug + Clone` (and
+  `Copy + PartialEq + Eq` where appropriate). `SessionInfo` and
+  `TokenResult` use a hand-implemented `Debug` that redacts
+  bearer-equivalent fields.
+- **CLI flag consistency.** `pnm keys create/import` now accept
+  `--context` (keeps `--context-id` as a hidden alias for backward
+  compat) — matches the rest of the CLI surface.
+- **`vta-enclave` `publish = false`.** Linux-only Nitro Enclave
+  binary; consumed via the deploy pipeline, not `cargo install`.
+- **Crate-level doc on `vta-sdk/src/lib.rs`.** First page of
+  `cargo doc` is no longer empty — covers Quick Start, sealed-transfer
+  pointer, feature-flag table, module map.
+- **README + integration-guide fixes.** Workspace `README.md`,
+  `pnm-cli/README.md`, and `docs/03-integrating/integration-guide.md`
+  no longer document non-existent flags or missing API methods.
+  Version pins bumped from `0.4` to `0.5`.
+- **Stale CLAUDE.md notes struck.** The "backup `vta_did` cross-check
+  not implemented" warning was already false (implemented at
+  `backup.rs:286-307`); removed.
+
+### Dependencies
+
+- **`keyring-core` 1.0** replaces the legacy `keyring` v3. Each
+  binary registers a platform store at startup via
+  `vta_sdk::keyring_init::install_default_store()`; per-target
+  stores: `apple-native-keyring-store` (macOS Keychain),
+  `windows-native-keyring-store` (Windows Credential Manager),
+  `dbus-secret-service-keyring-store` (Linux Secret Service —
+  matches prior behaviour and survives reboot, vs `linux-keyutils`
+  which doesn't).
+- **`affinidi-tdk` 0.6 → 0.7**, **`affinidi-messaging-didcomm-service`
+  0.2 → 0.3**, **`affinidi-tdk-common` 0.5 → 0.6**.
+  `TDKSharedState::default()` is removed; all 5 call sites switched
+  to `TDKSharedState::new(TDKConfig::builder().build()?).await?`.
+  The `secrets_resolver` field is now private; uses now go through
+  the `secrets_resolver()` accessor.
+- **`metrics-exporter-prometheus`** patch-bumped 0.18.2 → 0.18.3.
+
+### Deferred
+
+The following items are real but cascade beyond a focused commit
+and don't gate publish. Queued for the next breaking-change cycle:
+
+- **`SessionBackend` async trait migration.** Trait shape stays sync
+  for now; AzureBackend uses `block_on_isolated`. Native-async would
+  ripple through ~30 SessionStore call sites + both CLIs.
+- **`VtaClient<T: Transport>` god-object split.** Same shape of
+  cascade as SessionBackend.
+- **Hot-spot file split for `did_webvh/update.rs`** — the
+  recommended boundaries (update/rotate/state/keys_helper) share
+  helpers more entangled than the agent's recommendation suggested,
+  needs its own design pass.
+- **Provision-integration mid-sequence failure test** — needs a
+  fault-injecting `KeyspaceHandle` wrapper. Existing happy-path +
+  ACL-gate tests cover the externally-visible contract.
+- **Generic `--json` rollout** — wired into 4 high-value list
+  commands; remaining list commands (audit logs, services, mediator,
+  webvh) keep their human renderers and can opt in with a one-line
+  guard when needed.
+
+### Added (sealed-transfer foundation)
+
+- **Sealed-transfer wire format** (`vta-sdk::sealed_transfer`) —
+  HPKE-AEAD envelope (X25519-HKDF-SHA256 + ChaCha20-Poly1305),
+  OpenPGP-style ASCII armor with CRC24 line checksums, and a tagged
+  `SealedPayloadV1` enum covering admin credentials, context
+  provision bundles, DID secrets, admin key sets, raw private keys,
+  and template-bootstrap payloads. One format, one seal/open path,
+  one set of tamper tests for every secret we move.
+- **Provision-integration flow** — a holder posts a VP-framed
+  `BootstrapRequest` naming a DID template + variables; the VTA
+  mints keys, renders the template, registers the holder in the
+  ACL, issues a `VtaAuthorizationCredential` (W3C VC + Data
+  Integrity), seals the whole bundle to the holder's X25519, and
+  returns armored output. Works over three transports (offline
+  file, PNM REST bridge, DIDComm) through the same library function.
+- **DID templates feature** — declarative JSON describing the shape
+  of a DID document with `{TOKEN}` placeholders. Four built-ins ship
+  with the SDK (`didcomm-mediator`, `vta-admin`,
+  `webvh-hosting-server`, `webvh-service`). Operators can upload
+  global or context-scoped custom templates via REST / DIDComm. See
+  `docs/did-templates.md`.
+- **`webvh-service` built-in template** — generic webvh DID for
+  control plane, DID-hosting server, witness, and watcher services
+  that route DIDComm through a shared mediator DID.
+- **TEE Mode B bootstrap** — `pnm bootstrap connect --vta-url`
+  performs a one-command attested first-boot against a fresh Nitro
+  enclave. The `/bootstrap/request` carve-out closes permanently on
+  first success. Full Nitro attestation verification (COSE_Sign1 +
+  cert chain + PCR match) in `pnm-cli` via the `attest-verify`
+  feature.
+- **Cold-start admin credential flow** — unified temp-did:key flow
+  with auto-rotation to a fresh did:key on first authenticated call.
+  `vta import-did` seeds the temp DID into the ACL offline; PNM
+  completes the handshake + rotation in one `pnm setup` run.
+- **Non-interactive VTA setup** — `vta setup --from <file>` for
+  CI / sealed images / unattended bootstrap. See
+  `docs/non-interactive-setup.md`.
+- **Persistent bundle-id anti-replay store** — sealed-transfer nonce
+  reuse rejected via fjall-backed `PersistentNonceStore`.
+- **Rate limiting** on unauth routes (`/bootstrap/request`,
+  `/auth/*`, public `/did/{did}/log`): 5 rps + 10 burst per IP via
+  `tower-governor`.
+- **Deferred-VTA-DID `pnm setup` flow** (non-TEE) — operators can now
+  mint the PNM admin `did:key` **before** the VTA exists, paste it
+  into the VTA's `admin_did` input, boot the VTA, then finish PNM
+  with `pnm setup continue <slug>`. Unblocks automated VTA hosting:
+  Terraform / scripted provisioners no longer hit the chicken-and-egg
+  where PNM wanted the VTA DID first and VTA wanted the admin DID
+  first. Interactive (`pnm setup` → prompt VTA DID blank to defer)
+  and non-interactive (`pnm setup --name <n>` phase 1 with JSON on
+  stdout, `pnm setup continue <slug> --vta-did <did>` phase 2) modes.
+  Same ephemeral `did:key` preserved across both phases. Multiple
+  concurrent pending VTAs allowed (distinct slugs). Spec:
+  `docs/design/pnm-setup-deferred-vta-did.md`.
+- **`vta-sdk` `test-support` feature** — exposes
+  `vta_sdk::session::testing::InMemorySessionBackend` for consumer
+  integration tests. Avoids OS-keyring prompts / Secret-Service
+  availability in CI. Additive, zero-cost when off.
+
+### Changed
+
+- **MSRV bumped to Rust 1.94.0.**
+- **Replaced `rsa` crate with `aws-lc-rs`** for the KMS CMS envelope
+  unwrap in the Nitro attested bootstrap path. Drops RUSTSEC-2023-0071
+  exposure; constant-time OAEP via BoringSSL heritage. Also dropped
+  the SHA-1 MGF1 OAEP fallback (AWS KMS always uses symmetric
+  `RSAES_OAEP_SHA_256`).
+- **Replaced plaintext credential / DID-secret transfer** with sealed
+  bundles everywhere. Plaintext `encode/decode` helpers on bundle
+  types are gone — the only way to move secrets is through
+  `sealed_transfer::seal_payload` + `open_bundle`.
+- **`VtaError::Protocol(String)`** split into typed DIDComm variants
+  (`UnsupportedTransport`, `DidcommTransport`, `DidcommRemote`)
+  so the CLI can emit operator-specific remediation.
+- **Client-side keygen for admin credential issuance** — the VTA no
+  longer returns raw secret material. Clients mint their Ed25519
+  locally and register the public DID via ACL.
+- **`TemplateBootstrap` payload** is now the canonical integration
+  bundle shape; replaces ad-hoc `ContextProvisionBundle` exports.
+- **Coordinated RustCrypto 0.11 ecosystem bump**: `sha2` 0.10→0.11,
+  `hmac` 0.12→0.13, `hkdf` 0.12→0.13, `aes` 0.8→0.9, `cbc` 0.1→0.2.
+- **Azure crates bumped**: `azure_identity` 0.33→0.35,
+  `azure_security_keyvault_secrets` 0.12→0.14.
+- **[breaking] `vta-sdk::session` public-type `vta_did`** is now
+  `Option<String>` on `Session` (internal), `SessionInfo`,
+  `SessionStatus`, and `LoginResult`. `None` encodes the new
+  `PendingVtaBinding` state used by deferred-VTA-DID `pnm setup`.
+  `SessionStore` gains `store_pending_vta_binding`, `bind_vta_did`,
+  and `has_pending_vta_binding`. Existing session JSON still
+  deserializes (serde default). No external `SessionBackend`
+  implementors exist outside the in-tree built-ins.
+
+### Security
+
+Design-review hardening pass (see CLAUDE.md for the full write-up):
+
+- **S-1** KMS attested-only on real Nitro hardware. Previously a
+  transient NSM hiccup silently downgraded to an IAM-only KMS call,
+  bypassing PCR-enforced policy. Now terminal unless
+  `tee.kms.allow_unattested_fallback = true`.
+- **S-2** JWT key fingerprint no longer silently re-baselines on
+  missing record. Operators migrating from a pre-fingerprint VTA
+  opt in explicitly via `tee.kms.allow_fingerprint_init`.
+- **S-3** Constant-time challenge + DID compare on `/auth/`.
+- **S-4** `AuthClaims::local_cli` renamed to
+  `unsafe_local_cli_super_admin` and feature-gated behind
+  `cli-synthesis`. Enclave builds cannot compile a call to it.
+  Added a separate `server_internal_super_admin` for the library-
+  internal privilege-elevation case.
+- **S-5** `verify_producer_assertion_with_pubkey` now returns a
+  `VerifiedAssertion` typestate (`DidSignedVerified` /
+  `PinnedOnlyAcknowledged` / `AttestedNeedsNitroCheck`). Callers
+  must match exhaustively — no more silent `Ok(())` for Attested.
+- **S-6** `TeeProvider::verify(report) -> bool` renamed to
+  `smoke_check_structure(report) -> StructuralCheckOutcome` with
+  doc comments spelling out that this is structural only, not
+  cryptographic verification.
+- **S-7** Refresh tokens keyed by SHA-256 in the session reverse-
+  index. A storage dump now yields hashes, not live credentials.
+- **S-8** `validate_identifier` on context-id and template-name at
+  the DID-template operations boundary. Guards against
+  `{context}:{name}` → `tpl:ctx:a:b:c` keyspace injection.
+- **S-9** Backup import rejects mismatched `vta_did`. Fresh installs
+  accept any backup (disaster recovery); running VTAs refuse to
+  overwrite their identity with a foreign backup.
+- **S-10** `open_bundle` couples `PinnedOnly` producer assertions to
+  an OOB digest at the type level via `PinnedOnlyPolicy`.
+- **Backup encryption** uses Argon2id (m=64 MiB, t=3, p=4) +
+  AES-256-GCM with 12-char minimum password and AEAD tag check.
+
+### Tests
+
+Reference-quality coverage across foundation crates:
+
+- **T-1** vsock-store wire-format tests (25) — protocol constants,
+  encode/decode tamper cases, request payload shape.
+- **T-2** ACL unit tests (26) — CRUD, role assignment matrix,
+  context-scope visibility, expiration boundary, serde
+  forward-compat with pre-`expires_at` entries.
+- **T-3** JWT rejection tests (7) — expired, tampered signature,
+  `alg=none`, foreign signer, missing required claims, empty,
+  malformed shape.
+- **T-4** Session lifecycle tests (17) — CRUD, refresh-token S-7
+  regression guard, cleanup of expired sessions.
+- **T-5** vtc-service wire-shape + config parse tests (18).
+- **Mutation-coverage suite** for VP verify in
+  `provision_integration/request.rs` — bit-flip in nonce, ask,
+  `validUntil`, admin template, type arrays.
+- **Sealed-transfer adversarial suite** — armor CRC24 tamper, AAD
+  tamper caught by AEAD, missing chunk, nonce replay, wrong
+  recipient, PinnedOnly-without-digest rejection.
+
+### Refactored
+
+- `vta-service/src/operations/provision_integration.rs` (1942 lines)
+  split into `mod.rs` + `mint` + `preconditions` + `templates` +
+  `vta_keys` + `webvh` submodules.
+- `vta-service/src/operations/did_webvh.rs` (1444 lines) split into
+  `mod.rs` + `document` + `lifecycle` + `servers`.
+- `vta-service/src/setup/` split into `interactive` + `from_toml`.
+- New `vta-service/src/test_support` for the shared test harness.
+
+### Removed
+
+- **`/auth/credentials` endpoint and `VtaClient::auth_credential_*`
+  client methods** — clients mint did:key locally and register the
+  DID in the ACL; the VTA never holds the private key.
+- **Plaintext `encode/decode` helpers** on `CredentialBundle`,
+  `ContextProvisionBundle`, `DidSecretsBundle`, `AdminKeySet`,
+  `RawPrivateKey` — the only way to move these is via
+  `sealed_transfer`.
+- **`rsa` and `sha1` crates** from direct dependencies.
+
 ## 0.4.1 — 2026-04-15
 
 ### Added

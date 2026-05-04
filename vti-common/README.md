@@ -34,10 +34,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-vti-common = "0.2"
+vti-common = "0.5"
 
 # With encryption support
-vti-common = { version = "0.2", features = ["encryption"] }
+vti-common = { version = "0.5", features = ["encryption"] }
 ```
 
 ## License

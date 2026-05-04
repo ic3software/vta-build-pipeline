@@ -6,9 +6,11 @@
 //! work end-to-end with the current crate versions.
 //!
 //! Usage:
-//!   cargo run --package didcomm-test -- --mediator-did <DID>
-//!   cargo run --package didcomm-test -- --mediator-did <DID> --resolver-url ws://localhost:4445/did/v1/ws
-//!   cargo run --package didcomm-test -- --mediator-did <DID> --seed-hex <64-hex-chars>
+//! ```text
+//! cargo run --package didcomm-test -- --mediator-did <DID>
+//! cargo run --package didcomm-test -- --mediator-did <DID> --resolver-url ws://localhost:4445/did/v1/ws
+//! cargo run --package didcomm-test -- --mediator-did <DID> --seed-hex <64-hex-chars>
+//! ```
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -165,8 +167,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Insert secrets directly into the TDK's resolver with their did:key fragment IDs
-    tdk.secrets_resolver.insert(secrets.signing).await;
-    tdk.secrets_resolver.insert(secrets.key_agreement).await;
+    tdk.secrets_resolver().insert(secrets.signing).await;
+    tdk.secrets_resolver().insert(secrets.key_agreement).await;
     info!("secrets inserted into TDK resolver");
 
     // Create ATM with inbound message channel

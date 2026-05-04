@@ -2,7 +2,7 @@
 name = "vti-common"
 description = "Shared server-side infrastructure for VTA and VTC services"
 readme = "README.md"
-version = "0.3.0"
+version = "0.5.0"
 edition.workspace = true
 publish.workspace = true
 authors.workspace = true
@@ -14,10 +14,17 @@ repository.workspace = true
 default = []
 encryption = ["dep:aes-gcm", "dep:zeroize", "dep:rand"]
 vsock-store = ["dep:tokio-vsock", "dep:libc"]
+# Exposes `AuthClaims::unsafe_local_cli_super_admin` — a synthesizer that
+# produces a super-admin claim without any wire-level verification. Only
+# for the local/dev `vta` binary's CLI, where the trust boundary is the
+# OS process (not the network). NEVER enable in enclave builds.
+cli-synthesis = []
 
 [dependencies]
-axum = "0.8"
+async-trait = "0.1"
+axum = { workspace = true }
 axum-extra = { workspace = true }
+chrono = { workspace = true }
 fjall = { workspace = true }
 jsonwebtoken = { workspace = true }
 serde = { workspace = true }
@@ -26,19 +33,23 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
 
 # Secrets resolver (for error type)
 affinidi-tdk = { workspace = true }
 
 # Encryption (feature-gated)
-aes-gcm = { version = "0.10", optional = true }
+aes-gcm = { workspace = true, optional = true }
 zeroize = { version = "1", features = ["derive"], optional = true }
 rand = { workspace = true, optional = true }
 
 # Vsock storage proxy client (feature-gated, Linux only)
-tokio-vsock = { version = "0.7", optional = true }
-libc = { version = "0.2", optional = true }
+tokio-vsock = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 base64 = { workspace = true }
+
+[lints]
+workspace = true

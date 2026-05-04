@@ -41,7 +41,7 @@ cargo build --package cnm-cli --release --no-default-features --features config-
 
 ### From source
 
-Requires **Rust 1.91.0+**.
+Requires **Rust 1.94.0+**.
 
 ```sh
 cargo build --package cnm-cli --release
@@ -148,8 +148,9 @@ tokens:
    automatically when they expire.
 
 ```sh
-# Import credential and authenticate
-cnm auth login <credential>
+# Apply a sealed admin credential bundle (e.g. a backup-restore handoff
+# or a sealed transfer from another operator)
+cnm auth login --credential-bundle <file>
 
 # Check auth status
 cnm auth status
@@ -239,11 +240,11 @@ cnm config update --community-vta-name "My VTA" --public-url "https://vta.exampl
 
 ### Authentication
 
-| Command                   | Description                         |
-| ------------------------- | ----------------------------------- |
-| `auth login <credential>` | Import credential and authenticate  |
-| `auth logout`             | Clear stored credentials and tokens |
-| `auth status`             | Show current authentication status  |
+| Command                                 | Description                              |
+| --------------------------------------- | ---------------------------------------- |
+| `auth login --credential-bundle <file>` | Apply a sealed admin credential bundle   |
+| `auth logout`                           | Clear stored credentials and tokens      |
+| `auth status`                           | Show current authentication status       |
 
 ### Health
 
@@ -263,7 +264,7 @@ cnm config update --community-vta-name "My VTA" --public-url "https://vta.exampl
 | Command                                                                    | Description     |
 | -------------------------------------------------------------------------- | --------------- |
 | `keys list [--status active\|revoked] [--limit N] [--offset N]`            | List keys       |
-| `keys create --key-type ed25519\|x25519 [--context-id ID] [--label LABEL]` | Create a key    |
+| `keys create --key-type ed25519\|x25519\|p256 [--context-id ID] [--label LABEL]` | Create a key    |
 | `keys get <key_id>`                                                        | Get a key by ID |
 | `keys revoke <key_id>`                                                     | Revoke a key    |
 | `keys rename <key_id> <new_key_id>`                                        | Rename a key    |
@@ -288,7 +289,7 @@ cnm config update --community-vta-name "My VTA" --public-url "https://vta.exampl
 | ------------------------------------------------------------------------- | ----------------------- |
 | `acl list [--context ID]`                                                 | List ACL entries        |
 | `acl get <did>`                                                           | Get an ACL entry by DID |
-| `acl create --did DID --role ROLE [--label LABEL] [--contexts ctx1,ctx2]` | Create an ACL entry     |
+| `acl create --did DID --role ROLE [--label LABEL] [--contexts ctx1,ctx2] [--expires N[s\|m\|h\|d\|w]]` | Create an ACL entry     |
 | `acl update <did> [--role ROLE] [--label LABEL] [--contexts ctx1,ctx2]`   | Update an ACL entry     |
 | `acl delete <did>`                                                        | Delete an ACL entry     |
 
@@ -306,5 +307,6 @@ has unrestricted access across all contexts.
 - [VTA Service & Architecture](../README.md)
 - [PNM CLI (single-VTA)](../pnm-cli/README.md) -- simpler alternative for personal use
 - [First Person Network White Paper](https://www.firstperson.network/white-paper)
-- [Design Document](../docs/design.md)
-- [BIP-32 Path Specification](../docs/bip32_paths.md)
+- [Documentation index](../docs/README.md)
+- [Architecture](../docs/01-concepts/architecture.md)
+- [BIP-32 Path Specification](../docs/04-reference/bip32-paths.md)

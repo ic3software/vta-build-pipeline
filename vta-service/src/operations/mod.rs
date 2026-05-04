@@ -6,10 +6,29 @@ pub mod backup;
 pub mod cache;
 pub mod config;
 pub mod contexts;
-pub mod credentials;
+pub mod did_templates;
 #[cfg(feature = "webvh")]
 pub mod did_webvh;
+/// Offline state-assembly helpers: read the VTA's local store and
+/// produce the same wire-shape bundles (`DidSecretsBundle`,
+/// `ContextProvisionBundle`) that the equivalent `VtaClient` flows
+/// build over REST. Used by the on-host `vta context reprovision` /
+/// `vta keys bundle` CLIs for cold-start environments where PNM can't
+/// reach the VTA over the network.
+pub mod export;
+pub mod internal_authority;
 pub mod keys;
+/// DIDComm protocol management: enable/disable/migrate operations that
+/// patch the VTA's own DID document service array. See
+/// `docs/05-design-notes/didcomm-protocol-management.md`.
+#[cfg(feature = "webvh")]
+pub mod protocol;
+/// Generic template-driven integration bootstrap. See
+/// `docs/03-integrating/provision-integration.md`. Feature-gated on `webvh`
+/// because the phase-1 implementation delegates minting to
+/// `create_did_webvh`.
+#[cfg(feature = "webvh")]
+pub mod provision_integration;
 pub mod seeds;
 
 use crate::store::KeyspaceHandle;
@@ -19,6 +38,7 @@ pub struct Keyspaces<'a> {
     pub keys: &'a KeyspaceHandle,
     pub acl: &'a KeyspaceHandle,
     pub contexts: &'a KeyspaceHandle,
+    pub did_templates: &'a KeyspaceHandle,
     pub audit: &'a KeyspaceHandle,
     pub imported: &'a KeyspaceHandle,
     #[cfg(feature = "webvh")]
@@ -32,6 +52,7 @@ impl<'a> Keyspaces<'a> {
             keys: &s.keys_ks,
             acl: &s.acl_ks,
             contexts: &s.contexts_ks,
+            did_templates: &s.did_templates_ks,
             audit: &s.audit_ks,
             imported: &s.imported_ks,
             #[cfg(feature = "webvh")]
@@ -46,6 +67,7 @@ impl<'a> Keyspaces<'a> {
             keys: &s.keys_ks,
             acl: &s.acl_ks,
             contexts: &s.contexts_ks,
+            did_templates: &s.did_templates_ks,
             audit: &s.audit_ks,
             imported: &s.imported_ks,
             #[cfg(feature = "webvh")]

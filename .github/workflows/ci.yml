@@ -95,3 +95,116 @@ jobs:
           components: rustfmt
 
       - run: cargo fmt --all -- --check
+
+  msrv:
+    # Verify the workspace builds against the rust-version declared in
+    # the root `Cargo.toml`. CI's "stable" toolchain is usually newer
+    # than the MSRV; without this job a `let-else` introduced under a
+    # newer compiler can silently break consumers on the documented MSRV.
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          msrv=$(grep -E '^rust-version *= *"' Cargo.toml | head -1 | sed -E 's/.*"([0-9.]+)".*/\1/')
+          echo "msrv=$msrv" >> "$GITHUB_OUTPUT"
+          echo "Workspace MSRV: $msrv"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.msrv }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ steps.msrv.outputs.msrv }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-${{ steps.msrv.outputs.msrv }}-
+            ${{ runner.os }}-cargo-
+
+      - run: cargo check --workspace --locked
+
+  deny:
+    # cargo-deny enforces the advisory ignores documented in `deny.toml`
+    # and catches new license / source / duplicate-dependency issues
+    # before they land. The workspace already has a curated `deny.toml`
+    # with justified ignores; this job just runs it.
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans sources licenses
+
+  features:
+    # Build the most-used non-default feature combinations so a misuse
+    # of `cfg(feature = "...")` doesn't silently rot. Default-feature
+    # builds are covered by the `check` job above.
+    name: Feature combos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-features-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-features-
+            ${{ runner.os }}-cargo-
+
+      - name: vta-service tee + webvh
+        run: cargo check -p vta-service --no-default-features --features tee,rest,didcomm
+      - name: vta-service aws-secrets
+        run: cargo check -p vta-service --no-default-features --features aws-secrets,keyring,rest
+      - name: vta-service azure-secrets
+        run: cargo check -p vta-service --no-default-features --features azure-secrets,keyring,rest
+      - name: vta-sdk attest-verify
+        run: cargo check -p vta-sdk --features attest-verify
+      - name: vta-sdk client + sealed-transfer + provision-integration
+        run: cargo check -p vta-sdk --features client,sealed-transfer,provision-integration
+
+  enclave:
+    # The Nitro enclave binary uses a TEE-only feature combo that the
+    # default `check` job never touches. Linux-only because vsock-store
+    # depends on `tokio-vsock` which doesn't build on macOS/Windows.
+    name: Enclave build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-enclave-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-enclave-
+            ${{ runner.os }}-cargo-
+
+      - run: cargo check -p vta-enclave --no-default-features --features rest,didcomm,vsock-store

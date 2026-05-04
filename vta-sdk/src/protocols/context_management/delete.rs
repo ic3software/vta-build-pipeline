@@ -28,4 +28,7 @@ pub struct DeleteContextPreviewResultBody {
     pub acl_entries_removed: Vec<String>,
     /// ACL entries that will have this context removed from their allowed list.
     pub acl_entries_updated: Vec<String>,
+    /// DID templates scoped to this context that will be deleted.
+    #[serde(default)]
+    pub did_templates: Vec<String>,
 }

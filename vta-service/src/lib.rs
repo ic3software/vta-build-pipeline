@@ -7,10 +7,12 @@
 //! with the appropriate store backend and TEE context.
 
 pub mod acl;
+pub mod acl_sweeper;
 pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod contexts;
+pub mod did_templates;
 pub mod didcomm_bridge;
 pub mod error;
 pub mod keys;
@@ -22,6 +24,7 @@ pub mod operations;
 #[cfg(feature = "rest")]
 pub mod routes;
 pub mod seal;
+pub mod sealed_nonce_store;
 pub mod server;
 pub mod status;
 pub mod store;
@@ -33,6 +36,12 @@ pub mod webvh_client;
 pub mod webvh_didcomm;
 #[cfg(feature = "webvh")]
 pub mod webvh_store;
+
+// `test_support` is gated internally on `any(test, feature = "test-support")`.
+// `#[cfg(...)]` here would hide the module from the test builds that
+// don't pass `--features test-support` explicitly; the module header
+// handles that itself.
+pub mod test_support;
 
 /// Initialize tracing/logging from config. Call once at startup before any
 /// log output. Shared by all VTA front-end binaries.

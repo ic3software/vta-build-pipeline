@@ -3,5 +3,8 @@ pub mod audit;
 pub mod config;
 pub mod contexts;
 pub mod credentials;
+pub mod did_templates;
 pub mod keys;
+pub mod mediator;
+pub mod services;
 pub mod webvh;

@@ -39,13 +39,13 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 # Types only (no network)
-vta-sdk = "0.4"
+vta-sdk = "0.5"
 
 # Full client with session management
-vta-sdk = { version = "0.4", features = ["session", "keyring"] }
+vta-sdk = { version = "0.5", features = ["session", "keyring"] }
 
 # Service integration with offline resilience
-vta-sdk = { version = "0.4", features = ["integration"] }
+vta-sdk = { version = "0.5", features = ["integration"] }
 ```
 
 ### Quick Start: Service Integration
@@ -77,7 +77,7 @@ let result = startup(&config, &MyCache).await?;
 // result.client   — Some(VtaClient) when VTA is reachable
 ```
 
-See the [Integration Guide](../docs/integration-guide.md) for the full walkthrough.
+See the [Integration Guide](../docs/03-integrating/integration-guide.md) for the full walkthrough.
 
 ### Quick Start: Direct Client
 

@@ -9,6 +9,15 @@ use crate::keys::seeds::load_seed_bytes;
 use crate::keys::{self, KeyRecord, KeyStatus, KeyType};
 use crate::store::Store;
 
+/// Format a UTC `DateTime` as a readable local-timezone string with ISO offset.
+///
+/// Internal representation stays UTC; CLI output converts to operator locale.
+fn format_local_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M:%S %:z")
+        .to_string()
+}
+
 pub async fn run_keys_list(
     config_path: Option<PathBuf>,
     context: Option<String>,
@@ -183,13 +192,10 @@ pub async fn run_keys_seeds_list(
         eprintln!("  Status:      {status}");
         eprintln!(
             "  Created:     {}",
-            record.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+            format_local_datetime(record.created_at)
         );
         if let Some(retired_at) = record.retired_at {
-            eprintln!(
-                "  Retired:     {}",
-                retired_at.format("%Y-%m-%d %H:%M:%S UTC")
-            );
+            eprintln!("  Retired:     {}", format_local_datetime(retired_at));
         }
         if record.seed_hex.is_some() {
             eprintln!("  Storage:     archived in local store");
@@ -260,7 +266,7 @@ fn print_key_record(record: &KeyRecord) {
     }
     eprintln!(
         "  Created:     {}",
-        record.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        format_local_datetime(record.created_at)
     );
     eprintln!();
 }

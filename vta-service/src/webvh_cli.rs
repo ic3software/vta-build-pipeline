@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use affinidi_did_resolver_cache_sdk::{DIDCacheClient, config::DIDCacheConfigBuilder};
 
-use crate::acl::Role;
 use crate::auth::AuthClaims;
 use crate::config::AppConfig;
 use crate::didcomm_bridge::DIDCommBridge;
@@ -11,13 +10,24 @@ use crate::keys::seed_store::create_seed_store;
 use crate::operations;
 use crate::store::Store;
 
+/// Format a UTC `DateTime` as a readable local-timezone string with ISO offset.
+///
+/// The service stores timestamps in UTC internally (wire format, storage);
+/// operator-facing CLI output converts to the local timezone for readability.
+fn format_local_datetime(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M:%S %:z")
+        .to_string()
+}
+
 /// Create a synthetic super-admin AuthClaims for CLI operations.
+///
+/// Thin wrapper over the workspace-level
+/// [`AuthClaims::unsafe_local_cli_super_admin`] factory so the
+/// trust-boundary documentation lives in one place. Callers should
+/// prefer the factory directly in new code.
 pub(crate) fn cli_super_admin() -> AuthClaims {
-    AuthClaims {
-        did: "cli:local".to_string(),
-        role: Role::Admin,
-        allowed_contexts: vec![],
-    }
+    AuthClaims::unsafe_local_cli_super_admin("webvh")
 }
 
 pub async fn run_add_server(
@@ -75,10 +85,7 @@ pub async fn run_list_servers(
         if let Some(label) = &server.label {
             eprintln!("  Label:   {label}");
         }
-        eprintln!(
-            "  Created: {}",
-            server.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-        );
+        eprintln!("  Created: {}", format_local_datetime(server.created_at));
         eprintln!();
     }
     Ok(())
@@ -134,6 +141,7 @@ pub async fn run_create_did(
     mediator_service: bool,
     services_json: Option<String>,
     pre_rotation: Option<u32>,
+    print_mnemonic: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::load(config_path.clone())?;
     let store = Store::open(&config.store)?;
@@ -141,6 +149,7 @@ pub async fn run_create_did(
     let imported_ks = store.keyspace("imported_secrets")?;
     let contexts_ks = store.keyspace("contexts")?;
     let webvh_ks = store.keyspace("webvh")?;
+    let did_templates_ks = store.keyspace("did_templates")?;
     let seed_store: Arc<dyn crate::keys::seed_store::SeedStore> =
         Arc::from(create_seed_store(&config)?);
 
@@ -165,6 +174,12 @@ pub async fn run_create_did(
         set_primary: true,
         signing_key_id: None,
         ka_key_id: None,
+        template: None,
+        template_context: None,
+        template_vars: std::collections::HashMap::new(),
+        // `pnm did-webvh create` is a runtime integration-DID CLI; it
+        // never mints the VTA's own identity (setup wizard does that).
+        is_vta_identity: false,
     };
 
     let did_resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await?;
@@ -174,6 +189,7 @@ pub async fn run_create_did(
         &imported_ks,
         &contexts_ks,
         &webvh_ks,
+        &did_templates_ks,
         &*seed_store,
         &config,
         &auth,
@@ -192,7 +208,13 @@ pub async fn run_create_did(
     }
     eprintln!("  SCID:       {}", result.scid);
     if let Some(ref mnemonic) = result.mnemonic {
-        eprintln!("  Mnemonic:   {}", mnemonic);
+        if print_mnemonic {
+            eprintln!("  Mnemonic:   {mnemonic}");
+        } else {
+            eprintln!(
+                "  Mnemonic:   <redacted — re-run with `--print-mnemonic` if you really need it on stderr>"
+            );
+        }
     }
     eprintln!("  Portable:   {}", result.portable);
     eprintln!("  Signing:    {}", result.signing_key_id);
@@ -234,10 +256,7 @@ pub async fn run_list_dids(
         eprintln!("  Server:   {}", d.server_id);
         eprintln!("  SCID:     {}", d.scid);
         eprintln!("  Portable: {}", d.portable);
-        eprintln!(
-            "  Created:  {}",
-            d.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-        );
+        eprintln!("  Created:  {}", format_local_datetime(d.created_at));
         eprintln!();
     }
     Ok(())
@@ -272,5 +291,39 @@ pub async fn run_delete_did(
     store.persist().await?;
 
     eprintln!("WebVH DID deleted: {did}");
+    Ok(())
+}
+
+/// `vta webvh did-log` — print the raw `did.jsonl` log for a DID the
+/// VTA knows (provisioning-time snapshot).
+pub async fn run_did_log(
+    config_path: Option<PathBuf>,
+    did: String,
+    out: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = AppConfig::load(config_path)?;
+    let store = Store::open(&config.store)?;
+    let webvh_ks = store.keyspace("webvh")?;
+
+    let log = crate::webvh_store::get_did_log(&webvh_ks, &did)
+        .await?
+        .ok_or_else(|| format!("webvh DID log not found: {did}"))?;
+
+    match out {
+        Some(path) => {
+            std::fs::write(&path, log.as_bytes())
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+            eprintln!(
+                "DID log written to {} ({} bytes)",
+                path.display(),
+                log.len()
+            );
+        }
+        None => {
+            // Raw to stdout so it can be piped to a webvh server or
+            // saved to `.well-known/did.jsonl` directly.
+            print!("{log}");
+        }
+    }
     Ok(())
 }

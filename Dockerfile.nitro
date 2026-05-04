@@ -22,7 +22,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build the VTA binary
 # ---------------------------------------------------------------------------
-FROM rust:1.91-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 # Install build dependencies (dbus-1 is required by the keyring crate's build script)
 RUN apt-get update && \

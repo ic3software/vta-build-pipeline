@@ -612,6 +612,120 @@ pub async fn get_key_secret(
     })
 }
 
+/// Internal-authority variant of [`get_key_secret`] that bypasses the
+/// `auth.require_context` / `auth.is_super_admin` gates.
+///
+/// Required because the provision-integration flow needs to load the
+/// VTA's own signing material (`{vta_did}#key-0`,
+/// `{vta_did}#sealed-transfer-0`) to issue VCs and sign producer
+/// assertions; those keys are server-internal, not user-attributable.
+/// The user-facing caller has already been authorised upstream as a
+/// context admin at precondition time.
+///
+/// Construction of [`InternalAuthority`](super::internal_authority::InternalAuthority)
+/// is `pub(super)` to the `operations` module — route handlers cannot
+/// reach it. Each elevation
+/// thus has to come from the operations layer with an explicit purpose
+/// tag, which is logged as the audit actor.
+pub async fn get_key_secret_internal(
+    keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
+    seed_store: &Arc<dyn SeedStore>,
+    audit_ks: &KeyspaceHandle,
+    authority: super::internal_authority::InternalAuthority,
+    key_id: &str,
+    channel: &str,
+) -> Result<GetKeySecretResultBody, AppError> {
+    let record: KeyRecord = keys_ks
+        .get(keys::store_key(key_id))
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("key {key_id} not found")))?;
+
+    // Deliberately no `auth.require_context` / `is_super_admin` gate —
+    // possessing an `InternalAuthority` IS the gate.
+
+    let (public_key_multibase, private_key_multibase) = match record.origin {
+        KeyOrigin::Imported => {
+            let seed = load_seed_bytes(keys_ks, &**seed_store, None)
+                .await
+                .map_err(|e| AppError::Internal(format!("{e}")))?;
+            let mut secret_bytes = imported::load_secret(
+                imported_ks,
+                keys_ks,
+                &seed,
+                key_id,
+                &record.key_type.to_string(),
+            )
+            .await?;
+            let priv_mb = encode_private_multibase(&record.key_type, &secret_bytes);
+            secret_bytes.zeroize();
+            (record.public_key.clone(), priv_mb)
+        }
+        KeyOrigin::Derived => {
+            let seed = load_seed_bytes(keys_ks, &**seed_store, record.seed_id)
+                .await
+                .map_err(|e| AppError::Internal(format!("{e}")))?;
+            let bip32 = ed25519_dalek_bip32::ExtendedSigningKey::from_seed(&seed).map_err(|e| {
+                key_derivation_error(format!("failed to create BIP-32 root key: {e}"))
+            })?;
+
+            match record.key_type {
+                KeyType::Ed25519 => {
+                    let secret = bip32.derive_ed25519(&record.derivation_path)?;
+                    (
+                        secret.get_public_keymultibase()?,
+                        secret.get_private_keymultibase()?,
+                    )
+                }
+                KeyType::X25519 => {
+                    let secret = bip32.derive_x25519(&record.derivation_path)?;
+                    (
+                        secret.get_public_keymultibase()?,
+                        secret.get_private_keymultibase()?,
+                    )
+                }
+                KeyType::P256 => {
+                    let p256_secret = bip32.derive_p256(&record.derivation_path)?;
+                    let public_key = p256_secret.secret_key.public_key();
+                    let encoded = public_key.to_encoded_point(true);
+                    let pub_mb = encode_public_multibase(&KeyType::P256, encoded.as_bytes());
+                    let priv_mb = encode_private_multibase(
+                        &KeyType::P256,
+                        &p256_secret.secret_key.to_bytes(),
+                    );
+                    (pub_mb, priv_mb)
+                }
+            }
+        }
+    };
+
+    let actor = authority.audit_actor();
+    info!(channel, key_id = %key_id, actor = %actor, "key secret retrieved (internal)");
+    audit!(
+        "key.secret_export",
+        actor = &actor,
+        resource = key_id,
+        outcome = "success"
+    );
+    let _ = audit::record(
+        audit_ks,
+        "key.secret_export",
+        &actor,
+        Some(key_id),
+        "success",
+        Some(channel),
+        record.context_id.as_deref(),
+    )
+    .await;
+
+    Ok(GetKeySecretResultBody {
+        key_id: record.key_id,
+        key_type: record.key_type,
+        public_key_multibase,
+        private_key_multibase,
+    })
+}
+
 /// Sign a payload using a VTA-managed key.
 ///
 /// For derived keys, re-derives from BIP-32 seed. For imported keys,

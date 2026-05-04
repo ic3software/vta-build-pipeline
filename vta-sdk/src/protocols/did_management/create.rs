@@ -43,6 +43,19 @@ pub struct CreateDidWebvhBody {
     /// Requires `signing_key_id` to also be set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ka_key_id: Option<String>,
+    /// Stored DID template name to render as the DID document. Mutually
+    /// exclusive with `did_document` and `did_log`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Scope to look the template up in. `None` means "global only"; `Some(ctx)`
+    /// means "this context first, then global, then builtin".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_context: Option<String>,
+    /// Caller-supplied template variables. Server injects `DID`,
+    /// `SIGNING_KEY_MB`, `KA_KEY_MB`, `VTA_DID`, `VTA_URL`, `CONTEXT_ID`,
+    /// `CONTEXT_DID`, `NOW` automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_vars: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

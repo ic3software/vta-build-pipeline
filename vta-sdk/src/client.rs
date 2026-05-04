@@ -1,9 +1,7 @@
 use crate::error::VtaError;
-use crate::keys::{KeyRecord, KeyStatus, KeyType};
+use crate::keys::KeyRecord;
 use crate::protocols::key_management::sign::SignAlgorithm;
-use chrono::{DateTime, Utc};
 use reqwest::{Client, RequestBuilder};
-use serde::{Deserialize, Serialize};
 
 // ── Internal transport ──────────────────────────────────────────────
 
@@ -44,6 +42,12 @@ enum Transport {
 
 /// HTTP/DIDComm client for the VTA service API.
 ///
+/// **Requires the `client` feature.** Without it the struct and all
+/// methods below are absent — enable in `Cargo.toml`:
+/// ```toml
+/// vta-sdk = { version = "…", features = ["client"] }
+/// ```
+///
 /// Cloning a `VtaClient` is cheap — clones share the underlying HTTP
 /// connection pool and authentication state.
 #[derive(Clone)]
@@ -51,411 +55,37 @@ pub struct VtaClient {
     transport: Transport,
 }
 
+// ── Protocol response aliases ──────────────────────────────────────
+//
+// Response types that live in the `protocols::` layer are re-exported
+// here with `*Response` naming so callers can import everything they
+// need from `vta_sdk::client::*` (or `vta_sdk::prelude::*`) without
+// reaching into the protocol path. The original `*ResultBody` names
+// stay exported from `protocols/` for DIDComm-layer consumers.
+
+pub use crate::protocols::context_management::delete::{
+    DeleteContextPreviewResultBody as DeleteContextPreviewResponse,
+    DeleteContextResultBody as DeleteContextResponse,
+};
+
+pub use crate::protocols::did_management::create::CreateDidWebvhResultBody as CreateDidWebvhResponse;
+pub use crate::protocols::did_management::list::ListDidsWebvhResultBody as ListDidsWebvhResponse;
+pub use crate::protocols::did_management::servers::ListWebvhServersResultBody as ListWebvhServersResponse;
+
+// DID-template response shape (Phase 2+).
+pub use crate::did_templates::{
+    BUILTIN_NAMES as DID_TEMPLATE_BUILTINS, DidTemplate, DidTemplateRecord,
+    Scope as DidTemplateScope, TemplateError as DidTemplateError, TemplateVars,
+};
+
 // ── Request / Response types ────────────────────────────────────────
+//
+// All request/response DTOs live in `types.rs`; re-exported here so
+// callers can continue to use `vta_sdk::client::*` without reaching
+// into the submodule path.
+mod types;
+pub use types::*;
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct HealthResponse {
-    pub status: String,
-    #[serde(default)]
-    pub version: Option<String>,
-    #[serde(default)]
-    pub mediator_url: Option<String>,
-    #[serde(default)]
-    pub mediator_did: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ConfigResponse {
-    #[serde(rename = "vta_did")]
-    pub community_vta_did: Option<String>,
-    #[serde(rename = "vta_name")]
-    pub community_vta_name: Option<String>,
-    pub public_url: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpdateConfigRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vta_did: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vta_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_url: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CreateKeyRequest {
-    pub key_type: KeyType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub derivation_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub key_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mnemonic: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_id: Option<String>,
-}
-
-impl CreateKeyRequest {
-    pub fn new(key_type: KeyType) -> Self {
-        Self {
-            key_type,
-            derivation_path: None,
-            key_id: None,
-            mnemonic: None,
-            label: None,
-            context_id: None,
-        }
-    }
-    pub fn derivation_path(mut self, path: impl Into<String>) -> Self {
-        self.derivation_path = Some(path.into());
-        self
-    }
-    pub fn key_id(mut self, id: impl Into<String>) -> Self {
-        self.key_id = Some(id.into());
-        self
-    }
-    pub fn mnemonic(mut self, m: impl Into<String>) -> Self {
-        self.mnemonic = Some(m.into());
-        self
-    }
-    pub fn label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-    pub fn context(mut self, ctx: impl Into<String>) -> Self {
-        self.context_id = Some(ctx.into());
-        self
-    }
-}
-
-// ── Import key types ───────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct ImportKeyRequest {
-    pub key_type: KeyType,
-    /// JWE compact serialization of the private key (REST transport).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub private_key_jwe: Option<String>,
-    /// Multibase-encoded private key (DIDComm transport).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub private_key_multibase: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ImportKeyResponse {
-    pub key_id: String,
-    pub key_type: KeyType,
-    pub public_key: String,
-    pub status: KeyStatus,
-    pub label: Option<String>,
-    pub origin: crate::keys::KeyOrigin,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WrappingKeyResponse {
-    pub kid: String,
-    pub kty: String,
-    pub crv: String,
-    pub x: String,
-}
-
-// ── Context types ───────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct CreateContextRequest {
-    pub id: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-impl CreateContextRequest {
-    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            description: None,
-        }
-    }
-    pub fn description(mut self, desc: impl Into<String>) -> Self {
-        self.description = Some(desc.into());
-        self
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpdateContextRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub did: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpdateContextDidRequest {
-    pub did: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ContextResponse {
-    pub id: String,
-    pub name: String,
-    pub did: Option<String>,
-    pub description: Option<String>,
-    pub base_path: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ContextListResponse {
-    pub contexts: Vec<ContextResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateKeyResponse {
-    pub key_id: String,
-    pub key_type: KeyType,
-    pub derivation_path: String,
-    pub public_key: String,
-    pub status: KeyStatus,
-    pub label: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct InvalidateKeyResponse {
-    pub key_id: String,
-    pub status: KeyStatus,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RenameKeyRequest {
-    pub key_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RenameKeyResponse {
-    pub key_id: String,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GetKeySecretResponse {
-    pub key_id: String,
-    pub key_type: KeyType,
-    pub public_key_multibase: String,
-    pub private_key_multibase: String,
-}
-
-/// Response from `POST /keys/{key_id}/sign`.
-#[derive(Debug, Deserialize)]
-pub struct SignResponse {
-    pub key_id: String,
-    pub signature: String,
-    pub algorithm: SignAlgorithm,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ListKeysResponse {
-    pub keys: Vec<KeyRecord>,
-    pub total: u64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ErrorResponse {
-    pub error: String,
-}
-
-// ── Seed types ──────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct SeedInfoResponse {
-    pub id: u32,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub retired_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ListSeedsResponse {
-    pub seeds: Vec<SeedInfoResponse>,
-    pub active_seed_id: u32,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RotateSeedRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mnemonic: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RotateSeedResponse {
-    pub previous_seed_id: u32,
-    pub new_seed_id: u32,
-}
-
-// ── ACL types ───────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct AclEntryResponse {
-    pub did: String,
-    pub role: String,
-    pub label: Option<String>,
-    pub allowed_contexts: Vec<String>,
-    pub created_at: u64,
-    pub created_by: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AclListResponse {
-    pub entries: Vec<AclEntryResponse>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CreateAclRequest {
-    pub did: String,
-    pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    pub allowed_contexts: Vec<String>,
-}
-
-impl CreateAclRequest {
-    pub fn new(did: impl Into<String>, role: impl Into<String>) -> Self {
-        Self {
-            did: did.into(),
-            role: role.into(),
-            label: None,
-            allowed_contexts: Vec::new(),
-        }
-    }
-    pub fn label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-    pub fn contexts(mut self, contexts: Vec<String>) -> Self {
-        self.allowed_contexts = contexts;
-        self
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpdateAclRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_contexts: Option<Vec<String>>,
-}
-
-// ── WebVH server types ──────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct AddWebvhServerRequest {
-    pub id: String,
-    pub did: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpdateWebvhServerRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-// ── WebVH DID types ─────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct CreateDidWebvhRequest {
-    pub context_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub server_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    pub portable: bool,
-    pub add_mediator_service: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub additional_services: Option<Vec<serde_json::Value>>,
-    pub pre_rotation_count: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub did_document: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub did_log: Option<String>,
-    pub set_primary: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signing_key_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ka_key_id: Option<String>,
-}
-
-// ── WebVH DID log types ──────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct GetDidLogResponse {
-    pub did: String,
-    pub log: Option<String>,
-}
-
-// ── Credential types ────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct GenerateCredentialsRequest {
-    pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    pub allowed_contexts: Vec<String>,
-}
-
-impl GenerateCredentialsRequest {
-    pub fn new(role: impl Into<String>) -> Self {
-        Self {
-            role: role.into(),
-            label: None,
-            allowed_contexts: Vec::new(),
-        }
-    }
-    pub fn label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-    pub fn contexts(mut self, contexts: Vec<String>) -> Self {
-        self.allowed_contexts = contexts;
-        self
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GenerateCredentialsResponse {
-    pub did: String,
-    pub credential: String,
-    pub role: String,
-}
-
-/// Percent-encode characters that are not safe in URL path segments.
-///
-/// DID verification method IDs contain `#` (fragment delimiter) and potentially
-/// `?` (query delimiter) which must be encoded when used in path segments.
-/// Derivation paths contain `/` which would be interpreted as path separators.
-/// The `:` character is allowed in path segments per RFC 3986.
 fn encode_path_segment(s: &str) -> String {
     s.replace('%', "%25")
         .replace('#', "%23")
@@ -509,8 +139,8 @@ impl VtaClient {
 
 #[cfg(feature = "client")]
 use crate::protocols::{
-    acl_management, context_management, credential_management, did_management, key_management,
-    seed_management, vta_management,
+    acl_management, context_management, did_management, key_management, seed_management,
+    vta_management,
 };
 
 impl VtaClient {
@@ -531,19 +161,19 @@ impl VtaClient {
         }
     }
 
-    /// Create a client from a base64-encoded credential bundle.
+    /// Create a client from a credential bundle.
     ///
     /// Performs lightweight challenge-response auth (no ATM/TDK initialization)
     /// and stores the credential for automatic token refresh.
     pub async fn from_credential(
-        credential_b64: &str,
+        credential: &crate::credentials::CredentialBundle,
         url_override: Option<&str>,
     ) -> Result<Self, VtaError> {
         let (result, cred, http) =
-            crate::auth_light::authenticate_with_credential(credential_b64, url_override).await?;
+            crate::auth_light::authenticate_with_credential(credential, url_override).await?;
         let base_url = url_override
             .or(cred.vta_url.as_deref())
-            .ok_or("no VTA URL")?
+            .ok_or_else(|| VtaError::Validation("no VTA URL".into()))?
             .trim_end_matches('/')
             .to_string();
 
@@ -568,10 +198,10 @@ impl VtaClient {
 
     /// Returns the token expiry timestamp, if known.
     pub async fn token_expires_at(&self) -> Option<u64> {
-        if let Transport::Rest { auth, .. } = &self.transport {
-            auth.lock().await.expires_at
-        } else {
-            None
+        match &self.transport {
+            Transport::Rest { auth, .. } => auth.lock().await.expires_at,
+            #[cfg(feature = "session")]
+            Transport::DIDComm { .. } => None,
         }
     }
 
@@ -592,7 +222,8 @@ impl VtaClient {
             vta_did,
             mediator_did,
         )
-        .await?;
+        .await
+        .map_err(|e| VtaError::DidcommTransport(e.to_string()))?;
 
         let rest_client = rest_url.as_ref().map(|_| Client::new());
 
@@ -610,18 +241,26 @@ impl VtaClient {
     /// Can be called from sync or async contexts. For async contexts, use
     /// [`set_token_async`](Self::set_token_async) to avoid potential blocking.
     pub fn set_token(&self, token: String) {
-        if let Transport::Rest { auth, .. } = &self.transport {
-            // try_lock avoids blocking the current thread if called from async
-            if let Ok(mut guard) = auth.try_lock() {
-                guard.token = Some(token);
+        match &self.transport {
+            Transport::Rest { auth, .. } => {
+                // try_lock avoids blocking the current thread if called from async
+                if let Ok(mut guard) = auth.try_lock() {
+                    guard.token = Some(token);
+                }
             }
+            #[cfg(feature = "session")]
+            Transport::DIDComm { .. } => {}
         }
     }
 
     /// Set the Bearer token (async version).
     pub async fn set_token_async(&self, token: String) {
-        if let Transport::Rest { auth, .. } = &self.transport {
-            auth.lock().await.token = Some(token);
+        match &self.transport {
+            Transport::Rest { auth, .. } => {
+                auth.lock().await.token = Some(token);
+            }
+            #[cfg(feature = "session")]
+            Transport::DIDComm { .. } => {}
         }
     }
 
@@ -720,7 +359,7 @@ impl VtaClient {
     /// Dispatch an RPC call via REST (using `build_rest`) or DIDComm (using
     /// `msg_type`/`body`/`result_type`), returning a deserialized response.
     #[allow(unused_variables)]
-    async fn rpc<T: serde::de::DeserializeOwned>(
+    pub(crate) async fn rpc<T: serde::de::DeserializeOwned>(
         &self,
         msg_type: &str,
         body: serde_json::Value,
@@ -741,10 +380,11 @@ impl VtaClient {
                 Self::handle_response(resp).await
             }
             #[cfg(feature = "session")]
-            Transport::DIDComm { session, .. } => session
-                .send_and_wait(msg_type, body, result_type, timeout)
-                .await
-                .map_err(|e| VtaError::Protocol(e.to_string())),
+            Transport::DIDComm { session, .. } => {
+                session
+                    .send_and_wait(msg_type, body, result_type, timeout)
+                    .await
+            }
         }
     }
 
@@ -774,8 +414,7 @@ impl VtaClient {
             Transport::DIDComm { session, .. } => {
                 let _: serde_json::Value = session
                     .send_and_wait(msg_type, body, result_type, timeout)
-                    .await
-                    .map_err(|e| VtaError::Protocol(e.to_string()))?;
+                    .await?;
                 Ok(())
             }
         }
@@ -802,7 +441,9 @@ impl VtaClient {
                     let resp = client.get(format!("{url}/health")).send().await?;
                     Self::handle_response(resp).await
                 }
-                _ => Err("health check not available via DIDComm (no REST URL)".into()),
+                _ => Err(VtaError::UnsupportedTransport(
+                    "health check not available via DIDComm (no REST URL)".into(),
+                )),
             },
         }
     }
@@ -1068,7 +709,7 @@ impl VtaClient {
                 Self::handle_response(resp).await
             }
             #[cfg(feature = "session")]
-            Transport::DIDComm { .. } => Err(VtaError::Other(
+            Transport::DIDComm { .. } => Err(VtaError::UnsupportedTransport(
                 "wrapping key not needed for DIDComm transport".into(),
             )),
         }
@@ -1187,22 +828,6 @@ impl VtaClient {
             acl_management::DELETE_ACL_RESULT,
             30,
             |c, url| c.delete(format!("{url}/acl/{}", encode_path_segment(did))),
-        )
-        .await
-    }
-
-    // ── Credential methods ──────────────────────────────────────────
-
-    pub async fn generate_credentials(
-        &self,
-        req: GenerateCredentialsRequest,
-    ) -> Result<GenerateCredentialsResponse, VtaError> {
-        self.rpc(
-            credential_management::GENERATE_CREDENTIALS,
-            serde_json::to_value(&req)?,
-            credential_management::GENERATE_CREDENTIALS_RESULT,
-            30,
-            |c, url| c.post(format!("{url}/auth/credentials")).json(&req),
         )
         .await
     }
@@ -1461,6 +1086,69 @@ impl VtaClient {
         .await
     }
 
+    /// Apply a generic update to an existing webvh DID.
+    ///
+    /// `ctx_id` is the context the DID lives in; `scid` is the
+    /// stable component of the DID (e.g. the `Q...` segment of
+    /// `did:webvh:Q...:host:slug`). REST path:
+    /// `POST /contexts/{ctx_id}/dids/{scid}/update`.
+    pub async fn update_did_webvh(
+        &self,
+        ctx_id: &str,
+        scid: &str,
+        body: crate::protocols::did_management::update::UpdateDidWebvhBody,
+    ) -> Result<crate::protocols::did_management::update::UpdateDidWebvhResultBody, VtaError> {
+        self.rpc(
+            did_management::UPDATE_DID_WEBVH,
+            serde_json::json!({
+                "context_id": ctx_id,
+                "scid": scid,
+                "body": &body,
+            }),
+            did_management::UPDATE_DID_WEBVH_RESULT,
+            60,
+            |c, url| {
+                c.post(format!(
+                    "{url}/contexts/{}/dids/{}/update",
+                    encode_path_segment(ctx_id),
+                    encode_path_segment(scid)
+                ))
+                .json(&body)
+            },
+        )
+        .await
+    }
+
+    /// Rotate every verificationMethod's keys on a webvh DID. Auth
+    /// keys + pre-rotation rotate as a consequence of the resulting
+    /// document update.
+    pub async fn rotate_did_webvh_keys(
+        &self,
+        ctx_id: &str,
+        scid: &str,
+        body: crate::protocols::did_management::update::RotateDidWebvhKeysBody,
+    ) -> Result<crate::protocols::did_management::update::UpdateDidWebvhResultBody, VtaError> {
+        self.rpc(
+            did_management::ROTATE_DID_WEBVH_KEYS,
+            serde_json::json!({
+                "context_id": ctx_id,
+                "scid": scid,
+                "body": &body,
+            }),
+            did_management::ROTATE_DID_WEBVH_KEYS_RESULT,
+            60,
+            |c, url| {
+                c.post(format!(
+                    "{url}/contexts/{}/dids/{}/rotate-keys",
+                    encode_path_segment(ctx_id),
+                    encode_path_segment(scid)
+                ))
+                .json(&body)
+            },
+        )
+        .await
+    }
+
     // ── Audit Management ───────────────────────────────────────────
 
     /// List audit logs with optional filtering and pagination.
@@ -1572,7 +1260,8 @@ impl VtaClient {
         Ok(secrets)
     }
 
-    /// Fetch all secrets for a context as a portable [`DidSecretsBundle`].
+    /// Fetch all secrets for a context as a portable
+    /// [`DidSecretsBundle`](crate::did_secrets::DidSecretsBundle).
     ///
     /// Resolves the context DID, paginates through all active keys,
     /// fetches each secret, and returns a bundle ready for encoding/transport.
@@ -1619,6 +1308,294 @@ impl VtaClient {
         Ok(crate::did_secrets::DidSecretsBundle { did, secrets })
     }
 
+    // ── DID templates (Phase 2: global scope, REST) ─────────────────────
+
+    /// `GET /did-templates` — list all global templates.
+    pub async fn list_did_templates(
+        &self,
+    ) -> Result<Vec<crate::did_templates::DidTemplateRecord>, VtaError> {
+        use crate::protocols::did_template_management;
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            templates: Vec<crate::did_templates::DidTemplateRecord>,
+        }
+        let resp: Wrapper = self
+            .rpc(
+                did_template_management::LIST_TEMPLATES,
+                serde_json::json!({}),
+                did_template_management::LIST_TEMPLATES_RESULT,
+                30,
+                |c, url| c.get(format!("{url}/did-templates")),
+            )
+            .await?;
+        Ok(resp.templates)
+    }
+
+    /// `GET /did-templates/{name}` — fetch one global template.
+    pub async fn get_did_template(
+        &self,
+        name: &str,
+    ) -> Result<crate::did_templates::DidTemplateRecord, VtaError> {
+        use crate::protocols::did_template_management;
+        self.rpc(
+            did_template_management::GET_TEMPLATE,
+            serde_json::json!({ "name": name }),
+            did_template_management::GET_TEMPLATE_RESULT,
+            30,
+            |c, url| c.get(format!("{url}/did-templates/{}", encode_path_segment(name))),
+        )
+        .await
+    }
+
+    /// `POST /did-templates` — create a global template. Super admin only.
+    pub async fn create_did_template(
+        &self,
+        template: crate::did_templates::DidTemplate,
+    ) -> Result<crate::did_templates::DidTemplateRecord, VtaError> {
+        use crate::protocols::did_template_management;
+        self.rpc(
+            did_template_management::CREATE_TEMPLATE,
+            serde_json::to_value(&template)?,
+            did_template_management::CREATE_TEMPLATE_RESULT,
+            30,
+            |c, url| c.post(format!("{url}/did-templates")).json(&template),
+        )
+        .await
+    }
+
+    /// `PUT /did-templates/{name}` — replace a global template. Super admin only.
+    pub async fn update_did_template(
+        &self,
+        name: &str,
+        template: crate::did_templates::DidTemplate,
+    ) -> Result<crate::did_templates::DidTemplateRecord, VtaError> {
+        use crate::protocols::did_template_management;
+        self.rpc(
+            did_template_management::UPDATE_TEMPLATE,
+            serde_json::to_value(&template)?,
+            did_template_management::UPDATE_TEMPLATE_RESULT,
+            30,
+            |c, url| {
+                c.put(format!("{url}/did-templates/{}", encode_path_segment(name)))
+                    .json(&template)
+            },
+        )
+        .await
+    }
+
+    /// `DELETE /did-templates/{name}` — delete a global template. Super admin only.
+    pub async fn delete_did_template(&self, name: &str) -> Result<(), VtaError> {
+        use crate::protocols::did_template_management;
+        self.rpc_void(
+            did_template_management::DELETE_TEMPLATE,
+            serde_json::json!({ "name": name }),
+            did_template_management::DELETE_TEMPLATE_RESULT,
+            30,
+            |c, url| c.delete(format!("{url}/did-templates/{}", encode_path_segment(name))),
+        )
+        .await
+    }
+
+    /// `POST /did-templates/{name}/render` — render a stored template.
+    ///
+    /// Server injects ambient variables (`VTA_DID`, `VTA_URL`, `NOW`);
+    /// `vars` provides everything else.
+    pub async fn render_did_template(
+        &self,
+        name: &str,
+        vars: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, VtaError> {
+        use crate::protocols::did_template_management;
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Req {
+            vars: std::collections::HashMap<String, serde_json::Value>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            document: serde_json::Value,
+        }
+        let body = Req { vars };
+        let resp: Resp = self
+            .rpc(
+                did_template_management::RENDER_TEMPLATE,
+                serde_json::to_value(&body)?,
+                did_template_management::RENDER_TEMPLATE_RESULT,
+                30,
+                |c, url| {
+                    c.post(format!(
+                        "{url}/did-templates/{}/render",
+                        encode_path_segment(name)
+                    ))
+                    .json(&body)
+                },
+            )
+            .await?;
+        Ok(resp.document)
+    }
+
+    // ── DID templates — context scope (Phase 3) ──────────────────────
+
+    /// `GET /contexts/{id}/did-templates` — list context-scoped templates.
+    pub async fn list_context_did_templates(
+        &self,
+        context_id: &str,
+    ) -> Result<Vec<crate::did_templates::DidTemplateRecord>, VtaError> {
+        use crate::protocols::did_template_management;
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            templates: Vec<crate::did_templates::DidTemplateRecord>,
+        }
+        let resp: Wrapper = self
+            .rpc(
+                did_template_management::LIST_TEMPLATES,
+                serde_json::json!({ "context_id": context_id }),
+                did_template_management::LIST_TEMPLATES_RESULT,
+                30,
+                |c, url| {
+                    c.get(format!(
+                        "{url}/contexts/{}/did-templates",
+                        encode_path_segment(context_id)
+                    ))
+                },
+            )
+            .await?;
+        Ok(resp.templates)
+    }
+
+    /// `GET /contexts/{id}/did-templates/{name}` — fetch one context template.
+    pub async fn get_context_did_template(
+        &self,
+        context_id: &str,
+        name: &str,
+    ) -> Result<crate::did_templates::DidTemplateRecord, VtaError> {
+        use crate::protocols::did_template_management;
+        self.rpc(
+            did_template_management::GET_TEMPLATE,
+            serde_json::json!({ "context_id": context_id, "name": name }),
+            did_template_management::GET_TEMPLATE_RESULT,
+            30,
+            |c, url| {
+                c.get(format!(
+                    "{url}/contexts/{}/did-templates/{}",
+                    encode_path_segment(context_id),
+                    encode_path_segment(name)
+                ))
+            },
+        )
+        .await
+    }
+
+    /// `POST /contexts/{id}/did-templates` — create a context-scoped template.
+    /// Context admin (Admin role + context in `allowed_contexts`) or super admin.
+    pub async fn create_context_did_template(
+        &self,
+        context_id: &str,
+        template: crate::did_templates::DidTemplate,
+    ) -> Result<crate::did_templates::DidTemplateRecord, VtaError> {
+        use crate::protocols::did_template_management;
+        self.rpc(
+            did_template_management::CREATE_TEMPLATE,
+            serde_json::to_value(&template)?,
+            did_template_management::CREATE_TEMPLATE_RESULT,
+            30,
+            |c, url| {
+                c.post(format!(
+                    "{url}/contexts/{}/did-templates",
+                    encode_path_segment(context_id)
+                ))
+                .json(&template)
+            },
+        )
+        .await
+    }
+
+    /// `PUT /contexts/{id}/did-templates/{name}` — replace a context template.
+    pub async fn update_context_did_template(
+        &self,
+        context_id: &str,
+        name: &str,
+        template: crate::did_templates::DidTemplate,
+    ) -> Result<crate::did_templates::DidTemplateRecord, VtaError> {
+        use crate::protocols::did_template_management;
+        self.rpc(
+            did_template_management::UPDATE_TEMPLATE,
+            serde_json::to_value(&template)?,
+            did_template_management::UPDATE_TEMPLATE_RESULT,
+            30,
+            |c, url| {
+                c.put(format!(
+                    "{url}/contexts/{}/did-templates/{}",
+                    encode_path_segment(context_id),
+                    encode_path_segment(name)
+                ))
+                .json(&template)
+            },
+        )
+        .await
+    }
+
+    /// `DELETE /contexts/{id}/did-templates/{name}` — delete a context template.
+    pub async fn delete_context_did_template(
+        &self,
+        context_id: &str,
+        name: &str,
+    ) -> Result<(), VtaError> {
+        use crate::protocols::did_template_management;
+        self.rpc_void(
+            did_template_management::DELETE_TEMPLATE,
+            serde_json::json!({ "context_id": context_id, "name": name }),
+            did_template_management::DELETE_TEMPLATE_RESULT,
+            30,
+            |c, url| {
+                c.delete(format!(
+                    "{url}/contexts/{}/did-templates/{}",
+                    encode_path_segment(context_id),
+                    encode_path_segment(name)
+                ))
+            },
+        )
+        .await
+    }
+
+    /// `POST /contexts/{id}/did-templates/{name}/render` — render a context template.
+    ///
+    /// Server injects ambient variables: `VTA_DID`, `VTA_URL`, `NOW`,
+    /// `CONTEXT_ID`, and (if set on the context) `CONTEXT_DID`.
+    pub async fn render_context_did_template(
+        &self,
+        context_id: &str,
+        name: &str,
+        vars: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, VtaError> {
+        use crate::protocols::did_template_management;
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Req {
+            vars: std::collections::HashMap<String, serde_json::Value>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            document: serde_json::Value,
+        }
+        let body = Req { vars };
+        let resp: Resp = self
+            .rpc(
+                did_template_management::RENDER_TEMPLATE,
+                serde_json::to_value(&body)?,
+                did_template_management::RENDER_TEMPLATE_RESULT,
+                30,
+                |c, url| {
+                    c.post(format!(
+                        "{url}/contexts/{}/did-templates/{}/render",
+                        encode_path_segment(context_id),
+                        encode_path_segment(name)
+                    ))
+                    .json(&body)
+                },
+            )
+            .await?;
+        Ok(resp.document)
+    }
+
     /// Check whether the current auth token is valid by calling an authenticated endpoint.
     ///
     /// Returns `true` if authenticated, `false` if the token is invalid/expired.
@@ -1642,11 +1619,44 @@ impl VtaClient {
             }
         }
     }
+
+    /// `POST /bootstrap/provision-integration` — bridge a VP-framed
+    /// bootstrap request to the VTA and receive the sealed bundle.
+    ///
+    /// Requires REST transport — the endpoint has no DIDComm
+    /// equivalent in phase 1. Callers on the DIDComm transport get
+    /// [`VtaError::UnsupportedTransport`].
+    #[cfg(feature = "provision-integration")]
+    pub async fn provision_integration(
+        &self,
+        req: crate::provision_integration::http::ProvisionIntegrationRequest,
+    ) -> Result<crate::provision_integration::http::ProvisionIntegrationResponse, VtaError> {
+        match &self.transport {
+            Transport::Rest {
+                client,
+                base_url,
+                auth,
+            } => {
+                Self::ensure_token_valid(client, base_url, auth).await?;
+                let token = auth.lock().await.token.clone();
+                let http_req = client
+                    .post(format!("{base_url}/bootstrap/provision-integration"))
+                    .json(&req);
+                let resp = Self::with_auth_token(http_req, &token).send().await?;
+                Self::handle_response(resp).await
+            }
+            #[cfg(feature = "session")]
+            Transport::DIDComm { .. } => Err(VtaError::UnsupportedTransport(
+                "provision-integration is REST-only in phase 1".into(),
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::KeyType;
 
     // ── encode_path_segment ─────────────────────────────────────────
 
@@ -1774,6 +1784,7 @@ mod tests {
             role: "admin".into(),
             label: None,
             allowed_contexts: vec!["vta".into()],
+            expires_at: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["did"], "did:key:z6Mk123");
@@ -1823,15 +1834,6 @@ mod tests {
         let resp: ListKeysResponse = serde_json::from_str(json).unwrap();
         assert!(resp.keys.is_empty());
         assert_eq!(resp.total, 0);
-    }
-
-    #[test]
-    fn test_generate_credentials_response_deserialization() {
-        let json = r#"{"did":"did:key:z6Mk123","credential":"abc123","role":"admin"}"#;
-        let resp: GenerateCredentialsResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.did, "did:key:z6Mk123");
-        assert_eq!(resp.credential, "abc123");
-        assert_eq!(resp.role, "admin");
     }
 
     #[test]

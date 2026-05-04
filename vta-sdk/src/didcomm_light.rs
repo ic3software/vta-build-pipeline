@@ -161,8 +161,9 @@ fn concat_kdf(
 /// Input: 32-byte KEK, key to wrap (multiple of 8 bytes).
 /// Output: wrapped key (input_len + 8 bytes).
 fn aes_key_wrap(kek: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // aes 0.9 renamed `BlockEncrypt` → `BlockCipherEncrypt`.
     use aes::Aes256;
-    use aes::cipher::{BlockEncrypt, KeyInit as AesKeyInit};
+    use aes::cipher::{BlockCipherEncrypt, KeyInit as AesKeyInit};
 
     if !plaintext.len().is_multiple_of(8) || plaintext.is_empty() {
         return Err("key wrap input must be a non-empty multiple of 8 bytes".into());
@@ -220,8 +221,9 @@ fn aes_key_unwrap(
     kek: &[u8; 32],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // aes 0.9 renamed `BlockDecrypt` → `BlockCipherDecrypt`.
     use aes::Aes256;
-    use aes::cipher::{BlockDecrypt, KeyInit as AesKeyInit};
+    use aes::cipher::{BlockCipherDecrypt, KeyInit as AesKeyInit};
 
     if !ciphertext.len().is_multiple_of(8) || ciphertext.len() < 24 {
         return Err("key unwrap input must be at least 24 bytes and a multiple of 8".into());

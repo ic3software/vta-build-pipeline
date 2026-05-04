@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "name": "vta-admin",
+  "kind": "admin",
+  "description": "VTA-minted long-term admin identity. Default did:key (Ed25519), no service endpoints — used to roll an integration's ephemeral bootstrap key over to a permanent admin DID under VTA key custody.",
+  "methods": ["key"],
+  "requiredVars": [],
+  "optionalVars": {},
+  "defaults": {
+    "preRotationCount": 0,
+    "portable": false
+  },
+  "document": {
+    "@context": [
+      "https://www.w3.org/ns/did/v1",
+      "https://w3id.org/security/multikey/v1"
+    ],
+    "id": "{DID}",
+    "verificationMethod": [
+      {
+        "id": "{DID}#{SIGNING_KEY_MB}",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{SIGNING_KEY_MB}"
+      }
+    ],
+    "authentication": ["{DID}#{SIGNING_KEY_MB}"],
+    "assertionMethod": ["{DID}#{SIGNING_KEY_MB}"]
+  }
+}

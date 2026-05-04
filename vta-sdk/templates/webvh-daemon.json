@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "name": "webvh-daemon",
+  "kind": "webvh-daemon",
+  "description": "WebVH hosting daemon — publishes did:webvh logs over HTTP via a WebVHHosting service endpoint. No DIDComm. Use this for a node whose only role is hosting DID logs for self-managed DIDs. If the daemon also needs to accept DIDComm (admin RPC, witness coordination, control-plane traffic), use 'webvh-control' instead.",
+  "methods": ["webvh", "web"],
+  "requiredVars": ["URL"],
+  "optionalVars": {
+    "HOSTING_PATH": "/webvh",
+    "WEBVH_SERVER": null
+  },
+  "defaults": {
+    "preRotationCount": 2,
+    "portable": false,
+    "addMediatorService": false
+  },
+  "document": {
+    "@context": [
+      "https://www.w3.org/ns/did/v1",
+      "https://w3id.org/security/multikey/v1"
+    ],
+    "id": "{DID}",
+    "verificationMethod": [
+      {
+        "id": "{DID}#key-0",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{SIGNING_KEY_MB}"
+      },
+      {
+        "id": "{DID}#key-1",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{KA_KEY_MB}"
+      }
+    ],
+    "assertionMethod": ["{DID}#key-0"],
+    "authentication": ["{DID}#key-0"],
+    "keyAgreement": ["{DID}#key-1"],
+    "service": [
+      {
+        "id": "{DID}#webvh-hosting",
+        "type": "WebVHHosting",
+        "serviceEndpoint": {
+          "uri": "{URL}",
+          "hostingPath": "{HOSTING_PATH}"
+        }
+      }
+    ]
+  }
+}

@@ -166,7 +166,10 @@ fn format_role(entry: &AclEntry) -> String {
 
 fn format_timestamp(epoch: u64) -> String {
     match Utc.timestamp_opt(epoch as i64, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        chrono::LocalResult::Single(dt) => dt
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S %:z")
+            .to_string(),
         _ => format!("{epoch}"),
     }
 }
