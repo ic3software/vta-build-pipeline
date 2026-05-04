@@ -532,13 +532,10 @@ cargo run --package vta-service \
 
 ## Further reading
 
-- [`sealed-bootstrap.md`](../sealed-bootstrap.md) — design doc for the
-  sealed-transfer primitive used by complex-client provisioning.
-- [`phase5-cutover.md`](../phase5-cutover.md) — removal of the
-  plaintext base64 `encode/decode` path; the new `needs_rotation` +
-  local keygen flow replaces Mode A token bootstrap.
-- [`../04-reference/bip32-paths.md`](../04-reference/bip32-paths.md) — how contexts map to BIP-32
-  derivation paths.
+- [`sealed-bootstrap.md`](../../sealed-bootstrap.md) — design doc for
+  the sealed-transfer primitive used by complex-client provisioning.
+- [`bip32-paths.md`](../04-reference/bip32-paths.md) — how contexts
+  map to BIP-32 derivation paths.
 - [`feature-flags.md`](feature-flags.md) — compile-time feature matrix
   (TEE mode, secret backends, REST vs DIDComm, etc.).
 - [`../03-integrating/provision-integration.md`](../03-integrating/provision-integration.md) —

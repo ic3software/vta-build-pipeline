@@ -253,7 +253,7 @@ Authorization: Bearer <token>
 {"id": "my-app", "name": "My Application"}
 ```
 
-See the [VTA Service README](../vta-service/README.md) for the
+See the [VTA Service README](../../vta-service/README.md) for the
 complete API reference.
 
 ## Security Best Practices

@@ -148,8 +148,9 @@ tokens:
    automatically when they expire.
 
 ```sh
-# Import credential and authenticate
-cnm auth login <credential>
+# Apply a sealed admin credential bundle (e.g. a backup-restore handoff
+# or a sealed transfer from another operator)
+cnm auth login --credential-bundle <file>
 
 # Check auth status
 cnm auth status
@@ -239,11 +240,11 @@ cnm config update --community-vta-name "My VTA" --public-url "https://vta.exampl
 
 ### Authentication
 
-| Command                   | Description                         |
-| ------------------------- | ----------------------------------- |
-| `auth login <credential>` | Import credential and authenticate  |
-| `auth logout`             | Clear stored credentials and tokens |
-| `auth status`             | Show current authentication status  |
+| Command                                 | Description                              |
+| --------------------------------------- | ---------------------------------------- |
+| `auth login --credential-bundle <file>` | Apply a sealed admin credential bundle   |
+| `auth logout`                           | Clear stored credentials and tokens      |
+| `auth status`                           | Show current authentication status       |
 
 ### Health
 

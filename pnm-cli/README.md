@@ -117,8 +117,9 @@ tokens:
    automatically when they expire.
 
 ```sh
-# Import credential and authenticate
-pnm auth login <credential>
+# Apply a sealed admin credential bundle (e.g. a backup-restore handoff
+# or a sealed transfer from another operator)
+pnm auth login --credential-bundle <file>
 
 # Check auth status
 pnm auth status
@@ -151,7 +152,7 @@ are stored in `~/.config/pnm/sessions.json` instead. See
 `~/.config/pnm/config.toml`
 
 ```toml
-url = "http://localhost:3000"
+url = "http://localhost:8100"
 ```
 
 ### Environment variables
@@ -177,15 +178,15 @@ url = "http://localhost:3000"
 | `setup --name <slug> [--overwrite]`                      | Phase 1: mint an ephemeral `did:key`, park it in the keyring as a pending VTA binding under `<slug>`. |
 | `setup continue <slug> --vta-did <did>`                  | Phase 2: bind the VTA's DID to the entry from phase 1 and mark it ready to authenticate.                  |
 | `bootstrap connect --vta-url <url>`                      | One-step TEE-attested first-boot against a Nitro Enclave VTA. Drives `POST /bootstrap/request`.           |
-| `auth login <credential>`                                | Apply a credential the VTA setup wizard printed (Mode A flow).                                            |
+| `auth login --credential-bundle <file>`                  | Apply a sealed admin credential bundle delivered out-of-band (e.g. a backup-restore handoff or a sealed transfer from another operator). |
 
 ### Authentication
 
-| Command                   | Description                         |
-| ------------------------- | ----------------------------------- |
-| `auth login <credential>` | Import credential and authenticate  |
-| `auth logout`             | Clear stored credentials and tokens |
-| `auth status`             | Show current authentication status  |
+| Command                                 | Description                              |
+| --------------------------------------- | ---------------------------------------- |
+| `auth login --credential-bundle <file>` | Apply a sealed admin credential bundle   |
+| `auth logout`                           | Clear stored credentials and tokens      |
+| `auth status`                           | Show current authentication status       |
 
 ### Health
 
