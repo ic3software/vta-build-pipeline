@@ -1034,24 +1034,9 @@ async fn create_vta_did(
 
     match choice {
         0 => {
-            // Build additional services based on config
-            let mut additional_services = Vec::new();
             let add_mediator = messaging.is_some();
-
-            // Add VTA REST service endpoint if public URL is configured
-            if let Some(url) = public_url {
-                additional_services.push(json!({
-                    "id": "{DID}#vta-rest",
-                    "type": "VTARest",
-                    "serviceEndpoint": url
-                }));
-            }
-
-            let services = if additional_services.is_empty() {
-                None
-            } else {
-                Some(additional_services)
-            };
+            let services =
+                super::build_vta_additional_services(&config.services, public_url.as_deref());
 
             let did = build_wizard_did(
                 "VTA",

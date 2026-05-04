@@ -14,8 +14,10 @@ use bip39::Mnemonic;
 use dialoguer::{Confirm, Input};
 use didwebvh_rs::url::WebVHURL;
 use rand::Rng;
+use serde_json::{Value as JsonValue, json};
 use url::Url;
 
+use crate::config::ServicesConfig;
 use crate::contexts::{self, ContextRecord};
 use crate::store::KeyspaceHandle;
 
@@ -57,6 +59,49 @@ pub(crate) fn generate_mnemonic_silent() -> Result<Mnemonic, Box<dyn std::error:
     let mut entropy = [0u8; 32];
     rand::rng().fill_bytes(&mut entropy);
     Ok(Mnemonic::from_entropy(&entropy)?)
+}
+
+/// Build the `services` Vec passed to the WebVH DID builder for a
+/// `CreateWebvh` VTA DID — i.e. everything the VTA DID document
+/// publishes apart from the auto-injected DIDComm/Authentication
+/// entries that `create_simple_webvh_did` adds itself.
+///
+/// Currently this is just the `VTARest` entry: present iff REST is
+/// enabled and a `public_url` is configured. Returns `None` (rather
+/// than `Some(vec![])`) when the array would be empty so the
+/// downstream call can pass `None` through to the WebVH builder
+/// without a special case.
+///
+/// The non-interactive setup path's `validate_inputs` rejects
+/// `services.rest = true` + `public_url = None` at parse time, and
+/// the interactive wizard makes the URL prompt mandatory when REST
+/// is enabled, so in practice the absent branch only fires for
+/// `services.rest = false`. The `is_some()` branch is still gated
+/// on `services.rest` so a stray `public_url` set without REST
+/// doesn't end up advertising a service the VTA isn't running.
+///
+/// Shared by both setup paths so the rule has one source of truth —
+/// see the matrix test in this module's `tests` for the full
+/// `(rest, public_url)` truth table.
+pub(crate) fn build_vta_additional_services(
+    services: &ServicesConfig,
+    public_url: Option<&str>,
+) -> Option<Vec<JsonValue>> {
+    let mut additional = Vec::new();
+    if services.rest {
+        if let Some(url) = public_url.map(str::trim).filter(|u| !u.is_empty()) {
+            additional.push(json!({
+                "id": "{DID}#vta-rest",
+                "type": "VTARest",
+                "serviceEndpoint": url,
+            }));
+        }
+    }
+    if additional.is_empty() {
+        None
+    } else {
+        Some(additional)
+    }
 }
 
 /// Prompt the user for a URL (e.g. `https://example.com/dids/vta`) and
@@ -111,5 +156,69 @@ pub(crate) fn prompt_webvh_url(label: &str) -> Result<WebVHURL, Box<dyn std::err
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Matrix coverage for the VTA DID document's `additional_services`
+    /// array — the bug-prone surface that originally let a REST-only
+    /// VTA ship a DID document with no service entries.
+    ///
+    /// Inputs sweep `(services.rest, public_url)`; `services.didcomm`
+    /// is irrelevant to this helper (the DIDComm service is added by
+    /// `create_simple_webvh_did` itself via the `add_mediator_service`
+    /// flag, not via the `additional_services` Vec).
+    #[test]
+    fn build_vta_additional_services_matrix() {
+        let url = Some("https://vta.example.com");
+
+        // 1. REST + URL → exactly one VTARest entry pointing at the URL.
+        let services = ServicesConfig {
+            rest: true,
+            didcomm: false,
+        };
+        let out = build_vta_additional_services(&services, url)
+            .expect("REST + URL must emit a service entry");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["type"], "VTARest");
+        assert_eq!(out[0]["serviceEndpoint"], "https://vta.example.com");
+        assert_eq!(out[0]["id"], "{DID}#vta-rest");
+
+        // 2. REST + URL with surrounding whitespace → trimmed in the entry.
+        let out = build_vta_additional_services(&services, Some("  https://vta.example.com  "))
+            .expect("whitespace-padded URL must still emit");
+        assert_eq!(out[0]["serviceEndpoint"], "https://vta.example.com");
+
+        // 3. REST + None → empty (validate_inputs rejects this combo
+        //    upstream, but the helper still must not produce a bogus
+        //    entry if it ever sees it).
+        assert!(build_vta_additional_services(&services, None).is_none());
+
+        // 4. REST + empty string → empty (treated like None).
+        assert!(build_vta_additional_services(&services, Some("")).is_none());
+        assert!(build_vta_additional_services(&services, Some("   ")).is_none());
+
+        // 5. REST disabled, URL set → no VTARest entry. The URL is
+        //    still in `AppConfig.public_url` for other uses, but it
+        //    must NOT be advertised as a service the VTA doesn't run.
+        let services = ServicesConfig {
+            rest: false,
+            didcomm: true,
+        };
+        assert!(
+            build_vta_additional_services(&services, url).is_none(),
+            "URL must not be published as a service when REST is disabled"
+        );
+
+        // 6. Both off, no URL → empty. (Edge case; a VTA with no
+        //    services is degenerate but the helper must stay total.)
+        let services = ServicesConfig {
+            rest: false,
+            didcomm: false,
+        };
+        assert!(build_vta_additional_services(&services, None).is_none());
     }
 }
