@@ -88,14 +88,14 @@ pub(crate) fn build_vta_additional_services(
     public_url: Option<&str>,
 ) -> Option<Vec<JsonValue>> {
     let mut additional = Vec::new();
-    if services.rest {
-        if let Some(url) = public_url.map(str::trim).filter(|u| !u.is_empty()) {
-            additional.push(json!({
-                "id": "{DID}#vta-rest",
-                "type": "VTARest",
-                "serviceEndpoint": url,
-            }));
-        }
+    if services.rest
+        && let Some(url) = public_url.map(str::trim).filter(|u| !u.is_empty())
+    {
+        additional.push(json!({
+            "id": "{DID}#vta-rest",
+            "type": "VTARest",
+            "serviceEndpoint": url,
+        }));
     }
     if additional.is_empty() {
         None
