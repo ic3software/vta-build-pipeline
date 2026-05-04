@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-05-04
+
+The `sealed-bootstrap` release: every secret-bearing transfer between
+VTA, integrations, and CLIs now moves as an HPKE-sealed bundle, DID
+minting is template-driven, and the DIDComm protocol surface can be
+enabled, disabled, or migrated on a running VTA without rebuilding it.
 
 ### Added
 
@@ -304,13 +309,7 @@ and don't gate publish. Queued for the next breaking-change cycle:
   webvh) keep their human renderers and can opt in with a one-line
   guard when needed.
 
-## 0.5.0 — 2026-04-24
-
-The `sealed-bootstrap` release: every secret-bearing transfer between
-VTA, integrations, and CLIs now moves as an HPKE-sealed bundle, and
-DID minting is template-driven.
-
-### Added
+### Added (sealed-transfer foundation)
 
 - **Sealed-transfer wire format** (`vta-sdk::sealed_transfer`) —
   HPKE-AEAD envelope (X25519-HKDF-SHA256 + ChaCha20-Poly1305),
