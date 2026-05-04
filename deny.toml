@@ -46,3 +46,30 @@ ignore = [
   Drop when AWS SDK retires the rustls 0.21 code path.
   """ },
 ]
+
+# License policy. Allow-list is derived from the actual licenses present
+# in the dep graph as of 0.5.0 — every entry below appears on at least
+# one transitive crate. All are OSI-approved permissive or weak-copyleft
+# licenses compatible with our Apache-2.0 distribution.
+#
+# cargo-deny resolves OR-licensed crates against this allow list, so
+# crates licensed under e.g. `Apache-2.0 OR GPL-2.0-only` or
+# `MIT OR Apache-2.0 OR LGPL-2.1-or-later` automatically resolve to a
+# permissive branch we accept — no need to allow the copyleft alternatives.
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "Unicode-3.0",
+  "0BSD",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "Zlib",
+  "MPL-2.0",
+]
