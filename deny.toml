@@ -25,25 +25,51 @@ ignore = [
   that depends on rand 0.9.3+.
   """ },
 
-  { id = "GHSA-xgp8-3hg3-c2mh", reason = """
+  { id = "RUSTSEC-2026-0099", reason = """
   rustls-webpki 0.101.x accepts name constraints for certificates
-  asserting a wildcard name. Exploitable only during TLS cert
-  verification against a CA that issues such a cert; our only 0.101.x
-  path is through AWS SDK's aws-smithy-http-client → rustls 0.21 used
-  for calls to AWS API endpoints (KMS, Secrets Manager, STS, etc.) —
-  AWS's own CAs do not issue wildcard-name-constrained intermediates.
+  asserting a wildcard name (formerly tracked as GHSA-xgp8-3hg3-c2mh).
+  Exploitable only during TLS cert verification against a CA that
+  issues such a cert; our only 0.101.x path is through AWS SDK's
+  aws-smithy-http-client → rustls 0.21 used for calls to AWS API
+  endpoints (KMS, Secrets Manager, STS, etc.) — AWS's own CAs do
+  not issue wildcard-name-constrained intermediates.
 
   Drop when AWS SDK retires the rustls 0.21 code path (several crates
   already have rustls 0.23 support).
   """ },
 
-  { id = "GHSA-965h-392x-2mh5", reason = """
+  { id = "RUSTSEC-2026-0098", reason = """
   rustls-webpki 0.101.x incorrectly accepts name constraints on URI
-  names. Same transitive path as GHSA-xgp8-3hg3-c2mh (AWS SDK rustls
-  0.21) with the same narrow attack surface: AWS API endpoints are
-  certificated by AWS CAs that do not issue URI-constraint certs.
+  names (formerly tracked as GHSA-965h-392x-2mh5). Same transitive
+  path as RUSTSEC-2026-0099 (AWS SDK rustls 0.21) with the same
+  narrow attack surface: AWS API endpoints are certificated by AWS
+  CAs that do not issue URI-constraint certs.
 
   Drop when AWS SDK retires the rustls 0.21 code path.
+  """ },
+
+  { id = "RUSTSEC-2026-0104", reason = """
+  rustls-webpki 0.101.x panics when parsing a malformed certificate
+  revocation list. Reachable only when a CRL is fetched and parsed,
+  which our build does not do — `rustls-webpki` 0.101 is pulled
+  transitively through the AWS SDK rustls 0.21 path (same as the two
+  name-constraint advisories above), and AWS SDK request paths do
+  not enable CRL fetching.
+
+  Drop when AWS SDK retires the rustls 0.21 code path, or when
+  rustls-webpki 0.101 ships a fix.
+  """ },
+
+  { id = "RUSTSEC-2025-0134", reason = """
+  rustls-pemfile is unmaintained. Pulled transitively (in two
+  different versions) through the AWS SDK rustls 0.21 path —
+  `aws-smithy-http-client` and `hyper-rustls` 0.24 both depend on
+  it for parsing PEM-encoded certificates. Functional, just no
+  longer maintained; the parser is small enough that "unmaintained"
+  is the only flagged risk.
+
+  Drop when AWS SDK retires the rustls 0.21 code path; both 0.27
+  hyper-rustls and rustls 0.23 have moved to rustls-pki-types.
   """ },
 
   { id = "RUSTSEC-2023-0071", reason = """
