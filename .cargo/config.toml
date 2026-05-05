@@ -1,9 +1,0 @@
-# DEV: enable `tracing`'s `valuable` field-value path. Required for
-# `affinidi-messaging-mediator` (transitively pulled in by the
-# `affinidi-messaging-test-mediator` git dev-dep used by the
-# `tests/e2e` integration suite). The mediator's `tasks::statistics`
-# module uses `tracing::field::valuable` for object-shaped log fields,
-# and that path is gated on `--cfg tracing_unstable`. Mirrors the
-# `affinidi-tdk-rs` workspace's own `.cargo/config.toml`.
-[build]
-rustflags = ["--cfg", "tracing_unstable"]

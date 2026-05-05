@@ -12,23 +12,18 @@ use std::sync::Once;
 
 static INIT: Once = Once::new();
 
-/// One-shot per-process setup: tracing subscriber + rustls
-/// `CryptoProvider`. The crypto provider is mandatory because the test
-/// graph compiles in both `rust_crypto` and `aws_lc_rs`, so rustls
-/// refuses to auto-select. Mirrors what `tdk-common` and the mediator
-/// binary do at startup.
+/// One-shot per-process setup: tracing subscriber + rustls/jsonwebtoken
+/// `CryptoProvider`s. The crypto providers are mandatory because the
+/// test graph compiles in both `rust_crypto` and `aws_lc_rs`, so neither
+/// crate's auto-select picks a winner. Delegated to the test mediator's
+/// idempotent helper so we stay in lockstep with the provider the
+/// mediator binary itself uses.
 ///
 /// `RUST_LOG` controls the tracing level; default is `warn`.
 /// Idempotent — safe to call from every test.
 pub fn init_tracing() {
     INIT.call_once(|| {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        // `jsonwebtoken` ships its own `CryptoProvider` plumbing, distinct
-        // from rustls's. Both `rust_crypto` and `aws_lc_rs` features are
-        // enabled in the e2e test graph (via the workspace pin and the
-        // mediator's pin respectively), so its auto-select panics on
-        // first use. Install the aws_lc provider here once.
-        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
+        affinidi_messaging_test_mediator::install_default_crypto_provider();
 
         let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));

@@ -21,28 +21,22 @@ mod common;
 
 use common::test_vta::TestVta;
 
-// Auth handshake now reaches the WebSocket upgrade against
-// `TestMediator` — `#auth` + WS endpoints landed upstream — but the
-// upgrade is rejected with 403 ("DID isn't local to the mediator").
-// `handlers::websocket::websocket_handler` requires
-// `session.acls.get_local()`, which is only true for DIDs that have an
-// account row with the LOCAL ACL bit set. The test mediator only sets
-// up the random `admin_did` it generates internally; it has no API to
-// register additional DIDs (or the VTA's DID) as local accounts. Two
-// upstream additions unblock this:
-//   1. `TestMediatorBuilder::admin_did(&str)` so the caller can pin
-//      a known DID as the admin (and therefore a local account).
-//   2. (Or) a `local_dids: Vec<String>` setter that registers extra
-//      DIDs in the mediator's account list with the LOCAL ACL bit at
-//      startup.
-// Either is small. Re-enable once one ships.
-#[ignore = "test mediator has no setter to register a non-admin DID as a 'local' account; WS upgrade blocked by ACL"]
+// The mediator's WebSocket handler refuses upgrades unless the
+// authenticated session has the LOCAL ACL bit, so we register the
+// VTA's DID as a local account on the test mediator before spawning
+// it. `TestMediatorBuilder::local_did` (added upstream in tdk-rs PR
+// #303) inserts the DID into the account store with the LOCAL bit set
+// at startup.
 #[tokio::test]
 async fn transient_handshake_against_live_mediator_succeeds() {
     common::init_tracing();
 
-    let mediator = TestMediator::spawn().await.expect("spawn test mediator");
     let vta = TestVta::spawn().await.expect("spawn test VTA");
+    let mediator = TestMediator::builder()
+        .local_did(vta.did.clone())
+        .spawn()
+        .await
+        .expect("spawn test mediator");
 
     let opts = HandshakeOptions {
         timeout: Duration::from_secs(10),

@@ -174,23 +174,23 @@ dbus-secret-service-keyring-store = { version = "1", default-features = false, f
 # this whole block (and the matching `--cfg tracing_unstable` in
 # `.cargo/config.toml`) goes away.
 [patch.crates-io]
-affinidi-crypto = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-encoding = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-secrets-resolver = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-data-integrity = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-did-authentication = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-did-common = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-did-resolver-cache-sdk = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-did-web = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-did-scid = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-messaging-didcomm = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-messaging-didcomm-service = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-messaging-mediator = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-messaging-mediator-common = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-messaging-sdk = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-tdk = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-tdk-common = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
-affinidi-meeting-place = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
+affinidi-crypto = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-encoding = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-secrets-resolver = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-data-integrity = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-did-authentication = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-did-common = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-did-resolver-cache-sdk = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-did-web = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+did-scid = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-messaging-didcomm = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-messaging-didcomm-service = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-messaging-mediator = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-messaging-mediator-common = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-messaging-sdk = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-tdk = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-tdk-common = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
+affinidi-meeting-place = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "df6b230" }
 vta-sdk = { path = "vta-sdk" }
 
 [profile.release]
