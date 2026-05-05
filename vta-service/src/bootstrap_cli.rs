@@ -513,26 +513,10 @@ pub async fn run_provision_integration(
     //    endpoint which extracts a real session-backed claim.
     let auth = AuthClaims::unsafe_local_cli_super_admin("provision-integration");
 
-    // 4a. Optionally create the target context inline. Idempotent: if
-    //     it already exists we proceed to provisioning; the upcoming
-    //     preconditions check would otherwise reject the call.
-    if create_context
-        && crate::contexts::get_context(&state.contexts_ks, &target_context)
-            .await?
-            .is_none()
-    {
-        crate::operations::contexts::create_context(
-            &state.contexts_ks,
-            &auth,
-            &target_context,
-            target_context.clone(),
-            None,
-            "provision-integration",
-        )
-        .await
-        .map_err(|e| format!("create context '{target_context}': {e}"))?;
-        eprintln!("Created context '{target_context}' (--create-context).");
-    }
+    // 4a. Validate the target context exists, or create it inline when
+    //     the operator opted in via --create-context.
+    ensure_target_context_or_create(&state.contexts_ks, &auth, &target_context, create_context)
+        .await?;
 
     // 5. Call the shared library fn.
     let vc_validity = vc_validity_hours.map(|hrs| {
@@ -649,6 +633,50 @@ fn resolve_target_context(
              BootstrapRequest include a contextHint"
                 .into(),
         ),
+    }
+}
+
+/// Validate that the target context exists, or create it inline when
+/// `create_context` is set. Mirrors the precondition check the
+/// provisioning library fn would otherwise hit several layers down,
+/// but surfaces a CLI-shaped error that names the `--create-context`
+/// flag — operators paste a generated `vta bootstrap
+/// provision-integration` command and the original error
+/// (precondition failure deep inside the library fn) doesn't tell
+/// them how to recover.
+#[cfg(feature = "webvh")]
+async fn ensure_target_context_or_create(
+    contexts_ks: &crate::store::KeyspaceHandle,
+    auth: &crate::auth::AuthClaims,
+    target_context: &str,
+    create_context: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exists = crate::contexts::get_context(contexts_ks, target_context)
+        .await?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+    if create_context {
+        crate::operations::contexts::create_context(
+            contexts_ks,
+            auth,
+            target_context,
+            target_context.to_string(),
+            None,
+            "provision-integration",
+        )
+        .await
+        .map_err(|e| format!("create context '{target_context}': {e}"))?;
+        eprintln!("Created context '{target_context}' (--create-context).");
+        Ok(())
+    } else {
+        Err(format!(
+            "context '{target_context}' does not exist on this VTA. Either pass \
+             --create-context to create it as part of provisioning, or create it \
+             first with `vta contexts create --id {target_context}`."
+        )
+        .into())
     }
 }
 
@@ -1129,6 +1157,31 @@ mod tests {
     use super::parse_var;
     use serde_json::Value;
 
+    #[cfg(feature = "webvh")]
+    use super::ensure_target_context_or_create;
+    #[cfg(feature = "webvh")]
+    use crate::auth::AuthClaims;
+    #[cfg(feature = "webvh")]
+    use crate::contexts::get_context;
+    #[cfg(feature = "webvh")]
+    use crate::store::Store;
+    #[cfg(feature = "webvh")]
+    use vti_common::config::StoreConfig;
+
+    /// Open a tempdir-backed `Store` and return the `contexts` keyspace
+    /// handle. The tempdir is held in the returned guard so it lives as
+    /// long as the test needs the store.
+    #[cfg(feature = "webvh")]
+    fn open_test_contexts_keyspace() -> (tempfile::TempDir, Store, crate::store::KeyspaceHandle) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&StoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        })
+        .expect("open store");
+        let ks = store.keyspace("contexts").expect("contexts keyspace");
+        (dir, store, ks)
+    }
+
     #[test]
     fn parse_var_plain_string() {
         let (k, v) = parse_var("URL=https://mediator.example.com").unwrap();
@@ -1182,5 +1235,96 @@ mod tests {
     fn parse_var_empty_key_errors() {
         let err = parse_var("=value").unwrap_err();
         assert!(err.to_string().contains("empty key"));
+    }
+
+    /// Negative case for the operator UX fix: when the operator pastes a
+    /// generated `vta bootstrap provision-integration` command without
+    /// `--create-context` and the target context doesn't exist yet, the
+    /// CLI must fail with an error that names the missing flag (so the
+    /// fix is "obvious paste-and-go", not "search the docs"). Reproduces
+    /// the failure mode reported by an operator who ran a wizard-
+    /// generated command against a fresh VTA.
+    #[cfg(feature = "webvh")]
+    #[tokio::test]
+    async fn ensure_target_context_or_create_returns_actionable_error_when_missing() {
+        let (_dir, _store, contexts_ks) = open_test_contexts_keyspace();
+        let auth = AuthClaims::unsafe_local_cli_super_admin("test");
+
+        let err = ensure_target_context_or_create(&contexts_ks, &auth, "missing-ctx", false)
+            .await
+            .expect_err("missing context with create_context=false must error");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--create-context"),
+            "error must name --create-context flag, got: {msg}"
+        );
+        assert!(
+            msg.contains("missing-ctx"),
+            "error must name the missing context, got: {msg}"
+        );
+        // Belt-and-suspenders: the context is still absent — the helper
+        // must not have created anything as a side effect of the failure.
+        assert!(
+            get_context(&contexts_ks, "missing-ctx")
+                .await
+                .unwrap()
+                .is_none(),
+            "context must remain absent after the negative path"
+        );
+    }
+
+    /// Positive case for the same fix: when `--create-context` is set,
+    /// the helper creates the missing context inline and returns Ok.
+    /// The context exists in the keyspace afterwards, ready for the
+    /// downstream `provision_integration` library call.
+    #[cfg(feature = "webvh")]
+    #[tokio::test]
+    async fn ensure_target_context_or_create_creates_context_when_flag_set() {
+        let (_dir, _store, contexts_ks) = open_test_contexts_keyspace();
+        let auth = AuthClaims::unsafe_local_cli_super_admin("test");
+
+        ensure_target_context_or_create(&contexts_ks, &auth, "fresh-ctx", true)
+            .await
+            .expect("create_context=true must succeed against a missing context");
+
+        let record = get_context(&contexts_ks, "fresh-ctx")
+            .await
+            .unwrap()
+            .expect("context must exist after create_context=true");
+        assert_eq!(record.id, "fresh-ctx");
+    }
+
+    /// Idempotence: when the context already exists, the helper is a
+    /// no-op regardless of the `create_context` flag — provisioning
+    /// proceeds normally.
+    #[cfg(feature = "webvh")]
+    #[tokio::test]
+    async fn ensure_target_context_or_create_is_idempotent_when_context_exists() {
+        let (_dir, _store, contexts_ks) = open_test_contexts_keyspace();
+        let auth = AuthClaims::unsafe_local_cli_super_admin("test");
+
+        crate::operations::contexts::create_context(
+            &contexts_ks,
+            &auth,
+            "existing-ctx",
+            "existing-ctx".into(),
+            None,
+            "test-setup",
+        )
+        .await
+        .expect("seed existing context");
+
+        // create_context=false should still succeed because the context
+        // is already there.
+        ensure_target_context_or_create(&contexts_ks, &auth, "existing-ctx", false)
+            .await
+            .expect("existing context with create_context=false must be a no-op");
+
+        // create_context=true must also succeed — it doesn't try to
+        // re-create when the row is already present.
+        ensure_target_context_or_create(&contexts_ks, &auth, "existing-ctx", true)
+            .await
+            .expect("existing context with create_context=true must be a no-op");
     }
 }
