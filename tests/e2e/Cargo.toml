@@ -18,9 +18,11 @@ autobins = false
 [dependencies]
 
 [dev-dependencies]
-# Embedded mediator fixture from affinidi-tdk-rs (unpublished — pulled
-# via path through the workspace `[patch.crates-io]` redirect).
-affinidi-messaging-test-mediator = { path = "../../../../affinidi/affinidi-tdk-rs/crates/messaging/affinidi-messaging-test-mediator" }
+# Embedded mediator fixture from affinidi-tdk-rs. Marked `publish = false`
+# upstream, so it lives only in the public git repo. Pinned by `rev` for
+# reproducible builds; bump explicitly when the upstream test-mediator
+# API changes.
+affinidi-messaging-test-mediator = { git = "https://github.com/affinidi/affinidi-tdk-rs.git", rev = "d9edcc8" }
 
 # VTA: enable the `test-support` feature so we can stand up complete VTA
 # state (in-memory keyspaces, default `AppConfig`, bootstrap helpers)
