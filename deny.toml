@@ -60,6 +60,28 @@ ignore = [
   rustls-webpki 0.101 ships a fix.
   """ },
 
+  { id = "GHSA-82j2-j2ch-gfr8", reason = """
+  rustls-webpki: index-out-of-bounds panic in `bit_string_flags()`
+  reachable through `BorrowedCertRevocationList::from_der()` via the
+  `issuingDistributionPoint` CRL extension when the BIT STRING
+  content is exactly `[0x00]`. Fixed in 0.103.13; 0.101.x and 0.102.x
+  branches are not patched.
+
+  Same precondition and same transitive path as RUSTSEC-2026-0104:
+  the upstream advisory is explicit that "CRL checking is opt-in" —
+  only applications that pass `RevocationOptions` to
+  `verify_for_usage()` and load attacker-influenced CRL bytes are
+  affected. Our 0.101.x copy lives behind AWS SDK's
+  `aws-smithy-http-client` → `hyper-rustls` 0.24 → rustls 0.21 used
+  for AWS API endpoint TLS; that path does not enable revocation
+  checking and never fetches CRLs. The default (and our actual)
+  rustls config is unaffected.
+
+  No RUSTSEC ID assigned at the time of writing (advisory published
+  2026-04-24). Drop when AWS SDK retires the rustls 0.21 code path,
+  or when rustls-webpki 0.101 ships a backported fix.
+  """ },
+
   { id = "RUSTSEC-2025-0134", reason = """
   rustls-pemfile is unmaintained. Pulled transitively (in two
   different versions) through the AWS SDK rustls 0.21 path —
