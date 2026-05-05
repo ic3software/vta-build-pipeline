@@ -1,5 +1,19 @@
 # Changelog
 
+## vta-service 0.5.1 — 2026-05-05
+
+### Fixed
+
+- `vta bootstrap provision-integration` now produces an actionable error
+  when the target context is missing and `--create-context` wasn't
+  passed. The error names both the flag the operator can pass to
+  provision the context inline and the `vta contexts create --id <id>`
+  command they can run first. Previously the failure surfaced as a
+  generic precondition error from inside the library fn, with no hint
+  at the missing flag — operators pasting wizard-generated commands
+  against fresh VTAs had to grep the docs to recover. CLI-only behavior
+  change; library API and wire formats unchanged.
+
 ## 0.5.0 — 2026-05-04
 
 The `sealed-bootstrap` release: every secret-bearing transfer between
