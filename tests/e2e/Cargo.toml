@@ -1,0 +1,46 @@
+[package]
+name = "vti-e2e-tests"
+version = "0.5.0"
+description = "End-to-end integration tests for the VTI workspace (VTA + pnm + mediator + webvh)"
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Test-only crate; never published.
+publish = false
+
+# No library or binary surface — this crate exists only for the
+# `tests/` integration-test binaries below. Shared helpers live in
+# `tests/common/mod.rs`, included by each test binary.
+autobins = false
+
+[dependencies]
+
+[dev-dependencies]
+# Embedded mediator fixture from affinidi-tdk-rs.
+affinidi-messaging-test-mediator = "0.1"
+
+# VTA: enable the `test-support` feature so we can stand up complete VTA
+# state (in-memory keyspaces, default `AppConfig`, bootstrap helpers)
+# from outside the crate.
+vta-service = { path = "../../vta-service", features = ["test-support", "didcomm", "webvh", "rest"] }
+vta-sdk = { path = "../../vta-sdk", features = ["client", "didcomm", "session", "sealed-transfer", "provision-integration"] }
+vti-common = { path = "../../vti-common" }
+
+affinidi-tdk = { workspace = true }
+affinidi-secrets-resolver = { workspace = true }
+affinidi-did-resolver-cache-sdk = { workspace = true }
+affinidi-messaging-sdk = "0.17"
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
+tempfile = "3"
+reqwest = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+url = "2"
+
+[lints]
+workspace = true

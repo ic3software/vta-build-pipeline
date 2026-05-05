@@ -4,6 +4,7 @@ members = [
   "cnm-cli",
   "didcomm-test",
   "pnm-cli",
+  "tests/e2e",
   "vta-cli-common",
   "vta-sdk",
   "vta-service",
@@ -154,7 +155,6 @@ keyring-core = "1"
 apple-native-keyring-store = { version = "1", default-features = false, features = ["keychain"] }
 windows-native-keyring-store = "1"
 dbus-secret-service-keyring-store = { version = "1", default-features = false, features = ["crypto-rust"] }
-
 
 [profile.release]
 lto = "thin"

@@ -302,6 +302,105 @@ dependencies = [
 ]
 
 [[package]]
+name = "affinidi-messaging-mediator"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "faa61f5cbd099b3986ffcefe524f78b14fc82b593564ff625721f1968655ab4d"
+dependencies = [
+ "affinidi-did-common",
+ "affinidi-did-resolver-cache-sdk",
+ "affinidi-encoding",
+ "affinidi-messaging-didcomm",
+ "affinidi-messaging-mediator-common",
+ "affinidi-messaging-sdk",
+ "affinidi-secrets-resolver",
+ "ahash 0.8.12",
+ "async-convert",
+ "async-trait",
+ "axum",
+ "axum-extra",
+ "axum-server",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "didwebvh-rs",
+ "futures-util",
+ "governor",
+ "hostname",
+ "http 1.4.0",
+ "humantime",
+ "itertools",
+ "jsonwebtoken",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "num-format",
+ "rand 0.10.1",
+ "redis",
+ "regex",
+ "reqwest 0.13.3",
+ "ring",
+ "rustls 0.23.40",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha256",
+ "subtle",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "vta-sdk 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "affinidi-messaging-mediator-common"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8da34b5693b0489f38ce94d0a71fcac9e1753969df5dc3a7ae7ae0fc3fc041ef"
+dependencies = [
+ "aes-gcm",
+ "affinidi-messaging-sdk",
+ "ahash 0.8.12",
+ "argon2",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "futures-util",
+ "hex",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "humantime",
+ "itertools",
+ "metrics",
+ "num-format",
+ "rand 0.10.1",
+ "redis",
+ "reqwest 0.13.3",
+ "rustls 0.23.40",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha256",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "affinidi-messaging-sdk"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -326,6 +425,31 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "affinidi-messaging-test-mediator"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e8503e0eac797f071a397a9192d0d3a60bc584e5bcb10b7a2f00fbeb1598651"
+dependencies = [
+ "affinidi-did-resolver-cache-sdk",
+ "affinidi-messaging-mediator",
+ "affinidi-messaging-mediator-common",
+ "affinidi-messaging-sdk",
+ "affinidi-secrets-resolver",
+ "affinidi-tdk",
+ "async-trait",
+ "jsonwebtoken",
+ "ring",
+ "rustls 0.23.40",
+ "sha256",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
  "uuid",
 ]
 
@@ -561,6 +685,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
+name = "arcstr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -649,6 +788,15 @@ dependencies = [
  "compression-core",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "async-convert"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d416feee97712e43152cd42874de162b8f9b77295b1c85e5d92725cc8310bae"
+dependencies = [
+ "async-trait",
 ]
 
 [[package]]
@@ -1140,6 +1288,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -1158,8 +1307,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper 1.0.2",
  "tokio",
+ "tokio-tungstenite",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
@@ -1205,6 +1356,28 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum-server"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "either",
+ "fs-err",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "hyper 1.9.0",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls 0.23.40",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tower-service",
 ]
 
 [[package]]
@@ -1273,6 +1446,15 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+]
+
+[[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
 ]
 
 [[package]]
@@ -1791,7 +1973,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vta-cli-common",
- "vta-sdk",
+ "vta-sdk 0.5.0",
 ]
 
 [[package]]
@@ -1813,7 +1995,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
+ "futures-core",
  "memchr",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2538,7 +2724,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vta-sdk",
+ "vta-sdk 0.5.0",
 ]
 
 [[package]]
@@ -3031,6 +3217,16 @@ checksum = "8835f84f38484cc86f110a805655697908257fb9a7af005234060891557198e9"
 dependencies = [
  "nonempty",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "fs-err"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73fde052dbfc920003cfd2c8e2c6e6d4cc7c1091538c3a24226cec0665ab08c0"
+dependencies = [
+ "autocfg",
+ "tokio",
 ]
 
 [[package]]
@@ -3633,6 +3829,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
+]
+
+[[package]]
 name = "hpke"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3719,6 +3926,12 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "humantime"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
 name = "hybrid-array"
@@ -4853,11 +5066,19 @@ checksum = "1db0d8f1fc9e62caebd0319e11eaec5822b0186c171568f0480b46a0137f9108"
 dependencies = [
  "base64 0.22.1",
  "evmap",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-rustls 0.27.9",
+ "hyper-util",
  "indexmap 2.14.0",
+ "ipnet",
  "metrics",
  "metrics-util",
  "quanta",
+ "rustls 0.23.40",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5117,6 +5338,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "num-format"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a652d9771a63711fd3c3deb670acfbe5c30a4072e664d7a3bf5a9e1056ac72c3"
+dependencies = [
+ "arrayvec 0.7.6",
+ "itoa",
 ]
 
 [[package]]
@@ -5606,7 +5837,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vta-cli-common",
- "vta-sdk",
+ "vta-sdk 0.5.0",
 ]
 
 [[package]]
@@ -6092,6 +6323,38 @@ dependencies = [
  "slab",
  "static-iref",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "redis"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72d32a1ac9123f0d84fda64bfc02a271d9868483162dd2d9099b5c362ece064c"
+dependencies = [
+ "ahash 0.8.12",
+ "arc-swap",
+ "arcstr",
+ "async-lock",
+ "backon",
+ "bytes",
+ "cfg-if",
+ "combine",
+ "futures-channel",
+ "futures-util",
+ "itoa",
+ "num-bigint",
+ "percent-encoding",
+ "pin-project-lite",
+ "rustls 0.23.40",
+ "rustls-native-certs",
+ "ryu",
+ "sha1_smol",
+ "socket2 0.6.3",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-util",
+ "url",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -6857,6 +7120,12 @@ dependencies = [
  "cpufeatures 0.2.17",
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -8422,7 +8691,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tokio",
- "vta-sdk",
+ "vta-sdk 0.5.0",
  "x25519-dalek",
 ]
 
@@ -8481,6 +8750,33 @@ dependencies = [
  "wiremock",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "vta-sdk"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba075fc5275473109af54d96e91d3828d1f3c10a77d3089e672efa103f7dbfd"
+dependencies = [
+ "aes 0.9.0",
+ "aes-gcm",
+ "affinidi-did-resolver-cache-sdk",
+ "affinidi-tdk",
+ "base64 0.22.1",
+ "chrono",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "getrandom 0.4.2",
+ "multibase",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -8551,7 +8847,7 @@ dependencies = [
  "uuid",
  "vaultrs",
  "vta-cli-common",
- "vta-sdk",
+ "vta-sdk 0.5.0",
  "vti-common",
  "x25519-dalek",
  "zeroize",
@@ -8600,7 +8896,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "vta-sdk",
+ "vta-sdk 0.5.0",
  "vti-common",
  "x25519-dalek",
  "zeroize",
@@ -8631,6 +8927,28 @@ dependencies = [
  "tokio-vsock",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "vti-e2e-tests"
+version = "0.5.0"
+dependencies = [
+ "affinidi-did-resolver-cache-sdk",
+ "affinidi-messaging-sdk",
+ "affinidi-messaging-test-mediator",
+ "affinidi-secrets-resolver",
+ "affinidi-tdk",
+ "reqwest 0.13.3",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "vta-sdk 0.5.0",
+ "vta-service",
+ "vti-common",
 ]
 
 [[package]]

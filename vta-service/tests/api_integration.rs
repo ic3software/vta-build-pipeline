@@ -32,8 +32,26 @@ struct TestApp {
     router: axum::Router,
 }
 
+/// Pin jsonwebtoken's default `CryptoProvider` to `rust_crypto` once
+/// per process. The workspace pins `jsonwebtoken = { features =
+/// ["rust_crypto"] }` for vta-service's normal build, but when this
+/// test is compiled as part of `cargo test --workspace`, Cargo
+/// unifies features across every workspace member — including
+/// `tests/e2e`, which transitively pulls in `aws_lc_rs`. With both
+/// providers compiled in, `jsonwebtoken`'s auto-select panics on
+/// first use because it can't pick a default. Install one explicitly
+/// to break the tie.
+fn init_jwt_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    });
+}
+
 impl TestApp {
     async fn new() -> (Self, TestContext) {
+        init_jwt_provider();
         let dir = tempfile::tempdir().expect("temp dir");
         let store_config = StoreConfig {
             data_dir: dir.path().to_path_buf(),

@@ -25,7 +25,20 @@ use vtc_service::config::AppConfig;
 use vtc_service::routes;
 use vtc_service::server::AppState;
 
+/// Pin jsonwebtoken's default `CryptoProvider` to `rust_crypto` once
+/// per process. Required when `cargo test --workspace` unifies
+/// features across crates that pull in `aws_lc_rs` (e.g. `tests/e2e`)
+/// — without an explicit default, jsonwebtoken's auto-select panics.
+fn init_jwt_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    });
+}
+
 async fn build_test_router() -> (axum::Router, Arc<JwtKeys>, tempfile::TempDir) {
+    init_jwt_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open(&StoreConfig {
         data_dir: dir.path().to_path_buf(),

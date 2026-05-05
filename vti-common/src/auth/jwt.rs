@@ -130,7 +130,23 @@ mod tests {
     use super::*;
     use base64::Engine;
 
+    /// Pin jsonwebtoken's default `CryptoProvider` to `rust_crypto`
+    /// once per process. Required when `cargo test --workspace`
+    /// unifies features across crates that pull in `aws_lc_rs` (e.g.
+    /// `tests/e2e`) — without an explicit default, jsonwebtoken's
+    /// auto-select panics. Per-crate `cargo test` runs hit this too
+    /// once any sibling crate brings the second provider into the
+    /// shared target dir's feature graph.
+    fn init_jwt_provider() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+        });
+    }
+
     fn test_keys() -> JwtKeys {
+        init_jwt_provider();
         JwtKeys::from_ed25519_bytes(&[0x42u8; 32], "VTA").unwrap()
     }
 
