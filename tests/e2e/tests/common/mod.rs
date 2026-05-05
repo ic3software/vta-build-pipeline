@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 pub mod test_vta;
+pub mod test_vta_responder;
 
 use std::sync::Once;
 

@@ -179,9 +179,34 @@ impl DIDCommSession {
 
         debug!(msg_type, msg_id, "sending via DIDComm");
 
-        // Send the message (fire-and-forget to mediator, don't wait for response)
+        // Wrap the inner JWE in a `routing/2.0/forward` envelope addressed
+        // to the mediator and ship it. Strict mediators
+        // (`local_direct_delivery_allowed: false`) refuse direct delivery
+        // — same path the production VTA-side `affinidi-messaging-didcomm-service`
+        // takes via `forward_and_send_message`.
+        let mediator_did = self
+            .profile
+            .inner
+            .mediator
+            .as_ref()
+            .as_ref()
+            .map(|m| m.did.clone())
+            .ok_or_else(|| {
+                VtaError::DidcommTransport("no mediator configured on profile".into())
+            })?;
+
         self.atm
-            .send_message(&self.profile, &packed, &msg_id, false, false)
+            .forward_and_send_message(
+                &self.profile,
+                false, // authcrypt the forward envelope (mediator policy)
+                &packed,
+                Some(&msg_id),
+                &mediator_did,
+                &self.vta_did,
+                None,
+                None,
+                false,
+            )
             .await
             .map_err(|e| VtaError::DidcommTransport(format!("failed to send message: {e}")))?;
 

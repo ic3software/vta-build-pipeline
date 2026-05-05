@@ -19,7 +19,7 @@ autobins = false
 
 [dev-dependencies]
 # Embedded mediator fixture from affinidi-tdk-rs.
-affinidi-messaging-test-mediator = "0.1"
+affinidi-messaging-test-mediator = "0.2"
 
 # VTA: enable the `test-support` feature so we can stand up complete VTA
 # state (in-memory keyspaces, default `AppConfig`, bootstrap helpers)
@@ -32,10 +32,14 @@ affinidi-tdk = { workspace = true }
 affinidi-secrets-resolver = { workspace = true }
 affinidi-did-resolver-cache-sdk = { workspace = true }
 affinidi-messaging-sdk = "0.17"
+affinidi-messaging-didcomm = "0.13"
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
 tempfile = "3"
 reqwest = { workspace = true }
+ed25519-dalek = { workspace = true }
+multibase = { workspace = true }
+uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 serde_json = { workspace = true }
