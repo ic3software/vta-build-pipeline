@@ -138,6 +138,8 @@ pub fn with_didcomm_service(
         services.push(new_entry);
     }
 
+    // Canonicalize order — DIDComm must come before REST per spec §3.3.
+    sort_services_canonical(&mut doc);
     Ok(doc)
 }
 
@@ -169,6 +171,40 @@ fn id_matches_didcomm(id: &str) -> bool {
 
 fn id_matches_rest(id: &str) -> bool {
     id.ends_with(REST_SERVICE_FRAGMENT)
+}
+
+/// Sort the `service` array so DIDComm comes before REST, with all
+/// other entries (e.g. `#tee-attestation`) preserving their original
+/// relative order.
+///
+/// Spec §3.3 — when both transports are advertised, DIDComm is the
+/// preferred transport for clients that support it. We encode this
+/// via array ordering so a DID-Core resolver walking the array
+/// picks DIDComm first. No `priority` key is used (DIDComm-v2-spec
+/// only) so that DID-Core-only resolvers see the same preference.
+///
+/// Stable sort: `#vta-didcomm` -> `#vta-rest` -> everything else
+/// (preserved in input order). Idempotent. Pure — only mutates the
+/// `service` field of `doc`; verification methods and other fields
+/// are untouched.
+pub fn sort_services_canonical(doc: &mut Value) {
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    let Some(services) = obj.get_mut("service").and_then(Value::as_array_mut) else {
+        return;
+    };
+    services.sort_by_key(|s| {
+        let id = s.get("id").and_then(Value::as_str).unwrap_or("");
+        // 0 = DIDComm, 1 = REST, 2 = anything else (e.g. TEE)
+        if id_matches_didcomm(id) {
+            0u8
+        } else if id_matches_rest(id) {
+            1u8
+        } else {
+            2u8
+        }
+    });
 }
 
 fn extract_mediator_did(endpoint: &Value) -> Option<String> {
@@ -253,6 +289,8 @@ pub fn with_rest_service(mut doc: Value, url: &str) -> Result<Value, DocumentPat
         services.push(new_entry);
     }
 
+    // Canonicalize order — DIDComm must come before REST per spec §3.3.
+    sort_services_canonical(&mut doc);
     Ok(doc)
 }
 
@@ -723,5 +761,90 @@ mod tests {
         let stripped = without_rest_service(original);
         assert_eq!(stripped["verificationMethod"], original_vm);
         assert_eq!(stripped["authentication"], original_auth);
+    }
+
+    // ── Canonical ordering tests (T2.4) ───────────────────────────
+    //
+    // Spec §3.3: when both transports are advertised, DIDComm must
+    // come before REST so DID-Core resolvers walking the array pick
+    // DIDComm first. The `with_*_service` patchers funnel through
+    // `sort_services_canonical` to enforce this regardless of the
+    // pre-mutation array order.
+
+    fn id_at(doc: &Value, idx: usize) -> &str {
+        doc["service"][idx]["id"].as_str().unwrap()
+    }
+
+    /// Adding REST to a doc that already has DIDComm preserves the
+    /// invariant: DIDComm at index 0, REST at index 1.
+    #[test]
+    fn ordering_didcomm_then_rest_when_didcomm_was_first() {
+        let base = doc_with_didcomm("did:webvh:m");
+        let with_both = with_rest_service(base, "https://x.example.com").unwrap();
+        assert!(id_at(&with_both, 0).ends_with("#vta-didcomm"));
+        assert!(id_at(&with_both, 1).ends_with("#vta-rest"));
+    }
+
+    /// Adding DIDComm to a REST-only doc reorders so DIDComm is at
+    /// index 0 — without canonical sort the patcher's push-to-end
+    /// would put DIDComm second.
+    #[test]
+    fn ordering_didcomm_first_when_rest_was_first() {
+        let base = doc_with_rest("https://x.example.com");
+        let with_both = with_didcomm_service(base, "did:webvh:m").unwrap();
+        assert!(
+            id_at(&with_both, 0).ends_with("#vta-didcomm"),
+            "DIDComm must be first per spec §3.3, got: {}",
+            id_at(&with_both, 0),
+        );
+        assert!(id_at(&with_both, 1).ends_with("#vta-rest"));
+    }
+
+    /// TEE / other entries land after REST — they're not transports
+    /// so the §3.3 invariant doesn't constrain their position
+    /// relative to each other, but DIDComm + REST must come first.
+    #[test]
+    fn ordering_didcomm_rest_then_tee() {
+        let mut base = doc_with_didcomm("did:webvh:m");
+        // Insert TEE BEFORE adding REST — the canonical sort must
+        // still place REST before TEE since REST is a transport.
+        base["service"].as_array_mut().unwrap().push(json!({
+            "id": format!("{}#tee-attestation", vta_did()),
+            "type": "TeeAttestation",
+            "serviceEndpoint": "https://x"
+        }));
+        let with_rest = with_rest_service(base, "https://x.example.com").unwrap();
+        let services = with_rest["service"].as_array().unwrap();
+        assert_eq!(services.len(), 3);
+        assert!(id_at(&with_rest, 0).ends_with("#vta-didcomm"));
+        assert!(id_at(&with_rest, 1).ends_with("#vta-rest"));
+        assert!(id_at(&with_rest, 2).ends_with("#tee-attestation"));
+    }
+
+    /// `sort_services_canonical` is idempotent — applying it twice
+    /// yields the same array.
+    #[test]
+    fn sort_services_canonical_is_idempotent() {
+        let mut doc = doc_with_rest("https://x.example.com");
+        doc["service"].as_array_mut().unwrap().push(json!({
+            "id": format!("{}#vta-didcomm", vta_did()),
+            "type": "DIDCommMessaging",
+            "serviceEndpoint": [{ "accept": ["didcomm/v2"], "uri": "did:webvh:m" }]
+        }));
+        sort_services_canonical(&mut doc);
+        let after_first = doc.clone();
+        sort_services_canonical(&mut doc);
+        assert_eq!(doc, after_first);
+    }
+
+    /// `sort_services_canonical` is a no-op on a doc with no
+    /// `service` field (used by integration tests that strip the
+    /// field for non-transport DIDs).
+    #[test]
+    fn sort_services_canonical_handles_missing_service_field() {
+        let mut doc = doc_without_service();
+        let original = doc.clone();
+        sort_services_canonical(&mut doc);
+        assert_eq!(doc, original);
     }
 }
