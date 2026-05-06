@@ -15,6 +15,7 @@ pub mod enable_didcomm;
 pub mod enable_rest;
 pub mod invariant;
 pub mod report;
+pub mod rollback_rest;
 pub mod snapshot;
 pub mod update_didcomm;
 pub mod update_rest;
