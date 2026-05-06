@@ -8,6 +8,7 @@
 //! later phases.
 
 pub mod disable_didcomm;
+pub mod disable_rest;
 pub mod document;
 pub mod drain_cancel;
 pub mod enable_didcomm;
