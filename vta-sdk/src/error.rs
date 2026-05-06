@@ -71,9 +71,80 @@ pub enum VtaError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    // ── Runtime service-management variants (spec §4) ──────────────
+    //
+    // These are emitted by the post-setup service-management surface
+    // (`services {rest,didcomm} {enable,update,disable,rollback}`).
+    // Structured data for the variants that carry numeric fields
+    // round-trips lossless via [`TypedErrorPayload`] across both
+    // REST response bodies and DIDComm problem-report args.
+    /// The operation would leave the VTA's DID document with no
+    /// advertised transport services. Per spec §3.2, this is rejected
+    /// without a `--force` escape hatch — enable the other transport
+    /// first if a swap is intended.
+    #[error("refusing operation: would leave the VTA with no advertised services")]
+    LastServiceRefused,
+
+    /// `update`, `disable`, or a kind-specific drain action was
+    /// invoked for a service kind that isn't currently enabled.
+    #[error("service is not present (not currently enabled)")]
+    ServiceNotPresent,
+
+    /// `enable` was invoked for a service kind that's already
+    /// enabled. Use `update` to change its configuration.
+    #[error("service is already enabled")]
+    ServiceAlreadyEnabled,
+
+    /// DIDComm handshake against the candidate mediator failed
+    /// (trust-ping refused, timed out, or peer was unreachable).
+    #[error("mediator handshake failed: {reason}")]
+    MediatorHandshakeFailed { reason: String },
+
+    /// Drain TTL is outside the valid range. Bounds are
+    /// `MIN_DRAIN_TTL_OVER_DIDCOMM` (3600s, when the disable command
+    /// is itself delivered over DIDComm) and `MAX_DRAIN_TTL`
+    /// (30 days). All three fields are in seconds.
+    #[error("drain ttl {requested}s outside allowed range [{min}s, {max}s]")]
+    DrainTtlOutOfBounds { min: u64, max: u64, requested: u64 },
+
+    /// `rollback` was invoked for a service kind that has no prior
+    /// mutation in its snapshot store to fail-forward from.
+    #[error("no prior mutation to roll back from")]
+    NoPriorMutation,
+
     /// Catch-all for other errors.
     #[error("{0}")]
     Other(String),
+}
+
+/// Wire-format companion to the typed [`VtaError`] variants emitted
+/// by the runtime service-management surface.
+///
+/// The free-form `comment` string carried by DIDComm problem-reports
+/// (and the `body` string of REST error responses) is fine for the
+/// variants whose only data is a human-readable message
+/// ([`VtaError::Conflict`], [`VtaError::NotFound`], …) but lossy for
+/// variants like [`VtaError::DrainTtlOutOfBounds`] that carry three
+/// numeric fields the CLI needs to switch on.
+///
+/// Servers serialize a `TypedErrorPayload` into the response body
+/// (REST) or problem-report `args` (DIDComm); clients deserialize
+/// it back via [`VtaError::from_typed_payload`]. The discriminator
+/// is the kebab-cased variant name in the `code` field.
+///
+/// Variants line up 1:1 with the §4 spec list — the existing
+/// [`VtaError::UnsupportedTransport`] is included so the same
+/// channel carries every typed-error wire form.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "code", rename_all = "kebab-case")]
+pub enum TypedErrorPayload {
+    LastServiceRefused,
+    ServiceNotPresent,
+    ServiceAlreadyEnabled,
+    MediatorHandshakeFailed { reason: String },
+    DrainTtlOutOfBounds { min: u64, max: u64, requested: u64 },
+    NoPriorMutation,
+    UnsupportedTransport { detail: String },
 }
 
 impl VtaError {
@@ -119,6 +190,67 @@ impl VtaError {
                 code: other.to_string(),
                 comment,
             },
+        }
+    }
+
+    /// Reconstruct the typed [`VtaError`] variant from a wire-format
+    /// [`TypedErrorPayload`]. Used by the client when decoding REST
+    /// response bodies / DIDComm problem-report args for the runtime
+    /// service-management surface (spec §4).
+    pub fn from_typed_payload(payload: TypedErrorPayload) -> Self {
+        match payload {
+            TypedErrorPayload::LastServiceRefused => Self::LastServiceRefused,
+            TypedErrorPayload::ServiceNotPresent => Self::ServiceNotPresent,
+            TypedErrorPayload::ServiceAlreadyEnabled => Self::ServiceAlreadyEnabled,
+            TypedErrorPayload::MediatorHandshakeFailed { reason } => {
+                Self::MediatorHandshakeFailed { reason }
+            }
+            TypedErrorPayload::DrainTtlOutOfBounds {
+                min,
+                max,
+                requested,
+            } => Self::DrainTtlOutOfBounds {
+                min,
+                max,
+                requested,
+            },
+            TypedErrorPayload::NoPriorMutation => Self::NoPriorMutation,
+            TypedErrorPayload::UnsupportedTransport { detail } => {
+                Self::UnsupportedTransport(detail)
+            }
+        }
+    }
+
+    /// Project this error onto the wire-format [`TypedErrorPayload`]
+    /// when the variant is one of the runtime service-management
+    /// errors. Returns `None` for variants that don't have a
+    /// structured wire form (network errors, generic conflicts,
+    /// programmer-level protocol errors, …).
+    #[must_use]
+    pub fn to_typed_payload(&self) -> Option<TypedErrorPayload> {
+        match self {
+            Self::LastServiceRefused => Some(TypedErrorPayload::LastServiceRefused),
+            Self::ServiceNotPresent => Some(TypedErrorPayload::ServiceNotPresent),
+            Self::ServiceAlreadyEnabled => Some(TypedErrorPayload::ServiceAlreadyEnabled),
+            Self::MediatorHandshakeFailed { reason } => {
+                Some(TypedErrorPayload::MediatorHandshakeFailed {
+                    reason: reason.clone(),
+                })
+            }
+            Self::DrainTtlOutOfBounds {
+                min,
+                max,
+                requested,
+            } => Some(TypedErrorPayload::DrainTtlOutOfBounds {
+                min: *min,
+                max: *max,
+                requested: *requested,
+            }),
+            Self::NoPriorMutation => Some(TypedErrorPayload::NoPriorMutation),
+            Self::UnsupportedTransport(detail) => Some(TypedErrorPayload::UnsupportedTransport {
+                detail: detail.clone(),
+            }),
+            _ => None,
         }
     }
 
@@ -204,6 +336,38 @@ impl VtaError {
                 "Network error reaching the VTA. Confirm the URL is correct and the \
                  host is reachable.",
             ),
+            // Runtime service-management variants (spec §4). The CLI
+            // layer enriches these with the specific kind/command
+            // it just ran; this is the generic fallback hint for
+            // non-CLI consumers.
+            Self::LastServiceRefused => Some(
+                "This operation would leave the VTA with no advertised transport \
+                 services. Enable the other transport first (REST or DIDComm) \
+                 before disabling this one.",
+            ),
+            Self::ServiceNotPresent => Some(
+                "The service kind isn't currently enabled. Use \
+                 `services <kind> enable …` to bring it online before \
+                 updating, disabling, or rolling it back.",
+            ),
+            Self::ServiceAlreadyEnabled => Some(
+                "The service kind is already enabled. Use \
+                 `services <kind> update …` to change its configuration, \
+                 or `disable` to remove it.",
+            ),
+            Self::MediatorHandshakeFailed { .. } => Some(
+                "DIDComm handshake against the candidate mediator failed. \
+                 Confirm the mediator DID is correct and the mediator is \
+                 reachable; check the inner reason for the specific cause.",
+            ),
+            Self::DrainTtlOutOfBounds { .. } => Some(
+                "The supplied drain TTL is outside the allowed range. Pick a \
+                 value within the [min, max] interval shown in the error message.",
+            ),
+            Self::NoPriorMutation => Some(
+                "No prior mutation for this service kind to roll back from. Use \
+                 the direct `enable`/`update`/`disable` command instead.",
+            ),
             // No generic hint for these — the message itself is the
             // hint, or the failure is a protocol/programmer error
             // surface that an automated suggestion would only confuse.
@@ -284,6 +448,28 @@ mod tests {
                 .is_some()
         );
 
+        // Runtime service-management variants (spec §4) all have hints.
+        assert!(VtaError::LastServiceRefused.suggested_fix().is_some());
+        assert!(VtaError::ServiceNotPresent.suggested_fix().is_some());
+        assert!(VtaError::ServiceAlreadyEnabled.suggested_fix().is_some());
+        assert!(
+            VtaError::MediatorHandshakeFailed {
+                reason: "trust-ping timeout".into()
+            }
+            .suggested_fix()
+            .is_some()
+        );
+        assert!(
+            VtaError::DrainTtlOutOfBounds {
+                min: 3600,
+                max: 2_592_000,
+                requested: 30,
+            }
+            .suggested_fix()
+            .is_some()
+        );
+        assert!(VtaError::NoPriorMutation.suggested_fix().is_some());
+
         // Self-explanatory / programmer-error: no canned hint.
         assert!(VtaError::NotFound("x".into()).suggested_fix().is_none());
         assert!(VtaError::Protocol("shape".into()).suggested_fix().is_none());
@@ -295,5 +481,126 @@ mod tests {
             .suggested_fix()
             .is_none()
         );
+    }
+
+    /// Every typed runtime service-management variant must round-trip
+    /// through [`TypedErrorPayload`] without losing structured data.
+    /// The test cases line up 1:1 with the spec §4 list.
+    #[test]
+    fn typed_payload_round_trips_every_runtime_service_variant() {
+        let cases: Vec<VtaError> = vec![
+            VtaError::LastServiceRefused,
+            VtaError::ServiceNotPresent,
+            VtaError::ServiceAlreadyEnabled,
+            VtaError::MediatorHandshakeFailed {
+                reason: "trust-ping timeout after 10s".into(),
+            },
+            VtaError::DrainTtlOutOfBounds {
+                min: 3600,
+                max: 2_592_000,
+                requested: 30,
+            },
+            VtaError::NoPriorMutation,
+            VtaError::UnsupportedTransport("services didcomm enable is REST-only".into()),
+        ];
+
+        for original in cases {
+            let payload = original.to_typed_payload().unwrap_or_else(|| {
+                panic!("variant must project to TypedErrorPayload: {original:?}")
+            });
+
+            // Round-trip through JSON to mirror what REST and DIDComm
+            // transports actually do on the wire.
+            let json = serde_json::to_string(&payload)
+                .unwrap_or_else(|e| panic!("payload must serialize: {e}"));
+            let restored: TypedErrorPayload = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("payload must deserialize: {e}; raw={json}"));
+
+            assert_eq!(
+                payload, restored,
+                "TypedErrorPayload must round-trip through JSON",
+            );
+
+            // Reconstructing back to VtaError preserves the variant
+            // discriminant and any structured data.
+            let reconstructed = VtaError::from_typed_payload(restored);
+            match (&original, &reconstructed) {
+                (VtaError::LastServiceRefused, VtaError::LastServiceRefused)
+                | (VtaError::ServiceNotPresent, VtaError::ServiceNotPresent)
+                | (VtaError::ServiceAlreadyEnabled, VtaError::ServiceAlreadyEnabled)
+                | (VtaError::NoPriorMutation, VtaError::NoPriorMutation) => {}
+                (
+                    VtaError::MediatorHandshakeFailed { reason: a },
+                    VtaError::MediatorHandshakeFailed { reason: b },
+                ) => assert_eq!(a, b),
+                (
+                    VtaError::DrainTtlOutOfBounds {
+                        min: m1,
+                        max: x1,
+                        requested: r1,
+                    },
+                    VtaError::DrainTtlOutOfBounds {
+                        min: m2,
+                        max: x2,
+                        requested: r2,
+                    },
+                ) => {
+                    assert_eq!(m1, m2);
+                    assert_eq!(x1, x2);
+                    assert_eq!(r1, r2);
+                }
+                (VtaError::UnsupportedTransport(a), VtaError::UnsupportedTransport(b)) => {
+                    assert_eq!(a, b)
+                }
+                (a, b) => panic!("variant changed across round-trip: {a:?} → {b:?}"),
+            }
+        }
+    }
+
+    /// The kebab-case `code` discriminator on the wire JSON is part of
+    /// the contract for both REST and DIDComm transports — pin it
+    /// explicitly so a `serde(rename)` change doesn't silently break
+    /// existing peers.
+    #[test]
+    fn typed_payload_wire_discriminator_is_kebab_case() {
+        let payload = TypedErrorPayload::DrainTtlOutOfBounds {
+            min: 3600,
+            max: 2_592_000,
+            requested: 30,
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["code"], "drain-ttl-out-of-bounds");
+        assert_eq!(json["min"], 3600);
+        assert_eq!(json["max"], 2_592_000);
+        assert_eq!(json["requested"], 30);
+    }
+
+    /// `to_typed_payload` returns `None` for variants outside the
+    /// runtime service-management surface — the wire-format channel
+    /// is reserved for those typed variants and shouldn't blanket
+    /// every error.
+    #[test]
+    fn typed_payload_is_none_for_non_service_management_variants() {
+        assert!(VtaError::Auth("x".into()).to_typed_payload().is_none());
+        assert!(VtaError::NotFound("x".into()).to_typed_payload().is_none());
+        assert!(VtaError::Conflict("x".into()).to_typed_payload().is_none());
+        assert!(
+            VtaError::Server {
+                status: 500,
+                body: "x".into(),
+            }
+            .to_typed_payload()
+            .is_none()
+        );
+        assert!(VtaError::Protocol("x".into()).to_typed_payload().is_none());
+        assert!(
+            VtaError::DidcommRemote {
+                code: "e.x".into(),
+                comment: "x".into()
+            }
+            .to_typed_payload()
+            .is_none()
+        );
+        assert!(VtaError::Other("x".into()).to_typed_payload().is_none());
     }
 }
