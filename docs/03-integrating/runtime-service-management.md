@@ -16,14 +16,18 @@ guide. The DIDComm-specific surface is now part of a unified
 ## Migration from the legacy `pnm mediator …` surface
 
 If you have scripts targeting the pre-P5 commands, here's the
-direct mapping. Old commands have been **retired** (no aliases) —
-clap will print "unknown subcommand" if you call them.
+direct mapping. Old commands have been **retired** (no aliases).
+Calling `pnm mediator …` prints a friendly redirect with the
+equivalent `pnm services didcomm …` command and exits 2 — the
+clap-default "unknown subcommand" message is intercepted in
+`pnm-cli/src/main.rs` so operators with stale scripts get a
+copy-pasteable suggestion instead of a generic parse error.
 
 | Old | New |
 |---|---|
 | `pnm services enable didcomm --mediator-did X` | `pnm services didcomm enable --mediator-did X` |
 | `pnm services disable didcomm --drain-ttl 3600` | `pnm services didcomm disable --drain-ttl 86400` |
-| `pnm mediator migrate --to X --drain-ttl 3600` | `pnm services didcomm update --to X --drain-ttl 86400` |
+| `pnm mediator migrate --to X --drain-ttl 3600` | `pnm services didcomm update --mediator-did X --drain-ttl 86400` |
 | `pnm mediator rollback --to X` | `pnm services didcomm rollback` |
 | `pnm mediator drain cancel --mediator-did X` | `pnm services didcomm drain cancel --mediator-did X` |
 | `pnm mediator report` | `pnm services report` |
@@ -42,9 +46,9 @@ re-applies the prior config. No `--to` argument; the rollback
 target is whatever was in effect before the most recent forward
 mutation.
 
-The `--to` muscle memory is partially preserved: `pnm services
-didcomm update --to <did>` works (clap visible_alias on
-`--mediator-did`).
+The `--to` muscle memory is partially preserved on `update`:
+`pnm services didcomm update --to <did>` works (clap
+`visible_alias` on `--mediator-did`).
 
 ## Operations at a glance
 
@@ -191,6 +195,20 @@ fjall + replayed at boot).
   1h minimum so the response can land before the listener drops.
 - Hard upper bound: 30 days.
 
+Both bounds are enforced at the operation layer — `disable`,
+`update`, and `rollback` all reject out-of-range values with the
+typed `DrainTtlOutOfBounds` error before any I/O. Spec §7a.4
+matrix cells (`--drain-ttl 30s` over DIDComm, `--drain-ttl 31d`)
+are pinned by unit tests.
+
+**Rollback handshake.** When `services didcomm rollback` dispatches
+into `update_didcomm` to re-promote a previously-active mediator,
+it runs the same live mediator handshake as a forward update.
+Re-promoting a mediator that has since gone offline fails fast
+with `MediatorHandshakeFailed` rather than silently bricking the
+VTA — the rollback is rejected and the operator can pick a
+different recovery action.
+
 REST has no drain semantics — there's nothing to keep listening
 for after the URL is unadvertised. The Axum process keeps running
 (it's a process-level binding); only the *advertisement* is
@@ -294,7 +312,7 @@ pnm services didcomm disable
 pnm services rest disable
 # Error: refusing to disable REST — DIDComm is also off, so the
 # VTA would have no advertised services.
-# Suggested fix: Run `pnm services didcomm enable --mediator <did>`
+# Suggested fix: Run `pnm services didcomm enable --mediator-did <did>`
 # first, then retry.
 ```
 

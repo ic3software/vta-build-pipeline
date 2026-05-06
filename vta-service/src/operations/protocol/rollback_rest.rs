@@ -323,7 +323,6 @@ fn current_document_from_log(did_log: &str) -> Result<JsonValue, RollbackRestErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LogConfig, ServerConfig, ServicesConfig, StoreConfig};
     use crate::store::Store;
     use vti_common::config::StoreConfig as VtiStoreConfig;
 
@@ -343,30 +342,13 @@ mod tests {
     }
 
     fn build_fixture(rest: bool, didcomm: bool) -> TestFixture {
+        use crate::test_support::test_app_config;
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("vta.toml");
-        let cfg = AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: LogConfig::default(),
-            store: StoreConfig {
-                data_dir: dir.path().into(),
-            },
-            services: ServicesConfig { rest, didcomm },
-            vta_did: Some("did:webvh:scid123:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            resolver_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            audit: Default::default(),
-            auth: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            config_path,
-        };
+        let mut cfg = test_app_config(dir.path().into());
+        cfg.services.rest = rest;
+        cfg.services.didcomm = didcomm;
+        cfg.vta_did = Some("did:webvh:scid123:host:vta".into());
+        cfg.config_path = dir.path().join("vta.toml");
         let initial = toml::to_string_pretty(&cfg).unwrap();
         std::fs::write(&cfg.config_path, initial).unwrap();
         let store = Store::open(&VtiStoreConfig {

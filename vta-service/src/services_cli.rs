@@ -131,7 +131,12 @@ async fn build_offline_deps(
         drains_ks.clone(),
         tx,
     ));
-    let auth = AuthClaims::unsafe_local_cli_super_admin("vta-services-offline");
+    // Embed the calling process's pid (and uid on Unix) into the
+    // audit channel string so a forensic investigator can map a
+    // logged super-admin synthesis back to the shell session that
+    // ran the command. Best-effort: missing pid/uid degrades to
+    // the bare channel name rather than blocking the operation.
+    let auth = AuthClaims::unsafe_local_cli_super_admin(&offline_audit_channel());
 
     Ok(OfflineDeps {
         config: Arc::new(RwLock::new(config)),
@@ -150,6 +155,18 @@ async fn build_offline_deps(
         sweeper,
         auth,
     })
+}
+
+/// Build the audit-channel string the offline `vta services …`
+/// CLI uses when synthesising a super-admin claim. Includes the
+/// calling process's pid so audit-log greps can distinguish
+/// concurrent local invocations on the same host. (uid is not
+/// recorded because pulling it in would force a `libc` /
+/// `rustix` dependency on this code path; the pid plus the
+/// per-invocation timestamp on the audit record is sufficient
+/// to disambiguate in practice.)
+fn offline_audit_channel() -> String {
+    format!("vta-services-offline:pid={}", std::process::id())
 }
 
 /// Print a `VtaError`-bearing error using the workspace's shared
@@ -395,6 +412,7 @@ pub async fn run_services_didcomm_update(
             force,
             handshake_timeout: std::time::Duration::from_secs(handshake_timeout_secs.unwrap_or(10)),
             audit_kind: MigrateAuditKind::Forward,
+            transport: crate::operations::protocol::disable_didcomm::DisableTransport::Rest,
         },
         OpContext::Direct,
         "vta-cli-offline",
@@ -457,6 +475,11 @@ pub async fn run_services_didcomm_rollback(
     drain_ttl_secs: Option<u64>,
 ) -> CliResult {
     let d = build_offline_deps(config_path).await?;
+    // Offline path: there's no running DIDComm service to assemble a
+    // live prover against, so the dispatcher's re-promotion
+    // handshake degrades to a config-shape check via
+    // `AlwaysOkProver`. A subsequent `pnm services didcomm update`
+    // against a running VTA exercises the live prover.
     let prover = AlwaysOkProver;
     let result = rollback_didcomm(
         &d.config,

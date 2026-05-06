@@ -1310,6 +1310,39 @@ fn is_online_template_cmd(cmd: &DidTemplateCommands) -> bool {
     )
 }
 
+/// Translate a retired `pnm mediator …` invocation into the
+/// equivalent `pnm services didcomm …` command, or `None` if the
+/// args don't match a retired shape. Operates on `args()` directly
+/// so it runs before clap rejects the unknown subcommand.
+fn retired_mediator_redirect<I, S>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let argv: Vec<String> = args
+        .into_iter()
+        .map(|s| s.as_ref().to_string())
+        .skip(1) // drop the binary name
+        .filter(|a| !a.starts_with('-')) // ignore global flags like --json
+        .collect();
+
+    if argv.first().map(|s| s.as_str()) != Some("mediator") {
+        return None;
+    }
+
+    Some(match argv.get(1).map(|s| s.as_str()) {
+        Some("migrate") => "pnm services didcomm update --mediator-did <did>".to_string(),
+        Some("rollback") => "pnm services didcomm rollback".to_string(),
+        Some("report") => "pnm services report".to_string(),
+        Some("drain") => match argv.get(2).map(|s| s.as_str()) {
+            Some("cancel") => "pnm services didcomm drain cancel --mediator-did <did>".to_string(),
+            Some("list") => "pnm services didcomm drain list".to_string(),
+            _ => "pnm services didcomm drain {list|cancel}".to_string(),
+        },
+        _ => "pnm services --help".to_string(),
+    })
+}
+
 /// Spawn a Ctrl-C / SIGTERM watcher that lets a second signal force the
 /// process out. Operations like a stuck mediator handshake can hold the
 /// async runtime for tens of seconds even though the runtime itself
@@ -1335,6 +1368,21 @@ fn install_force_exit_handler() {
 #[tokio::main]
 async fn main() {
     install_force_exit_handler();
+
+    // Migration cue: the `pnm mediator …` subcommand surface was
+    // retired in favour of `pnm services didcomm …`. Detect it
+    // before clap rejects the args with a generic "unrecognised
+    // subcommand" message and print a copy-pasteable redirect.
+    if let Some(replacement) = retired_mediator_redirect(std::env::args()) {
+        eprintln!("`pnm mediator …` was retired in this release.");
+        eprintln!();
+        eprintln!("Run instead:");
+        eprintln!("  {replacement}");
+        eprintln!();
+        eprintln!("See `pnm services --help` for the full surface, or");
+        eprintln!("docs/03-integrating/runtime-service-management.md.");
+        std::process::exit(2);
+    }
 
     let cli = Cli::parse();
 

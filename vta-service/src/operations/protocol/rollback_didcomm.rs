@@ -36,7 +36,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
-use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -313,6 +312,7 @@ pub async fn rollback_didcomm(
                     force: false,
                     handshake_timeout: DEFAULT_ROLLBACK_HANDSHAKE_TIMEOUT,
                     audit_kind: MigrateAuditKind::Rollback,
+                    transport: params.transport,
                 },
                 OpContext::Rollback,
                 channel,
@@ -358,20 +358,19 @@ async fn read_current_didcomm_mediator(
     let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
         .await?
         .ok_or_else(|| RollbackDidcommError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
+    let current_doc = crate::operations::protocol::document::current_document_from_log(&did_log)?;
 
     Ok(current_didcomm_service(&current_doc).map(|svc| svc.mediator_did))
 }
 
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, RollbackDidcommError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(RollbackDidcommError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| RollbackDidcommError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+impl From<crate::operations::protocol::document::CurrentDocumentError> for RollbackDidcommError {
+    fn from(value: crate::operations::protocol::document::CurrentDocumentError) -> Self {
+        use crate::operations::protocol::document::CurrentDocumentError as E;
+        match value {
+            E::EmptyLog => Self::EmptyLog,
+            E::Parse(s) => Self::Storage(s),
+        }
+    }
 }
 
 #[cfg(test)]

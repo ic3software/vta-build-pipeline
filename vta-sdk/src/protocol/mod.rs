@@ -94,15 +94,14 @@ impl VtaClient {
     /// LogEntry advertising the mediator and registers it as
     /// active.
     ///
-    /// **Phase 3 limitation:** the live mediator handshake (steps
-    /// 2-5) requires a running `DIDCommService`, which doesn't
-    /// exist yet at first-enable. This call therefore bypasses
-    /// steps 2-5; the connection is validated implicitly when the
-    /// DIDComm runtime starts up after the next service restart.
-    /// To validate a mediator pre-publish today, run
-    /// `pnm services enable didcomm` followed by
-    /// `pnm mediator migrate --to <same>` — the migrate path runs
-    /// the full handshake.
+    /// **First-enable handshake:** the route runs a transient
+    /// `DIDCommService` round-trip against the candidate mediator
+    /// before publishing — see
+    /// `vta_service::messaging::transient_handshake`. The operation
+    /// itself uses [`AlwaysOkProver`] because the steady-state
+    /// `DIDCommService` doesn't exist yet at first-enable. The
+    /// live-prover path through `update_didcomm` covers the
+    /// steady-state case.
     pub async fn enable_didcomm(
         &self,
         req: EnableDidcommRequest,

@@ -85,4 +85,81 @@ mod tests {
         }
         // tempdir drops at end of scope — cleanup happens here.
     }
+
+    /// Spec §7a.6 path 5 — drain entries persisted to fjall survive
+    /// a process restart and the [`DrainSweeper`] re-arms its
+    /// in-memory timers from the on-disk set. Doesn't require a
+    /// running mediator: the assertion is purely "set persisted →
+    /// fresh sweeper sees the same entries → arms the right
+    /// number of timers."
+    #[tokio::test]
+    async fn drain_set_survives_simulated_restart() {
+        use chrono::{Duration, Utc};
+        use std::sync::Arc;
+        use vta_service::messaging::drain_store::{self, PersistedDrainEntry};
+        use vta_service::messaging::drain_sweeper::{DrainSweeper, teardown_channel};
+        use vta_service::messaging::registry::MediatorListenerRegistry;
+        use vti_common::telemetry::RingBufferTelemetry;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_path_buf();
+        let deadline = Utc::now() + Duration::hours(24);
+
+        // Phase 1: open the store, write a drain entry, drop.
+        {
+            let store = simulate_restart(&data_dir);
+            let drains_ks = store.keyspace("drains").unwrap();
+            drain_store::store_drain(
+                &drains_ks,
+                &PersistedDrainEntry {
+                    mediator_did: "did:peer:2.M-DRAINING".into(),
+                    endpoint: "https://m.example".into(),
+                    drains_until: deadline,
+                },
+            )
+            .await
+            .unwrap();
+            drop(drains_ks);
+            drop(store);
+        }
+
+        // Phase 2: re-open the store (simulating fresh process
+        // boot), build a fresh registry + sweeper from the persisted
+        // set, and assert it arms one timer.
+        let restarted = simulate_restart(&data_dir);
+        let drains_ks = restarted.keyspace("drains").unwrap();
+        let persisted = drain_store::list_drains(&drains_ks).await.unwrap();
+        assert_eq!(
+            persisted.len(),
+            1,
+            "drain entry must survive restart; got {persisted:?}"
+        );
+        assert_eq!(persisted[0].mediator_did, "did:peer:2.M-DRAINING");
+
+        let telemetry = Arc::new(RingBufferTelemetry::with_capacity(16));
+        let registry =
+            Arc::new(MediatorListenerRegistry::new(Arc::clone(&telemetry)
+                as Arc<dyn vti_common::telemetry::TelemetrySink + Send + Sync>));
+        let (tx, _rx) = teardown_channel(8);
+        let sweeper = DrainSweeper::new(Arc::clone(&registry), drains_ks.clone(), tx);
+
+        // Re-arm from persisted set the way the runtime does at
+        // boot. We pass the registry's own DrainEntry shape;
+        // build one from the persisted record.
+        let entries: Vec<vta_service::messaging::registry::DrainEntry> = persisted
+            .iter()
+            .map(|p| vta_service::messaging::registry::DrainEntry {
+                mediator_did: p.mediator_did.clone(),
+                endpoint: p.endpoint.clone(),
+                drains_until: p.drains_until,
+                generation: 0,
+            })
+            .collect();
+        sweeper.arm_all(&entries).await;
+        assert_eq!(
+            sweeper.armed_count().await,
+            1,
+            "sweeper must arm one timer per persisted drain entry"
+        );
+    }
 }

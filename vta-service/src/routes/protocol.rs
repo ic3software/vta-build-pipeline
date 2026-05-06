@@ -71,17 +71,13 @@ pub struct EnableDidcommResponse {
 /// VTA. Auth: super-admin only. Refuses if DIDComm is already
 /// enabled (operator should use `migrate` instead).
 ///
-/// **Phase 3 limitation (tracked):** the live mediator handshake
-/// (steps 2-5) requires a running `DIDCommService`, which doesn't
-/// exist yet at first-enable time. For Phase 3 this route uses
-/// [`AlwaysOkProver`], so steps 2-5 are bypassed; the connection is
-/// validated implicitly when the DIDComm runtime starts up after
-/// the next service restart. Phase 4 introduces a real
-/// `ListenerProver` impl wired to a live `DIDCommService` — that
-/// impl is naturally exercised by `pnm mediator migrate` (where
-/// DIDComm is already running). Operators who need pre-publish
-/// validation today should run `pnm mediator migrate` once DIDComm
-/// is enabled.
+/// **First-enable handshake limitation:** the live mediator
+/// handshake (steps 2-5) requires a running `DIDCommService`, which
+/// doesn't exist yet at first-enable time. This route uses a
+/// transient handshake (`try_run_first_enable_handshake`) for steps
+/// 2-5, then [`AlwaysOkProver`] inside the operation itself. The
+/// live-prover path through `update_didcomm` (where DIDComm is
+/// already running) covers the steady-state case.
 pub async fn enable_didcomm_handler(
     auth: SuperAdminAuth,
     State(state): State<AppState>,
@@ -184,7 +180,7 @@ impl IntoResponse for EnableDidcommHttpError {
                     error: "didcomm_already_enabled",
                     message: "DIDComm is already enabled.".into(),
                     suggested_fix: Some(
-                        "Use `pnm mediator migrate --to <did>` to change the active mediator."
+                        "Use `pnm services didcomm update --mediator-did <did>` to change the active mediator."
                             .into(),
                     ),
                     stage: None,
@@ -431,13 +427,19 @@ impl IntoResponse for DisableDidcommHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(DisableDidcommError::DrainTtlTooShortForDidcomm) => (
+            Self::Op(DisableDidcommError::DrainTtlOutOfBounds {
+                min,
+                max,
+                requested,
+            }) => (
                 StatusCode::BAD_REQUEST,
                 ErrorBody {
-                    error: "drain_ttl_too_short_for_didcomm",
-                    message: "drain-ttl 0s over DIDComm transport is not permitted (minimum 1h).".into(),
+                    error: "drain_ttl_out_of_bounds",
+                    message: format!(
+                        "drain ttl {requested}s outside allowed range [{min}s, {max}s]"
+                    ),
                     suggested_fix: Some(
-                        "Either retry over REST transport (`--transport rest`) or use a TTL >= 1h.".into(),
+                        "Either retry over REST transport (`--transport rest`) for a sub-1h TTL, or pick a TTL within bounds (1h–30d).".into(),
                     ),
                     stage: None,
                 },
@@ -652,6 +654,7 @@ pub async fn update_didcomm_handler(
             force: req.force,
             handshake_timeout: timeout,
             audit_kind,
+            transport: crate::operations::protocol::disable_didcomm::DisableTransport::Rest,
         },
         OpContext::Direct,
         "rest",
@@ -690,7 +693,24 @@ impl IntoResponse for UpdateDidcommHttpError {
                         "DIDComm is not currently enabled — there is no active mediator to migrate from."
                             .into(),
                     suggested_fix: Some(
-                        "Use `pnm services enable didcomm --mediator-did <did>` first.".into(),
+                        "Use `pnm services didcomm enable --mediator-did <did>` first.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Op(UpdateDidcommError::DrainTtlOutOfBounds {
+                min,
+                max,
+                requested,
+            }) => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "drain_ttl_out_of_bounds",
+                    message: format!(
+                        "drain ttl {requested}s outside allowed range [{min}s, {max}s]"
+                    ),
+                    suggested_fix: Some(
+                        "Pick a TTL within bounds (1h–30d over DIDComm transport, 0s–30d over REST).".into(),
                     ),
                     stage: None,
                 },
@@ -710,7 +730,7 @@ impl IntoResponse for UpdateDidcommHttpError {
                     error: "already_draining",
                     message: format!("`{did}` is currently in drain state."),
                     suggested_fix: Some(format!(
-                        "Run `pnm mediator drain cancel --mediator-did {did}` first, or use `pnm mediator rollback --to {did}` to make it active."
+                        "Run `pnm services didcomm drain cancel --mediator-did {did}` first, or use `pnm services didcomm rollback` to fail-forward to a state where `{did}` is active."
                     )),
                     stage: None,
                 },
@@ -933,13 +953,13 @@ impl IntoResponse for DrainCancelHttpError {
                     RegistryError::CannotCancelActive(_) => (
                         "cannot_cancel_active",
                         Some(
-                            "Use `pnm services disable didcomm` to disable the active mediator instead.".to_string(),
+                            "Use `pnm services didcomm disable` to disable the active mediator instead.".to_string(),
                         ),
                     ),
                     RegistryError::NotRegistered(_) => (
                         "not_registered",
                         Some(
-                            "List drains with `pnm mediator report` to see what's currently in drain state.".to_string(),
+                            "List drains with `pnm services didcomm drain list` to see what's currently in drain state.".to_string(),
                         ),
                     ),
                     _ => ("registry_failed", None),
@@ -1062,42 +1082,24 @@ impl IntoResponse for MediatorReportHttpError {
 ///
 /// The fallback isn't a code-quality cop-out — it's the
 /// intended behaviour when DIDComm isn't running. The live prover
-/// is only meaningful for `update_didcomm` and `mediator
+/// is only meaningful for `update_didcomm` and `services didcomm
 /// rollback`, where DIDComm is by definition already up.
 async fn build_live_prover(
     state: &AppState,
     bridge: &Arc<crate::didcomm_bridge::DIDCommBridge>,
 ) -> Option<crate::messaging::live_prover::DIDCommServiceProver> {
-    use affinidi_tdk::secrets_resolver::SecretsResolver;
-
-    let service = bridge.try_get_service()?;
-    let secrets_resolver = state.secrets_resolver.as_ref()?;
-    let signing_vm_id = state.signing_vm_id.as_ref()?;
-    let ka_vm_id = state.ka_vm_id.as_ref()?;
     let vta_did = {
         let cfg = state.config.read().await;
         cfg.vta_did.clone()?
     };
-
-    let mut secrets = Vec::with_capacity(2);
-    if let Some(s) = secrets_resolver.get_secret(signing_vm_id).await {
-        secrets.push(s);
-    }
-    if let Some(s) = secrets_resolver.get_secret(ka_vm_id).await {
-        secrets.push(s);
-    }
-    if secrets.is_empty() {
-        return None;
-    }
-
-    let builder = std::sync::Arc::new(
-        crate::messaging::live_prover::StaticListenerConfigBuilder::new(vta_did, secrets, None),
-    );
-    Some(crate::messaging::live_prover::DIDCommServiceProver::new(
-        service,
-        Arc::clone(bridge),
-        builder,
-    ))
+    crate::messaging::live_prover::try_build_from_parts(
+        bridge,
+        &vta_did,
+        state.secrets_resolver.as_ref()?,
+        state.signing_vm_id.as_ref()?,
+        state.ka_vm_id.as_ref()?,
+    )
+    .await
 }
 
 /// Run the transient first-enable handshake against the new
@@ -1390,7 +1392,7 @@ impl IntoResponse for RestServiceHttpError {
                     error: "last_service_refused",
                     message: "Refusing to disable REST — DIDComm is also off, so the VTA would have no advertised services.".into(),
                     suggested_fix: Some(
-                        "Run `pnm services didcomm enable --mediator <did>` first, then retry."
+                        "Run `pnm services didcomm enable --mediator-did <did>` first, then retry."
                             .into(),
                     ),
                     stage: None,
@@ -1563,7 +1565,24 @@ pub async fn rollback_didcomm_handler(
         .ok_or(RollbackDidcommHttpError::DidResolverUnavailable)?
         .clone();
     let bridge = Arc::clone(&state.didcomm_bridge);
-    let prover = AlwaysOkProver;
+
+    // Rollback dispatches into a forward op (update or disable). When
+    // it dispatches into `update_didcomm` to re-promote a previously-
+    // active mediator, the new active needs to handshake before we
+    // commit the LogEntry. Use the live prover when available so a
+    // dead re-promotion target fails at handshake instead of
+    // silently bricking the VTA. Falls back to `AlwaysOkProver`
+    // only when DIDComm isn't currently running (the rollback then
+    // can only meaningfully dispatch into `enable_didcomm` /
+    // `disable_didcomm` arms, neither of which exercises the
+    // prover).
+    let live_prover = build_live_prover(&state, &bridge).await;
+    let always_ok = AlwaysOkProver;
+    let prover_ref: &(dyn crate::messaging::handshake::ListenerProver + Send + Sync) =
+        match live_prover.as_ref() {
+            Some(p) => p,
+            None => &always_ok,
+        };
 
     let drain_ttl = Duration::from_secs(req.drain_ttl_secs.unwrap_or(86_400));
 
@@ -1581,7 +1600,7 @@ pub async fn rollback_didcomm_handler(
         &state.mediator_registry,
         &state.drain_sweeper,
         &state.telemetry,
-        &prover,
+        prover_ref,
         &auth.0,
         RollbackDidcommParams {
             drain_ttl,
@@ -1690,7 +1709,7 @@ impl IntoResponse for RollbackRestHttpError {
                          services. Enable DIDComm first and retry."
                             .into(),
                     suggested_fix: Some(
-                        "Run `pnm services didcomm enable --mediator <did>`, then retry rollback."
+                        "Run `pnm services didcomm enable --mediator-did <did>`, then retry rollback."
                             .into(),
                     ),
                     stage: None,

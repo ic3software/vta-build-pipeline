@@ -29,6 +29,35 @@
 use serde_json::{Value, json};
 use thiserror::Error;
 
+/// Parse the most recent (last non-empty) line of a `did.jsonl`
+/// log and return the published DID-document state from that
+/// LogEntry. This is the canonical "current document on chain"
+/// helper used by every service-management op layer
+/// (enable / update / disable / rollback for both REST and DIDComm)
+/// — single source of truth so a future change to the WebVH log
+/// shape lands in one place.
+pub fn current_document_from_log(did_log: &str) -> Result<Value, CurrentDocumentError> {
+    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
+    let line = did_log
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .ok_or(CurrentDocumentError::EmptyLog)?;
+    let entry: LogEntry = serde_json::from_str(line)
+        .map_err(|e| CurrentDocumentError::Parse(format!("DID log line parse: {e}")))?;
+    Ok(entry.get_state().clone())
+}
+
+/// Errors from [`current_document_from_log`]. Each op error type
+/// converts these into its own variants so the wire-error mapping
+/// stays per-op (different status codes, different suggested fixes).
+#[derive(Debug, Error)]
+pub enum CurrentDocumentError {
+    #[error("VTA DID log is empty — cannot read current document")]
+    EmptyLog,
+    #[error("{0}")]
+    Parse(String),
+}
+
 /// Fragment used by this workspace for the DIDComm mediator service
 /// entry. Matches what
 /// `operations::did_webvh::document::build_did_document_inner` emits.
@@ -52,6 +81,12 @@ pub struct DidcommServiceRef {
     /// service endpoint object, or the bare endpoint string for legacy
     /// docs).
     pub mediator_did: String,
+    /// Routing keys advertised on the `routingKeys` array of the
+    /// service endpoint object, if any. Empty when the entry omits
+    /// the field or carries the legacy plain-string endpoint shape.
+    /// `list_services` surfaces these to operators so a future
+    /// writer that adds routing-key support reads consistent state.
+    pub routing_keys: Vec<String>,
 }
 
 /// A read-only view of the REST service entry on a DID document.
@@ -84,10 +119,13 @@ pub fn current_didcomm_service(doc: &Value) -> Option<DidcommServiceRef> {
     for svc in services {
         let id = svc.get("id")?.as_str()?;
         if id_matches_didcomm(id) {
-            let mediator_did = extract_mediator_did(svc.get("serviceEndpoint")?)?;
+            let endpoint = svc.get("serviceEndpoint")?;
+            let mediator_did = extract_mediator_did(endpoint)?;
+            let routing_keys = extract_routing_keys(endpoint);
             return Some(DidcommServiceRef {
                 id: id.to_string(),
                 mediator_did,
+                routing_keys,
             });
         }
     }
@@ -165,12 +203,31 @@ pub fn without_didcomm_service(mut doc: Value) -> Value {
     doc
 }
 
+/// Match the workspace's canonical `#vta-didcomm` fragment shape.
+/// Strict — accepts only `<did-without-fragment>#vta-didcomm`,
+/// rejects malformed nested-fragment ids like
+/// `did:webvh:foo#extra#vta-didcomm`. Defence-in-depth against
+/// future writers that might emit non-canonical ids; the patcher
+/// helpers in this module always emit the canonical form.
 fn id_matches_didcomm(id: &str) -> bool {
-    id.ends_with(DIDCOMM_SERVICE_FRAGMENT)
+    matches_canonical_fragment(id, DIDCOMM_SERVICE_FRAGMENT)
 }
 
+/// Match the workspace's canonical `#vta-rest` fragment shape.
+/// See [`id_matches_didcomm`] for the rationale.
 fn id_matches_rest(id: &str) -> bool {
-    id.ends_with(REST_SERVICE_FRAGMENT)
+    matches_canonical_fragment(id, REST_SERVICE_FRAGMENT)
+}
+
+/// `id` matches `<did-without-fragment><fragment>` exactly. The
+/// service-id contract per DID-Core is a single `#fragment` suffix
+/// after the DID; reject ids that contain another `#` before the
+/// expected fragment.
+fn matches_canonical_fragment(id: &str, fragment: &str) -> bool {
+    let Some(prefix) = id.strip_suffix(fragment) else {
+        return false;
+    };
+    !prefix.contains('#')
 }
 
 /// Sort the `service` array so DIDComm comes before REST, with all
@@ -213,6 +270,33 @@ fn extract_mediator_did(endpoint: &Value) -> Option<String> {
         Value::Object(map) => map.get("uri")?.as_str().map(str::to_string),
         Value::Array(arr) => arr.iter().find_map(extract_mediator_did),
         _ => None,
+    }
+}
+
+/// Extract the `routingKeys` array from a DIDComm `serviceEndpoint`
+/// value. Returns the keys in source order, or empty when the
+/// endpoint is the bare-string shape, omits the field, or has a
+/// non-array `routingKeys`. Tolerates the array-of-objects shape
+/// the DID-Core service-endpoint convention permits.
+fn extract_routing_keys(endpoint: &Value) -> Vec<String> {
+    match endpoint {
+        Value::Object(map) => map
+            .get("routingKeys")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Value::Array(arr) => arr
+            .iter()
+            .find_map(|inner| match inner {
+                Value::Object(_) => Some(extract_routing_keys(inner)),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
     }
 }
 
@@ -318,6 +402,25 @@ pub fn without_rest_service(mut doc: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Defence-in-depth: nested-fragment ids like
+    /// `did:webvh:foo#extra#vta-rest` must NOT be matched as
+    /// canonical REST/DIDComm service entries. The patcher writers
+    /// always emit `<did>#vta-rest` / `<did>#vta-didcomm`; the
+    /// readers reject anything else so a malformed id sneaking in
+    /// doesn't get treated as our entry.
+    #[test]
+    fn fragment_match_is_strict_not_suffix() {
+        assert!(id_matches_didcomm("did:webvh:foo#vta-didcomm"));
+        assert!(id_matches_rest("did:webvh:foo#vta-rest"));
+        // Nested fragment — reject.
+        assert!(!id_matches_didcomm("did:webvh:foo#extra#vta-didcomm"));
+        assert!(!id_matches_rest("did:webvh:foo#extra#vta-rest"));
+        // Suffix-only collision — reject (fragment was preceded by
+        // characters that aren't a `#`).
+        assert!(!id_matches_didcomm("did:webvh:foo-vta-didcomm"));
+        assert!(!id_matches_rest("did:webvh:foo-vta-rest"));
+    }
 
     fn vta_did() -> &'static str {
         "did:webvh:abc123:vta.example.com:vta-1"

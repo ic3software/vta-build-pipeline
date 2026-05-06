@@ -70,7 +70,7 @@ pub struct EnableDidcommResult {
 #[derive(Debug, Error)]
 pub enum EnableDidcommError {
     #[error(
-        "DIDComm is already enabled. Use `pnm mediator migrate --to <did>` to change the active mediator."
+        "DIDComm is already enabled. Use `pnm services didcomm update --mediator-did <did>` to change the active mediator."
     )]
     DidcommAlreadyEnabled,
     #[error("VTA DID is not configured — run `vta setup` first")]
@@ -250,20 +250,19 @@ async fn read_preconditions(
         .await?
         .ok_or_else(|| EnableDidcommError::VtaDidLogMissing(vta_did.clone()))?;
 
-    let current_doc = current_document_from_log(&did_log)?;
+    let current_doc = crate::operations::protocol::document::current_document_from_log(&did_log)?;
 
     Ok((vta_did, scid, current_doc))
 }
 
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, EnableDidcommError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(EnableDidcommError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| EnableDidcommError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+impl From<crate::operations::protocol::document::CurrentDocumentError> for EnableDidcommError {
+    fn from(value: crate::operations::protocol::document::CurrentDocumentError) -> Self {
+        use crate::operations::protocol::document::CurrentDocumentError as E;
+        match value {
+            E::EmptyLog => Self::EmptyLog,
+            E::Parse(s) => Self::Storage(s),
+        }
+    }
 }
 
 async fn persist_didcomm_enabled(
@@ -292,39 +291,20 @@ async fn persist_didcomm_enabled(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ServerConfig, ServicesConfig, StoreConfig};
+    use crate::config::AppConfig;
     use crate::keys::seed_store::PlaintextSeedStore;
     use crate::messaging::handshake::{AlwaysOkProver, FailingProver, HandshakeStage};
     use crate::operations::protocol::snapshot;
     use crate::store::Store;
+    use crate::test_support::test_app_config;
     use vti_common::telemetry::RingBufferTelemetry;
 
     fn fresh_config(tmpdir: &std::path::Path) -> Arc<RwLock<AppConfig>> {
-        let cfg = AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: Default::default(),
-            store: StoreConfig {
-                data_dir: tmpdir.into(),
-            },
-            services: ServicesConfig {
-                rest: true,
-                didcomm: false,
-            },
-            vta_did: Some("did:webvh:scid123:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            auth: Default::default(),
-            audit: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            resolver_url: None,
-            config_path: tmpdir.join("config.toml"),
-        };
+        let mut cfg = test_app_config(tmpdir.into());
+        cfg.services.rest = true;
+        cfg.services.didcomm = false;
+        cfg.vta_did = Some("did:webvh:scid123:host:vta".into());
+        cfg.config_path = tmpdir.join("config.toml");
         Arc::new(RwLock::new(cfg))
     }
 
@@ -340,8 +320,9 @@ mod tests {
     }
 
     async fn empty_keyspace(name: &str) -> (tempfile::TempDir, KeyspaceHandle) {
+        use vti_common::config::StoreConfig as VtiStoreConfig;
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&StoreConfig {
+        let store = Store::open(&VtiStoreConfig {
             data_dir: dir.path().into(),
         })
         .unwrap();

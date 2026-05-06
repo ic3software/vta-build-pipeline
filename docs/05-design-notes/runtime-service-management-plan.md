@@ -1,6 +1,6 @@
 # Plan: Runtime service-endpoint management
 
-Status: **DRAFT — Phase 2 (Plan)**
+Status: **Implemented**
 Companion to: `runtime-service-management.md` (the approved spec)
 Owner: Glenn Gore
 Last updated: 2026-05-06

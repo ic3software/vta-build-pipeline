@@ -368,6 +368,7 @@ async fn s1_didcomm_update_returns_didcomm_not_enabled() {
             force: false,
             handshake_timeout: std::time::Duration::from_secs(1),
             audit_kind: MigrateAuditKind::Forward,
+            transport: vta_service::operations::protocol::disable_didcomm::DisableTransport::Rest,
         },
         OpContext::Direct,
         "test",
