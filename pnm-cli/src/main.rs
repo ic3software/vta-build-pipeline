@@ -7,8 +7,7 @@ use clap::{Parser, Subcommand};
 use vta_sdk::client::VtaClient;
 
 use vta_cli_common::commands::{
-    acl, audit, config as config_cmd, contexts, credentials, did_templates, keys, mediator,
-    services, webvh,
+    acl, audit, config as config_cmd, contexts, credentials, did_templates, keys, services, webvh,
 };
 use vta_cli_common::render::{CYAN, DIM, GREEN, RED, RESET};
 
@@ -97,20 +96,15 @@ enum Commands {
         command: ConfigCommands,
     },
 
-    /// Manage which protocol surfaces (REST, DIDComm) the VTA exposes.
+    /// Manage the VTA's advertised transport services (REST + DIDComm).
     ///
-    /// Spec: docs/05-design-notes/didcomm-protocol-management.md
+    /// Spec: docs/05-design-notes/runtime-service-management.md §5.1.
+    /// The previous `pnm mediator …` subcommand was retired in this
+    /// release; its functionality moved under
+    /// `pnm services didcomm {update,rollback,drain {list,cancel}}`.
     Services {
         #[command(subcommand)]
         command: ServicesCommands,
-    },
-
-    /// Manage the active and draining DIDComm mediators.
-    ///
-    /// Spec: docs/05-design-notes/didcomm-protocol-management.md
-    Mediator {
-        #[command(subcommand)]
-        command: MediatorCommands,
     },
 
     /// Key management
@@ -653,97 +647,29 @@ enum ConfigCommands {
     },
 }
 
+// ── Unified `pnm services …` surface (spec §5.1) ──────────────────
+//
+// Replaces the earlier `pnm services {enable,disable} didcomm` and
+// `pnm mediator …` subcommands. The retired surfaces redirect via
+// the `pnm mediator …` migration cue (handled by main()'s clap
+// error path) so operators with stale scripts get a clear pointer.
+
 #[derive(Subcommand)]
 enum ServicesCommands {
-    /// Enable a protocol on this VTA (today: only `didcomm`).
-    Enable {
+    /// Show currently-advertised transport services.
+    List,
+    /// Manage REST advertisement.
+    Rest {
         #[command(subcommand)]
-        protocol: ServicesEnableProtocol,
+        command: RestCommands,
     },
-    /// Disable a protocol on this VTA (today: only `didcomm`).
-    /// Refuses if REST is also disabled — the VTA must keep at
-    /// least one protocol surface. Use `--drain-ttl 0s` to tear
-    /// the listener down immediately.
-    Disable {
-        #[command(subcommand)]
-        protocol: ServicesDisableProtocol,
-    },
-}
-
-#[derive(Subcommand)]
-enum ServicesEnableProtocol {
-    /// Enable DIDComm. Requires a mediator DID and super-admin auth.
-    /// The VTA must currently be REST-only.
+    /// Manage DIDComm advertisement.
     Didcomm {
-        /// Mediator's DID (e.g. did:webvh:scid:host:path)
-        #[arg(long)]
-        mediator_did: String,
-        /// Skip handshake steps 2-5 (DID resolution always runs).
-        /// Use only when reachability has been validated out-of-band.
-        #[arg(long)]
-        force: bool,
-        /// Trust-ping round-trip timeout in seconds (default 10).
-        #[arg(long)]
-        handshake_timeout: Option<u64>,
-    },
-}
-
-#[derive(Subcommand)]
-enum ServicesDisableProtocol {
-    /// Disable DIDComm. The current mediator's listener stays up
-    /// for `drain-ttl` seconds so in-flight messages can drain
-    /// (default: 1 hour).
-    Didcomm {
-        /// Drain window in seconds. 0 = immediate teardown.
-        /// Server enforces a 1h minimum when called over DIDComm
-        /// transport; over REST any value is permitted.
-        #[arg(long, default_value_t = 3600)]
-        drain_ttl: u64,
-    },
-}
-
-#[derive(Subcommand)]
-enum MediatorCommands {
-    /// Migrate to a new mediator. Runs the pre-promotion handshake;
-    /// the prior mediator's listener stays up until `drain-ttl`
-    /// expires so in-flight messages can still arrive.
-    Migrate {
-        /// New mediator's DID.
-        #[arg(long = "to")]
-        new_mediator_did: String,
-        /// Drain window for the prior mediator (seconds).
-        #[arg(long, default_value_t = 3600)]
-        drain_ttl: u64,
-        /// Skip handshake steps 2-5 (DID resolution always runs).
-        #[arg(long)]
-        force: bool,
-        /// Trust-ping timeout (seconds, default 10).
-        #[arg(long)]
-        handshake_timeout: Option<u64>,
-    },
-    /// Rollback to a previously-active mediator. Mechanically the
-    /// same as `migrate`, but tagged in telemetry as a rollback.
-    Rollback {
-        /// Target mediator's DID (typically a previously-active one
-        /// that may still be in drain).
-        #[arg(long = "to")]
-        target_mediator_did: String,
-        /// Drain window for the now-prior mediator (seconds).
-        #[arg(long, default_value_t = 3600)]
-        drain_ttl: u64,
-        /// Skip handshake steps 2-5 (DID resolution always runs).
-        #[arg(long)]
-        force: bool,
-        /// Trust-ping timeout (seconds, default 10).
-        #[arg(long)]
-        handshake_timeout: Option<u64>,
-    },
-    /// Drain-set management (cancel an in-flight drain).
-    Drain {
         #[command(subcommand)]
-        command: MediatorDrainCommands,
+        command: DidcommCommands,
     },
     /// Show inbound-message attribution by mediator and sender.
+    /// (Replaces `pnm mediator report`.)
     Report {
         /// Lower bound (RFC 3339, e.g. 2026-04-29T15:00:00Z).
         #[arg(long)]
@@ -758,10 +684,89 @@ enum MediatorCommands {
 }
 
 #[derive(Subcommand)]
-enum MediatorDrainCommands {
+enum RestCommands {
+    /// Add a `#vta-rest` service entry advertising `--url`.
+    Enable {
+        #[arg(long)]
+        url: String,
+    },
+    /// Replace the URL on the existing `#vta-rest` entry.
+    Update {
+        #[arg(long)]
+        url: String,
+    },
+    /// Remove the `#vta-rest` entry. Refused when DIDComm is also
+    /// disabled (spec §3.2 — at least one transport must remain).
+    Disable,
+    /// Fail-forward the most recent REST mutation by re-applying
+    /// the snapshotted prior state (spec §3.5a).
+    Rollback,
+}
+
+#[derive(Subcommand)]
+enum DidcommCommands {
+    /// Enable DIDComm. Requires a mediator DID and super-admin auth.
+    /// The VTA must currently be REST-only.
+    Enable {
+        #[arg(long)]
+        mediator_did: String,
+        /// Skip handshake steps 2-5 (DID resolution always runs).
+        #[arg(long)]
+        force: bool,
+        /// Trust-ping round-trip timeout in seconds (default 10).
+        #[arg(long)]
+        handshake_timeout: Option<u64>,
+    },
+    /// Update which mediator the `#vta-didcomm` entry advertises.
+    /// (Replaces `pnm mediator migrate`.) Runs the pre-promotion
+    /// handshake; the prior mediator's listener stays up until
+    /// `--drain-ttl` expires so in-flight messages can drain.
+    Update {
+        #[arg(long = "mediator-did", visible_alias = "to")]
+        new_mediator_did: String,
+        /// Drain window for the prior mediator (seconds).
+        /// Default: 24h per spec §3.6.
+        #[arg(long, default_value_t = 86_400)]
+        drain_ttl: u64,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        handshake_timeout: Option<u64>,
+    },
+    /// Disable DIDComm. The current mediator's listener stays up
+    /// for `--drain-ttl` seconds so in-flight messages drain.
+    /// Default: 24h per spec §3.6.
+    Disable {
+        /// 0 = immediate teardown over REST transport. Server
+        /// enforces a 1h minimum when invoked over DIDComm
+        /// transport (spec §3.6).
+        #[arg(long, default_value_t = 86_400)]
+        drain_ttl: u64,
+    },
+    /// Fail-forward the most recent DIDComm mutation by re-applying
+    /// the snapshotted prior state. (Replaces `pnm mediator
+    /// rollback`.)
+    Rollback {
+        /// Drain window for the demoted mediator (seconds) when
+        /// the rollback dispatches into update / disable. Default:
+        /// 24h. Omitted = use server-side default.
+        #[arg(long)]
+        drain_ttl: Option<u64>,
+    },
+    /// Drain-set management.
+    Drain {
+        #[command(subcommand)]
+        command: DrainCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrainCommands {
+    /// Show currently-draining mediators.
+    List,
     /// Cancel a drain entry. Drops the listener for that mediator
     /// immediately. Refuses if the named DID is the active mediator
-    /// (use `services disable didcomm` instead).
+    /// (use `services didcomm disable` instead).
     Cancel {
         #[arg(long)]
         mediator_did: String,
@@ -1745,13 +1750,24 @@ async fn main() {
             }
         },
         Commands::Services { command } => match command {
-            ServicesCommands::Enable { protocol } => match protocol {
-                ServicesEnableProtocol::Didcomm {
+            ServicesCommands::List => services::cmd_services_list(&client).await,
+            ServicesCommands::Rest { command } => match command {
+                RestCommands::Enable { url } => {
+                    services::cmd_services_rest_enable(&client, url).await
+                }
+                RestCommands::Update { url } => {
+                    services::cmd_services_rest_update(&client, url).await
+                }
+                RestCommands::Disable => services::cmd_services_rest_disable(&client).await,
+                RestCommands::Rollback => services::cmd_services_rest_rollback(&client).await,
+            },
+            ServicesCommands::Didcomm { command } => match command {
+                DidcommCommands::Enable {
                     mediator_did,
                     force,
                     handshake_timeout,
                 } => {
-                    services::cmd_services_enable_didcomm(
+                    services::cmd_services_didcomm_enable(
                         &client,
                         mediator_did,
                         force,
@@ -1759,55 +1775,40 @@ async fn main() {
                     )
                     .await
                 }
-            },
-            ServicesCommands::Disable { protocol } => match protocol {
-                ServicesDisableProtocol::Didcomm { drain_ttl } => {
-                    services::cmd_services_disable_didcomm(&client, drain_ttl).await
-                }
-            },
-        },
-        Commands::Mediator { command } => match command {
-            MediatorCommands::Migrate {
-                new_mediator_did,
-                drain_ttl,
-                force,
-                handshake_timeout,
-            } => {
-                mediator::cmd_mediator_migrate(
-                    &client,
+                DidcommCommands::Update {
                     new_mediator_did,
                     drain_ttl,
                     force,
                     handshake_timeout,
-                )
-                .await
-            }
-            MediatorCommands::Rollback {
-                target_mediator_did,
-                drain_ttl,
-                force,
-                handshake_timeout,
-            } => {
-                mediator::cmd_mediator_rollback(
-                    &client,
-                    target_mediator_did,
-                    drain_ttl,
-                    force,
-                    handshake_timeout,
-                )
-                .await
-            }
-            MediatorCommands::Drain { command } => match command {
-                MediatorDrainCommands::Cancel { mediator_did } => {
-                    mediator::cmd_mediator_drain_cancel(&client, mediator_did).await
+                } => {
+                    services::cmd_services_didcomm_update(
+                        &client,
+                        new_mediator_did,
+                        drain_ttl,
+                        force,
+                        handshake_timeout,
+                    )
+                    .await
                 }
+                DidcommCommands::Disable { drain_ttl } => {
+                    services::cmd_services_didcomm_disable(&client, drain_ttl).await
+                }
+                DidcommCommands::Rollback { drain_ttl } => {
+                    services::cmd_services_didcomm_rollback(&client, drain_ttl).await
+                }
+                DidcommCommands::Drain { command } => match command {
+                    DrainCommands::List => services::cmd_services_didcomm_drain_list(&client).await,
+                    DrainCommands::Cancel { mediator_did } => {
+                        services::cmd_services_didcomm_drain_cancel(&client, mediator_did).await
+                    }
+                },
             },
-            MediatorCommands::Report {
+            ServicesCommands::Report {
                 since,
                 until,
                 format,
-            } => match format.parse::<mediator::ReportFormat>() {
-                Ok(format) => mediator::cmd_mediator_report(&client, since, until, format).await,
+            } => match format.parse::<services::ReportFormat>() {
+                Ok(format) => services::cmd_services_report(&client, since, until, format).await,
                 Err(msg) => Err(msg.into()),
             },
         },

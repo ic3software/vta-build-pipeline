@@ -1,16 +1,115 @@
-//! `pnm services …` command implementations.
+//! `pnm services …` command implementations — unified CLI surface.
 //!
-//! Spec: `docs/05-design-notes/didcomm-protocol-management.md`.
+//! Spec: `docs/05-design-notes/runtime-service-management.md` §5.1.
 //!
-//! Phase 3 lands `enable didcomm`. Phase 4 fills in `disable
-//! didcomm` and `list`.
+//! Twelve commands across two transport kinds plus a top-level
+//! list/report. Each function calls the matching `vta-sdk` client
+//! method; the typed `VtaError` variants are surfaced via the
+//! existing CLI error renderer (`render::print_cli_error`) which
+//! attaches operator-actionable suggested-fix strings per
+//! CLAUDE.md.
+//!
+//! The retired `pnm mediator …` subcommand surface is replaced by
+//! `pnm services didcomm {update,rollback,drain {list,cancel}}` —
+//! see the migration cue in pnm-cli/cnm-cli for the
+//! retired-command UX.
 
 use vta_sdk::client::VtaClient;
-use vta_sdk::protocol::{DisableDidcommRequest, EnableDidcommRequest};
+use vta_sdk::protocol::services::{
+    DisableRestRequest, EnableRestRequest, RollbackDidcommRequest, RollbackRestRequest,
+    UpdateRestRequest,
+};
+use vta_sdk::protocol::{DisableDidcommRequest, EnableDidcommRequest, UpdateDidcommRequest};
 
-/// `pnm services enable didcomm --mediator-did <did> [--force]
-///                              [--handshake-timeout <secs>]`.
-pub async fn cmd_services_enable_didcomm(
+// ── services list ──────────────────────────────────────────────────
+
+/// `pnm services list` — show current REST + DIDComm advertisements.
+pub async fn cmd_services_list(client: &VtaClient) -> Result<(), Box<dyn std::error::Error>> {
+    let response = client.list_services().await.map_err(|e| format!("{e}"))?;
+
+    println!("Services advertised on this VTA's DID document:");
+    println!();
+    for state in &response.services {
+        match state {
+            vta_sdk::protocol::services::ServiceState::Didcomm {
+                enabled,
+                mediator_did,
+                routing_keys,
+            } => {
+                let on = if *enabled { "on" } else { "off" };
+                println!("  DIDComm:  {on}");
+                if let Some(m) = mediator_did {
+                    println!("    Mediator:     {m}");
+                }
+                if !routing_keys.is_empty() {
+                    println!("    Routing keys: {}", routing_keys.join(", "));
+                }
+            }
+            vta_sdk::protocol::services::ServiceState::Rest { enabled, url } => {
+                let on = if *enabled { "on" } else { "off" };
+                println!("  REST:     {on}");
+                if let Some(u) = url {
+                    println!("    URL:          {u}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── services rest {enable, update, disable, rollback} ─────────────
+
+pub async fn cmd_services_rest_enable(
+    client: &VtaClient,
+    url: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = EnableRestRequest::new(url);
+    let resp = client.enable_rest(req).await.map_err(|e| format!("{e}"))?;
+    println!("REST enabled.");
+    println!("  New version ID: {}", resp.log_entry_version_id);
+    println!("  Effective at:   {}", resp.effective_at);
+    Ok(())
+}
+
+pub async fn cmd_services_rest_update(
+    client: &VtaClient,
+    url: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = UpdateRestRequest::new(url);
+    let resp = client.update_rest(req).await.map_err(|e| format!("{e}"))?;
+    println!("REST URL updated.");
+    println!("  New version ID: {}", resp.log_entry_version_id);
+    println!("  Effective at:   {}", resp.effective_at);
+    Ok(())
+}
+
+pub async fn cmd_services_rest_disable(
+    client: &VtaClient,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resp = client
+        .disable_rest(DisableRestRequest::default())
+        .await
+        .map_err(|e| format!("{e}"))?;
+    println!("REST disabled.");
+    println!("  New version ID: {}", resp.log_entry_version_id);
+    println!("  Effective at:   {}", resp.effective_at);
+    Ok(())
+}
+
+pub async fn cmd_services_rest_rollback(
+    client: &VtaClient,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resp = client
+        .rollback_rest(RollbackRestRequest::default())
+        .await
+        .map_err(|e| format!("{e}"))?;
+    print_rollback_result("REST", &resp);
+    Ok(())
+}
+
+// ── services didcomm {enable, update, disable, rollback} ──────────
+
+pub async fn cmd_services_didcomm_enable(
     client: &VtaClient,
     mediator_did: String,
     force: bool,
@@ -19,15 +118,10 @@ pub async fn cmd_services_enable_didcomm(
     let mut req = EnableDidcommRequest::new(&mediator_did);
     req.force = force;
     req.handshake_timeout_secs = handshake_timeout_secs;
-
-    let resp = client.enable_didcomm(req).await.map_err(|e| {
-        // Surface the operator-friendly message that the route
-        // attaches as `suggested_fix` (carried through `VtaError`).
-        // The SDK's `VtaError::Protocol` already carries the
-        // server-rendered message — print it directly.
-        format!("{e}")
-    })?;
-
+    let resp = client
+        .enable_didcomm(req)
+        .await
+        .map_err(|e| format!("{e}"))?;
     println!("DIDComm enabled.");
     println!("  Mediator DID:   {}", resp.mediator_did);
     if !resp.mediator_endpoint.is_empty() {
@@ -37,19 +131,39 @@ pub async fn cmd_services_enable_didcomm(
     if force {
         println!();
         println!("  Note: --force was set; mediator handshake steps 2-5 were bypassed.");
-        println!("  The connection will be validated when the DIDComm runtime starts.");
-    } else {
-        println!();
-        println!("  Note: First-enable runs only handshake step 1 (DID resolution).");
-        println!("  The connection is validated when the DIDComm runtime starts after");
-        println!("  the next service restart. To validate end-to-end pre-publish, run");
-        println!("  `pnm mediator migrate --to <same>` once DIDComm is up.");
     }
     Ok(())
 }
 
-/// `pnm services disable didcomm [--drain-ttl <duration>]`.
-pub async fn cmd_services_disable_didcomm(
+pub async fn cmd_services_didcomm_update(
+    client: &VtaClient,
+    new_mediator_did: String,
+    drain_ttl_secs: u64,
+    force: bool,
+    handshake_timeout_secs: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut req = UpdateDidcommRequest::new(&new_mediator_did, drain_ttl_secs);
+    req.force = force;
+    req.handshake_timeout_secs = handshake_timeout_secs;
+    let resp = client
+        .update_didcomm(req)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    println!("DIDComm mediator updated.");
+    println!("  Prior mediator:  {}", resp.prior_mediator_did);
+    println!("  Active mediator: {}", resp.active_mediator_did);
+    if !resp.active_mediator_endpoint.is_empty() {
+        println!("  Active endpoint: {}", resp.active_mediator_endpoint);
+    }
+    println!("  New version ID:  {}", resp.new_version_id);
+    println!(
+        "  Drain deadline:  {} (prior listener stays up until then)",
+        resp.drains_until
+    );
+    Ok(())
+}
+
+pub async fn cmd_services_didcomm_disable(
     client: &VtaClient,
     drain_ttl_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -58,7 +172,6 @@ pub async fn cmd_services_disable_didcomm(
         .disable_didcomm(req)
         .await
         .map_err(|e| format!("{e}"))?;
-
     println!("DIDComm disabled.");
     println!("  Prior mediator: {}", resp.prior_mediator_did);
     println!("  New version ID: {}", resp.new_version_id);
@@ -66,14 +179,169 @@ pub async fn cmd_services_disable_didcomm(
         Some(deadline) => {
             println!("  Drain deadline: {deadline}");
             println!();
-            println!("  The listener stays up until the deadline so in-flight messages can");
+            println!("  The listener stays up until the deadline so in-flight messages can drain.");
             println!(
-                "  arrive. Cancel early with `pnm mediator drain cancel --mediator-did <did>`."
+                "  Cancel early with `pnm services didcomm drain cancel --mediator-did <did>`."
             );
         }
-        None => {
-            println!("  Listener torn down immediately (drain TTL was 0).");
+        None => println!("  Listener torn down immediately (drain TTL was 0)."),
+    }
+    Ok(())
+}
+
+pub async fn cmd_services_didcomm_rollback(
+    client: &VtaClient,
+    drain_ttl_secs: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut req = RollbackDidcommRequest::default();
+    req.drain_ttl_secs = drain_ttl_secs;
+    let resp = client
+        .rollback_didcomm(req)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    print_rollback_result("DIDComm", &resp);
+    Ok(())
+}
+
+// ── services didcomm drain {list, cancel} ─────────────────────────
+
+pub async fn cmd_services_didcomm_drain_list(
+    client: &VtaClient,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resp = client.list_drain().await.map_err(|e| format!("{e}"))?;
+    if resp.entries.is_empty() {
+        println!("No mediators currently in drain.");
+        return Ok(());
+    }
+    println!("Drain set ({} mediator(s)):", resp.entries.len());
+    println!();
+    let header_did = "MEDIATOR DID";
+    let header_until = "DRAIN UNTIL";
+    println!("  {header_did:<60}  {header_until}");
+    for e in &resp.entries {
+        println!(
+            "  {:<60}  {}",
+            truncate(&e.mediator_did, 60),
+            e.drains_until
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_services_didcomm_drain_cancel(
+    client: &VtaClient,
+    mediator_did: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = vta_sdk::protocol::DrainCancelRequest { mediator_did };
+    let resp = client.drain_cancel(req).await.map_err(|e| format!("{e}"))?;
+    println!("Drain cancelled for {}.", resp.mediator_did);
+    println!("  Listener was torn down immediately.");
+    Ok(())
+}
+
+// ── services report ───────────────────────────────────────────────
+
+pub async fn cmd_services_report(
+    client: &VtaClient,
+    since: Option<String>,
+    until: Option<String>,
+    format: ReportFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = client
+        .mediator_report(since.as_deref(), until.as_deref())
+        .await
+        .map_err(|e| format!("{e}"))?;
+
+    match format {
+        ReportFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        ReportFormat::Table => {
+            println!("Service-management report");
+            if let Some(ref s) = report.since {
+                println!("  Window: {s} → {}", report.until);
+            } else {
+                println!("  Window: (all time) → {}", report.until);
+            }
+            println!();
+            if report.mediators.is_empty() {
+                println!("  No inbound DIDComm messages recorded.");
+            } else {
+                println!("  Per-mediator inbound counts (most recent first):");
+                let header_did = "MEDIATOR DID";
+                let header_count = "INBOUND";
+                println!("    {header_did:<60}  {header_count:>10}  LAST SEEN");
+                for m in &report.mediators {
+                    println!(
+                        "    {:<60}  {:>10}  {}",
+                        truncate(&m.mediator_did, 60),
+                        m.inbound_count,
+                        m.last_seen
+                    );
+                }
+            }
+            if !report.senders.is_empty() {
+                println!();
+                println!("  Senders by last-seen mediator:");
+                for s in &report.senders {
+                    println!(
+                        "    {} → {} (at {})",
+                        truncate(&s.sender_did, 50),
+                        truncate(&s.last_seen_mediator, 50),
+                        s.last_seen_at
+                    );
+                }
+            }
         }
     }
     Ok(())
+}
+
+// ── shared helpers ────────────────────────────────────────────────
+
+fn print_rollback_result(kind: &str, resp: &vta_sdk::protocol::services::RollbackResponse) {
+    if resp.kind == "no_op" {
+        println!("{kind} rollback: no change required.");
+        println!("  Snapshot matches current state — nothing to do.");
+        return;
+    }
+    println!("{kind} rolled back.");
+    println!("  Action:         {}", resp.kind);
+    if !resp.log_entry_version_id.is_empty() {
+        println!("  New version ID: {}", resp.log_entry_version_id);
+    }
+    println!("  Effective at:   {}", resp.effective_at);
+    if let Some(ref drain_until) = resp.drain_until {
+        println!("  Drain deadline: {drain_until}");
+    }
+    if let Some(ref draining) = resp.draining_mediator {
+        println!("  Draining:       {draining}");
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ReportFormat {
+    Json,
+    Table,
+}
+
+impl std::str::FromStr for ReportFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "json" => Ok(Self::Json),
+            "table" => Ok(Self::Table),
+            other => Err(format!("unknown format `{other}` — use `json` or `table`")),
+        }
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max - 1).collect();
+        out.push('…');
+        out
+    }
 }
