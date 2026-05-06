@@ -61,6 +61,14 @@ pub struct TestStore {
     pub imported_ks: KeyspaceHandle,
     pub webvh_ks: KeyspaceHandle,
     pub sealed_nonces_ks: KeyspaceHandle,
+    /// Persisted drain set for the runtime service-management
+    /// surface. Required by `disable_didcomm` / `update_didcomm` /
+    /// rollback ops.
+    pub drains_ks: KeyspaceHandle,
+    /// Per-kind previous-config snapshot store for fail-forward
+    /// rollback (spec §3.5a). Required by every forward op + the
+    /// rollback dispatchers.
+    pub snapshot_ks: KeyspaceHandle,
     pub data_dir: PathBuf,
 }
 
@@ -81,6 +89,10 @@ pub async fn open_test_store() -> TestStore {
         imported_ks: store.keyspace("imported").expect("imported ks"),
         webvh_ks: store.keyspace("webvh").expect("webvh ks"),
         sealed_nonces_ks: store.keyspace("sealed_nonces").expect("nonces ks"),
+        drains_ks: store.keyspace("drains").expect("drains ks"),
+        snapshot_ks: store
+            .keyspace(crate::operations::protocol::snapshot::KEYSPACE_NAME)
+            .expect("snapshot ks"),
         _dir: dir,
         _store: store,
         data_dir,

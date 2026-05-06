@@ -6,6 +6,8 @@
 //! every public item.
 #![allow(dead_code)]
 
+pub mod restart;
+pub mod state_fixtures;
 pub mod test_vta;
 pub mod test_vta_responder;
 

@@ -142,20 +142,27 @@ pub async fn disable_rest(
 
     let _guard = PROTOCOL_LOCK.lock().await;
 
-    // 1. Read preconditions: REST must be on (config + on-chain).
-    //    Capture the prior URL while we're at it for the snapshot
-    //    + telemetry.
-    let (vta_did, scid, current_doc, prior_url, didcomm_enabled) =
-        read_preconditions(config, webvh_ks).await?;
-
-    // 2. Brick-prevention. If DIDComm is also off, disabling REST
-    //    leaves no transport advertised — refuse via the shared
-    //    helper (T0.4). Single source of truth for spec §3.2; no
-    //    --force escape hatch.
+    // 1. Brick-prevention runs FIRST — fail-fast on the cheap
+    //    config-only check before any I/O. Mirrors disable_didcomm's
+    //    order, where the §3.2 invariant is checked before reading
+    //    the webvh log. The prior_url for the snapshot is captured
+    //    later, after the brick check has already passed.
+    let didcomm_enabled = {
+        let cfg = config.read().await;
+        if !cfg.services.rest {
+            return Err(DisableRestError::ServiceNotPresent);
+        }
+        cfg.services.didcomm
+    };
     would_violate_last_service(
         &CurrentServices::new(true, didcomm_enabled),
         ProposedOp::disable(ServiceKind::Rest),
     )?;
+
+    // 2. Read on-chain state: VTA DID record + DID log. Validates
+    //    services.rest == true (already done above) AND captures
+    //    the prior URL for the snapshot.
+    let (vta_did, scid, current_doc, prior_url, _) = read_preconditions(config, webvh_ks).await?;
 
     // 3. Persist snapshot BEFORE the runtime mutation per spec
     //    §3.5a. Pre-state is RestSnapshot::Enabled with the prior
