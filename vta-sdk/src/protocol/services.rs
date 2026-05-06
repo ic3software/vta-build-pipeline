@@ -22,6 +22,65 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::VtaError;
+
+/// Validate a service-endpoint URL.
+///
+/// Spec §3.4: must be `https://`, parsable by `url::Url`, no
+/// fragment, no userinfo. Returns the parsed [`url::Url`] on
+/// success so callers don't re-parse, or [`VtaError::Validation`]
+/// with a specific message on failure.
+///
+/// Centralized so both REST handlers and DIDComm transport
+/// handlers (and any client-side pre-flight) use the same rule.
+/// The CLI surfaces the rejection through `VtaError`'s
+/// `suggested_fix` path; reasons are kept short and operator-
+/// readable rather than full stack-trace text.
+///
+/// `localhost` and IP literals are accepted — the operator may
+/// genuinely want to advertise a private deployment. TLS is still
+/// required there (operator can run a private CA / mkcert); the
+/// invariant is that clients see a TLS-protected URL in the DID
+/// document, not that the cert chains to a public root.
+pub fn validate_service_url(url: &str) -> Result<url::Url, VtaError> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(VtaError::Validation("service URL is empty".into()));
+    }
+
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|e| VtaError::Validation(format!("service URL is unparseable: {e}")))?;
+
+    if parsed.scheme() != "https" {
+        return Err(VtaError::Validation(format!(
+            "service URL must use https:// (got {})",
+            parsed.scheme()
+        )));
+    }
+
+    if parsed.fragment().is_some() {
+        return Err(VtaError::Validation(
+            "service URL must not contain a `#fragment`".into(),
+        ));
+    }
+
+    // userinfo = the `user:password@` part. `url::Url` exposes
+    // username() (always returns "" when absent) and password()
+    // (Option<&str>). A non-empty username OR a password being
+    // present means userinfo is set.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(VtaError::Validation(
+            "service URL must not contain userinfo (user:password@)".into(),
+        ));
+    }
+
+    if parsed.host().is_none() {
+        return Err(VtaError::Validation("service URL must have a host".into()));
+    }
+
+    Ok(parsed)
+}
+
 /// Request body for `POST /services/rest/enable`.
 ///
 /// Adds a `#vta-rest` service entry to the VTA's DID document
@@ -206,6 +265,119 @@ mod tests {
         assert_eq!(json["drain_until"], "2026-05-07T13:00:00Z");
         let restored: ServiceMutationResponse = serde_json::from_value(json).unwrap();
         assert_eq!(restored, didcomm_response);
+    }
+
+    // ── validate_service_url ──────────────────────────────────────
+
+    #[test]
+    fn validate_service_url_accepts_https() {
+        assert!(validate_service_url("https://vta.example.com").is_ok());
+        assert!(validate_service_url("https://vta.example.com/").is_ok());
+        assert!(validate_service_url("https://vta.example.com:8443").is_ok());
+        assert!(validate_service_url("https://vta.example.com/path/sub").is_ok());
+    }
+
+    #[test]
+    fn validate_service_url_accepts_localhost_and_ip_literals() {
+        // Private/dev deployments are valid — operators may run
+        // mkcert or a private CA; TLS-protected is what matters,
+        // not whether the cert chains to a public root.
+        assert!(validate_service_url("https://localhost:8443").is_ok());
+        assert!(validate_service_url("https://127.0.0.1:8443").is_ok());
+        assert!(validate_service_url("https://[::1]:8443").is_ok());
+    }
+
+    #[test]
+    fn validate_service_url_rejects_http() {
+        let err = validate_service_url("http://vta.example.com").unwrap_err();
+        match err {
+            VtaError::Validation(msg) => assert!(
+                msg.contains("https"),
+                "expected scheme-related rejection, got: {msg}",
+            ),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_service_url_rejects_other_schemes() {
+        for bad in [
+            "ws://vta.example.com",
+            "ftp://x.example",
+            "file:///etc/passwd",
+        ] {
+            assert!(
+                matches!(validate_service_url(bad), Err(VtaError::Validation(_))),
+                "expected rejection for {bad}",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_service_url_rejects_fragment() {
+        let err = validate_service_url("https://vta.example.com/api#section").unwrap_err();
+        match err {
+            VtaError::Validation(msg) => {
+                assert!(
+                    msg.contains("fragment"),
+                    "expected fragment rejection, got: {msg}"
+                )
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_service_url_rejects_userinfo() {
+        for bad in [
+            "https://user@vta.example.com",
+            "https://user:pass@vta.example.com",
+            "https://:pass@vta.example.com",
+        ] {
+            let err = validate_service_url(bad).unwrap_err();
+            match err {
+                VtaError::Validation(msg) => assert!(
+                    msg.contains("userinfo"),
+                    "expected userinfo rejection for {bad}, got: {msg}",
+                ),
+                other => panic!("expected Validation for {bad}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn validate_service_url_rejects_unparseable() {
+        for bad in ["not a url at all", "://no-scheme", "https://", "🦀"] {
+            assert!(
+                matches!(validate_service_url(bad), Err(VtaError::Validation(_))),
+                "expected rejection for {bad:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_service_url_rejects_empty_and_whitespace() {
+        for bad in ["", "   ", "\t\n"] {
+            let err = validate_service_url(bad).unwrap_err();
+            match err {
+                VtaError::Validation(msg) => assert!(
+                    msg.contains("empty"),
+                    "expected empty-URL rejection for {bad:?}, got: {msg}",
+                ),
+                other => panic!("expected Validation for {bad:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// On success, the parsed `url::Url` is returned so callers
+    /// don't re-parse. Spot-check a couple of properties.
+    #[test]
+    fn validate_service_url_returns_parsed_url() {
+        let parsed = validate_service_url("https://vta.example.com:8443/api").unwrap();
+        assert_eq!(parsed.scheme(), "https");
+        assert_eq!(parsed.host_str(), Some("vta.example.com"));
+        assert_eq!(parsed.port(), Some(8443));
+        assert_eq!(parsed.path(), "/api");
     }
 
     /// `ServiceMutationResponse` deserializes both forms — explicit
