@@ -16,6 +16,7 @@ pub mod invariant;
 pub mod migrate_mediator;
 pub mod report;
 pub mod snapshot;
+pub mod update_rest;
 
 /// Process-wide lock serializing every protocol-state mutation
 /// (enable / disable / migrate / drain-cancel). Modeled on
