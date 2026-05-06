@@ -40,11 +40,11 @@ use crate::config::AppConfig;
 use crate::didcomm_bridge::DIDCommBridge;
 use crate::error::AppError;
 use crate::operations::did_webvh::{UpdateDidWebvhError, UpdateDidWebvhOptions, update_did_webvh};
-use crate::operations::protocol::PROTOCOL_LOCK;
 use crate::operations::protocol::document::{
     DocumentPatchError, current_rest_service, with_rest_service,
 };
 use crate::operations::protocol::snapshot::{self, RestSnapshot, ServiceConfigSnapshot};
+use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
 
@@ -113,6 +113,7 @@ pub async fn update_rest(
     telemetry: &SharedTelemetrySink,
     auth: &AuthClaims,
     params: UpdateRestParams,
+    ctx: OpContext,
     channel: &str,
 ) -> Result<UpdateRestResult, UpdateRestError> {
     auth.require_super_admin()
@@ -175,18 +176,18 @@ pub async fn update_rest(
 
     // 7. Telemetry: prior + new URL together so external verifiers
     //    can graph URL transitions per VTA.
-    let _ = telemetry
-        .record(
-            TelemetryEvent::new(TelemetryKind::ServicesRestUpdate)
-                .with_field("channel", JsonValue::from(channel))
-                .with_field(
-                    "new_version_id",
-                    JsonValue::from(update_result.new_version_id.clone()),
-                )
-                .with_field("prior_url", JsonValue::from(prior_url.clone()))
-                .with_field("url", JsonValue::from(canonical_url.clone())),
+    let mut event = TelemetryEvent::new(TelemetryKind::ServicesRestUpdate)
+        .with_field("channel", JsonValue::from(channel))
+        .with_field(
+            "new_version_id",
+            JsonValue::from(update_result.new_version_id.clone()),
         )
-        .await;
+        .with_field("prior_url", JsonValue::from(prior_url.clone()))
+        .with_field("url", JsonValue::from(canonical_url.clone()));
+    if let Some(tag) = ctx.telemetry_triggered_by() {
+        event = event.with_field("triggered_by", JsonValue::from(tag));
+    }
+    let _ = telemetry.record(event).await;
 
     info!(
         channel,

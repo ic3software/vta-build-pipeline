@@ -43,8 +43,8 @@ use crate::error::AppError;
 use crate::messaging::drain_sweeper::DrainSweeper;
 use crate::messaging::registry::{MediatorListenerRegistry, RegistryError};
 use crate::operations::did_webvh::{UpdateDidWebvhError, UpdateDidWebvhOptions, update_did_webvh};
-use crate::operations::protocol::PROTOCOL_LOCK;
 use crate::operations::protocol::document::{DocumentPatchError, without_didcomm_service};
+use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
 
@@ -146,6 +146,7 @@ pub async fn disable_didcomm(
     telemetry: &SharedTelemetrySink,
     auth: &AuthClaims,
     params: DisableDidcommParams,
+    ctx: OpContext,
     channel: &str,
 ) -> Result<DisableDidcommResult, DisableDidcommError> {
     auth.require_super_admin()
@@ -235,27 +236,27 @@ pub async fn disable_didcomm(
         Some(deadline)
     };
 
-    let _ = telemetry
-        .record(
-            TelemetryEvent::new(TelemetryKind::ServicesDidcommDisable)
-                .with_mediator(&prior_mediator)
-                .with_field(
-                    "drain_ttl_secs",
-                    JsonValue::from(params.drain_ttl.as_secs()),
-                )
-                .with_field(
-                    "new_version_id",
-                    JsonValue::from(update_result.new_version_id.clone()),
-                )
-                .with_field(
-                    "transport",
-                    JsonValue::from(match params.transport {
-                        DisableTransport::Rest => "rest",
-                        DisableTransport::Didcomm => "didcomm",
-                    }),
-                ),
+    let mut event = TelemetryEvent::new(TelemetryKind::ServicesDidcommDisable)
+        .with_mediator(&prior_mediator)
+        .with_field(
+            "drain_ttl_secs",
+            JsonValue::from(params.drain_ttl.as_secs()),
         )
-        .await;
+        .with_field(
+            "new_version_id",
+            JsonValue::from(update_result.new_version_id.clone()),
+        )
+        .with_field(
+            "transport",
+            JsonValue::from(match params.transport {
+                DisableTransport::Rest => "rest",
+                DisableTransport::Didcomm => "didcomm",
+            }),
+        );
+    if let Some(tag) = ctx.telemetry_triggered_by() {
+        event = event.with_field("triggered_by", JsonValue::from(tag));
+    }
+    let _ = telemetry.record(event).await;
 
     info!(
         channel,
@@ -494,6 +495,7 @@ mod tests {
             &sink,
             &super_admin(),
             rest_params(Duration::from_secs(3600)),
+            OpContext::Direct,
             "test",
         )
         .await
@@ -537,6 +539,7 @@ mod tests {
             &sink,
             &super_admin(),
             rest_params(Duration::from_secs(3600)),
+            OpContext::Direct,
             "test",
         )
         .await
@@ -577,6 +580,7 @@ mod tests {
             &sink,
             &super_admin(),
             didcomm_params(Duration::from_secs(1800)),
+            OpContext::Direct,
             "test",
         )
         .await
@@ -621,6 +625,7 @@ mod tests {
             &sink,
             &super_admin(),
             rest_params(Duration::from_secs(0)),
+            OpContext::Direct,
             "test",
         )
         .await
@@ -661,6 +666,7 @@ mod tests {
             &sink,
             &super_admin(),
             didcomm_params(Duration::from_secs(3600)),
+            OpContext::Direct,
             "test",
         )
         .await

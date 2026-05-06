@@ -15,6 +15,8 @@ pub mod enable_didcomm;
 pub mod enable_rest;
 pub mod invariant;
 pub mod report;
+pub mod rollback_didcomm;
+pub mod rollback_rest;
 pub mod snapshot;
 pub mod update_didcomm;
 pub mod update_rest;
@@ -28,6 +30,37 @@ pub mod update_rest;
 /// lock and intentionally do not take it. Mutation paths take it
 /// unconditionally.
 pub static PROTOCOL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Whether a forward operation was invoked directly by the
+/// operator or as the fail-forward dispatch from a rollback.
+///
+/// Threaded through every forward op (enable / update / disable
+/// for both REST and DIDComm) so the emitted telemetry event can
+/// carry a `triggered_by: "rollback"` field per spec §3.5a. The
+/// rollback layer (T3.1 / T3.2) reads the per-kind snapshot,
+/// computes the equivalent forward operation, and dispatches into
+/// it with [`OpContext::Rollback`]; the forward op runs unchanged
+/// modulo this telemetry tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpContext {
+    Direct,
+    Rollback,
+}
+
+impl OpContext {
+    /// JSON value to surface in the `triggered_by` telemetry field
+    /// for this context. Returns `None` for [`OpContext::Direct`]
+    /// — direct operations don't carry the field at all (omitted
+    /// rather than serialized as `"direct"`, since the absence is
+    /// the conventional signal).
+    #[must_use]
+    pub fn telemetry_triggered_by(self) -> Option<&'static str> {
+        match self {
+            OpContext::Direct => None,
+            OpContext::Rollback => Some("rollback"),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

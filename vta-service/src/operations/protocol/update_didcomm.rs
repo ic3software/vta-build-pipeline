@@ -45,10 +45,10 @@ use crate::messaging::handshake::{
 };
 use crate::messaging::registry::{MediatorBinding, MediatorListenerRegistry, RegistryError};
 use crate::operations::did_webvh::{UpdateDidWebvhError, UpdateDidWebvhOptions, update_did_webvh};
-use crate::operations::protocol::PROTOCOL_LOCK;
 use crate::operations::protocol::document::{
     DocumentPatchError, current_didcomm_service, with_didcomm_service,
 };
+use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
 
@@ -155,6 +155,7 @@ pub async fn update_didcomm(
     prover: &(dyn ListenerProver + Send + Sync),
     auth: &AuthClaims,
     params: UpdateDidcommParams,
+    ctx: OpContext,
     channel: &str,
 ) -> Result<UpdateDidcommResult, UpdateDidcommError> {
     auth.require_super_admin()
@@ -245,22 +246,22 @@ pub async fn update_didcomm(
     // Arm the sweeper so the drain TTL actually fires.
     sweeper.arm(&prior_mediator, deadline).await;
 
-    let _ = telemetry
-        .record(
-            TelemetryEvent::new(TelemetryKind::ServicesDidcommUpdate)
-                .with_mediator(&resolved.mediator_did)
-                .with_field("from", JsonValue::from(prior_mediator.clone()))
-                .with_field("audit_kind", JsonValue::from(params.audit_kind.as_str()))
-                .with_field(
-                    "new_version_id",
-                    JsonValue::from(update_result.new_version_id.clone()),
-                )
-                .with_field(
-                    "drain_ttl_secs",
-                    JsonValue::from(params.drain_ttl.as_secs()),
-                ),
+    let mut event = TelemetryEvent::new(TelemetryKind::ServicesDidcommUpdate)
+        .with_mediator(&resolved.mediator_did)
+        .with_field("from", JsonValue::from(prior_mediator.clone()))
+        .with_field("audit_kind", JsonValue::from(params.audit_kind.as_str()))
+        .with_field(
+            "new_version_id",
+            JsonValue::from(update_result.new_version_id.clone()),
         )
-        .await;
+        .with_field(
+            "drain_ttl_secs",
+            JsonValue::from(params.drain_ttl.as_secs()),
+        );
+    if let Some(tag) = ctx.telemetry_triggered_by() {
+        event = event.with_field("triggered_by", JsonValue::from(tag));
+    }
+    let _ = telemetry.record(event).await;
 
     info!(
         channel,
@@ -497,6 +498,7 @@ mod tests {
             &prover,
             &super_admin(),
             forward_params("did:m:B"),
+            OpContext::Direct,
             "test",
         )
         .await
@@ -537,6 +539,7 @@ mod tests {
             &prover,
             &super_admin(),
             forward_params("did:m:B"),
+            OpContext::Direct,
             "test",
         )
         .await
@@ -599,6 +602,7 @@ mod tests {
             &prover,
             &super_admin(),
             forward_params("did:m:B"),
+            OpContext::Direct,
             "test",
         )
         .await

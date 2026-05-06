@@ -46,8 +46,8 @@ use crate::messaging::handshake::{
 };
 use crate::messaging::registry::{MediatorBinding, MediatorListenerRegistry, RegistryError};
 use crate::operations::did_webvh::{UpdateDidWebvhError, UpdateDidWebvhOptions, update_did_webvh};
-use crate::operations::protocol::PROTOCOL_LOCK;
 use crate::operations::protocol::document::{DocumentPatchError, with_didcomm_service};
+use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
 
@@ -119,6 +119,7 @@ pub async fn enable_didcomm(
     prover: &(dyn ListenerProver + Send + Sync),
     auth: &AuthClaims,
     params: EnableDidcommParams,
+    ctx: OpContext,
     channel: &str,
 ) -> Result<EnableDidcommResult, EnableDidcommError> {
     auth.require_super_admin()
@@ -201,16 +202,16 @@ pub async fn enable_didcomm(
 
     // ServicesDidcommEnable: distinct from MigrateStart so reports
     // can distinguish "first-time enable" from "mediator migration".
-    let _ = telemetry
-        .record(
-            TelemetryEvent::new(TelemetryKind::ServicesDidcommEnable)
-                .with_mediator(&resolved.mediator_did)
-                .with_field(
-                    "new_version_id",
-                    JsonValue::from(update_result.new_version_id.clone()),
-                ),
-        )
-        .await;
+    let mut event = TelemetryEvent::new(TelemetryKind::ServicesDidcommEnable)
+        .with_mediator(&resolved.mediator_did)
+        .with_field(
+            "new_version_id",
+            JsonValue::from(update_result.new_version_id.clone()),
+        );
+    if let Some(tag) = ctx.telemetry_triggered_by() {
+        event = event.with_field("triggered_by", JsonValue::from(tag));
+    }
+    let _ = telemetry.record(event).await;
 
     info!(
         channel,
@@ -396,6 +397,7 @@ mod tests {
                 force: false,
                 handshake_timeout: Duration::from_secs(1),
             },
+            OpContext::Direct,
             "test",
         )
         .await;
@@ -444,6 +446,7 @@ mod tests {
                 force: false,
                 handshake_timeout: Duration::from_secs(1),
             },
+            OpContext::Direct,
             "test",
         )
         .await;
@@ -492,6 +495,7 @@ mod tests {
                 force: false,
                 handshake_timeout: Duration::from_secs(1),
             },
+            OpContext::Direct,
             "test",
         )
         .await;
@@ -550,6 +554,7 @@ mod tests {
                 force: false,
                 handshake_timeout: Duration::from_secs(1),
             },
+            OpContext::Direct,
             "test",
         )
         .await;

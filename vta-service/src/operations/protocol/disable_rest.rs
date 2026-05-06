@@ -46,7 +46,6 @@ use crate::config::AppConfig;
 use crate::didcomm_bridge::DIDCommBridge;
 use crate::error::AppError;
 use crate::operations::did_webvh::{UpdateDidWebvhError, UpdateDidWebvhOptions, update_did_webvh};
-use crate::operations::protocol::PROTOCOL_LOCK;
 use crate::operations::protocol::document::{
     DocumentPatchError, current_rest_service, without_rest_service,
 };
@@ -56,6 +55,7 @@ use crate::operations::protocol::invariant::{
 use crate::operations::protocol::snapshot::{
     self, RestSnapshot, ServiceConfigSnapshot, ServiceKind,
 };
+use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
 
@@ -134,6 +134,7 @@ pub async fn disable_rest(
     telemetry: &SharedTelemetrySink,
     auth: &AuthClaims,
     _params: DisableRestParams,
+    ctx: OpContext,
     channel: &str,
 ) -> Result<DisableRestResult, DisableRestError> {
     auth.require_super_admin()
@@ -196,17 +197,17 @@ pub async fn disable_rest(
 
     // 7. Telemetry. Prior URL is included so an external verifier
     //    knows what URL just stopped being advertised.
-    let _ = telemetry
-        .record(
-            TelemetryEvent::new(TelemetryKind::ServicesRestDisable)
-                .with_field("channel", JsonValue::from(channel))
-                .with_field(
-                    "new_version_id",
-                    JsonValue::from(update_result.new_version_id.clone()),
-                )
-                .with_field("prior_url", JsonValue::from(prior_url.clone())),
+    let mut event = TelemetryEvent::new(TelemetryKind::ServicesRestDisable)
+        .with_field("channel", JsonValue::from(channel))
+        .with_field(
+            "new_version_id",
+            JsonValue::from(update_result.new_version_id.clone()),
         )
-        .await;
+        .with_field("prior_url", JsonValue::from(prior_url.clone()));
+    if let Some(tag) = ctx.telemetry_triggered_by() {
+        event = event.with_field("triggered_by", JsonValue::from(tag));
+    }
+    let _ = telemetry.record(event).await;
 
     info!(
         channel,

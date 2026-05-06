@@ -369,8 +369,16 @@ pub fn build_handler(
                 handler_fn(super::handlers_protocol::handle_disable_rest),
             )?
             .route(
+                protocol_management::ROLLBACK_REST,
+                handler_fn(super::handlers_protocol::handle_rollback_rest),
+            )?
+            .route(
                 protocol_management::UPDATE_DIDCOMM,
                 handler_fn(super::handlers_protocol::handle_update_didcomm),
+            )?
+            .route(
+                protocol_management::ROLLBACK_DIDCOMM,
+                handler_fn(super::handlers_protocol::handle_rollback_didcomm),
             )?
             .route(
                 protocol_management::DRAIN_CANCEL,

@@ -237,8 +237,16 @@ pub fn router() -> Router<AppState> {
             post(protocol::disable_rest_handler),
         )
         .route(
+            "/services/rest/rollback",
+            post(protocol::rollback_rest_handler),
+        )
+        .route(
             "/services/didcomm/update",
             post(protocol::update_didcomm_handler),
+        )
+        .route(
+            "/services/didcomm/rollback",
+            post(protocol::rollback_didcomm_handler),
         )
         .route(
             "/mediators/drain/cancel",
