@@ -1784,3 +1784,66 @@ impl IntoResponse for RollbackDidcommHttpError {
         (status, Json(body)).into_response()
     }
 }
+
+// ── List handler (T4.2) ───────────────────────────────────────────
+//
+// `GET /services` — read-only inspection of the VTA's currently
+// advertised transport services. Auth: super-admin (matches the
+// other service-management ops; the operator's view of service
+// state is operational info we keep gated).
+
+use crate::operations::protocol::list::{ListServicesError, list_services};
+
+pub async fn list_services_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+) -> Result<Json<vta_sdk::protocol::services::ServicesListResponse>, ListServicesHttpError> {
+    let response = list_services(&state.config, &state.webvh_ks, &auth.0).await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug)]
+pub enum ListServicesHttpError {
+    Op(ListServicesError),
+}
+
+impl From<ListServicesError> for ListServicesHttpError {
+    fn from(value: ListServicesError) -> Self {
+        Self::Op(value)
+    }
+}
+
+impl IntoResponse for ListServicesHttpError {
+    fn into_response(self) -> Response {
+        let (status, body) = match self {
+            Self::Op(ListServicesError::VtaDidNotConfigured) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "vta_did_not_configured",
+                    message: "VTA DID is not configured.".into(),
+                    suggested_fix: Some("Run `vta setup` to configure the VTA's DID first.".into()),
+                    stage: None,
+                },
+            ),
+            Self::Op(ListServicesError::Auth(msg)) => (
+                StatusCode::FORBIDDEN,
+                ErrorBody {
+                    error: "auth",
+                    message: msg,
+                    suggested_fix: Some("Super-admin role required for service inspection.".into()),
+                    stage: None,
+                },
+            ),
+            Self::Op(other) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "list_failed",
+                    message: other.to_string(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+        };
+        (status, Json(body)).into_response()
+    }
+}

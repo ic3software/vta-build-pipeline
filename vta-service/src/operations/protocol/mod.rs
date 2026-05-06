@@ -14,6 +14,7 @@ pub mod drain_cancel;
 pub mod enable_didcomm;
 pub mod enable_rest;
 pub mod invariant;
+pub mod list;
 pub mod report;
 pub mod rollback_didcomm;
 pub mod rollback_rest;

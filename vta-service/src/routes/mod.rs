@@ -240,6 +240,7 @@ pub fn router() -> Router<AppState> {
             "/services/rest/rollback",
             post(protocol::rollback_rest_handler),
         )
+        .route("/services", get(protocol::list_services_handler))
         .route(
             "/services/didcomm/update",
             post(protocol::update_didcomm_handler),

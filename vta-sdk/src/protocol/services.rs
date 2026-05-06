@@ -143,6 +143,49 @@ pub struct DisableRestRequest {}
 #[must_use]
 pub struct RollbackRestRequest {}
 
+/// Response body for `GET /services` — the operator-facing read
+/// surface for inspecting the VTA's current advertised transport
+/// services. Spec §10 (resolved): minimal shape — one entry per
+/// kind, `enabled` flag, kind-specific config when enabled.
+///
+/// Order is canonical: DIDComm before REST when both are
+/// advertised, matching the spec §3.3 ordering invariant
+/// enforced in `protocol::document::sort_services_canonical`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServicesListResponse {
+    pub services: Vec<ServiceState>,
+}
+
+/// State of a single transport kind. The `kind` discriminator is
+/// `"rest"` or `"didcomm"` on the wire (kebab-case to align with
+/// the rest of the runtime service-management surface). When
+/// `enabled` is `false`, the kind-specific config fields are
+/// absent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ServiceState {
+    Rest {
+        enabled: bool,
+        /// Currently-published REST URL. `None` when REST is
+        /// disabled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
+    Didcomm {
+        enabled: bool,
+        /// Currently-active mediator DID. `None` when DIDComm is
+        /// disabled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mediator_did: Option<String>,
+        /// Routing keys for the active mediator. Empty when
+        /// DIDComm is disabled or when the mediator entry doesn't
+        /// carry routing-keys today (the workspace's `#vta-didcomm`
+        /// service entry currently doesn't).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        routing_keys: Vec<String>,
+    },
+}
+
 /// Shared response body for every successful service-mutation
 /// operation (REST + DIDComm enable/update/disable/rollback).
 ///
@@ -378,6 +421,77 @@ mod tests {
         assert_eq!(parsed.host_str(), Some("vta.example.com"));
         assert_eq!(parsed.port(), Some(8443));
         assert_eq!(parsed.path(), "/api");
+    }
+
+    // ── ServicesListResponse / ServiceState wire shape ──────────
+
+    #[test]
+    fn services_list_response_round_trips_both_kinds() {
+        let response = ServicesListResponse {
+            services: vec![
+                ServiceState::Didcomm {
+                    enabled: true,
+                    mediator_did: Some("did:peer:2.M".into()),
+                    routing_keys: vec!["did:peer:2.K".into()],
+                },
+                ServiceState::Rest {
+                    enabled: true,
+                    url: Some("https://vta.example.com".into()),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let restored: ServicesListResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, response);
+    }
+
+    /// Disabled state on either kind has the kind-specific config
+    /// fields elided from the wire form (per `skip_serializing_if`).
+    #[test]
+    fn service_state_disabled_omits_config_fields() {
+        let rest_off = ServiceState::Rest {
+            enabled: false,
+            url: None,
+        };
+        let json = serde_json::to_value(&rest_off).unwrap();
+        assert_eq!(json["kind"], "rest");
+        assert_eq!(json["enabled"], false);
+        assert!(
+            json.get("url").is_none(),
+            "url must be elided when None to keep the wire form clean",
+        );
+
+        let didcomm_off = ServiceState::Didcomm {
+            enabled: false,
+            mediator_did: None,
+            routing_keys: vec![],
+        };
+        let json = serde_json::to_value(&didcomm_off).unwrap();
+        assert_eq!(json["kind"], "didcomm");
+        assert_eq!(json["enabled"], false);
+        assert!(json.get("mediator_did").is_none());
+        assert!(json.get("routing_keys").is_none());
+    }
+
+    /// Discriminator field is literal `kind` with kebab-case
+    /// (`rest` / `didcomm`) values — pin the wire contract so a
+    /// `serde(rename)` tweak fails loudly.
+    #[test]
+    fn service_state_discriminator_is_literal_kind() {
+        let json = serde_json::to_value(ServiceState::Rest {
+            enabled: true,
+            url: Some("https://x.example".into()),
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "rest");
+
+        let json = serde_json::to_value(ServiceState::Didcomm {
+            enabled: true,
+            mediator_did: Some("did:peer:2.M".into()),
+            routing_keys: vec![],
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "didcomm");
     }
 
     /// `ServiceMutationResponse` deserializes both forms — explicit

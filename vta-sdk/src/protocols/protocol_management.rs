@@ -70,6 +70,15 @@ pub const ROLLBACK_DIDCOMM: &str =
 pub const ROLLBACK_DIDCOMM_RESULT: &str =
     "https://firstperson.network/protocols/services-management/1.0/didcomm-rollback-result";
 
+// Read-only inspection (T4.2). Auth: super-admin. The result
+// payload uses the SDK's `ServicesListResponse` shape — one
+// entry per kind, canonical DIDComm-before-REST order.
+
+pub const LIST_SERVICES: &str =
+    "https://firstperson.network/protocols/services-management/1.0/list";
+pub const LIST_SERVICES_RESULT: &str =
+    "https://firstperson.network/protocols/services-management/1.0/list-result";
+
 // ── services-management (DIDComm side, continued) ───────────────────
 
 // T2.3 rename — was MIGRATE_MEDIATOR / mediator-management/1.0/migrate.

@@ -649,3 +649,30 @@ pub async fn handle_rollback_didcomm(
         Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
     }
 }
+
+// ── List services over DIDComm (T4.2) ─────────────────────────────
+
+pub async fn handle_list_services(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = match auth_from_message(&message, &state.acl_ks).await {
+        Ok(a) => a,
+        Err(e) => return Ok(Some(problem_report_unauthorized(e.to_string()))),
+    };
+
+    let result =
+        crate::operations::protocol::list::list_services(&state.config, &state.webvh_ks, &auth)
+            .await;
+
+    use crate::operations::protocol::list::ListServicesError;
+    match result {
+        Ok(r) => response(protocol_management::LIST_SERVICES_RESULT, &r),
+        Err(ListServicesError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
+        Err(ListServicesError::VtaDidNotConfigured) => {
+            Ok(Some(problem_report_conflict("VTA DID is not configured")))
+        }
+        Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
+    }
+}
