@@ -162,6 +162,111 @@ impl VtaClient {
         )
         .await
     }
+
+    // ── REST service-management client methods (P1 wire types,
+    //    P5 client surface) ──────────────────────────────────────────
+
+    /// Enable REST advertisement on the VTA's DID document by
+    /// publishing a `#vta-rest` service entry. Spec §3.4.
+    pub async fn enable_rest(
+        &self,
+        req: services::EnableRestRequest,
+    ) -> Result<services::ServiceMutationResponse, VtaError> {
+        self.rpc(
+            protocol_management::ENABLE_REST,
+            serde_json::to_value(&req)?,
+            protocol_management::ENABLE_REST_RESULT,
+            30,
+            |c, url| c.post(format!("{url}/services/rest/enable")).json(&req),
+        )
+        .await
+    }
+
+    /// Update the URL on the existing `#vta-rest` service entry.
+    pub async fn update_rest(
+        &self,
+        req: services::UpdateRestRequest,
+    ) -> Result<services::ServiceMutationResponse, VtaError> {
+        self.rpc(
+            protocol_management::UPDATE_REST,
+            serde_json::to_value(&req)?,
+            protocol_management::UPDATE_REST_RESULT,
+            30,
+            |c, url| c.post(format!("{url}/services/rest/update")).json(&req),
+        )
+        .await
+    }
+
+    /// Remove the `#vta-rest` entry from the VTA's DID document.
+    /// Refused with `LastServiceRefused` when DIDComm is also off.
+    pub async fn disable_rest(
+        &self,
+        req: services::DisableRestRequest,
+    ) -> Result<services::ServiceMutationResponse, VtaError> {
+        self.rpc(
+            protocol_management::DISABLE_REST,
+            serde_json::to_value(&req)?,
+            protocol_management::DISABLE_REST_RESULT,
+            30,
+            |c, url| c.post(format!("{url}/services/rest/disable")).json(&req),
+        )
+        .await
+    }
+
+    // ── Fail-forward rollback client methods (P3 server, P5
+    //    client surface) ──────────────────────────────────────────
+
+    /// Fail-forward the most recent REST mutation by re-applying
+    /// the snapshotted prior state. Spec §3.5a.
+    pub async fn rollback_rest(
+        &self,
+        req: services::RollbackRestRequest,
+    ) -> Result<services::RollbackResponse, VtaError> {
+        self.rpc(
+            protocol_management::ROLLBACK_REST,
+            serde_json::to_value(&req)?,
+            protocol_management::ROLLBACK_REST_RESULT,
+            60,
+            |c, url| c.post(format!("{url}/services/rest/rollback")).json(&req),
+        )
+        .await
+    }
+
+    /// Fail-forward the most recent DIDComm mutation. Threads
+    /// `drain_ttl_secs` through to the dispatched forward op for
+    /// the disable / update arms.
+    pub async fn rollback_didcomm(
+        &self,
+        req: services::RollbackDidcommRequest,
+    ) -> Result<services::RollbackResponse, VtaError> {
+        self.rpc(
+            protocol_management::ROLLBACK_DIDCOMM,
+            serde_json::to_value(&req)?,
+            protocol_management::ROLLBACK_DIDCOMM_RESULT,
+            120,
+            |c, url| {
+                c.post(format!("{url}/services/didcomm/rollback"))
+                    .json(&req)
+            },
+        )
+        .await
+    }
+
+    // ── Read-only inspection (P4 server, P5 client surface) ──────
+
+    /// Inspect the VTA's currently-advertised transport services.
+    /// Returns one entry per kind in canonical DIDComm-then-REST
+    /// order.
+    pub async fn list_services(&self) -> Result<services::ServicesListResponse, VtaError> {
+        self.rpc(
+            protocol_management::LIST_SERVICES,
+            serde_json::Value::Null,
+            protocol_management::LIST_SERVICES_RESULT,
+            30,
+            |c, url| c.get(format!("{url}/services")),
+        )
+        .await
+    }
 }
 
 /// Request body for `POST /services/didcomm/update`.

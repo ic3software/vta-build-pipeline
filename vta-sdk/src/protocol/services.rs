@@ -143,6 +143,54 @@ pub struct DisableRestRequest {}
 #[must_use]
 pub struct RollbackRestRequest {}
 
+/// Request body for `POST /services/didcomm/rollback`.
+///
+/// Threads `drain_ttl_secs` through to the dispatched forward op
+/// for the disable / update arms. Server applies the spec §3.6
+/// default (24h) when omitted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[must_use]
+pub struct RollbackDidcommRequest {
+    /// Drain window for the previously-active mediator (seconds).
+    /// Server default is 24h when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_ttl_secs: Option<u64>,
+}
+
+impl RollbackDidcommRequest {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn drain_ttl_secs(mut self, secs: u64) -> Self {
+        self.drain_ttl_secs = Some(secs);
+        self
+    }
+}
+
+/// Response body for the rollback handlers. Wider than
+/// [`ServiceMutationResponse`] — adds `kind` and
+/// `draining_mediator` fields that downstream consumers need to
+/// distinguish the dispatched arm.
+///
+/// `log_entry_version_id` is the empty string when the rollback
+/// was a no-op (snapshot ≡ current state).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RollbackResponse {
+    pub log_entry_version_id: String,
+    pub effective_at: String,
+    /// One of: `disabled`, `enabled`, `updated`, `no_op`.
+    pub kind: String,
+    /// `Some(rfc3339)` when the rollback scheduled a drain.
+    /// `None` for REST and DIDComm enable / no-op arms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_until: Option<String>,
+    /// Mediator DID currently being drained by this rollback.
+    /// `None` for REST and DIDComm enable / no-op arms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draining_mediator: Option<String>,
+}
+
 /// Response body for `GET /services` — the operator-facing read
 /// surface for inspecting the VTA's current advertised transport
 /// services. Spec §10 (resolved): minimal shape — one entry per
