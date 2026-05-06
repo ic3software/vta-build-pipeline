@@ -110,6 +110,7 @@ pub async fn enable_didcomm(
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
+    snapshot_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -144,6 +145,19 @@ pub async fn enable_didcomm(
         },
     )
     .await?;
+
+    // Persist snapshot BEFORE the runtime mutation per spec §3.5a.
+    // Pre-state for an enable is DidcommSnapshot::Disabled so a
+    // future `services didcomm rollback` re-applies "off." Snapshot
+    // write happens after handshake (handshake failure means the
+    // mutation never started; no snapshot needed).
+    use crate::operations::protocol::snapshot::{self, DidcommSnapshot, ServiceConfigSnapshot};
+    snapshot::write(
+        snapshot_ks,
+        ServiceConfigSnapshot::Didcomm(DidcommSnapshot::Disabled),
+    )
+    .await
+    .map_err(|e| EnableDidcommError::Storage(format!("snapshot write: {e}")))?;
 
     // Patch the document. `with_didcomm_service` enforces the at-
     // most-one invariant and preserves verificationMethod
@@ -280,6 +294,7 @@ mod tests {
     use crate::config::{AppConfig, ServerConfig, ServicesConfig, StoreConfig};
     use crate::keys::seed_store::PlaintextSeedStore;
     use crate::messaging::handshake::{AlwaysOkProver, FailingProver, HandshakeStage};
+    use crate::operations::protocol::snapshot;
     use crate::store::Store;
     use vti_common::telemetry::RingBufferTelemetry;
 
@@ -353,6 +368,7 @@ mod tests {
         let (_cd, contexts_ks) = empty_keyspace("contexts").await;
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
+        let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -367,6 +383,7 @@ mod tests {
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
+            &snapshot_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -399,6 +416,7 @@ mod tests {
         let (_cd, contexts_ks) = empty_keyspace("contexts").await;
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
+        let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -413,6 +431,7 @@ mod tests {
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
+            &snapshot_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -445,6 +464,7 @@ mod tests {
         let (_cd, contexts_ks) = empty_keyspace("contexts").await;
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
+        let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -459,6 +479,7 @@ mod tests {
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
+            &snapshot_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -498,6 +519,7 @@ mod tests {
         let (_cd, contexts_ks) = empty_keyspace("contexts").await;
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
+        let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -515,6 +537,7 @@ mod tests {
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
+            &snapshot_ks,
             &*seed,
             &resolver,
             &bridge,

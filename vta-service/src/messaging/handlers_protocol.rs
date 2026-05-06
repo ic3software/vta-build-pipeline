@@ -95,6 +95,7 @@ pub async fn handle_disable_didcomm(
         &state.webvh_ks,
         &state.audit_ks,
         &state.drains_ks,
+        &state.snapshot_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -187,6 +188,7 @@ pub async fn handle_migrate_mediator(
         &state.webvh_ks,
         &state.audit_ks,
         &state.drains_ks,
+        &state.snapshot_ks,
         &*state.seed_store,
         state
             .did_resolver

@@ -137,6 +137,7 @@ pub async fn disable_didcomm(
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
     drains_ks: &KeyspaceHandle,
+    snapshot_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -155,6 +156,22 @@ pub async fn disable_didcomm(
     // Pre-flight checks (atomic; nothing mutated until past here).
     let (_vta_did, scid, current_doc, prior_mediator) =
         read_preconditions(config, webvh_ks, &params).await?;
+
+    // Persist snapshot BEFORE the runtime mutation per spec §3.5a.
+    // Pre-state is DidcommSnapshot::Enabled with the prior mediator
+    // so a future `services didcomm rollback` re-enables that
+    // mediator. routing_keys is empty — the existing #vta-didcomm
+    // service entry doesn't carry routing-keys today.
+    use crate::operations::protocol::snapshot::{self, DidcommSnapshot, ServiceConfigSnapshot};
+    snapshot::write(
+        snapshot_ks,
+        ServiceConfigSnapshot::Didcomm(DidcommSnapshot::Enabled {
+            mediator_did: prior_mediator.clone(),
+            routing_keys: vec![],
+        }),
+    )
+    .await
+    .map_err(|e| DisableDidcommError::Storage(format!("snapshot write: {e}")))?;
 
     // Patch out the `#vta-didcomm` service entry.
     let patched = without_didcomm_service(current_doc);
@@ -340,6 +357,7 @@ mod tests {
     use super::*;
     use crate::config::{AppConfig, ServerConfig, ServicesConfig, StoreConfig};
     use crate::keys::seed_store::PlaintextSeedStore;
+    use crate::operations::protocol::snapshot;
     use crate::store::Store;
     use vti_common::telemetry::RingBufferTelemetry;
 
@@ -442,6 +460,7 @@ mod tests {
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
+        let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -452,6 +471,7 @@ mod tests {
             &webvh_ks,
             &audit_ks,
             &drains_ks,
+            &snapshot_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -483,6 +503,7 @@ mod tests {
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
+        let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -493,6 +514,7 @@ mod tests {
             &webvh_ks,
             &audit_ks,
             &drains_ks,
+            &snapshot_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -520,6 +542,7 @@ mod tests {
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
+        let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -531,6 +554,7 @@ mod tests {
             &webvh_ks,
             &audit_ks,
             &drains_ks,
+            &snapshot_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -560,6 +584,7 @@ mod tests {
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
+        let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -573,6 +598,7 @@ mod tests {
             &webvh_ks,
             &audit_ks,
             &drains_ks,
+            &snapshot_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -601,6 +627,7 @@ mod tests {
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
+        let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -611,6 +638,7 @@ mod tests {
             &webvh_ks,
             &audit_ks,
             &drains_ks,
+            &snapshot_ks,
             &*seed,
             &resolver,
             &bridge,
