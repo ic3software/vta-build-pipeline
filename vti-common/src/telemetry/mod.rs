@@ -90,6 +90,9 @@ pub enum TelemetryKind {
     MediatorDrainExpire,
     ServicesDidcommEnable,
     ServicesDidcommDisable,
+    ServicesRestEnable,
+    ServicesRestUpdate,
+    ServicesRestDisable,
 }
 
 #[derive(Debug, Clone, Default)]
