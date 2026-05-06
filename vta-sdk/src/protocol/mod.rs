@@ -6,6 +6,13 @@
 //! not yet running at first-enable time). The disable / migrate /
 //! drain-cancel / report calls — and their DIDComm transport
 //! handlers — arrive in Phase 4 verticals.
+//!
+//! Runtime REST service-management wire types (the symmetric
+//! REST-side of the spec §4 surface — `EnableRestRequest`,
+//! `UpdateRestRequest`, `DisableRestRequest`, `RollbackRestRequest`,
+//! `ServiceMutationResponse`) live in [`services`].
+
+pub mod services;
 
 use serde::{Deserialize, Serialize};
 
