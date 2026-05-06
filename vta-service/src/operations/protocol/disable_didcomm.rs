@@ -277,11 +277,25 @@ async fn read_preconditions(
     webvh_ks: &KeyspaceHandle,
     params: &DisableDidcommParams,
 ) -> Result<(String, String, JsonValue, String), DisableDidcommError> {
+    use crate::operations::protocol::invariant::{
+        CurrentServices, ProposedOp, would_violate_last_service,
+    };
+    use crate::operations::protocol::snapshot::ServiceKind;
+    use vta_sdk::error::VtaError;
+
     let cfg = config.read().await;
     if !cfg.services.didcomm {
         return Err(DisableDidcommError::DidcommNotEnabled);
     }
-    if !cfg.services.rest {
+    // Brick-prevention via the shared §3.2 helper (T0.4) —
+    // single source of truth across all disable / rollback paths.
+    // VtaError::LastServiceRefused maps to the existing
+    // DisableDidcommError::NoProtocolRemaining wire variant so
+    // operators see the same error string as before this refactor.
+    if let Err(VtaError::LastServiceRefused) = would_violate_last_service(
+        &CurrentServices::new(cfg.services.rest, cfg.services.didcomm),
+        ProposedOp::disable(ServiceKind::Didcomm),
+    ) {
         return Err(DisableDidcommError::NoProtocolRemaining);
     }
     if params.transport == DisableTransport::Didcomm
