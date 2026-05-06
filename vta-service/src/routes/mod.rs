@@ -218,6 +218,8 @@ pub fn router() -> Router<AppState> {
 
     // Protocol management routes (DIDComm enable/disable/migrate;
     // spec docs/05-design-notes/didcomm-protocol-management.md).
+    // Plus the symmetric REST routes (spec
+    // docs/05-design-notes/runtime-service-management.md §3.4).
     #[cfg(feature = "webvh")]
     let router = router
         .route(
@@ -227,6 +229,12 @@ pub fn router() -> Router<AppState> {
         .route(
             "/services/didcomm/disable",
             post(protocol::disable_didcomm_handler),
+        )
+        .route("/services/rest/enable", post(protocol::enable_rest_handler))
+        .route("/services/rest/update", post(protocol::update_rest_handler))
+        .route(
+            "/services/rest/disable",
+            post(protocol::disable_rest_handler),
         )
         .route(
             "/mediators/migrate",

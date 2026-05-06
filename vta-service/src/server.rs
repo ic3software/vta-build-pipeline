@@ -90,6 +90,10 @@ pub struct AppState {
     /// Keyed by mediator DID; replayed at boot.
     #[cfg(feature = "webvh")]
     pub drains_ks: KeyspaceHandle,
+    /// Per-kind previous-config snapshot store for fail-forward
+    /// rollback (spec §3.5a). Populated alongside `drains_ks`.
+    #[cfg(feature = "webvh")]
+    pub snapshot_ks: KeyspaceHandle,
     /// In-process registry of active + draining mediator listeners.
     /// Owns the per-listener bounded outbound buffer and the
     /// active/drain state machine.
@@ -178,6 +182,9 @@ pub async fn build_app_state(
     let webvh_ks = apply_encryption(store.keyspace("webvh")?);
     #[cfg(feature = "webvh")]
     let drains_ks = apply_encryption(store.keyspace("drains")?);
+    #[cfg(feature = "webvh")]
+    let snapshot_ks =
+        apply_encryption(store.keyspace(crate::operations::protocol::snapshot::KEYSPACE_NAME)?);
 
     let auth = init_auth(&config, &*seed_store, &keys_ks).await;
 
@@ -219,6 +226,8 @@ pub async fn build_app_state(
         webvh_ks,
         #[cfg(feature = "webvh")]
         drains_ks,
+        #[cfg(feature = "webvh")]
+        snapshot_ks,
         #[cfg(feature = "webvh")]
         mediator_registry,
         #[cfg(feature = "webvh")]
@@ -305,6 +314,9 @@ pub async fn run(
         let webvh_ks = apply_encryption(store.keyspace("webvh")?);
         #[cfg(feature = "webvh")]
         let drains_ks = apply_encryption(store.keyspace("drains")?);
+        #[cfg(feature = "webvh")]
+        let snapshot_ks =
+            apply_encryption(store.keyspace(crate::operations::protocol::snapshot::KEYSPACE_NAME)?);
 
         // Initialize auth infrastructure
         let auth = init_auth(&config, &*seed_store, &keys_ks).await;
@@ -455,6 +467,8 @@ pub async fn run(
                 webvh_ks,
                 #[cfg(feature = "webvh")]
                 drains_ks,
+                #[cfg(feature = "webvh")]
+                snapshot_ks,
                 #[cfg(feature = "webvh")]
                 mediator_registry: Arc::clone(&mediator_registry),
                 #[cfg(feature = "webvh")]

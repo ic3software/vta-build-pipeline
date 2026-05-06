@@ -95,6 +95,10 @@ impl TestApp {
         let did_templates_ks = store.keyspace("did_templates").unwrap();
         #[cfg(feature = "webvh")]
         let drains_ks = store.keyspace("drains").unwrap();
+        #[cfg(feature = "webvh")]
+        let snapshot_ks = store
+            .keyspace(vta_service::operations::protocol::snapshot::KEYSPACE_NAME)
+            .unwrap();
         let telemetry: vti_common::telemetry::SharedTelemetrySink =
             Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
         #[cfg(feature = "webvh")]
@@ -124,6 +128,8 @@ impl TestApp {
             webvh_ks,
             #[cfg(feature = "webvh")]
             drains_ks,
+            #[cfg(feature = "webvh")]
+            snapshot_ks,
             #[cfg(feature = "webvh")]
             mediator_registry,
             #[cfg(feature = "webvh")]

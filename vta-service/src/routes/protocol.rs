@@ -20,12 +20,17 @@ use crate::messaging::handshake::{AlwaysOkProver, HandshakeError, HandshakeStage
 use crate::operations::protocol::disable_didcomm::{
     DisableDidcommError, DisableDidcommParams, DisableTransport, disable_didcomm,
 };
+use crate::operations::protocol::disable_rest::{
+    DisableRestError, DisableRestParams, disable_rest,
+};
 use crate::operations::protocol::enable_didcomm::{
     EnableDidcommError, EnableDidcommParams, enable_didcomm,
 };
+use crate::operations::protocol::enable_rest::{EnableRestError, EnableRestParams, enable_rest};
 use crate::operations::protocol::migrate_mediator::{
     MigrateAuditKind, MigrateMediatorError, MigrateMediatorParams, migrate_mediator,
 };
+use crate::operations::protocol::update_rest::{UpdateRestError, UpdateRestParams, update_rest};
 use crate::server::AppState;
 
 /// Default trust-ping round-trip timeout for first-enable when the
@@ -1143,4 +1148,333 @@ async fn try_run_first_enable_handshake(
     )
     .await
     .map(|_| ())
+}
+
+// ── REST service-management handlers (spec §3.4) ──────────────────
+//
+// `POST /services/rest/{enable,update,disable}` and (in T3.4)
+// `/services/rest/rollback`. The wire types are reused directly
+// from `vta_sdk::protocol::services` rather than redefined locally
+// — the SDK types are the canonical wire contract; redefining them
+// here would just duplicate that contract.
+//
+// Response shape is the SDK's shared `ServiceMutationResponse` for
+// every mutation across REST and DIDComm (spec §4). REST mutations
+// always set `drain_until: None`; DIDComm ops in T2.x will populate
+// it when scheduling a drain.
+
+/// `POST /services/rest/enable` — add a `#vta-rest` service entry
+/// to the VTA's DID document. Auth: super-admin. Refused with
+/// `ServiceAlreadyEnabled` if REST is already advertised.
+pub async fn enable_rest_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Json(req): Json<vta_sdk::protocol::services::EnableRestRequest>,
+) -> Result<Json<vta_sdk::protocol::services::ServiceMutationResponse>, RestServiceHttpError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or(RestServiceHttpError::DidResolverUnavailable)?
+        .clone();
+
+    let result = enable_rest(
+        &state.config,
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.snapshot_ks,
+        &*state.seed_store,
+        &did_resolver,
+        &state.didcomm_bridge,
+        &state.telemetry,
+        &auth.0,
+        EnableRestParams { url: req.url },
+        "rest",
+    )
+    .await?;
+
+    Ok(Json(vta_sdk::protocol::services::ServiceMutationResponse {
+        log_entry_version_id: result.new_version_id,
+        effective_at: chrono::Utc::now().to_rfc3339(),
+        drain_until: None,
+    }))
+}
+
+/// `POST /services/rest/update` — replace the URL on the existing
+/// `#vta-rest` entry. Auth: super-admin. Refused with
+/// `ServiceNotPresent` if REST isn't currently advertised.
+pub async fn update_rest_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Json(req): Json<vta_sdk::protocol::services::UpdateRestRequest>,
+) -> Result<Json<vta_sdk::protocol::services::ServiceMutationResponse>, RestServiceHttpError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or(RestServiceHttpError::DidResolverUnavailable)?
+        .clone();
+
+    let result = update_rest(
+        &state.config,
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.snapshot_ks,
+        &*state.seed_store,
+        &did_resolver,
+        &state.didcomm_bridge,
+        &state.telemetry,
+        &auth.0,
+        UpdateRestParams { url: req.url },
+        "rest",
+    )
+    .await?;
+
+    Ok(Json(vta_sdk::protocol::services::ServiceMutationResponse {
+        log_entry_version_id: result.new_version_id,
+        effective_at: chrono::Utc::now().to_rfc3339(),
+        drain_until: None,
+    }))
+}
+
+/// `POST /services/rest/disable` — remove the `#vta-rest` entry.
+/// Auth: super-admin. Refused with `LastServiceRefused` when
+/// DIDComm is also disabled (spec §3.2 — no `--force` escape).
+pub async fn disable_rest_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Json(_req): Json<vta_sdk::protocol::services::DisableRestRequest>,
+) -> Result<Json<vta_sdk::protocol::services::ServiceMutationResponse>, RestServiceHttpError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or(RestServiceHttpError::DidResolverUnavailable)?
+        .clone();
+
+    let result = disable_rest(
+        &state.config,
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.snapshot_ks,
+        &*state.seed_store,
+        &did_resolver,
+        &state.didcomm_bridge,
+        &state.telemetry,
+        &auth.0,
+        DisableRestParams,
+        "rest",
+    )
+    .await?;
+
+    Ok(Json(vta_sdk::protocol::services::ServiceMutationResponse {
+        log_entry_version_id: result.new_version_id,
+        effective_at: chrono::Utc::now().to_rfc3339(),
+        drain_until: None,
+    }))
+}
+
+/// Unified HTTP error type for the three REST service-management
+/// routes. Each operation has its own typed error enum, but the
+/// HTTP-level concerns (status code + error body shape) overlap
+/// enough that one `IntoResponse` covers them all.
+#[derive(Debug)]
+pub enum RestServiceHttpError {
+    Enable(EnableRestError),
+    Update(UpdateRestError),
+    Disable(DisableRestError),
+    DidResolverUnavailable,
+}
+
+impl From<EnableRestError> for RestServiceHttpError {
+    fn from(value: EnableRestError) -> Self {
+        Self::Enable(value)
+    }
+}
+impl From<UpdateRestError> for RestServiceHttpError {
+    fn from(value: UpdateRestError) -> Self {
+        Self::Update(value)
+    }
+}
+impl From<DisableRestError> for RestServiceHttpError {
+    fn from(value: DisableRestError) -> Self {
+        Self::Disable(value)
+    }
+}
+
+impl IntoResponse for RestServiceHttpError {
+    fn into_response(self) -> Response {
+        let (status, body) = match self {
+            // ── Enable ────────────────────────────────────────────
+            Self::Enable(EnableRestError::ServiceAlreadyEnabled) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "service_already_enabled",
+                    message: "REST is already enabled.".into(),
+                    suggested_fix: Some(
+                        "Use `pnm services rest update --url <url>` to change the URL.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Enable(EnableRestError::Validation(msg)) => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "invalid_url",
+                    message: msg,
+                    suggested_fix: Some(
+                        "URL must be https://, parsable, with no fragment or userinfo.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+
+            // ── Update ────────────────────────────────────────────
+            Self::Update(UpdateRestError::ServiceNotPresent) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "service_not_present",
+                    message: "REST is not currently enabled.".into(),
+                    suggested_fix: Some(
+                        "Run `pnm services rest enable --url <url>` first.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Update(UpdateRestError::Validation(msg)) => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "invalid_url",
+                    message: msg,
+                    suggested_fix: Some(
+                        "URL must be https://, parsable, with no fragment or userinfo.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+
+            // ── Disable ───────────────────────────────────────────
+            Self::Disable(DisableRestError::ServiceNotPresent) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "service_not_present",
+                    message: "REST is not currently enabled — nothing to disable.".into(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+            Self::Disable(DisableRestError::LastServiceRefused) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "last_service_refused",
+                    message: "Refusing to disable REST — DIDComm is also off, so the VTA would have no advertised services.".into(),
+                    suggested_fix: Some(
+                        "Run `pnm services didcomm enable --mediator <did>` first, then retry."
+                            .into(),
+                    ),
+                    stage: None,
+                },
+            ),
+
+            // ── Shared per-op errors (auth / VTA-DID / publish /
+            //    storage) — each variant routes to the same status
+            //    + a per-op error tag. Match arms grouped by the
+            //    underlying concept.
+            Self::Enable(EnableRestError::Auth(msg))
+            | Self::Update(UpdateRestError::Auth(msg))
+            | Self::Disable(DisableRestError::Auth(msg)) => (
+                StatusCode::FORBIDDEN,
+                ErrorBody {
+                    error: "auth",
+                    message: msg,
+                    suggested_fix: Some(
+                        "Super-admin role required for service-management operations.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Enable(EnableRestError::VtaDidNotConfigured)
+            | Self::Update(UpdateRestError::VtaDidNotConfigured)
+            | Self::Disable(DisableRestError::VtaDidNotConfigured) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "vta_did_not_configured",
+                    message: "VTA DID is not configured.".into(),
+                    suggested_fix: Some("Run `vta setup` to configure the VTA's DID first.".into()),
+                    stage: None,
+                },
+            ),
+            Self::Enable(EnableRestError::WebVHUpdate(e))
+            | Self::Update(UpdateRestError::WebVHUpdate(e))
+            | Self::Disable(DisableRestError::WebVHUpdate(e)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "webvh_update_failed",
+                    message: e.to_string(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+            Self::Enable(EnableRestError::DocumentPatch(e))
+            | Self::Update(UpdateRestError::DocumentPatch(e))
+            | Self::Disable(DisableRestError::DocumentPatch(e)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "document_patch_failed",
+                    message: e.to_string(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+
+            // ── Storage / persistence / log-corruption catch-alls.
+            //    Same shape across ops; collapse to a single arm.
+            Self::Enable(
+                EnableRestError::VtaDidRecordMissing(_)
+                | EnableRestError::VtaDidLogMissing(_)
+                | EnableRestError::EmptyLog
+                | EnableRestError::ConfigPersistence(_)
+                | EnableRestError::Storage(_),
+            )
+            | Self::Update(
+                UpdateRestError::VtaDidRecordMissing(_)
+                | UpdateRestError::VtaDidLogMissing(_)
+                | UpdateRestError::EmptyLog
+                | UpdateRestError::Storage(_),
+            )
+            | Self::Disable(
+                DisableRestError::VtaDidRecordMissing(_)
+                | DisableRestError::VtaDidLogMissing(_)
+                | DisableRestError::EmptyLog
+                | DisableRestError::ConfigPersistence(_)
+                | DisableRestError::Storage(_),
+            ) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "storage_error",
+                    message: "Internal storage / log-replay failure.".into(),
+                    suggested_fix: Some(
+                        "Re-run `vta setup` if local state appears corrupted.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+
+            Self::DidResolverUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorBody {
+                    error: "did_resolver_unavailable",
+                    message: "DID resolver not available on this VTA.".into(),
+                    suggested_fix: Some(
+                        "Confirm the resolver is configured and running, then retry.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+        };
+        (status, Json(body)).into_response()
+    }
 }
