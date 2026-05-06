@@ -37,6 +37,8 @@ use crate::operations::protocol::disable_rest::{DisableRestParams, disable_rest}
 use crate::operations::protocol::drain_cancel::{DrainCancelParams, drain_cancel};
 use crate::operations::protocol::enable_rest::{EnableRestParams, enable_rest};
 use crate::operations::protocol::report::{ReportParams, mediator_report};
+use crate::operations::protocol::rollback_didcomm::{RollbackDidcommParams, rollback_didcomm};
+use crate::operations::protocol::rollback_rest::{RollbackRestParams, rollback_rest};
 use crate::operations::protocol::update_didcomm::{
     MigrateAuditKind, UpdateDidcommParams, update_didcomm,
 };
@@ -504,6 +506,146 @@ pub async fn handle_disable_rest(
             "refusing operation: would leave the VTA with no advertised services",
         ))),
         Err(DisableRestError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
+        Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
+    }
+}
+
+// ── Fail-forward rollback over DIDComm (T3.4) ──────────────────────
+
+pub async fn handle_rollback_rest(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = match auth_from_message(&message, &state.acl_ks).await {
+        Ok(a) => a,
+        Err(e) => return Ok(Some(problem_report_unauthorized(e.to_string()))),
+    };
+
+    let result = rollback_rest(
+        &state.config,
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.snapshot_ks,
+        &*state.seed_store,
+        state
+            .did_resolver
+            .as_ref()
+            .ok_or_else(|| handler_err("did_resolver unavailable"))?,
+        &state.didcomm_bridge,
+        &state.telemetry,
+        &auth,
+        RollbackRestParams,
+        "didcomm",
+    )
+    .await;
+
+    use crate::operations::protocol::rollback_rest::RollbackRestError;
+    match result {
+        Ok(r) => response(
+            protocol_management::ROLLBACK_REST_RESULT,
+            &serde_json::json!({
+                "log_entry_version_id": r.new_version_id.unwrap_or_default(),
+                "effective_at": Utc::now().to_rfc3339(),
+                "kind": match r.kind {
+                    crate::operations::protocol::rollback_rest::RollbackKind::Disabled => "disabled",
+                    crate::operations::protocol::rollback_rest::RollbackKind::Enabled => "enabled",
+                    crate::operations::protocol::rollback_rest::RollbackKind::Updated => "updated",
+                    crate::operations::protocol::rollback_rest::RollbackKind::NoOp => "no_op",
+                },
+            }),
+        ),
+        Err(RollbackRestError::NoPriorMutation) => Ok(Some(problem_report_conflict(
+            "no prior REST mutation to roll back from",
+        ))),
+        Err(RollbackRestError::DisableForward(
+            crate::operations::protocol::disable_rest::DisableRestError::LastServiceRefused,
+        )) => Ok(Some(problem_report_conflict(
+            "rolling back this REST mutation would leave the VTA with no advertised services",
+        ))),
+        Err(RollbackRestError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
+        Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RollbackDidcommBody {
+    #[serde(default)]
+    drain_ttl_secs: Option<u64>,
+}
+
+pub async fn handle_rollback_didcomm(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = match auth_from_message(&message, &state.acl_ks).await {
+        Ok(a) => a,
+        Err(e) => return Ok(Some(problem_report_unauthorized(e.to_string()))),
+    };
+
+    let body: RollbackDidcommBody = serde_json::from_value(message.body).map_err(handler_err)?;
+    let drain_ttl = std::time::Duration::from_secs(body.drain_ttl_secs.unwrap_or(86_400));
+
+    let prover = AlwaysOkProver;
+
+    let result = rollback_didcomm(
+        &state.config,
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.drains_ks,
+        &state.snapshot_ks,
+        &*state.seed_store,
+        state
+            .did_resolver
+            .as_ref()
+            .ok_or_else(|| handler_err("did_resolver unavailable"))?,
+        &state.didcomm_bridge,
+        &state.mediator_registry,
+        &state.drain_sweeper,
+        &state.telemetry,
+        &prover,
+        &auth,
+        RollbackDidcommParams {
+            drain_ttl,
+            // The rollback request arrived over DIDComm transport,
+            // so the MIN_DRAIN_TTL_OVER_DIDCOMM floor applies if
+            // the dispatch ends up in disable_didcomm.
+            transport: DisableTransport::Didcomm,
+        },
+        "didcomm",
+    )
+    .await;
+
+    use crate::operations::protocol::rollback_didcomm::RollbackDidcommError;
+    match result {
+        Ok(r) => response(
+            protocol_management::ROLLBACK_DIDCOMM_RESULT,
+            &serde_json::json!({
+                "log_entry_version_id": r.new_version_id.unwrap_or_default(),
+                "effective_at": Utc::now().to_rfc3339(),
+                "kind": match r.kind {
+                    crate::operations::protocol::rollback_didcomm::RollbackKind::Disabled => "disabled",
+                    crate::operations::protocol::rollback_didcomm::RollbackKind::Enabled => "enabled",
+                    crate::operations::protocol::rollback_didcomm::RollbackKind::Updated => "updated",
+                    crate::operations::protocol::rollback_didcomm::RollbackKind::NoOp => "no_op",
+                },
+                "draining_mediator": r.draining_mediator,
+            }),
+        ),
+        Err(RollbackDidcommError::NoPriorMutation) => Ok(Some(problem_report_conflict(
+            "no prior DIDComm mutation to roll back from",
+        ))),
+        Err(RollbackDidcommError::DisableForward(
+            crate::operations::protocol::disable_didcomm::DisableDidcommError::NoProtocolRemaining,
+        )) => Ok(Some(problem_report_conflict(
+            "rolling back this DIDComm mutation would leave the VTA with no advertised services",
+        ))),
+        Err(RollbackDidcommError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
         Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
     }
 }

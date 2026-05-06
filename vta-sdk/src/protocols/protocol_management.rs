@@ -53,6 +53,23 @@ pub const DISABLE_REST: &str =
 pub const DISABLE_REST_RESULT: &str =
     "https://firstperson.network/protocols/services-management/1.0/rest-disable-result";
 
+// Fail-forward rollback ops (T3.x). Read the per-kind snapshot
+// and dispatch into the equivalent forward operation. Reachable
+// over both transports — REST is always running per spec §3.2,
+// and the dispatched forward ops handle the chicken-and-egg
+// concerns themselves (e.g. enable_didcomm is REST-only by
+// nature; rollback into it falls back to that constraint).
+
+pub const ROLLBACK_REST: &str =
+    "https://firstperson.network/protocols/services-management/1.0/rest-rollback";
+pub const ROLLBACK_REST_RESULT: &str =
+    "https://firstperson.network/protocols/services-management/1.0/rest-rollback-result";
+
+pub const ROLLBACK_DIDCOMM: &str =
+    "https://firstperson.network/protocols/services-management/1.0/didcomm-rollback";
+pub const ROLLBACK_DIDCOMM_RESULT: &str =
+    "https://firstperson.network/protocols/services-management/1.0/didcomm-rollback-result";
+
 // ── services-management (DIDComm side, continued) ───────────────────
 
 // T2.3 rename — was MIGRATE_MEDIATOR / mediator-management/1.0/migrate.

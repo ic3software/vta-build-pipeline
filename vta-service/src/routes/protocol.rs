@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::SuperAdminAuth;
 use crate::messaging::handshake::{AlwaysOkProver, HandshakeError, HandshakeStage};
 use crate::operations::protocol::OpContext;
+use crate::operations::protocol::disable_didcomm::DisableTransport as DidcommTransport;
 use crate::operations::protocol::disable_didcomm::{
     DisableDidcommError, DisableDidcommParams, DisableTransport, disable_didcomm,
 };
@@ -28,6 +29,13 @@ use crate::operations::protocol::enable_didcomm::{
     EnableDidcommError, EnableDidcommParams, enable_didcomm,
 };
 use crate::operations::protocol::enable_rest::{EnableRestError, EnableRestParams, enable_rest};
+use crate::operations::protocol::rollback_didcomm::{
+    RollbackDidcommError, RollbackDidcommParams, RollbackKind as DidcommRollbackKind,
+    rollback_didcomm,
+};
+use crate::operations::protocol::rollback_rest::{
+    RollbackKind as RestRollbackKind, RollbackRestError, RollbackRestParams, rollback_rest,
+};
 use crate::operations::protocol::update_didcomm::{
     MigrateAuditKind, UpdateDidcommError, UpdateDidcommParams, update_didcomm,
 };
@@ -1481,6 +1489,294 @@ impl IntoResponse for RestServiceHttpError {
                     suggested_fix: Some(
                         "Confirm the resolver is configured and running, then retry.".into(),
                     ),
+                    stage: None,
+                },
+            ),
+        };
+        (status, Json(body)).into_response()
+    }
+}
+
+// ── Fail-forward rollback handlers (T3.4) ─────────────────────────
+//
+// `POST /services/{rest,didcomm}/rollback` — read the per-kind
+// snapshot store and dispatch into the appropriate forward op.
+// Spec §3.5a. The dispatched op publishes its own LogEntry; this
+// handler just routes the snapshot read + forwards the operator's
+// drain TTL where applicable.
+//
+// No-op rollbacks (snapshot ≡ current state) return a 200 with an
+// empty `log_entry_version_id` and a `kind` field set to "no_op".
+// CLIs surface this as "nothing to do" without raising an error.
+
+/// `POST /services/rest/rollback` — fail-forward the most recent
+/// REST mutation. Auth: super-admin. Refused with `NoPriorMutation`
+/// when no snapshot is recorded.
+pub async fn rollback_rest_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Json(_req): Json<vta_sdk::protocol::services::RollbackRestRequest>,
+) -> Result<Json<RollbackResponse>, RollbackRestHttpError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or(RollbackRestHttpError::DidResolverUnavailable)?
+        .clone();
+
+    let result = rollback_rest(
+        &state.config,
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.snapshot_ks,
+        &*state.seed_store,
+        &did_resolver,
+        &state.didcomm_bridge,
+        &state.telemetry,
+        &auth.0,
+        RollbackRestParams,
+        "rest",
+    )
+    .await?;
+
+    Ok(Json(RollbackResponse {
+        log_entry_version_id: result.new_version_id.unwrap_or_default(),
+        effective_at: chrono::Utc::now().to_rfc3339(),
+        kind: rest_kind_str(result.kind).into(),
+        drain_until: None,
+        draining_mediator: None,
+    }))
+}
+
+/// `POST /services/didcomm/rollback` — fail-forward the most recent
+/// DIDComm mutation. Auth: super-admin. Threads drain_ttl through
+/// to the dispatched forward op for the disable / update arms.
+pub async fn rollback_didcomm_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Json(req): Json<RollbackDidcommHttpRequest>,
+) -> Result<Json<RollbackResponse>, RollbackDidcommHttpError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or(RollbackDidcommHttpError::DidResolverUnavailable)?
+        .clone();
+    let bridge = Arc::clone(&state.didcomm_bridge);
+    let prover = AlwaysOkProver;
+
+    let drain_ttl = Duration::from_secs(req.drain_ttl_secs.unwrap_or(86_400));
+
+    let result = rollback_didcomm(
+        &state.config,
+        &state.keys_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.drains_ks,
+        &state.snapshot_ks,
+        &*state.seed_store,
+        &did_resolver,
+        &bridge,
+        &state.mediator_registry,
+        &state.drain_sweeper,
+        &state.telemetry,
+        &prover,
+        &auth.0,
+        RollbackDidcommParams {
+            drain_ttl,
+            transport: DidcommTransport::Rest,
+        },
+        "rest",
+    )
+    .await?;
+
+    Ok(Json(RollbackResponse {
+        log_entry_version_id: result.new_version_id.unwrap_or_default(),
+        effective_at: chrono::Utc::now().to_rfc3339(),
+        kind: didcomm_kind_str(result.kind).into(),
+        drain_until: None,
+        draining_mediator: result.draining_mediator,
+    }))
+}
+
+/// REST handler request body for didcomm rollback. The drain_ttl
+/// is optional — server applies the spec §3.6 default (24h) when
+/// omitted.
+#[derive(Debug, Deserialize)]
+pub struct RollbackDidcommHttpRequest {
+    #[serde(default)]
+    pub drain_ttl_secs: Option<u64>,
+}
+
+/// Unified rollback response shape used by both REST handlers.
+/// Wider than `ServiceMutationResponse` because rollback adds two
+/// concepts: a `kind` discriminator (so the CLI can print
+/// "rolled back to enabled at https://x.example.com" vs.
+/// "rollback was a no-op") and a `draining_mediator` field
+/// for the DIDComm update / disable arms.
+#[derive(Debug, Serialize)]
+pub struct RollbackResponse {
+    /// New WebVH LogEntry version-id. Empty string when the
+    /// rollback was a no-op (snapshot ≡ current state).
+    pub log_entry_version_id: String,
+    pub effective_at: String,
+    /// One of: `disabled`, `enabled`, `updated`, `no_op`.
+    pub kind: String,
+    /// `Some(rfc3339)` when the rollback scheduled a drain on
+    /// the previously-active mediator (DIDComm update / disable
+    /// arms). `None` for REST and for the DIDComm enable / no-op
+    /// arms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain_until: Option<String>,
+    /// Mediator DID currently being drained by this rollback's
+    /// dispatched op. `None` for REST and DIDComm enable / no-op
+    /// arms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draining_mediator: Option<String>,
+}
+
+fn rest_kind_str(k: RestRollbackKind) -> &'static str {
+    match k {
+        RestRollbackKind::Disabled => "disabled",
+        RestRollbackKind::Enabled => "enabled",
+        RestRollbackKind::Updated => "updated",
+        RestRollbackKind::NoOp => "no_op",
+    }
+}
+
+fn didcomm_kind_str(k: DidcommRollbackKind) -> &'static str {
+    match k {
+        DidcommRollbackKind::Disabled => "disabled",
+        DidcommRollbackKind::Enabled => "enabled",
+        DidcommRollbackKind::Updated => "updated",
+        DidcommRollbackKind::NoOp => "no_op",
+    }
+}
+
+#[derive(Debug)]
+pub enum RollbackRestHttpError {
+    Op(RollbackRestError),
+    DidResolverUnavailable,
+}
+
+impl From<RollbackRestError> for RollbackRestHttpError {
+    fn from(value: RollbackRestError) -> Self {
+        Self::Op(value)
+    }
+}
+
+impl IntoResponse for RollbackRestHttpError {
+    fn into_response(self) -> Response {
+        let (status, body) = match self {
+            Self::Op(RollbackRestError::NoPriorMutation) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "no_prior_mutation",
+                    message: "No prior REST mutation to roll back from.".into(),
+                    suggested_fix: Some(
+                        "Use `pnm services rest enable / update / disable` directly instead."
+                            .into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Op(RollbackRestError::DisableForward(DisableRestError::LastServiceRefused)) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "last_service_refused",
+                    message:
+                        "Rolling back this REST mutation would leave the VTA with no advertised \
+                         services. Enable DIDComm first and retry."
+                            .into(),
+                    suggested_fix: Some(
+                        "Run `pnm services didcomm enable --mediator <did>`, then retry rollback."
+                            .into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Op(other) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "rollback_failed",
+                    message: other.to_string(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+            Self::DidResolverUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorBody {
+                    error: "did_resolver_unavailable",
+                    message: "DID resolver not available on this VTA.".into(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+        };
+        (status, Json(body)).into_response()
+    }
+}
+
+#[derive(Debug)]
+pub enum RollbackDidcommHttpError {
+    Op(RollbackDidcommError),
+    DidResolverUnavailable,
+}
+
+impl From<RollbackDidcommError> for RollbackDidcommHttpError {
+    fn from(value: RollbackDidcommError) -> Self {
+        Self::Op(value)
+    }
+}
+
+impl IntoResponse for RollbackDidcommHttpError {
+    fn into_response(self) -> Response {
+        let (status, body) = match self {
+            Self::Op(RollbackDidcommError::NoPriorMutation) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "no_prior_mutation",
+                    message: "No prior DIDComm mutation to roll back from.".into(),
+                    suggested_fix: Some(
+                        "Use `pnm services didcomm enable / update / disable` directly instead."
+                            .into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Op(RollbackDidcommError::DisableForward(
+                DisableDidcommError::NoProtocolRemaining,
+            )) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "last_service_refused",
+                    message:
+                        "Rolling back this DIDComm mutation would leave the VTA with no advertised \
+                         services. Enable REST first and retry."
+                            .into(),
+                    suggested_fix: Some(
+                        "Run `pnm services rest enable --url <url>`, then retry rollback.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Op(other) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "rollback_failed",
+                    message: other.to_string(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+            Self::DidResolverUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorBody {
+                    error: "did_resolver_unavailable",
+                    message: "DID resolver not available on this VTA.".into(),
+                    suggested_fix: None,
                     stage: None,
                 },
             ),
