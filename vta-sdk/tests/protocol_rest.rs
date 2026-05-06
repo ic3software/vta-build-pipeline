@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use vta_sdk::client::VtaClient;
 use vta_sdk::error::VtaError;
 use vta_sdk::protocol::{
-    DisableDidcommRequest, DrainCancelRequest, EnableDidcommRequest, MigrateMediatorRequest,
+    DisableDidcommRequest, DrainCancelRequest, EnableDidcommRequest, UpdateDidcommRequest,
 };
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -114,13 +114,13 @@ async fn disable_didcomm_with_drain_window() {
     assert_eq!(resp.drains_until.as_deref(), Some("2026-05-12T00:00:00Z"));
 }
 
-// ── migrate_mediator ────────────────────────────────────────────────
+// ── update_didcomm ────────────────────────────────────────────────
 
 #[tokio::test]
-async fn migrate_mediator_posts_request() {
+async fn update_didcomm_posts_request() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/mediators/migrate"))
+        .and(path("/services/didcomm/update"))
         .and(auth())
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "new_version_id": "4-zVer",
@@ -133,20 +133,20 @@ async fn migrate_mediator_posts_request() {
         .mount(&server)
         .await;
     let c = client(&server).await;
-    let req = MigrateMediatorRequest::new("did:peer:2.new", 3600)
+    let req = UpdateDidcommRequest::new("did:peer:2.new", 3600)
         .force(false)
         .rollback(true)
         .handshake_timeout_secs(15);
-    let resp = c.migrate_mediator(req).await.unwrap();
+    let resp = c.update_didcomm(req).await.unwrap();
     assert_eq!(resp.active_mediator_did, "did:peer:2.new");
     assert_eq!(resp.prior_mediator_did, "did:peer:2.old");
 }
 
 #[tokio::test]
-async fn migrate_mediator_500_maps_to_server_error() {
+async fn update_didcomm_500_maps_to_server_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/mediators/migrate"))
+        .and(path("/services/didcomm/update"))
         .respond_with(
             ResponseTemplate::new(500).set_body_json(json!({"error": "handshake failed"})),
         )
@@ -154,7 +154,7 @@ async fn migrate_mediator_500_maps_to_server_error() {
         .await;
     let c = client(&server).await;
     let err = c
-        .migrate_mediator(MigrateMediatorRequest::new("did:peer:2.new", 3600))
+        .update_didcomm(UpdateDidcommRequest::new("did:peer:2.new", 3600))
         .await
         .unwrap_err();
     match err {

@@ -152,7 +152,7 @@ impl ListenerProver for DIDCommServiceProver {
             });
         }
 
-        // Listener stays up — caller (`migrate_mediator`) will
+        // Listener stays up — caller (`update_didcomm`) will
         // promote this mediator in the registry on success. On
         // any subsequent operation-level failure, the route layer
         // is responsible for cleanup; that's a known v1 gap (no

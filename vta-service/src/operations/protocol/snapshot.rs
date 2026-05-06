@@ -28,7 +28,7 @@
 //! describing the current state — a subsequent rollback would find
 //! snapshot ≡ current and is a no-op (handled in T3.1/T3.2). A
 //! crash between runtime mutation and LogEntry publication uses the
-//! existing transactional-rollback pattern from `migrate_mediator`.
+//! existing transactional-rollback pattern from `update_didcomm`.
 
 use serde::{Deserialize, Serialize};
 use vti_common::error::AppError;

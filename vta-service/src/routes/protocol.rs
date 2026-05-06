@@ -27,8 +27,8 @@ use crate::operations::protocol::enable_didcomm::{
     EnableDidcommError, EnableDidcommParams, enable_didcomm,
 };
 use crate::operations::protocol::enable_rest::{EnableRestError, EnableRestParams, enable_rest};
-use crate::operations::protocol::migrate_mediator::{
-    MigrateAuditKind, MigrateMediatorError, MigrateMediatorParams, migrate_mediator,
+use crate::operations::protocol::update_didcomm::{
+    MigrateAuditKind, UpdateDidcommError, UpdateDidcommParams, update_didcomm,
 };
 use crate::operations::protocol::update_rest::{UpdateRestError, UpdateRestParams, update_rest};
 use crate::server::AppState;
@@ -549,11 +549,11 @@ impl IntoResponse for DisableDidcommHttpError {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// migrate_mediator
+// update_didcomm
 // ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct MigrateMediatorRequest {
+pub struct UpdateDidcommRequest {
     pub new_mediator_did: String,
     pub drain_ttl_secs: u64,
     #[serde(default)]
@@ -566,7 +566,7 @@ pub struct MigrateMediatorRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct MigrateMediatorResponse {
+pub struct UpdateDidcommResponse {
     pub new_version_id: String,
     pub prior_mediator_did: String,
     pub active_mediator_did: String,
@@ -574,7 +574,7 @@ pub struct MigrateMediatorResponse {
     pub drains_until: String,
 }
 
-/// `POST /mediators/migrate` — change the active mediator. Auth:
+/// `POST /services/didcomm/update` — change the active mediator. Auth:
 /// super-admin. Runs the full pre-promotion handshake against the
 /// new mediator. Uses the live `DIDCommServiceProver` when the
 /// upstream DIDComm service is running and the VTA's secrets
@@ -582,16 +582,16 @@ pub struct MigrateMediatorResponse {
 /// falls back to [`AlwaysOkProver`]. The fallback path is hit
 /// when DIDComm hasn't started yet or when secrets aren't
 /// configured (e.g. mock test fixtures).
-pub async fn migrate_mediator_handler(
+pub async fn update_didcomm_handler(
     auth: SuperAdminAuth,
     State(state): State<AppState>,
-    Json(req): Json<MigrateMediatorRequest>,
-) -> Result<Json<MigrateMediatorResponse>, MigrateMediatorHttpError> {
+    Json(req): Json<UpdateDidcommRequest>,
+) -> Result<Json<UpdateDidcommResponse>, UpdateDidcommHttpError> {
     let bridge = Arc::clone(&state.didcomm_bridge);
     let did_resolver = state
         .did_resolver
         .as_ref()
-        .ok_or(MigrateMediatorHttpError::DidResolverUnavailable)?
+        .ok_or(UpdateDidcommHttpError::DidResolverUnavailable)?
         .clone();
 
     // Try to assemble a live prover. Falls back to AlwaysOk if
@@ -609,7 +609,7 @@ pub async fn migrate_mediator_handler(
         MigrateAuditKind::Forward
     };
 
-    // The migrate_mediator op takes a `&dyn ListenerProver` so
+    // The update_didcomm op takes a `&dyn ListenerProver` so
     // both branches need to materialize a concrete reference
     // before the call.
     let always_ok = AlwaysOkProver;
@@ -619,7 +619,7 @@ pub async fn migrate_mediator_handler(
             None => &always_ok,
         };
 
-    let result = migrate_mediator(
+    let result = update_didcomm(
         &state.config,
         &state.keys_ks,
         &state.contexts_ks,
@@ -635,7 +635,7 @@ pub async fn migrate_mediator_handler(
         &state.telemetry,
         prover_ref,
         &auth.0,
-        MigrateMediatorParams {
+        UpdateDidcommParams {
             new_mediator_did: req.new_mediator_did,
             drain_ttl: Duration::from_secs(req.drain_ttl_secs),
             force: req.force,
@@ -646,7 +646,7 @@ pub async fn migrate_mediator_handler(
     )
     .await?;
 
-    Ok(Json(MigrateMediatorResponse {
+    Ok(Json(UpdateDidcommResponse {
         new_version_id: result.new_version_id,
         prior_mediator_did: result.prior_mediator_did,
         active_mediator_did: result.active_mediator_did,
@@ -656,21 +656,21 @@ pub async fn migrate_mediator_handler(
 }
 
 #[derive(Debug)]
-pub enum MigrateMediatorHttpError {
-    Op(MigrateMediatorError),
+pub enum UpdateDidcommHttpError {
+    Op(UpdateDidcommError),
     DidResolverUnavailable,
 }
 
-impl From<MigrateMediatorError> for MigrateMediatorHttpError {
-    fn from(value: MigrateMediatorError) -> Self {
+impl From<UpdateDidcommError> for UpdateDidcommHttpError {
+    fn from(value: UpdateDidcommError) -> Self {
         Self::Op(value)
     }
 }
 
-impl IntoResponse for MigrateMediatorHttpError {
+impl IntoResponse for UpdateDidcommHttpError {
     fn into_response(self) -> Response {
         let (status, body) = match self {
-            Self::Op(MigrateMediatorError::DidcommNotEnabled) => (
+            Self::Op(UpdateDidcommError::DidcommNotEnabled) => (
                 StatusCode::CONFLICT,
                 ErrorBody {
                     error: "didcomm_not_enabled",
@@ -683,7 +683,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::SameAsActive(did)) => (
+            Self::Op(UpdateDidcommError::SameAsActive(did)) => (
                 StatusCode::CONFLICT,
                 ErrorBody {
                     error: "same_as_active",
@@ -692,7 +692,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::AlreadyDraining(did)) => (
+            Self::Op(UpdateDidcommError::AlreadyDraining(did)) => (
                 StatusCode::CONFLICT,
                 ErrorBody {
                     error: "already_draining",
@@ -703,7 +703,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::VtaDidNotConfigured) => (
+            Self::Op(UpdateDidcommError::VtaDidNotConfigured) => (
                 StatusCode::CONFLICT,
                 ErrorBody {
                     error: "vta_did_not_configured",
@@ -714,7 +714,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::VtaDidRecordMissing(did)) => (
+            Self::Op(UpdateDidcommError::VtaDidRecordMissing(did)) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody {
                     error: "vta_did_record_missing",
@@ -725,7 +725,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::VtaDidLogMissing(did)) => (
+            Self::Op(UpdateDidcommError::VtaDidLogMissing(did)) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody {
                     error: "vta_did_log_missing",
@@ -736,7 +736,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::EmptyLog) => (
+            Self::Op(UpdateDidcommError::EmptyLog) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody {
                     error: "vta_did_log_empty",
@@ -747,7 +747,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::NoActiveMediator) => (
+            Self::Op(UpdateDidcommError::NoActiveMediator) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody {
                     error: "no_active_mediator",
@@ -760,7 +760,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::Handshake(HandshakeError::Failed { stage, cause })) => {
+            Self::Op(UpdateDidcommError::Handshake(HandshakeError::Failed { stage, cause })) => {
                 (
                     StatusCode::BAD_GATEWAY,
                     ErrorBody {
@@ -779,7 +779,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     },
                 )
             }
-            Self::Op(MigrateMediatorError::DocumentPatch(e)) => (
+            Self::Op(UpdateDidcommError::DocumentPatch(e)) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody {
                     error: "document_patch_failed",
@@ -788,7 +788,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::WebVHUpdate(e)) => (
+            Self::Op(UpdateDidcommError::WebVHUpdate(e)) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody {
                     error: "webvh_update_failed",
@@ -797,7 +797,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::ConfigPersistence(e)) => (
+            Self::Op(UpdateDidcommError::ConfigPersistence(e)) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody {
                     error: "config_persistence_failed",
@@ -809,7 +809,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::Registry(e)) => (
+            Self::Op(UpdateDidcommError::Registry(e)) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody {
                     error: "registry_failed",
@@ -818,7 +818,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::Auth(e)) => (
+            Self::Op(UpdateDidcommError::Auth(e)) => (
                 StatusCode::FORBIDDEN,
                 ErrorBody {
                     error: "forbidden",
@@ -829,7 +829,7 @@ impl IntoResponse for MigrateMediatorHttpError {
                     stage: None,
                 },
             ),
-            Self::Op(MigrateMediatorError::Storage(e)) => (
+            Self::Op(UpdateDidcommError::Storage(e)) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorBody {
                     error: "storage_failed",
@@ -1050,7 +1050,7 @@ impl IntoResponse for MediatorReportHttpError {
 ///
 /// The fallback isn't a code-quality cop-out — it's the
 /// intended behaviour when DIDComm isn't running. The live prover
-/// is only meaningful for `migrate_mediator` and `mediator
+/// is only meaningful for `update_didcomm` and `mediator
 /// rollback`, where DIDComm is by definition already up.
 async fn build_live_prover(
     state: &AppState,

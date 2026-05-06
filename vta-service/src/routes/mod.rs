@@ -237,8 +237,8 @@ pub fn router() -> Router<AppState> {
             post(protocol::disable_rest_handler),
         )
         .route(
-            "/mediators/migrate",
-            post(protocol::migrate_mediator_handler),
+            "/services/didcomm/update",
+            post(protocol::update_didcomm_handler),
         )
         .route(
             "/mediators/drain/cancel",

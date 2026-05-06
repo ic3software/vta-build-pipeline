@@ -6,7 +6,7 @@
 //! and `report` arrive in P4.3 / P4.4.
 
 use vta_sdk::client::VtaClient;
-use vta_sdk::protocol::{DrainCancelRequest, MigrateMediatorRequest};
+use vta_sdk::protocol::{DrainCancelRequest, UpdateDidcommRequest};
 
 /// `pnm mediator migrate --to <did> --drain-ttl <secs> [--force]
 ///                       [--handshake-timeout <secs>]`.
@@ -61,13 +61,13 @@ async fn run_migrate(
     handshake_timeout_secs: Option<u64>,
     rollback: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut req = MigrateMediatorRequest::new(&new_mediator_did, drain_ttl_secs);
+    let mut req = UpdateDidcommRequest::new(&new_mediator_did, drain_ttl_secs);
     req.force = force;
     req.handshake_timeout_secs = handshake_timeout_secs;
     req.rollback = rollback;
 
     let resp = client
-        .migrate_mediator(req)
+        .update_didcomm(req)
         .await
         .map_err(|e| format!("{e}"))?;
 

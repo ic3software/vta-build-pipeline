@@ -369,8 +369,8 @@ pub fn build_handler(
                 handler_fn(super::handlers_protocol::handle_disable_rest),
             )?
             .route(
-                protocol_management::MIGRATE_MEDIATOR,
-                handler_fn(super::handlers_protocol::handle_migrate_mediator),
+                protocol_management::UPDATE_DIDCOMM,
+                handler_fn(super::handlers_protocol::handle_update_didcomm),
             )?
             .route(
                 protocol_management::DRAIN_CANCEL,

@@ -84,7 +84,7 @@ pub enum TelemetryKind {
     MediatorHandshakeOk,
     MediatorHandshakeFailed,
     MediatorHandshakeBypassed,
-    MediatorMigrateStart,
+    ServicesDidcommUpdate,
     MediatorDrainStart,
     MediatorDrainCancel,
     MediatorDrainExpire,
@@ -227,7 +227,7 @@ mod swappability_tests {
         .await
         .unwrap();
         sink.record(
-            TelemetryEvent::new(TelemetryKind::MediatorMigrateStart).with_mediator("did:m:B"),
+            TelemetryEvent::new(TelemetryKind::ServicesDidcommUpdate).with_mediator("did:m:B"),
         )
         .await
         .unwrap();

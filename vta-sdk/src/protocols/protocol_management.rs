@@ -53,12 +53,24 @@ pub const DISABLE_REST: &str =
 pub const DISABLE_REST_RESULT: &str =
     "https://firstperson.network/protocols/services-management/1.0/rest-disable-result";
 
-// ── mediator-management ─────────────────────────────────────────────
+// ── services-management (DIDComm side, continued) ───────────────────
 
-pub const MIGRATE_MEDIATOR: &str =
-    "https://firstperson.network/protocols/mediator-management/1.0/migrate";
-pub const MIGRATE_MEDIATOR_RESULT: &str =
-    "https://firstperson.network/protocols/mediator-management/1.0/migrate-result";
+// T2.3 rename — was MIGRATE_MEDIATOR / mediator-management/1.0/migrate.
+// The operation isn't really "migrating the mediator," it's updating
+// which mediator the DIDComm service is using (spec §3.4). Renamed
+// end-to-end (URL, Rust constant, request / response types, handler
+// functions, telemetry kind) to align with the unified
+// `services {kind} {verb}` surface.
+pub const UPDATE_DIDCOMM: &str =
+    "https://firstperson.network/protocols/services-management/1.0/didcomm-update";
+pub const UPDATE_DIDCOMM_RESULT: &str =
+    "https://firstperson.network/protocols/services-management/1.0/didcomm-update-result";
+
+// ── mediator-management (drain bookkeeping only) ────────────────────
+//
+// These remain under mediator-management/ — they operate on the
+// drain set, not the active mediator advertisement, so the original
+// name is still accurate.
 
 pub const DRAIN_CANCEL: &str =
     "https://firstperson.network/protocols/mediator-management/1.0/drain-cancel";

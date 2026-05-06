@@ -400,7 +400,7 @@ impl MediatorListenerRegistry {
         let _ = self
             .telemetry
             .record(
-                TelemetryEvent::new(TelemetryKind::MediatorMigrateStart)
+                TelemetryEvent::new(TelemetryKind::ServicesDidcommUpdate)
                     .with_mediator(&mediator_did)
                     .with_field(
                         "from",
@@ -968,7 +968,7 @@ mod tests {
         reg.record_activate(binding("did:m:A", "wss://A")).await;
         let events = sink.query(&TelemetryFilter::new()).await.unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, TelemetryKind::MediatorMigrateStart);
+        assert_eq!(events[0].kind, TelemetryKind::ServicesDidcommUpdate);
         assert_eq!(events[0].mediator_did.as_deref(), Some("did:m:A"));
     }
 

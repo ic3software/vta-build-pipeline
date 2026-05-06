@@ -191,7 +191,7 @@ pub async fn enable_didcomm(
     // Register the mediator as active. The caller (the route layer)
     // is responsible for opening the upstream listener if it isn't
     // already; the registry's `record_activate` updates state +
-    // emits the `MediatorMigrateStart` telemetry event.
+    // emits the `ServicesDidcommUpdate` telemetry event.
     registry
         .record_activate(MediatorBinding {
             mediator_did: resolved.mediator_did.clone(),

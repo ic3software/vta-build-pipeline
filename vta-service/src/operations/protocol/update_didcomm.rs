@@ -1,4 +1,4 @@
-//! `migrate_mediator` operation.
+//! `update_didcomm` operation.
 //!
 //! Spec: `docs/05-design-notes/didcomm-protocol-management.md`
 //! success criteria #4, #5, #6 (rollback alias), #11, #13, #14.
@@ -6,7 +6,7 @@
 //! Sequence (under [`PROTOCOL_LOCK`]):
 //! 1. Verify caller is super-admin.
 //! 2. Confirm `services.didcomm` is `true` (refuse with
-//!    [`MigrateMediatorError::DidcommNotEnabled`] otherwise — the
+//!    [`UpdateDidcommError::DidcommNotEnabled`] otherwise — the
 //!    operator should `services enable didcomm` first).
 //! 3. Confirm the new mediator differs from the active one and
 //!    isn't already in drain state.
@@ -18,7 +18,7 @@
 //! 6. Persist `messaging.mediator_did = new`.
 //! 7. Promote the new mediator in the registry; place the prior
 //!    mediator in drain state with the operator-supplied TTL.
-//! 8. Emit `MediatorMigrateStart` telemetry distinct from
+//! 8. Emit `ServicesDidcommUpdate` telemetry distinct from
 //!    rollbacks (`audit_kind` field).
 
 use std::sync::Arc;
@@ -71,7 +71,7 @@ impl MigrateAuditKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct MigrateMediatorParams {
+pub struct UpdateDidcommParams {
     pub new_mediator_did: String,
     pub drain_ttl: Duration,
     pub force: bool,
@@ -80,7 +80,7 @@ pub struct MigrateMediatorParams {
 }
 
 #[derive(Debug, Clone)]
-pub struct MigrateMediatorResult {
+pub struct UpdateDidcommResult {
     pub new_version_id: String,
     pub prior_mediator_did: String,
     pub active_mediator_did: String,
@@ -89,7 +89,7 @@ pub struct MigrateMediatorResult {
 }
 
 #[derive(Debug, Error)]
-pub enum MigrateMediatorError {
+pub enum UpdateDidcommError {
     #[error(
         "DIDComm is not currently enabled. Use `pnm services enable didcomm --mediator-did <did>` first."
     )]
@@ -131,14 +131,14 @@ pub enum MigrateMediatorError {
     Storage(String),
 }
 
-impl From<AppError> for MigrateMediatorError {
+impl From<AppError> for UpdateDidcommError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn migrate_mediator(
+pub async fn update_didcomm(
     config: &Arc<RwLock<AppConfig>>,
     keys_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
@@ -154,11 +154,11 @@ pub async fn migrate_mediator(
     telemetry: &SharedTelemetrySink,
     prover: &(dyn ListenerProver + Send + Sync),
     auth: &AuthClaims,
-    params: MigrateMediatorParams,
+    params: UpdateDidcommParams,
     channel: &str,
-) -> Result<MigrateMediatorResult, MigrateMediatorError> {
+) -> Result<UpdateDidcommResult, UpdateDidcommError> {
     auth.require_super_admin()
-        .map_err(|e| MigrateMediatorError::Auth(e.to_string()))?;
+        .map_err(|e| UpdateDidcommError::Auth(e.to_string()))?;
 
     let _guard = PROTOCOL_LOCK.lock().await;
 
@@ -196,7 +196,7 @@ pub async fn migrate_mediator(
         }),
     )
     .await
-    .map_err(|e| MigrateMediatorError::Storage(format!("snapshot write: {e}")))?;
+    .map_err(|e| UpdateDidcommError::Storage(format!("snapshot write: {e}")))?;
 
     // Patch document: replace #vta-didcomm to point at new
     // mediator. Preserves verificationMethod byte-identical.
@@ -236,7 +236,7 @@ pub async fn migrate_mediator(
 
     let deadline = Utc::now()
         + chrono::Duration::from_std(params.drain_ttl).map_err(|e| {
-            MigrateMediatorError::ConfigPersistence(format!("drain TTL out of range: {e}"))
+            UpdateDidcommError::ConfigPersistence(format!("drain TTL out of range: {e}"))
         })?;
     let prior_endpoint = best_effort_endpoint(did_resolver, &prior_mediator).await;
     registry
@@ -247,7 +247,7 @@ pub async fn migrate_mediator(
 
     let _ = telemetry
         .record(
-            TelemetryEvent::new(TelemetryKind::MediatorMigrateStart)
+            TelemetryEvent::new(TelemetryKind::ServicesDidcommUpdate)
                 .with_mediator(&resolved.mediator_did)
                 .with_field("from", JsonValue::from(prior_mediator.clone()))
                 .with_field("audit_kind", JsonValue::from(params.audit_kind.as_str()))
@@ -271,7 +271,7 @@ pub async fn migrate_mediator(
         "mediator migrated"
     );
 
-    Ok(MigrateMediatorResult {
+    Ok(UpdateDidcommResult {
         new_version_id: update_result.new_version_id,
         prior_mediator_did: prior_mediator,
         active_mediator_did: resolved.mediator_did,
@@ -284,34 +284,34 @@ async fn read_preconditions(
     config: &Arc<RwLock<AppConfig>>,
     registry: &MediatorListenerRegistry,
     webvh_ks: &KeyspaceHandle,
-    params: &MigrateMediatorParams,
-) -> Result<(String, String, JsonValue, String), MigrateMediatorError> {
+    params: &UpdateDidcommParams,
+) -> Result<(String, String, JsonValue, String), UpdateDidcommError> {
     let cfg = config.read().await;
     if !cfg.services.didcomm {
-        return Err(MigrateMediatorError::DidcommNotEnabled);
+        return Err(UpdateDidcommError::DidcommNotEnabled);
     }
     let vta_did = cfg
         .vta_did
         .clone()
-        .ok_or(MigrateMediatorError::VtaDidNotConfigured)?;
+        .ok_or(UpdateDidcommError::VtaDidNotConfigured)?;
     drop(cfg);
 
     let record = webvh_store::get_did(webvh_ks, &vta_did)
         .await?
-        .ok_or_else(|| MigrateMediatorError::VtaDidRecordMissing(vta_did.clone()))?;
+        .ok_or_else(|| UpdateDidcommError::VtaDidRecordMissing(vta_did.clone()))?;
     let scid = record.scid.clone();
 
     let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
         .await?
-        .ok_or_else(|| MigrateMediatorError::VtaDidLogMissing(vta_did.clone()))?;
+        .ok_or_else(|| UpdateDidcommError::VtaDidLogMissing(vta_did.clone()))?;
     let current_doc = current_document_from_log(&did_log)?;
 
     let prior_mediator = current_didcomm_service(&current_doc)
         .map(|s| s.mediator_did)
-        .ok_or(MigrateMediatorError::NoActiveMediator)?;
+        .ok_or(UpdateDidcommError::NoActiveMediator)?;
 
     if prior_mediator == params.new_mediator_did {
-        return Err(MigrateMediatorError::SameAsActive(prior_mediator));
+        return Err(UpdateDidcommError::SameAsActive(prior_mediator));
     }
 
     // Refuse migrate to a draining mediator — the operator should
@@ -323,7 +323,7 @@ async fn read_preconditions(
             .await
             .is_some()
     {
-        return Err(MigrateMediatorError::AlreadyDraining(
+        return Err(UpdateDidcommError::AlreadyDraining(
             params.new_mediator_did.clone(),
         ));
     }
@@ -331,14 +331,14 @@ async fn read_preconditions(
     Ok((vta_did, scid, current_doc, prior_mediator))
 }
 
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, MigrateMediatorError> {
+fn current_document_from_log(did_log: &str) -> Result<JsonValue, UpdateDidcommError> {
     use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
     let line = did_log
         .lines()
         .rfind(|l| !l.trim().is_empty())
-        .ok_or(MigrateMediatorError::EmptyLog)?;
+        .ok_or(UpdateDidcommError::EmptyLog)?;
     let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| MigrateMediatorError::Storage(format!("DID log line parse: {e}")))?;
+        .map_err(|e| UpdateDidcommError::Storage(format!("DID log line parse: {e}")))?;
     Ok(entry.get_state().clone())
 }
 
@@ -346,7 +346,7 @@ async fn persist_new_mediator(
     config: &Arc<RwLock<AppConfig>>,
     mediator_did: &str,
     mediator_endpoint: &str,
-) -> Result<(), MigrateMediatorError> {
+) -> Result<(), UpdateDidcommError> {
     let (contents, path) = {
         let mut cfg = config.write().await;
         cfg.messaging = Some(MessagingConfig {
@@ -355,12 +355,12 @@ async fn persist_new_mediator(
             mediator_host: None,
         });
         let contents = toml::to_string_pretty(&*cfg)
-            .map_err(|e| MigrateMediatorError::ConfigPersistence(e.to_string()))?;
+            .map_err(|e| UpdateDidcommError::ConfigPersistence(e.to_string()))?;
         let path = cfg.config_path.clone();
         (contents, path)
     };
     std::fs::write(&path, contents)
-        .map_err(|e| MigrateMediatorError::ConfigPersistence(e.to_string()))?;
+        .map_err(|e| UpdateDidcommError::ConfigPersistence(e.to_string()))?;
     Ok(())
 }
 
@@ -455,8 +455,8 @@ mod tests {
         .unwrap()
     }
 
-    fn forward_params(new_mediator: &str) -> MigrateMediatorParams {
-        MigrateMediatorParams {
+    fn forward_params(new_mediator: &str) -> UpdateDidcommParams {
+        UpdateDidcommParams {
             new_mediator_did: new_mediator.into(),
             drain_ttl: Duration::from_secs(3600),
             force: false,
@@ -480,7 +480,7 @@ mod tests {
         let prover = AlwaysOkProver;
         let seed = dummy_seed(dir.path());
 
-        let err = migrate_mediator(
+        let err = update_didcomm(
             &config,
             &keys_ks,
             &contexts_ks,
@@ -501,7 +501,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, MigrateMediatorError::DidcommNotEnabled));
+        assert!(matches!(err, UpdateDidcommError::DidcommNotEnabled));
     }
 
     #[tokio::test]
@@ -520,7 +520,7 @@ mod tests {
         let prover = AlwaysOkProver;
         let seed = dummy_seed(dir.path());
 
-        let err = migrate_mediator(
+        let err = update_didcomm(
             &config,
             &keys_ks,
             &contexts_ks,
@@ -541,7 +541,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, MigrateMediatorError::VtaDidNotConfigured));
+        assert!(matches!(err, UpdateDidcommError::VtaDidNotConfigured));
     }
 
     #[tokio::test]
@@ -582,7 +582,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = migrate_mediator(
+        let err = update_didcomm(
             &config,
             &keys_ks,
             &contexts_ks,
@@ -610,8 +610,8 @@ mod tests {
         // either VtaDidRecordMissing or AlreadyDraining since both
         // are valid refusal modes.
         assert!(
-            matches!(err, MigrateMediatorError::VtaDidRecordMissing(_))
-                || matches!(err, MigrateMediatorError::AlreadyDraining(_)),
+            matches!(err, UpdateDidcommError::VtaDidRecordMissing(_))
+                || matches!(err, UpdateDidcommError::AlreadyDraining(_)),
             "expected refusal, got {err:?}"
         );
     }

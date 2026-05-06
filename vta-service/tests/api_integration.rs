@@ -2949,11 +2949,11 @@ async fn mediator_report_returns_empty_report_when_no_traffic() {
 
 #[cfg(feature = "webvh")]
 #[tokio::test]
-async fn migrate_mediator_unauthenticated_returns_401() {
+async fn update_didcomm_unauthenticated_returns_401() {
     let (app, _ctx) = TestApp::new().await;
     let req = Request::builder()
         .method("POST")
-        .uri("/mediators/migrate")
+        .uri("/services/didcomm/update")
         .header("content-type", "application/json")
         .body(Body::from(
             json!({
@@ -2969,12 +2969,12 @@ async fn migrate_mediator_unauthenticated_returns_401() {
 
 #[cfg(feature = "webvh")]
 #[tokio::test]
-async fn migrate_mediator_returns_typed_error_body() {
+async fn update_didcomm_returns_typed_error_body() {
     let (app, ctx) = TestApp::new().await;
     let token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
     let (_status, body) = app
         .request(post_auth(
-            "/mediators/migrate",
+            "/services/didcomm/update",
             &token,
             json!({
                 "new_mediator_did": "did:key:z6MkBogus",
@@ -3002,7 +3002,7 @@ async fn rollback_routes_via_migrate_with_rollback_flag() {
     let token = ctx.auth_token("did:key:z6MkSuper", "admin", vec![]).await;
     let (_status, body) = app
         .request(post_auth(
-            "/mediators/migrate",
+            "/services/didcomm/update",
             &token,
             json!({
                 "new_mediator_did": "did:key:z6MkBogus",

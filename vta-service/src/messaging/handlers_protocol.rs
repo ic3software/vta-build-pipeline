@@ -35,10 +35,10 @@ use crate::operations::protocol::disable_didcomm::{
 use crate::operations::protocol::disable_rest::{DisableRestParams, disable_rest};
 use crate::operations::protocol::drain_cancel::{DrainCancelParams, drain_cancel};
 use crate::operations::protocol::enable_rest::{EnableRestParams, enable_rest};
-use crate::operations::protocol::migrate_mediator::{
-    MigrateAuditKind, MigrateMediatorParams, migrate_mediator,
-};
 use crate::operations::protocol::report::{ReportParams, mediator_report};
+use crate::operations::protocol::update_didcomm::{
+    MigrateAuditKind, UpdateDidcommParams, update_didcomm,
+};
 use crate::operations::protocol::update_rest::{UpdateRestParams, update_rest};
 
 type HandlerResult = Result<Option<DIDCommResponse>, DIDCommServiceError>;
@@ -142,10 +142,10 @@ pub async fn handle_disable_didcomm(
     }
 }
 
-// ── migrate_mediator over DIDComm ───────────────────────────────────
+// ── update_didcomm over DIDComm ───────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct MigrateMediatorBody {
+struct UpdateDidcommBody {
     new_mediator_did: String,
     drain_ttl_secs: u64,
     #[serde(default)]
@@ -156,7 +156,7 @@ struct MigrateMediatorBody {
     rollback: bool,
 }
 
-pub async fn handle_migrate_mediator(
+pub async fn handle_update_didcomm(
     _ctx: HandlerContext,
     message: Message,
     Extension(state): Extension<Arc<VtaState>>,
@@ -166,7 +166,7 @@ pub async fn handle_migrate_mediator(
         Err(e) => return Ok(Some(problem_report_unauthorized(e.to_string()))),
     };
 
-    let body: MigrateMediatorBody = serde_json::from_value(message.body).map_err(handler_err)?;
+    let body: UpdateDidcommBody = serde_json::from_value(message.body).map_err(handler_err)?;
 
     // For DIDComm transport we use AlwaysOkProver — see comment in
     // routes/protocol.rs::build_live_prover. Same fallback rationale
@@ -181,7 +181,7 @@ pub async fn handle_migrate_mediator(
         MigrateAuditKind::Forward
     };
 
-    let result = migrate_mediator(
+    let result = update_didcomm(
         &state.config,
         &state.keys_ks,
         &state.contexts_ks,
@@ -200,7 +200,7 @@ pub async fn handle_migrate_mediator(
         &state.telemetry,
         &prover,
         &auth,
-        MigrateMediatorParams {
+        UpdateDidcommParams {
             new_mediator_did: body.new_mediator_did,
             drain_ttl: Duration::from_secs(body.drain_ttl_secs),
             force: body.force,
@@ -211,10 +211,10 @@ pub async fn handle_migrate_mediator(
     )
     .await;
 
-    use crate::operations::protocol::migrate_mediator::MigrateMediatorError;
+    use crate::operations::protocol::update_didcomm::UpdateDidcommError;
     match result {
         Ok(r) => response(
-            protocol_management::MIGRATE_MEDIATOR_RESULT,
+            protocol_management::UPDATE_DIDCOMM_RESULT,
             &serde_json::json!({
                 "new_version_id": r.new_version_id,
                 "prior_mediator_did": r.prior_mediator_did,
@@ -223,16 +223,16 @@ pub async fn handle_migrate_mediator(
                 "drains_until": r.drains_until.to_rfc3339(),
             }),
         ),
-        Err(MigrateMediatorError::DidcommNotEnabled) => Ok(Some(problem_report_conflict(
+        Err(UpdateDidcommError::DidcommNotEnabled) => Ok(Some(problem_report_conflict(
             "DIDComm is not currently enabled",
         ))),
-        Err(MigrateMediatorError::SameAsActive(did)) => Ok(Some(problem_report_conflict(format!(
+        Err(UpdateDidcommError::SameAsActive(did)) => Ok(Some(problem_report_conflict(format!(
             "{did} is already the active mediator"
         )))),
-        Err(MigrateMediatorError::AlreadyDraining(did)) => Ok(Some(problem_report_conflict(
+        Err(UpdateDidcommError::AlreadyDraining(did)) => Ok(Some(problem_report_conflict(
             format!("{did} is currently in drain state — cancel or rollback first"),
         ))),
-        Err(MigrateMediatorError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
+        Err(UpdateDidcommError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
         Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
     }
 }

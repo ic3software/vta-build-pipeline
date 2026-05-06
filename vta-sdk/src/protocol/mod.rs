@@ -141,28 +141,33 @@ impl VtaClient {
         .await
     }
 
-    /// Migrate the active mediator. Runs the pre-promotion
-    /// handshake against the new mediator and places the prior
-    /// mediator in drain state for the requested TTL.
-    pub async fn migrate_mediator(
+    /// Update which DIDComm mediator the VTA's `#vta-didcomm`
+    /// service entry advertises. Runs the pre-promotion handshake
+    /// against the new mediator and places the prior mediator in
+    /// drain state for the requested TTL.
+    ///
+    /// (T2.3 rename — was `migrate_mediator`. Operation is the
+    /// same; the naming aligns with the unified `services
+    /// {kind} {verb}` surface.)
+    pub async fn update_didcomm(
         &self,
-        req: MigrateMediatorRequest,
-    ) -> Result<MigrateMediatorResponse, VtaError> {
+        req: UpdateDidcommRequest,
+    ) -> Result<UpdateDidcommResponse, VtaError> {
         self.rpc(
-            protocol_management::MIGRATE_MEDIATOR,
+            protocol_management::UPDATE_DIDCOMM,
             serde_json::to_value(&req)?,
-            protocol_management::MIGRATE_MEDIATOR_RESULT,
+            protocol_management::UPDATE_DIDCOMM_RESULT,
             120,
-            |c, url| c.post(format!("{url}/mediators/migrate")).json(&req),
+            |c, url| c.post(format!("{url}/services/didcomm/update")).json(&req),
         )
         .await
     }
 }
 
-/// Request body for `POST /mediators/migrate`.
+/// Request body for `POST /services/didcomm/update`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[must_use]
-pub struct MigrateMediatorRequest {
+pub struct UpdateDidcommRequest {
     pub new_mediator_did: String,
     pub drain_ttl_secs: u64,
     #[serde(default)]
@@ -174,7 +179,7 @@ pub struct MigrateMediatorRequest {
     pub rollback: bool,
 }
 
-impl MigrateMediatorRequest {
+impl UpdateDidcommRequest {
     pub fn new(new_mediator_did: impl Into<String>, drain_ttl_secs: u64) -> Self {
         Self {
             new_mediator_did: new_mediator_did.into(),
@@ -202,7 +207,7 @@ impl MigrateMediatorRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MigrateMediatorResponse {
+pub struct UpdateDidcommResponse {
     pub new_version_id: String,
     pub prior_mediator_did: String,
     pub active_mediator_did: String,
