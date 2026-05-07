@@ -1667,10 +1667,10 @@ impl VtaClient {
     ///   shared library function as REST; only the I/O differs.
     ///
     /// In DIDComm mode, the session's `client_did` must already
-    /// hold admin role in the target context's ACL. The VTA
-    /// rejects with `Forbidden` (mapped to [`VtaError::Auth`]) if
-    /// the DIDComm sender DID and the VP's holder DID disagree —
-    /// privilege-laundering guard.
+    /// hold admin role in the target context's ACL. Sender and VP
+    /// holder may legitimately differ — the air-gap onboarding flow
+    /// relies on this, since the bundle is HPKE-sealed to the VP
+    /// holder's X25519 derivation and the relayer can't decrypt it.
     #[cfg(feature = "provision-integration")]
     pub async fn provision_integration(
         &self,
@@ -1698,6 +1698,7 @@ impl VtaClient {
                     req.context,
                     req.assertion,
                     req.vc_validity_seconds,
+                    req.create_context,
                 )
                 .await
             }

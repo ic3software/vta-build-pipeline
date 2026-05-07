@@ -56,12 +56,18 @@ const DEFAULT_TIMEOUT_SECS: u64 = 60;
 /// `adminTemplate`).
 ///
 /// `assertion` defaults to [`AssertionMode::DidSigned`] when `None`.
+///
+/// `create_context` opts into super-admin context creation when the
+/// target context isn't yet registered — same semantics as the REST
+/// path. Default is `false` (caller must have created the context
+/// out-of-band).
 pub async fn provision_integration_didcomm(
     session: &DIDCommSession,
     request: BootstrapRequest,
     context: String,
     assertion: Option<AssertionMode>,
     vc_validity_seconds: Option<i64>,
+    create_context: bool,
 ) -> Result<ProvisionIntegrationResponse, VtaError> {
     // No "session DID must equal VP holder" pre-check. The flow is
     // intentionally layered (outer authcrypt = relayer, inner VP =
@@ -71,11 +77,7 @@ pub async fn provision_integration_didcomm(
         context,
         assertion,
         vc_validity_seconds,
-        // The DIDComm SDK helper exposes only the fields useful in
-        // most contexts; callers that need `create_context` should
-        // construct `ProvisionIntegrationRequest` directly and call
-        // `VtaClient::provision_integration`.
-        create_context: false,
+        create_context,
     };
     let body = serde_json::to_value(&body_struct).map_err(VtaError::from)?;
 
