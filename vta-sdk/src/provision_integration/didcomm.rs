@@ -11,10 +11,21 @@
 //! bootstrap, use the `vta bootstrap provision-integration` CLI on the
 //! VTA host.
 //!
-//! Auth model: DIDComm authcrypt authenticates the sender; the VTA
-//! also verifies the VP's `DataIntegrityProof` and rejects with a
-//! `Forbidden` problem-report when the DIDComm sender DID and the VP
-//! holder DID disagree (privilege-laundering guard).
+//! Auth model — layered like an onion. The DIDComm authcrypt
+//! sender authenticates the *relayer* and is gated by the VTA's
+//! ACL (sender must be admin in the target context). Inside the
+//! body, the VP's `DataIntegrityProof` authenticates the *holder*
+//! — the bundle is HPKE-sealed to the holder's X25519 derivation,
+//! so only the holder can open it. Sender and holder may legitimately
+//! differ; the air-gap onboarding flow relies on this:
+//!
+//!   1. Third-party integration (air-gapped) signs a BootstrapRequest
+//!      with its own ephemeral did:key.
+//!   2. Request is transferred to the operator's host.
+//!   3. Operator's PNM relays the request over its DIDComm session.
+//!   4. VTA issues the bundle, sealed to the integration.
+//!   5. Operator carries the (encrypted) bundle back across the
+//!      air-gap; only the integration can decrypt.
 
 use crate::didcomm_session::DIDCommSession;
 use crate::error::VtaError;
@@ -24,15 +35,6 @@ use crate::protocols::provision_integration_management::{
 
 use super::BootstrapRequest;
 use super::http::{AssertionMode, ProvisionIntegrationRequest, ProvisionIntegrationResponse};
-
-/// Read the `holder` DID from a `BootstrapRequest` VP without
-/// running full signature verification. The VP's structural shape
-/// guarantees `holder` is present at this path; signature
-/// verification is the VTA's job. Surfaced separately so the
-/// DIDComm dispatch can pre-check sender == holder before sending.
-fn vp_holder_did(req: &BootstrapRequest) -> &str {
-    req.holder.as_str()
-}
 
 /// Default DIDComm round-trip timeout (seconds). Generous so the VTA
 /// has time to mint keys, render templates, build the webvh log, and
@@ -61,23 +63,9 @@ pub async fn provision_integration_didcomm(
     assertion: Option<AssertionMode>,
     vc_validity_seconds: Option<i64>,
 ) -> Result<ProvisionIntegrationResponse, VtaError> {
-    // Pre-flight: the VTA enforces `DIDCommSender == VP holder`
-    // (privilege-laundering guard). Catch the mismatch here so the
-    // operator gets a focused error instead of a misleading
-    // "Forbidden" round-trip — and so the suggested fix points at
-    // REST transport, which is the right path for the relay use
-    // case.
-    if session.client_did() != vp_holder_did(&request) {
-        return Err(VtaError::UnsupportedTransport(format!(
-            "DIDComm transport requires the session DID `{}` to match the VP holder `{}`. \
-             To relay a VP signed by a different holder, use REST transport — \
-             rebuild the client with `VtaClient::from_credential` / `VtaClient::new` \
-             instead of `connect_didcomm`.",
-            session.client_did(),
-            vp_holder_did(&request),
-        )));
-    }
-
+    // No "session DID must equal VP holder" pre-check. The flow is
+    // intentionally layered (outer authcrypt = relayer, inner VP =
+    // holder); see the module-level docs for the air-gap rationale.
     let body_struct = ProvisionIntegrationRequest {
         request,
         context,

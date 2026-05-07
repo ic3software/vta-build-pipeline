@@ -1168,17 +1168,34 @@ pub async fn handle_provision_integration(
         }
     };
 
-    // Enforce DIDComm-sender == VP-holder. Without this check, an
-    // ACL-registered admin could relay a VP signed by anyone else
-    // and the VTA would issue a bundle binding the *VP holder* (not
-    // the relayer) to a fresh admin DID — a privilege-laundering vector.
-    if auth.did != verified.holder() {
-        return Ok(Some(app_err_to_response(AppError::Forbidden(format!(
-            "DIDComm sender '{}' does not match VP holder '{}'",
-            auth.did,
-            verified.holder()
-        )))));
-    }
+    // No "sender must equal VP holder" check — by design.
+    //
+    // The provision-integration flow is layered like an onion:
+    //
+    //   * Outer (DIDComm authcrypt): the *relayer* is
+    //     authenticated by the authcrypt sender. ACL authorization
+    //     above (`auth_from_message` + the upstream context-admin
+    //     check) gates whether the relayer is allowed to make the
+    //     call.
+    //   * Inner (VP): the *holder* is authenticated by the VP's
+    //     `DataIntegrityProof`. The VTA issues a bundle bound to
+    //     this holder and HPKE-sealed to the holder's X25519
+    //     derivation.
+    //
+    // Sender ≠ holder is the **air-gap onboarding** case: a
+    // third-party integration on a disconnected network signs a
+    // BootstrapRequest using its own ephemeral did:key, ships the
+    // request to the operator, and the operator's PNM relays it to
+    // the VTA. The bundle returned is encrypted to the integration
+    // and only the integration can open it — the relayer carries
+    // ciphertext back across the air-gap. There is no
+    // privilege-laundering: the relayer can't decrypt the bundle,
+    // and the VP signature requires the holder's private key (so
+    // the relayer can't forge a VP claiming to be a third party
+    // either).
+    //
+    // Same model as the REST path, where `auth.did` (the bearer
+    // token's DID) and the VP holder can also legitimately differ.
 
     let assertion_mode = body
         .assertion

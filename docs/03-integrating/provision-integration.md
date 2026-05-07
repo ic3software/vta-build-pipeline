@@ -28,38 +28,46 @@ that contains:
 
 Three transports carry the same VP-and-sealed-bundle exchange:
 
-1. **File** — air-gapped / offline. Operator hand-carries the
-   request and the bundle as files.
+1. **File** — air-gapped / offline at *both* ends. Operator
+   hand-carries the request and the bundle as files between two
+   disconnected hosts.
 2. **REST** — PNM-bridged. Operator runs `pnm bootstrap
-   provision-integration` from an authenticated REST session.
-   The operator's bearer token authenticates the *relay*; the VP
-   inside carries the integration's identity. These can
-   legitimately differ — the REST path is the relay path.
-3. **DIDComm** — **holder-driven only**. The integration itself
-   sends the request over an authcrypt'd DIDComm session. Used
-   when an already-admin integration provisions further
-   integrations in the same context using its own session.
+   provision-integration` from a REST-connected `pnm` session.
+3. **DIDComm** — same `pnm bootstrap provision-integration`
+   command when the operator's `pnm` is connected via DIDComm.
+   `VtaClient::provision_integration` dispatches based on how
+   the client was constructed.
 
-The sealed bundle returned is identical across all three.
+The sealed bundle returned is identical across all three. Both
+REST and DIDComm support the **operator-as-relayer** flow.
 
-### Why DIDComm is holder-driven only
+### Auth model — onion layers
 
-The VTA's DIDComm handler enforces `DIDComm sender == VP holder`
-as a privilege-laundering guard: the authcrypt sender is the
-authenticated identity (there's no separate token), and an
-ACL-registered admin relaying a VP signed by *anyone else* would
-otherwise let the VTA bind the VP-holder (not the relayer) to a
-fresh admin DID. This is rejected as `Forbidden`.
+The authentication model is layered the same way on both
+transports:
 
-`VtaClient::provision_integration` dispatches based on how the
-client was constructed. When the client is on DIDComm and the VP
-holder differs from the session's `client_did`, the SDK refuses
-client-side with a clear error pointing at REST transport — the
-operator gets immediate guidance instead of a wire-roundtrip
-rejection.
+* **Outer (transport):** the *relayer* is authenticated by the
+  bearer token (REST) or the authcrypt sender DID (DIDComm). The
+  VTA's ACL gates whether the relayer is allowed to call
+  `provision-integration` against the target context.
+* **Inner (VP):** the *holder* is authenticated by the
+  BootstrapRequest's `DataIntegrityProof`. The VTA HPKE-seals
+  the issued bundle to the holder's X25519 derivation, so only
+  the holder can open it.
 
-For the operator-relay use case, run `pnm bootstrap
-provision-integration` from a REST-connected `pnm` session.
+Relayer and holder may legitimately differ. The canonical
+example is **air-gap onboarding**: a third-party integration on
+a disconnected network signs a BootstrapRequest using its own
+ephemeral did:key, transfers the request to the operator's host,
+the operator's PNM relays it to the VTA over DIDComm (or REST),
+and the operator carries the (encrypted) bundle back across the
+air-gap. The relayer doesn't gain anything — they can't decrypt
+the bundle, and the VP signature requires the holder's private
+key, so they can't forge a VP claiming to be a third party.
+
+The only authorization gate is the relayer's ACL membership in
+the target context. It is enforced identically on both
+transports.
 
 The sealed bundle returned is identical across all three. Only the
 transport differs.

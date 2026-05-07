@@ -30,19 +30,24 @@
   `UnsupportedTransport`. Whichever transport the client opened
   carries the VP and the sealed bundle.
 
-  DIDComm is **holder-driven only** — the VTA enforces
-  `DIDCommSender == VPHolder` as a privilege-laundering guard.
-  The SDK pre-checks this client-side and refuses with a clear
-  hint pointing at REST when the session DID and VP holder
-  differ; operator-relay use cases must use REST.
+  Both REST and DIDComm support the **operator-as-relayer** flow
+  needed for air-gap onboarding: a third-party integration signs
+  a BootstrapRequest with its own ephemeral did:key, transfers
+  the request to the operator's host, the operator's PNM relays
+  it to the VTA, and the operator carries the encrypted bundle
+  back. The auth model is layered the same on both transports —
+  outer transport authenticates the relayer (bearer token or
+  authcrypt sender, ACL-gated), inner VP authenticates the
+  holder (the bundle is HPKE-sealed to the holder's X25519). The
+  relayer can't decrypt the bundle and can't forge the VP
+  signature, so relaying is safe.
 
-  Wire fix to support the above: introduces a workspace-specific
-  `e.p.msg.forbidden` problem-report code so DIDComm permission
-  rejections don't collapse into the SDK's `Auth` variant. Was
-  previously generating a misleading "Token may be expired" CLI
-  hint for what's actually a `Forbidden`. SDK clients that
-  predate this code fall back to `DidcommRemote { code, comment }`
-  cleanly.
+  Adds a workspace-specific `e.p.msg.forbidden` problem-report
+  code so genuine permission failures don't collapse into the
+  SDK's `Auth` variant — fixes a misleading "Token may be
+  expired" CLI hint that fired for `Forbidden` errors over
+  DIDComm. SDK clients that predate this code fall back to
+  `DidcommRemote { code, comment }` cleanly.
 - **Promote a serverless WebVH DID to a server-managed one** —
   `pnm webvh register-did --did <did> --server <server-id>` (and
   the offline `vta webvh register-did …`) push an existing local

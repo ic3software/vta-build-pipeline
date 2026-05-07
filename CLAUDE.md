@@ -295,26 +295,32 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Producer returns**: HPKE-sealed `TemplateBootstrapPayload` (integration
   DID, private keys, `did.jsonl`, VC-issued admin authorization, VTA trust
   bundle) in armor with SHA-256 digest communicated out-of-band.
-- **Transports**:
+- **Transports** (REST and DIDComm both support relayer ≠ holder):
   - **Offline file**: `vta bootstrap provision-request` / `provision-integration` / `open`.
-  - **PNM REST bridge** (relay path): `pnm bootstrap provision-request` →
+  - **PNM REST bridge**: `pnm bootstrap provision-request` →
     `pnm bootstrap provision-integration` (authenticated, hits
-    `POST /bootstrap/provision-integration`). The operator's
-    bearer token authenticates the relay; the VP carries the
-    integration's identity — these can legitimately differ.
-  - **DIDComm** (holder-driven only): the integration itself
-    sends the `provision-integration/1.0` message over its own
-    authcrypt session. The handler enforces
-    `DIDCommSender == VPHolder` as a privilege-laundering guard;
-    relay over DIDComm is **rejected**. The SDK pre-checks this
-    in `provision_integration_didcomm` and refuses with a
-    `VtaError::UnsupportedTransport` pointing at REST, so the
-    operator never sees the wire-roundtrip "Forbidden". The
-    workspace also defines a custom
-    `e.p.msg.forbidden` problem-report code (alongside the
-    affinidi taxonomy) so genuine permission failures don't
-    collapse into the SDK's `Auth` variant — preventing the
-    misleading "Token may be expired" CLI hint.
+    `POST /bootstrap/provision-integration`).
+  - **DIDComm**: same `pnm bootstrap provision-integration`
+    command when the client is on DIDComm transport. The
+    `provision-integration/1.0` message carries the VP and
+    receives the same sealed bundle. `VtaClient::
+    provision_integration` dispatches based on the
+    `Transport::Rest`/`Transport::DIDComm` variant.
+- **Auth model** (both transports — onion layers):
+  - **Outer**: bearer token (REST) / authcrypt sender (DIDComm)
+    authenticates the *relayer*. ACL-gated.
+  - **Inner**: VP `DataIntegrityProof` authenticates the
+    *holder*. The bundle is HPKE-sealed to the holder's X25519
+    derivation.
+  - Relayer and holder may legitimately differ — the air-gap
+    onboarding flow relies on this. The relayer can't decrypt
+    the bundle (no holder private key), and the VP signature
+    can't be forged without the holder's key, so there's no
+    privilege escalation. Use `e.p.msg.forbidden` for genuine
+    permission failures (caller authenticated but not admin in
+    the context); the standard `e.p.msg.unauthorized` code is
+    reserved for actual auth failures so the CLI doesn't print
+    a misleading "Token may be expired" hint.
 - **Code**: `vta-service/src/operations/provision_integration.rs`,
   `vta-sdk/src/provision_integration/{http,didcomm}.rs`,
   `vta-service/src/routes/bootstrap.rs:provision_integration`,
