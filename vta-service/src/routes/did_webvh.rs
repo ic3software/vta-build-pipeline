@@ -332,8 +332,11 @@ fn map_register_err(e: RegisterDidWithServerError) -> AppError {
         E::DidNotFound(msg) | E::ServerNotFound(msg) | E::LogMissing(msg) => {
             AppError::NotFound(msg)
         }
-        E::AlreadyServerManaged { .. } => AppError::Conflict(e.to_string()),
+        E::AlreadyServerManaged { .. } | E::PathAllocationMismatch { .. } => {
+            AppError::Conflict(e.to_string())
+        }
         E::Transport(msg) | E::Publish(msg) => AppError::Internal(format!("publish: {msg}")),
+        E::DidUrlParse { .. } => AppError::Validation(e.to_string()),
         E::Storage(msg) => AppError::Internal(msg),
     }
 }

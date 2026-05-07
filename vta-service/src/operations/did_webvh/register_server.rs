@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use chrono::Utc;
+use didwebvh_rs::url::WebVHURL;
 use thiserror::Error;
 use tracing::info;
 
@@ -80,6 +81,15 @@ pub enum RegisterDidWithServerError {
     Publish(String),
     #[error("storage error: {0}")]
     Storage(String),
+    #[error(
+        "server allocated `{allocated}` but DID resolves at `{expected}`. \
+         The path component is likely already claimed on this host — \
+         choose a different webvh server, or have the host operator \
+         release that path."
+    )]
+    PathAllocationMismatch { allocated: String, expected: String },
+    #[error("could not derive URL from DID `{did}`: {reason}")]
+    DidUrlParse { did: String, reason: String },
 }
 
 impl From<AppError> for RegisterDidWithServerError {
@@ -128,21 +138,70 @@ pub async fn register_did_with_server(
         .ok_or_else(|| RegisterDidWithServerError::LogMissing(params.did.clone()))?;
 
     // 4. Build the transport for the target server (REST or DIDComm
-    //    depending on the server DID's advertised endpoints) and push
-    //    the existing log.
+    //    depending on the server DID's advertised endpoints).
     let transport = WebvhTransport::from_server(&server, did_resolver, didcomm_bridge)
         .await
         .map_err(|e| RegisterDidWithServerError::Transport(e.to_string()))?;
+
+    // 5. The serverless DID has no mnemonic (it was minted with one
+    //    artifact: a local `did.jsonl`, no host involvement). Ask the
+    //    target host to allocate a slot for the DID's *existing* path
+    //    component — same path the DID identifier already resolves at —
+    //    and use the freshly-issued mnemonic to publish.
+    //
+    //    `WebVHURL::parse_did_url` returns `path` with leading and
+    //    trailing slashes (`/glenn-vta/`). The host's `request_uri`
+    //    expects the path without slashes; an empty/`.well-known/`
+    //    path gets passed as `None` so the server applies its default.
+    let parsed = WebVHURL::parse_did_url(&params.did).map_err(|e| {
+        RegisterDidWithServerError::DidUrlParse {
+            did: params.did.clone(),
+            reason: e.to_string(),
+        }
+    })?;
+    let trimmed_path = parsed.path.trim_matches('/');
+    let request_path = if trimmed_path.is_empty() || trimmed_path == ".well-known" {
+        None
+    } else {
+        Some(trimmed_path)
+    };
+
+    let uri_response = transport
+        .request_uri(request_path)
+        .await
+        .map_err(|e| RegisterDidWithServerError::Publish(format!("request_uri: {e}")))?;
+
+    // Verify the host allocated the URL the DID already resolves at.
+    // If the path is taken, the server allocates a different one — we
+    // refuse rather than silently break resolution. The expected URL
+    // mirrors `WebvhServer::published_did_url` shape: scheme + host
+    // (+ port) + path + `did.jsonl`.
+    let port_segment = parsed.port.map(|p| format!(":{p}")).unwrap_or_default();
+    let expected_url = format!(
+        "https://{host}{port}{path}did.jsonl",
+        host = parsed.domain,
+        port = port_segment,
+        path = parsed.path,
+    );
+    if uri_response.did_url != expected_url {
+        return Err(RegisterDidWithServerError::PathAllocationMismatch {
+            allocated: uri_response.did_url,
+            expected: expected_url,
+        });
+    }
+
     transport
-        .publish_did(&record.mnemonic, &did_log)
+        .publish_did(&uri_response.mnemonic, &did_log)
         .await
         .map_err(|e| RegisterDidWithServerError::Publish(e.to_string()))?;
 
-    // 5. Flip `server_id` on the local record. From here on,
-    //    `update_did_webvh` will treat this as a server-managed DID
-    //    and auto-publish on every subsequent change (including the
-    //    `services` runtime mutations).
+    // 6. Flip `server_id` on the local record AND persist the
+    //    server-issued mnemonic. From here on, `update_did_webvh` will
+    //    treat this as a server-managed DID and auto-publish on every
+    //    subsequent change (including the `services` runtime mutations)
+    //    using this mnemonic.
     record.server_id = params.server_id.clone();
+    record.mnemonic = uri_response.mnemonic;
     record.updated_at = Utc::now();
     let log_entry_count = record.log_entry_count;
     webvh_store::store_did(webvh_ks, &record).await?;
