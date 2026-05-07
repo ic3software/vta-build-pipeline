@@ -9,9 +9,58 @@ use serde_json::Value;
 
 use crate::auth::AuthClaims;
 use crate::error::AppError;
+use crate::store::KeyspaceHandle;
 use vta_sdk::provision_integration::{BootstrapAsk, DidTemplateRef, VerifiedBootstrapRequest};
 
 use super::ProvisionIntegrationDeps;
+
+/// Ensure the target `context` exists, optionally creating it
+/// inline when `create_context` is set. Centralised here so REST,
+/// DIDComm, and the offline CLI all enforce the same semantics:
+///
+/// - Context exists → returns `Ok(false)` (idempotent, no-op).
+/// - Context missing + `create_context: false` → `AppError::NotFound`
+///   with the existing precondition message.
+/// - Context missing + `create_context: true` → calls
+///   [`crate::operations::contexts::create_context`], which itself
+///   checks `auth.require_super_admin()`. Context-admin callers
+///   land here and surface as `AppError::Forbidden`. Returns
+///   `Ok(true)` on success so callers can populate
+///   `summary.context_created`.
+///
+/// Auth concentration: the super-admin gate lives inside
+/// `operations::contexts::create_context` exclusively. We don't
+/// re-check it here so the boundary stays in one place.
+pub async fn ensure_target_context_or_create(
+    contexts_ks: &KeyspaceHandle,
+    auth: &AuthClaims,
+    context: &str,
+    create_context: bool,
+) -> Result<bool, AppError> {
+    if crate::contexts::get_context(contexts_ks, context)
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    if !create_context {
+        return Err(AppError::NotFound(format!(
+            "context '{context}' is not registered on this VTA — create it first via \
+             'vta contexts create --id {context}' (offline) or 'pnm contexts create' (online), \
+             or pass '--create-context' to provision it inline"
+        )));
+    }
+    crate::operations::contexts::create_context(
+        contexts_ks,
+        auth,
+        context,
+        context.to_string(),
+        None,
+        "provision-integration",
+    )
+    .await?;
+    Ok(true)
+}
 
 pub(super) async fn preconditions(
     state: &ProvisionIntegrationDeps,

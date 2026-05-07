@@ -71,6 +71,11 @@ pub async fn provision_integration_didcomm(
         context,
         assertion,
         vc_validity_seconds,
+        // The DIDComm SDK helper exposes only the fields useful in
+        // most contexts; callers that need `create_context` should
+        // construct `ProvisionIntegrationRequest` directly and call
+        // `VtaClient::provision_integration`.
+        create_context: false,
     };
     let body = serde_json::to_value(&body_struct).map_err(VtaError::from)?;
 

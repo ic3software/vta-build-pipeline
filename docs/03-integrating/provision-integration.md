@@ -33,6 +33,8 @@ Three transports carry the same VP-and-sealed-bundle exchange:
    disconnected hosts.
 2. **REST** — PNM-bridged. Operator runs `pnm bootstrap
    provision-integration` from a REST-connected `pnm` session.
+   Pass `--create-context` to create the target context inline
+   if it doesn't already exist (super-admin only; idempotent).
 3. **DIDComm** — same `pnm bootstrap provision-integration`
    command when the operator's `pnm` is connected via DIDComm.
    `VtaClient::provision_integration` dispatches based on how

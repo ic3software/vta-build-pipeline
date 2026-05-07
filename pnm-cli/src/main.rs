@@ -330,6 +330,14 @@ enum BootstrapCommands {
         /// Output path for the armored bundle.
         #[arg(long)]
         out: std::path::PathBuf,
+        /// Create the target context inline if it doesn't already
+        /// exist on the VTA. Requires **super-admin** role; ordinary
+        /// context-admin callers get `Forbidden` against a missing
+        /// context. Idempotent — no-op when the context already
+        /// exists. Mirrors `vta bootstrap provision-integration
+        /// --create-context`.
+        #[arg(long)]
+        create_context: bool,
     },
 }
 
@@ -1780,6 +1788,7 @@ async fn main() {
                 assertion,
                 vc_validity_seconds,
                 out,
+                create_context,
             } => {
                 bootstrap::run_provision_integration(
                     &client,
@@ -1788,6 +1797,7 @@ async fn main() {
                     assertion,
                     vc_validity_seconds,
                     out,
+                    create_context,
                 )
                 .await
             }

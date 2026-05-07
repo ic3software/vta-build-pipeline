@@ -49,6 +49,8 @@ mod templates;
 mod vta_keys;
 mod webvh;
 
+pub use preconditions::ensure_target_context_or_create;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

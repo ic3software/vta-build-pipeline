@@ -514,9 +514,22 @@ pub async fn run_provision_integration(
     let auth = AuthClaims::unsafe_local_cli_super_admin("provision-integration");
 
     // 4a. Validate the target context exists, or create it inline when
-    //     the operator opted in via --create-context.
-    ensure_target_context_or_create(&state.contexts_ks, &auth, &target_context, create_context)
-        .await?;
+    //     the operator opted in via --create-context. Same helper
+    //     drives the REST + DIDComm transport handlers — the
+    //     super-admin gate inside `operations::contexts::
+    //     create_context` is the authoritative auth check.
+    let context_created =
+        crate::operations::provision_integration::ensure_target_context_or_create(
+            &state.contexts_ks,
+            &auth,
+            &target_context,
+            create_context,
+        )
+        .await
+        .map_err(|e| format!("ensure context '{target_context}': {e}"))?;
+    if context_created {
+        eprintln!("Created context '{target_context}' (--create-context).");
+    }
 
     // 5. Call the shared library fn.
     let vc_validity = vc_validity_hours.map(|hrs| {
@@ -633,50 +646,6 @@ fn resolve_target_context(
              BootstrapRequest include a contextHint"
                 .into(),
         ),
-    }
-}
-
-/// Validate that the target context exists, or create it inline when
-/// `create_context` is set. Mirrors the precondition check the
-/// provisioning library fn would otherwise hit several layers down,
-/// but surfaces a CLI-shaped error that names the `--create-context`
-/// flag — operators paste a generated `vta bootstrap
-/// provision-integration` command and the original error
-/// (precondition failure deep inside the library fn) doesn't tell
-/// them how to recover.
-#[cfg(feature = "webvh")]
-async fn ensure_target_context_or_create(
-    contexts_ks: &crate::store::KeyspaceHandle,
-    auth: &crate::auth::AuthClaims,
-    target_context: &str,
-    create_context: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let exists = crate::contexts::get_context(contexts_ks, target_context)
-        .await?
-        .is_some();
-    if exists {
-        return Ok(());
-    }
-    if create_context {
-        crate::operations::contexts::create_context(
-            contexts_ks,
-            auth,
-            target_context,
-            target_context.to_string(),
-            None,
-            "provision-integration",
-        )
-        .await
-        .map_err(|e| format!("create context '{target_context}': {e}"))?;
-        eprintln!("Created context '{target_context}' (--create-context).");
-        Ok(())
-    } else {
-        Err(format!(
-            "context '{target_context}' does not exist on this VTA. Either pass \
-             --create-context to create it as part of provisioning, or create it \
-             first with `vta contexts create --id {target_context}`."
-        )
-        .into())
     }
 }
 
@@ -1158,11 +1127,11 @@ mod tests {
     use serde_json::Value;
 
     #[cfg(feature = "webvh")]
-    use super::ensure_target_context_or_create;
-    #[cfg(feature = "webvh")]
     use crate::auth::AuthClaims;
     #[cfg(feature = "webvh")]
     use crate::contexts::get_context;
+    #[cfg(feature = "webvh")]
+    use crate::operations::provision_integration::ensure_target_context_or_create;
     #[cfg(feature = "webvh")]
     use crate::store::Store;
     #[cfg(feature = "webvh")]

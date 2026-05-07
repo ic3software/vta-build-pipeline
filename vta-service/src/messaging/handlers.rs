@@ -1212,6 +1212,18 @@ pub async fn handle_provision_integration(
     let vc_validity = body.vc_validity_seconds.map(chrono::Duration::seconds);
 
     let deps = operations::provision_integration::ProvisionIntegrationDeps::from(state.as_ref());
+    // `--create-context` from the wire body. Same semantics as the
+    // REST handler — super-admin gate enforced inside
+    // `operations::contexts::create_context`. Idempotent.
+    let context_created = app_try!(
+        operations::provision_integration::ensure_target_context_or_create(
+            &deps.contexts_ks,
+            &auth,
+            &body.context,
+            body.create_context,
+        )
+        .await
+    );
     let output = app_try!(
         operations::provision_integration::provision_integration(
             &deps,
@@ -1241,6 +1253,7 @@ pub async fn handle_provision_integration(
             secret_count: output.summary.secret_count,
             output_count: output.summary.output_count,
             webvh_server_id: output.summary.webvh_server_id,
+            context_created,
         },
     };
 

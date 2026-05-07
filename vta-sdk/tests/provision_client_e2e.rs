@@ -177,6 +177,7 @@ impl Respond for SealResponder {
                 secret_count: 2,
                 output_count: 1,
                 webvh_server_id: None,
+                context_created: false,
             },
         };
 
@@ -429,6 +430,7 @@ impl Respond for AdminRotationResponder {
                 secret_count: 1,
                 output_count: 0,
                 webvh_server_id: None,
+                context_created: false,
             },
         };
 

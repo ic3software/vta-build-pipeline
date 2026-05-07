@@ -23,6 +23,21 @@
   operator guide and
   `docs/05-design-notes/runtime-service-management.md` for the
   spec.
+- **`pnm bootstrap provision-integration --create-context`** —
+  PNM matches the offline `vta` flag. Creates the target context
+  inline if it doesn't exist, instead of failing the whole call
+  with "context not registered." **Requires super-admin** —
+  context-admin callers get `Forbidden` against a missing
+  context (the super-admin gate sits inside
+  `operations::contexts::create_context`, the one place context
+  creation is authorised). Idempotent when the context already
+  exists. The response carries a new `context_created: bool`
+  field so operators see whether their flag actually did
+  something — the CLI prints `Context: <id> (created inline …)`
+  on first run and `Context: <id> (already existed; --create-context
+  was a no-op)` on idempotent retries. Same wire field is honoured
+  on REST and DIDComm; old senders continue to work because
+  `create_context` defaults to `false` on the wire.
 - **`pnm bootstrap provision-integration` works over DIDComm** —
   the SDK's `VtaClient::provision_integration` now dispatches to
   the existing `provision-integration/1.0` DIDComm handler when

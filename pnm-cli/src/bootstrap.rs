@@ -387,6 +387,7 @@ pub async fn run_connect(
 ///   authcrypt session. The VTA enforces that the DIDComm sender
 ///   DID matches the VP holder before issuing the bundle
 ///   (privilege-laundering guard).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_provision_integration(
     client: &vta_sdk::client::VtaClient,
     request: PathBuf,
@@ -394,6 +395,7 @@ pub async fn run_provision_integration(
     assertion: String,
     vc_validity_seconds: Option<i64>,
     out: PathBuf,
+    create_context: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use vta_sdk::provision_integration::http::{
         AssertionMode as WireAssertionMode, ProvisionIntegrationRequest,
@@ -429,6 +431,7 @@ pub async fn run_provision_integration(
             context: target_context.clone(),
             assertion: Some(assertion_mode),
             vc_validity_seconds,
+            create_context,
         })
         .await?;
 
@@ -442,7 +445,15 @@ pub async fn run_provision_integration(
     );
     eprintln!();
     eprintln!("  Bundle-Id:       {}", resp.summary.bundle_id_hex);
-    eprintln!("  Context:         {target_context}");
+    if resp.summary.context_created {
+        eprintln!("  Context:         {target_context} (created inline via --create-context)");
+    } else if create_context {
+        eprintln!(
+            "  Context:         {target_context} (already existed; --create-context was a no-op)"
+        );
+    } else {
+        eprintln!("  Context:         {target_context}");
+    }
     eprintln!("  Client DID:      {}", resp.summary.client_did);
     if resp.summary.admin_rolled_over {
         eprintln!(

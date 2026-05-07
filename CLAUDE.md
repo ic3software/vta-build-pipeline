@@ -299,7 +299,13 @@ new flow, update both this section and the relevant `docs/*.md`.
   - **Offline file**: `vta bootstrap provision-request` / `provision-integration` / `open`.
   - **PNM REST bridge**: `pnm bootstrap provision-request` →
     `pnm bootstrap provision-integration` (authenticated, hits
-    `POST /bootstrap/provision-integration`).
+    `POST /bootstrap/provision-integration`). Supports
+    `--create-context` to create the target context inline when
+    missing — same flag the offline `vta` CLI exposes. Wire
+    field `create_context: bool` on the request body, paired
+    with `context_created: bool` on the response so operators
+    see whether the flag actually did something. Super-admin
+    only (`operations::contexts::create_context`'s auth gate).
   - **DIDComm**: same `pnm bootstrap provision-integration`
     command when the client is on DIDComm transport. The
     `provision-integration/1.0` message carries the VP and
