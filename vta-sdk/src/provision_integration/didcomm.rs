@@ -25,6 +25,15 @@ use crate::protocols::provision_integration_management::{
 use super::BootstrapRequest;
 use super::http::{AssertionMode, ProvisionIntegrationRequest, ProvisionIntegrationResponse};
 
+/// Read the `holder` DID from a `BootstrapRequest` VP without
+/// running full signature verification. The VP's structural shape
+/// guarantees `holder` is present at this path; signature
+/// verification is the VTA's job. Surfaced separately so the
+/// DIDComm dispatch can pre-check sender == holder before sending.
+fn vp_holder_did(req: &BootstrapRequest) -> &str {
+    req.holder.as_str()
+}
+
 /// Default DIDComm round-trip timeout (seconds). Generous so the VTA
 /// has time to mint keys, render templates, build the webvh log, and
 /// seal the bundle — all of which happen synchronously inside the
@@ -52,6 +61,23 @@ pub async fn provision_integration_didcomm(
     assertion: Option<AssertionMode>,
     vc_validity_seconds: Option<i64>,
 ) -> Result<ProvisionIntegrationResponse, VtaError> {
+    // Pre-flight: the VTA enforces `DIDCommSender == VP holder`
+    // (privilege-laundering guard). Catch the mismatch here so the
+    // operator gets a focused error instead of a misleading
+    // "Forbidden" round-trip — and so the suggested fix points at
+    // REST transport, which is the right path for the relay use
+    // case.
+    if session.client_did() != vp_holder_did(&request) {
+        return Err(VtaError::UnsupportedTransport(format!(
+            "DIDComm transport requires the session DID `{}` to match the VP holder `{}`. \
+             To relay a VP signed by a different holder, use REST transport — \
+             rebuild the client with `VtaClient::from_credential` / `VtaClient::new` \
+             instead of `connect_didcomm`.",
+            session.client_did(),
+            vp_holder_did(&request),
+        )));
+    }
+
     let body_struct = ProvisionIntegrationRequest {
         request,
         context,

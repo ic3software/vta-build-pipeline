@@ -28,6 +28,14 @@ pub mod problem_report_codes {
     pub const NOT_FOUND: &str = "e.p.msg.not-found";
     pub const CONFLICT: &str = "e.p.msg.conflict";
     pub const INTERNAL: &str = "e.p.msg.internal-error";
+    /// Workspace-specific extension to the affinidi taxonomy.
+    /// Distinguishes "permission denied" (caller authenticated but
+    /// lacks the role / context / sender-identity) from
+    /// `unauthorized` (auth failed). Without this, the SDK
+    /// collapses both into `VtaError::Auth` and the CLI prints
+    /// "Token may be expired" — which is misleading when the real
+    /// problem is a privilege-laundering rejection or an ACL miss.
+    pub const FORBIDDEN: &str = "e.p.msg.forbidden";
 }
 
 /// Extract code and comment from a problem-report message body.

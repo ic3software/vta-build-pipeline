@@ -28,21 +28,38 @@ that contains:
 
 Three transports carry the same VP-and-sealed-bundle exchange:
 
-1. **File** — air-gapped / offline. Operator hand-carries the request
-   and the bundle as files.
-2. **REST** — `pnm bootstrap provision-integration` from an
-   authenticated REST session.
-3. **DIDComm** — same `pnm bootstrap provision-integration`
-   command when the operator's `pnm` is connected via DIDComm
-   (`pnm setup` opted into DIDComm transport, or an
-   already-admin integration runs the SDK directly). The
-   `provision-integration/1.0` protocol carries the same VP-and-
-   sealed-bundle exchange over an authcrypt'd DIDComm session.
+1. **File** — air-gapped / offline. Operator hand-carries the
+   request and the bundle as files.
+2. **REST** — PNM-bridged. Operator runs `pnm bootstrap
+   provision-integration` from an authenticated REST session.
+   The operator's bearer token authenticates the *relay*; the VP
+   inside carries the integration's identity. These can
+   legitimately differ — the REST path is the relay path.
+3. **DIDComm** — **holder-driven only**. The integration itself
+   sends the request over an authcrypt'd DIDComm session. Used
+   when an already-admin integration provisions further
+   integrations in the same context using its own session.
 
-`VtaClient::provision_integration` dispatches automatically
-based on how the client was constructed; the operator command is
-identical in both cases. The sealed bundle returned is identical
-across all three transports.
+The sealed bundle returned is identical across all three.
+
+### Why DIDComm is holder-driven only
+
+The VTA's DIDComm handler enforces `DIDComm sender == VP holder`
+as a privilege-laundering guard: the authcrypt sender is the
+authenticated identity (there's no separate token), and an
+ACL-registered admin relaying a VP signed by *anyone else* would
+otherwise let the VTA bind the VP-holder (not the relayer) to a
+fresh admin DID. This is rejected as `Forbidden`.
+
+`VtaClient::provision_integration` dispatches based on how the
+client was constructed. When the client is on DIDComm and the VP
+holder differs from the session's `client_did`, the SDK refuses
+client-side with a clear error pointing at REST transport — the
+operator gets immediate guidance instead of a wire-roundtrip
+rejection.
+
+For the operator-relay use case, run `pnm bootstrap
+provision-integration` from a REST-connected `pnm` session.
 
 The sealed bundle returned is identical across all three. Only the
 transport differs.

@@ -33,6 +33,15 @@ pub struct DIDCommSession {
 }
 
 impl DIDCommSession {
+    /// The session's local DID — the one used as the authcrypt
+    /// sender on outbound messages. Surfaced so SDK helpers can
+    /// pre-check sender == expected DID before sending (the VTA's
+    /// `provision-integration` handler enforces sender == VP
+    /// holder, for instance).
+    pub fn client_did(&self) -> &str {
+        &self.client_did
+    }
+
     /// Connect to a VTA via DIDComm through a mediator.
     ///
     /// Sets up the ATM and profile for REST-based messaging. Does NOT open a

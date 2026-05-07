@@ -297,17 +297,24 @@ new flow, update both this section and the relevant `docs/*.md`.
   bundle) in armor with SHA-256 digest communicated out-of-band.
 - **Transports**:
   - **Offline file**: `vta bootstrap provision-request` / `provision-integration` / `open`.
-  - **PNM REST bridge**: `pnm bootstrap provision-request` →
+  - **PNM REST bridge** (relay path): `pnm bootstrap provision-request` →
     `pnm bootstrap provision-integration` (authenticated, hits
-    `POST /bootstrap/provision-integration`).
-  - **DIDComm**: same `pnm bootstrap provision-integration`
-    command when the client is on DIDComm transport — the
-    `provision-integration/1.0` protocol carries the VP and
-    receives the same sealed bundle. `VtaClient::
-    provision_integration` dispatches based on the
-    `Transport::Rest`/`Transport::DIDComm` variant.
-    `auth_from_message` enforces `DIDCommSender == VPHolder`
-    before the bundle is issued (privilege-laundering guard).
+    `POST /bootstrap/provision-integration`). The operator's
+    bearer token authenticates the relay; the VP carries the
+    integration's identity — these can legitimately differ.
+  - **DIDComm** (holder-driven only): the integration itself
+    sends the `provision-integration/1.0` message over its own
+    authcrypt session. The handler enforces
+    `DIDCommSender == VPHolder` as a privilege-laundering guard;
+    relay over DIDComm is **rejected**. The SDK pre-checks this
+    in `provision_integration_didcomm` and refuses with a
+    `VtaError::UnsupportedTransport` pointing at REST, so the
+    operator never sees the wire-roundtrip "Forbidden". The
+    workspace also defines a custom
+    `e.p.msg.forbidden` problem-report code (alongside the
+    affinidi taxonomy) so genuine permission failures don't
+    collapse into the SDK's `Auth` variant — preventing the
+    misleading "Token may be expired" CLI hint.
 - **Code**: `vta-service/src/operations/provision_integration.rs`,
   `vta-sdk/src/provision_integration/{http,didcomm}.rs`,
   `vta-service/src/routes/bootstrap.rs:provision_integration`,

@@ -52,9 +52,18 @@ fn app_err_to_response(e: AppError) -> DIDCommResponse {
         AppError::Authentication(msg) | AppError::Unauthorized(msg) => {
             ProblemReport::unauthorized(msg.clone())
         }
-        // No `forbidden` code in the didcomm-service taxonomy — reuse
-        // `unauthorized` so clients can still distinguish from 500s.
-        AppError::Forbidden(msg) => ProblemReport::unauthorized(msg.clone()),
+        // The affinidi taxonomy doesn't define a `forbidden` code,
+        // but collapsing into `unauthorized` means SDK clients see
+        // "Token may be expired" for what's actually a permission /
+        // privilege-laundering rejection. Emit a workspace-specific
+        // `e.p.msg.forbidden` code; SDK clients that don't know it
+        // fall back to `DidcommRemote { code, comment }` cleanly.
+        AppError::Forbidden(msg) => ProblemReport {
+            code: vta_sdk::protocols::problem_report_codes::FORBIDDEN.to_string(),
+            comment: msg.clone(),
+            args: Vec::new(),
+            escalate_to: None,
+        },
         AppError::Validation(msg) => ProblemReport::bad_request(msg.clone()),
         _ => ProblemReport::internal_error(e.to_string()),
     };

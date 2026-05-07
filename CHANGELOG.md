@@ -27,11 +27,22 @@
   the SDK's `VtaClient::provision_integration` now dispatches to
   the existing `provision-integration/1.0` DIDComm handler when
   the client is in DIDComm transport mode, instead of returning
-  `UnsupportedTransport`. The pnm-cli command is unchanged;
-  whichever transport the client opened (REST or DIDComm) is
-  what carries the VP and the sealed bundle. The VTA enforces
-  `DIDCommSender == VPHolder` on the DIDComm path
-  (privilege-laundering guard).
+  `UnsupportedTransport`. Whichever transport the client opened
+  carries the VP and the sealed bundle.
+
+  DIDComm is **holder-driven only** — the VTA enforces
+  `DIDCommSender == VPHolder` as a privilege-laundering guard.
+  The SDK pre-checks this client-side and refuses with a clear
+  hint pointing at REST when the session DID and VP holder
+  differ; operator-relay use cases must use REST.
+
+  Wire fix to support the above: introduces a workspace-specific
+  `e.p.msg.forbidden` problem-report code so DIDComm permission
+  rejections don't collapse into the SDK's `Auth` variant. Was
+  previously generating a misleading "Token may be expired" CLI
+  hint for what's actually a `Forbidden`. SDK clients that
+  predate this code fall back to `DidcommRemote { code, comment }`
+  cleanly.
 - **Promote a serverless WebVH DID to a server-managed one** —
   `pnm webvh register-did --did <did> --server <server-id>` (and
   the offline `vta webvh register-did …`) push an existing local
