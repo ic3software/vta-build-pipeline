@@ -328,6 +328,155 @@ pub async fn run_did_log(
     Ok(())
 }
 
+/// Offline equivalent of `pnm webvh edit-did` — edit a WebVH
+/// DID document and publish a new LogEntry. Operates directly on
+/// the local fjall keystore. The VTA daemon must be stopped
+/// (fjall holds an exclusive lock when the daemon is running).
+///
+/// Same flag surface as the online command:
+/// - No flags → interactive mode (opens `$EDITOR`, asks about
+///   webvh parameters, confirms).
+/// - `--document <file>` / `--options-file <file>` plus per-field
+///   flags → non-interactive mode.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_edit_did(
+    config_path: Option<PathBuf>,
+    did: String,
+    document: Option<PathBuf>,
+    options_file: Option<PathBuf>,
+    pre_rotation: Option<u32>,
+    ttl: Option<u32>,
+    watchers: Vec<String>,
+    no_watchers: bool,
+    label: Option<String>,
+    no_confirm: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use vta_cli_common::commands::webvh_edit::{
+        EditFlags, assert_did_id_unchanged, build_options_from_flags, confirm_publish,
+        diff_summary, document_id, extract_current_document, launch_editor, prompt_webvh_params,
+    };
+    use vta_sdk::protocols::did_management::update::UpdateDidWebvhBody;
+
+    let config = AppConfig::load(config_path)?;
+    let store = Store::open(&config.store)?;
+    let webvh_ks = store.keyspace("webvh")?;
+    let keys_ks = store.keyspace("keys")?;
+    let contexts_ks = store.keyspace("contexts")?;
+    let audit_ks = store.keyspace("audit")?;
+    let did_resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await?;
+    let didcomm_bridge: Arc<DIDCommBridge> = Arc::new(DIDCommBridge::placeholder());
+    let seed_store: Arc<dyn crate::keys::seed_store::SeedStore> =
+        Arc::from(create_seed_store(&config)?);
+
+    // Look up the DID record for scid (update_did_webvh keys off it).
+    let record = crate::webvh_store::get_did(&webvh_ks, &did)
+        .await?
+        .ok_or_else(|| format!("DID `{did}` not found on this VTA"))?;
+    let scid = record.scid.clone();
+
+    let any_flag_set = document.is_some()
+        || options_file.is_some()
+        || pre_rotation.is_some()
+        || ttl.is_some()
+        || !watchers.is_empty()
+        || no_watchers
+        || label.is_some();
+
+    let body: UpdateDidWebvhBody = if any_flag_set {
+        let flags = EditFlags {
+            document_file: document,
+            options_file,
+            pre_rotation,
+            ttl,
+            watchers,
+            no_watchers,
+            label,
+        };
+        let body = build_options_from_flags(&flags)?;
+        if let Some(edited) = &body.document {
+            let log = crate::webvh_store::get_did_log(&webvh_ks, &did)
+                .await?
+                .ok_or_else(|| format!("DID `{did}` has no log on disk"))?;
+            let prior = extract_current_document(&log)?;
+            assert_did_id_unchanged(&prior, edited)?;
+        }
+        body
+    } else {
+        let log = crate::webvh_store::get_did_log(&webvh_ks, &did)
+            .await?
+            .ok_or_else(|| format!("DID `{did}` has no log on disk"))?;
+        let prior = extract_current_document(&log)?;
+        let prior_id = document_id(&prior)?.to_string();
+        eprintln!("Editing DID document for {prior_id}.");
+        eprintln!("Opening $EDITOR — save and exit to continue, or quit without saving to abort.");
+
+        let edited = match launch_editor(&prior)? {
+            Some(doc) => {
+                let summary = diff_summary(&prior, &doc);
+                eprintln!();
+                eprintln!("Document diff:");
+                for line in summary.lines() {
+                    eprintln!("  {line}");
+                }
+                eprintln!();
+                Some(doc)
+            }
+            None => {
+                eprintln!("Editor cancelled. No changes will be published.");
+                return Ok(());
+            }
+        };
+        prompt_webvh_params(edited)?
+    };
+
+    confirm_publish(&body, no_confirm)?;
+
+    // Convert the wire body into the op-layer options shape. The
+    // SDK type carries `witnesses` as opaque JSON to stay
+    // didwebvh-rs-free; we deserialise into the typed enum at
+    // intake (matching the REST handler's behaviour).
+    let witnesses = match body.witnesses {
+        Some(value) => Some(
+            serde_json::from_value(value)
+                .map_err(|e| format!("invalid witnesses JSON in options-file: {e}"))?,
+        ),
+        None => None,
+    };
+    let opts = crate::operations::did_webvh::UpdateDidWebvhOptions {
+        document: body.document,
+        pre_rotation_count: body.pre_rotation_count,
+        witnesses,
+        watchers: body.watchers,
+        ttl: body.ttl,
+        label: body.label,
+    };
+
+    let auth = cli_super_admin();
+    let result = crate::operations::did_webvh::update_did_webvh(
+        &keys_ks,
+        &contexts_ks,
+        &webvh_ks,
+        &audit_ks,
+        &*seed_store,
+        &auth,
+        &scid,
+        opts,
+        &did_resolver,
+        &didcomm_bridge,
+        "vta-cli-offline",
+    )
+    .await?;
+    store.persist().await?;
+
+    eprintln!("WebVH DID updated.");
+    eprintln!("  DID:             {}", result.did);
+    eprintln!("  New version ID:  {}", result.new_version_id);
+    eprintln!("  New SCID:        {}", result.new_scid);
+    eprintln!("  Update keys:     {}", result.update_keys_count);
+    eprintln!("  Pre-rotation:    {}", result.pre_rotation_key_count);
+    Ok(())
+}
+
 /// Offline equivalent of `pnm webvh register-did` — promote a
 /// serverless WebVH DID to a server-managed one. Operates directly
 /// on the local fjall keystore. The VTA daemon must be stopped

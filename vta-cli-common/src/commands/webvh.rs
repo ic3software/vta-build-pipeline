@@ -154,6 +154,106 @@ pub async fn cmd_webvh_did_register_server(
     Ok(())
 }
 
+/// `pnm webvh edit-did --did <did>` — interactive or
+/// non-interactive update of an existing WebVH DID document.
+///
+/// **Interactive (no flags):** fetches the latest published DID
+/// document, opens it in `$EDITOR`, asks whether to change any of
+/// the webvh parameters (pre-rotation, watchers, TTL, label),
+/// confirms, then publishes a new LogEntry.
+///
+/// **Non-interactive:** supply `--document <file>` (and optionally
+/// the per-field flags) or `--options-file <file>` to skip prompts
+/// entirely. Useful for scripted flows.
+///
+/// Refuses to publish if the operator changed the DID's top-level
+/// `id` field — the WebVH method treats the DID id as a permanent
+/// commitment from the first LogEntry.
+pub async fn cmd_webvh_did_edit(
+    client: &VtaClient,
+    did: &str,
+    flags: super::webvh_edit::EditFlags,
+    no_confirm: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use super::webvh_edit::{
+        build_options_from_flags, confirm_publish, diff_summary, document_id,
+        extract_current_document, launch_editor, prompt_webvh_params,
+    };
+
+    // Fetch the DID record (for context_id + scid) — this also
+    // surfaces a clean 404 if the DID isn't registered.
+    let record = client.get_did_webvh(did).await?;
+    let context_id = record.context_id.clone();
+    let scid = record.scid.clone();
+
+    // Decide between interactive and non-interactive paths. The
+    // non-interactive heuristic: any flag set → skip the editor
+    // and prompt chain. Interactive mode (no flags) opens $EDITOR
+    // and asks the parameter questions.
+    let any_flag_set = flags.document_file.is_some()
+        || flags.options_file.is_some()
+        || flags.pre_rotation.is_some()
+        || flags.ttl.is_some()
+        || !flags.watchers.is_empty()
+        || flags.no_watchers
+        || flags.label.is_some();
+
+    let body = if any_flag_set {
+        let body = build_options_from_flags(&flags)?;
+        // Validate the supplied document doesn't change the DID id.
+        if let Some(edited) = &body.document {
+            let log = client.get_did_webvh_log(did).await?;
+            let log_str = log.log.ok_or_else(|| -> Box<dyn std::error::Error> {
+                "DID has no published log on the VTA — nothing to edit".into()
+            })?;
+            let prior = extract_current_document(&log_str)?;
+            super::webvh_edit::assert_did_id_unchanged(&prior, edited)?;
+        }
+        body
+    } else {
+        // Interactive path: fetch the log, extract the latest doc,
+        // open in $EDITOR, then walk the parameter prompts.
+        let log = client.get_did_webvh_log(did).await?;
+        let log_str = log.log.ok_or_else(|| -> Box<dyn std::error::Error> {
+            "DID has no published log on the VTA — nothing to edit".into()
+        })?;
+        let prior = extract_current_document(&log_str)?;
+        let prior_id = document_id(&prior)?.to_string();
+        eprintln!("Editing DID document for {prior_id}.");
+        eprintln!("Opening $EDITOR — save and exit to continue, or quit without saving to abort.");
+
+        let edited = match launch_editor(&prior)? {
+            Some(doc) => {
+                let summary = diff_summary(&prior, &doc);
+                eprintln!();
+                eprintln!("Document diff:");
+                for line in summary.lines() {
+                    eprintln!("  {line}");
+                }
+                eprintln!();
+                Some(doc)
+            }
+            None => {
+                eprintln!("Editor cancelled. No changes will be published.");
+                return Ok(());
+            }
+        };
+
+        prompt_webvh_params(edited)?
+    };
+
+    confirm_publish(&body, no_confirm)?;
+
+    let result = client.update_did_webvh(&context_id, &scid, body).await?;
+    println!("WebVH DID updated.");
+    println!("  DID:             {}", result.did);
+    println!("  New version ID:  {}", result.new_version_id);
+    println!("  New SCID:        {}", result.new_scid);
+    println!("  Update keys:     {}", result.update_keys_count);
+    println!("  Pre-rotation:    {}", result.pre_rotation_key_count);
+    Ok(())
+}
+
 // ── DID commands ────────────────────────────────────────────────────
 
 pub async fn cmd_webvh_did_create(

@@ -34,6 +34,12 @@ rand = { workspace = true }
 # endpoints; this one is public so a bare reqwest call is simpler than
 # threading it through VtaClient.
 reqwest = { workspace = true }
+# Interactive prompts ($EDITOR, Confirm, Input) for the
+# `webvh edit-did` command. Already present transitively via
+# vta-service; declaring it here so vta-cli-common can use it directly
+# without leaning on a transitive dep.
+dialoguer = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

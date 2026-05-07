@@ -640,6 +640,38 @@ enum WebvhCommands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Edit an existing WebVH DID document. Offline equivalent of
+    /// `pnm webvh edit-did`. Operates directly on the local fjall
+    /// keystore — VTA daemon must be stopped (fjall lock).
+    ///
+    /// Interactive mode opens the latest DID document in `$EDITOR`,
+    /// then asks about webvh parameters. Non-interactive mode takes
+    /// `--document` / `--options-file` and per-field flags.
+    EditDid {
+        /// The DID to edit.
+        #[arg(long)]
+        did: String,
+        /// Path to a JSON file with the new DID document. Skips
+        /// `$EDITOR`.
+        #[arg(long)]
+        document: Option<PathBuf>,
+        /// Path to a JSON file with a full UpdateDidWebvhBody.
+        /// Mutually exclusive with the per-field flags below.
+        #[arg(long)]
+        options_file: Option<PathBuf>,
+        #[arg(long)]
+        pre_rotation: Option<u32>,
+        #[arg(long)]
+        ttl: Option<u32>,
+        #[arg(long = "watcher")]
+        watchers: Vec<String>,
+        #[arg(long)]
+        no_watchers: bool,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        no_confirm: bool,
+    },
     /// Register an existing serverless WebVH DID with a registered
     /// hosting server. Pushes the local `did.jsonl` to the host and
     /// flips the DID's `server_id` so future updates auto-publish.
@@ -1134,6 +1166,31 @@ async fn main() {
                 }
                 WebvhCommands::DidLog { did, out } => {
                     webvh_cli::run_did_log(cli.config, did, out).await
+                }
+                WebvhCommands::EditDid {
+                    did,
+                    document,
+                    options_file,
+                    pre_rotation,
+                    ttl,
+                    watchers,
+                    no_watchers,
+                    label,
+                    no_confirm,
+                } => {
+                    webvh_cli::run_edit_did(
+                        cli.config,
+                        did,
+                        document,
+                        options_file,
+                        pre_rotation,
+                        ttl,
+                        watchers,
+                        no_watchers,
+                        label,
+                        no_confirm,
+                    )
+                    .await
                 }
                 WebvhCommands::RegisterDid { did, server } => {
                     webvh_cli::run_register_did(cli.config, did, server).await

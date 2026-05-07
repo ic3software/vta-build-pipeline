@@ -354,6 +354,95 @@ deployments must use `pnm webvh register-did` against the running
 enclave (the offline path can't reach the vsock store on the
 parent host).
 
+## Walkthrough: edit an existing DID document
+
+Use case: you want to add or remove a service entry, change a
+verification method's controller, or otherwise hand-edit the DID
+document, then publish the change as a new LogEntry.
+
+### Interactive (the common case)
+
+```bash
+pnm webvh edit-did --did did:webvh:abcd1234:vta.example.com:vta
+```
+
+What happens:
+
+1. The CLI fetches the latest published DID document and opens it
+   in `$EDITOR` (uses `dialoguer::Editor` — `vi` by default,
+   honours your `$EDITOR` / `$VISUAL`).
+2. Make your edits, save, exit. Quitting without saving aborts
+   the operation cleanly.
+3. The CLI prints a one-line diff summary (`added: …`,
+   `changed: …`, `removed: …`) so you can sanity-check what
+   you touched.
+4. A `Confirm` chain asks whether to change any webvh parameters:
+   - Override pre-rotation count?
+   - Replace watcher URLs?
+   - Set a new TTL?
+   - Add an audit label?
+   Each defaults to **No** — hit Enter to skip and just publish
+   the document edit.
+5. Final confirmation lists what's in the body
+   (`document, watchers, label`, etc.) and asks "Publish?".
+6. The CLI calls `update_did_webvh`, which appends a new
+   LogEntry, rotates control keys, and (if the DID is server-managed)
+   pushes the new log line to the host.
+
+**The DID `id` is locked.** If you edit the top-level `id` field,
+the publish is rejected with `DidIdChanged` and the
+operation aborts. The DID identifier is a permanent commitment
+from the first LogEntry; mutating it would break every existing
+reference. To mint a new DID instead, use `pnm webvh create-did`.
+
+### Non-interactive (scripted)
+
+```bash
+# Just publish a new document, no parameter changes:
+pnm webvh edit-did \
+  --did did:webvh:abcd:vta.example.com:vta \
+  --document new-doc.json \
+  --no-confirm
+
+# Document + parameter overrides:
+pnm webvh edit-did \
+  --did did:webvh:abcd:vta.example.com:vta \
+  --document new-doc.json \
+  --pre-rotation 2 \
+  --ttl 86400 \
+  --watcher https://watcher.example.com \
+  --label "post-audit rotation" \
+  --no-confirm
+
+# Disable watchers entirely:
+pnm webvh edit-did \
+  --did did:webvh:abcd:vta.example.com:vta \
+  --no-watchers \
+  --no-confirm
+```
+
+`--no-confirm` skips the final "Publish?" prompt — required for
+unattended runs.
+
+For witness changes, use `--options-file <path>` pointing at a
+JSON file with the full
+[`UpdateDidWebvhBody`](https://github.com/OpenVTC/verifiable-trust-infrastructure/blob/main/vta-sdk/src/protocols/did_management/update.rs)
+shape. The witness wire form uses multibase ids and a threshold
+field that's awkward to express on the command line; a JSON file
+is friendlier.
+
+### Offline equivalent
+
+```bash
+# VTA daemon must be stopped — fjall lock applies.
+vta webvh edit-did --did did:webvh:abcd:vta.example.com:vta
+```
+
+Same flag surface and same security boundary as the other
+offline `vta` commands: filesystem access to the data directory
+is the boundary, no operator authentication ceremony, not
+available in TEE deployments.
+
 ## Walkthrough: brick-prevention in action
 
 ```bash

@@ -586,6 +586,56 @@ enum WebvhCommands {
         #[arg(long = "var", value_parser = parse_key_value)]
         vars: Vec<(String, String)>,
     },
+    /// Edit an existing WebVH DID document.
+    ///
+    /// **Interactive (default):** opens the latest DID document in
+    /// `$EDITOR`, then walks a Confirm/Input chain for the webvh
+    /// parameters (pre-rotation, watchers, TTL, audit label),
+    /// confirms, and publishes a new LogEntry.
+    ///
+    /// **Non-interactive:** supply `--document <file>` (and
+    /// optionally per-field flags) or `--options-file <file>` for
+    /// scripted updates. Witness changes need `--options-file`
+    /// because the multibase-id wire shape is awkward to express
+    /// on the command line.
+    ///
+    /// The DID's top-level `id` is treated as a permanent
+    /// commitment from the first LogEntry — changing it in the
+    /// editor is rejected before publish.
+    EditDid {
+        /// The DID to edit.
+        #[arg(long)]
+        did: String,
+        /// Path to a JSON file with the new DID document. Skips
+        /// `$EDITOR`.
+        #[arg(long)]
+        document: Option<std::path::PathBuf>,
+        /// Path to a JSON file with a full UpdateDidWebvhBody
+        /// (document + every parameter). Mutually exclusive with
+        /// the per-field flags below.
+        #[arg(long)]
+        options_file: Option<std::path::PathBuf>,
+        /// Override the pre-rotation count (0 disables).
+        #[arg(long)]
+        pre_rotation: Option<u32>,
+        /// New TTL in seconds.
+        #[arg(long)]
+        ttl: Option<u32>,
+        /// Replace the watcher set with these URLs (repeatable).
+        #[arg(long = "watcher")]
+        watchers: Vec<String>,
+        /// Disable watchers entirely (mutually exclusive with
+        /// `--watcher`).
+        #[arg(long)]
+        no_watchers: bool,
+        /// Audit label for this update.
+        #[arg(long)]
+        label: Option<String>,
+        /// Skip the final "Publish?" confirmation prompt. Useful
+        /// for scripted runs.
+        #[arg(long)]
+        no_confirm: bool,
+    },
     /// Register an existing serverless WebVH DID with a webvh hosting server.
     ///
     /// Pushes the local `did.jsonl` to the host and flips the DID's
@@ -2113,6 +2163,28 @@ async fn main() {
                     )
                     .await
                 }
+            }
+            WebvhCommands::EditDid {
+                did,
+                document,
+                options_file,
+                pre_rotation,
+                ttl,
+                watchers,
+                no_watchers,
+                label,
+                no_confirm,
+            } => {
+                let flags = vta_cli_common::commands::webvh_edit::EditFlags {
+                    document_file: document,
+                    options_file,
+                    pre_rotation,
+                    ttl,
+                    watchers,
+                    no_watchers,
+                    label,
+                };
+                webvh::cmd_webvh_did_edit(&client, &did, flags, no_confirm).await
             }
             WebvhCommands::RegisterDid { did, server } => {
                 webvh::cmd_webvh_did_register_server(&client, &did, &server).await
