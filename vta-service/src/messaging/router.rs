@@ -358,6 +358,10 @@ pub fn build_handler(
             .route(
                 did_management::ROTATE_DID_WEBVH_KEYS,
                 handler_fn(handlers::handle_rotate_did_webvh_keys),
+            )?
+            .route(
+                did_management::REGISTER_DID_WITH_SERVER,
+                handler_fn(handlers::handle_register_did_with_server),
             )?;
 
         // Protocol management over DIDComm. `enable` is REST-only
