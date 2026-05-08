@@ -20,6 +20,13 @@ config_path = "/srv/vta/config.toml"
 # Where the on-disk fjall store lives. (required)
 data_dir    = "/srv/vta/data"
 
+# WebSocket URL of a remote DID resolver. Optional. Set this when the
+# VTA should resolve DIDs via a remote resolver-cache (e.g. shared
+# across multiple VTAs) or when running in TEE network mode where
+# DID resolution is bridged to a parent-side
+# `affinidi-did-resolver-cache-server` over vsock.
+# resolver_url = "ws://resolver.example.com/did/v1/ws"
+
 # Optional human-readable name for this VTA. Surfaced in `vta config show`.
 vta_name    = "trust-prod-1"
 
@@ -56,6 +63,11 @@ port = 8100
 [log]
 level  = "info"   # "trace" | "debug" | "info" | "warn" | "error"
 format = "json"   # "text" | "json"
+
+# Audit-log retention. Default 28 days. Compliance-driven deployments
+# typically want 90 or 365.
+[audit]
+retention_days = 28
 
 # ---------------------------------------------------------------------------
 # Seed-store backend (required — there is no implicit default)
@@ -97,6 +109,29 @@ service = "vta-prod"   # default "vta"; use a unique name per VTA on the same ho
 # [secrets]
 # backend = "plaintext"
 
+# HashiCorp Vault (KV v2). Compiled in only when the `vault-secrets`
+# feature is enabled. Authenticates via Kubernetes by default; switch
+# `auth_method` to `"token"` or `"approle"` for non-K8s deployments.
+# [secrets]
+# backend     = "vault"
+# addr        = "https://vault.example.com:8200"
+# secret_path = "vta/master-seed"   # under kv_mount; default mount is "secret"
+# kv_mount    = "secret"            # optional; default "secret"
+# secret_key  = "seed"              # optional; field within the KV entry. default "seed"
+# namespace   = "vta-prod"          # optional; Vault Enterprise namespace
+# auth_method = "kubernetes"        # "kubernetes" (default), "token", or "approle"
+# # auth_method = "kubernetes" — needs k8s_role; k8s_mount/k8s_jwt_path are optional
+# k8s_role     = "vta"
+# k8s_mount    = "kubernetes"
+# k8s_jwt_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+# # auth_method = "token" — provide token here, or set VAULT_TOKEN env
+# # token = "hvs.CAES…"
+# # auth_method = "approle" — provide role_id + secret_id
+# # approle_role_id   = "…"
+# # approle_secret_id = "…"
+# # approle_mount     = "approle"
+# # skip_verify = false   # dev/test only; never set true in production
+
 # ---------------------------------------------------------------------------
 # DIDComm mediator (optional; default = skip)
 # ---------------------------------------------------------------------------
@@ -106,16 +141,41 @@ service = "vta-prod"   # default "vta"; use a unique name per VTA on the same ho
 # kind = "skip"
 
 # Point at an existing mediator DID. ATM resolves the endpoint from the DID
-# document at runtime.
+# document at runtime. `mediator_host` is the external hostname the VTA
+# should resolve when dialling — used in TEE network mode where outbound
+# traffic goes via a vsock proxy that needs the upstream hostname for SNI.
 # [messaging]
-# kind = "existing"
-# did  = "did:webvh:.../mediator"
+# kind          = "existing"
+# did           = "did:webvh:.../mediator"
+# mediator_host = "mediator.example.com"   # optional; TEE deployments only
 
 # Mint a new mediator DID using the built-in `didcomm-mediator` template.
+#
+# `url` is the DIDComm service endpoint (where clients send messages —
+# becomes the `serviceEndpoint.uri` in the rendered DID document).
+#
+# `webvh_url` is where the mediator's `did.jsonl` is published — it
+# determines the `did:webvh:<scid>:host:path` identifier itself.
+# Optional; defaults to `url` for the common case where DIDComm and
+# DID hosting share a host. Set it explicitly when the mediator
+# endpoint and the DID document live on different hosts.
+#
+# `mediator_host` — see comment under `kind = "existing"`. TEE-only.
+#
+# `[messaging.template_vars]` is an escape hatch for the optional
+# `didcomm-mediator` template variables (`ROUTING_KEYS`, `ACCEPT`,
+# `WEBVH_SERVER`). `URL` and `WS_URL` are managed by the wizard from
+# `url` and cannot be overridden here.
 [messaging]
-kind    = "create_mediator"
-context = "mediator"   # default "mediator"; trust context the mediator's keys live in
-url     = "https://mediator.example.com"
+kind      = "create_mediator"
+context   = "mediator"   # default "mediator"; trust context the mediator's keys live in
+url       = "https://mediator.example.com"
+# webvh_url     = "https://trust.example.com/dids/mediator"
+# mediator_host = "mediator.example.com"
+
+# [messaging.template_vars]
+# ROUTING_KEYS = ["did:key:zUpstreamMediatorRoutingKey..."]
+# ACCEPT       = ["didcomm/v2"]
 
 # ---------------------------------------------------------------------------
 # VTA DID (optional; default = skip)
@@ -130,6 +190,12 @@ url     = "https://mediator.example.com"
 # [vta_did]
 # kind = "existing"
 # did  = "did:webvh:.../vta"
+
+# Mint a new self-resolving `did:key`. No external hosting required —
+# the DID encodes the public key directly. Ideal for local development
+# or deployments that don't need webvh's portability/rotation.
+# [vta_did]
+# kind = "create_did_key"
 
 # Mint a new did:webvh for the VTA. Always uses the operations layer's
 # "simple mode" (VTA generates keys + document). Operators who need
