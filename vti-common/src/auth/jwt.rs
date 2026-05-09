@@ -130,18 +130,19 @@ mod tests {
     use super::*;
     use base64::Engine;
 
-    /// Pin jsonwebtoken's default `CryptoProvider` to `rust_crypto`
-    /// once per process. Required when `cargo test --workspace`
-    /// unifies features across crates that pull in `aws_lc_rs` (e.g.
-    /// `tests/e2e`) — without an explicit default, jsonwebtoken's
-    /// auto-select panics. Per-crate `cargo test` runs hit this too
-    /// once any sibling crate brings the second provider into the
-    /// shared target dir's feature graph.
+    /// Pin jsonwebtoken's default `CryptoProvider` to `aws_lc_rs`
+    /// once per process. Required because jsonwebtoken's auto-select
+    /// panics when more than one provider is in the feature graph;
+    /// `cargo test --workspace` unifies features across crates and
+    /// can produce that situation. We compile `jsonwebtoken` with
+    /// only the `aws_lc_rs` backend (the `rust_crypto` bundle pulls
+    /// in `rsa` which is exposed to RUSTSEC-2023-0071), so this is
+    /// also the only backend available at runtime.
     fn init_jwt_provider() {
         use std::sync::Once;
         static INIT: Once = Once::new();
         INIT.call_once(|| {
-            let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+            let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
         });
     }
 
