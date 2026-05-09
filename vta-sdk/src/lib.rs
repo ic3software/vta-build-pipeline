@@ -100,7 +100,13 @@ pub mod didcomm_session;
 pub mod keyring_init;
 pub mod keys;
 pub mod prelude;
-#[cfg(feature = "client")]
+// `protocol` itself is always-on (its `services` submodule holds pure
+// wire types + the shared `validate_service_url` validator that
+// vta-service uses without ever talking to a `VtaClient`). The
+// `impl VtaClient` blocks inside are individually `cfg(feature = "client")`-
+// gated, so disabling the `client` feature still drops the network
+// machinery — but consumers no longer need to flip the feature on
+// just to import `protocol::services::validate_service_url`.
 pub mod protocol;
 pub mod protocols;
 #[cfg(feature = "provision-client")]

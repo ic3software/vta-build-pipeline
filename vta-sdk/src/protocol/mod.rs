@@ -16,8 +16,11 @@ pub mod services;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "client")]
 use crate::client::VtaClient;
+#[cfg(feature = "client")]
 use crate::error::VtaError;
+#[cfg(feature = "client")]
 use crate::protocols::protocol_management;
 
 /// Request body for `POST /services/didcomm/enable`.
@@ -85,6 +88,7 @@ pub struct DisableDidcommResponse {
     pub drains_until: Option<String>,
 }
 
+#[cfg(feature = "client")]
 impl VtaClient {
     /// Enable DIDComm on a REST-only VTA. Spec: success criterion #1.
     ///
@@ -366,6 +370,7 @@ pub struct MediatorReport {
     pub senders: Vec<SenderLastSeen>,
 }
 
+#[cfg(feature = "client")]
 impl VtaClient {
     /// Cancel a drain entry early, dropping the listener for that
     /// mediator immediately. Refuses if the named DID is the
@@ -419,6 +424,7 @@ impl VtaClient {
     }
 }
 
+#[cfg(feature = "client")]
 fn build_report_query(since: Option<&str>, until: Option<&str>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(s) = since {
@@ -430,6 +436,7 @@ fn build_report_query(since: Option<&str>, until: Option<&str>) -> String {
     parts.join("&")
 }
 
+#[cfg(feature = "client")]
 fn url_encode(s: &str) -> String {
     // RFC 3339 timestamps contain `:` and `+`; the latter is the
     // form-urlencoded representation of a space and would mangle
