@@ -7,6 +7,8 @@ const MSG_DID_REQUEST: &str = "https://affinidi.com/webvh/1.0/did/request";
 const MSG_DID_OFFER: &str = "https://affinidi.com/webvh/1.0/did/offer";
 const MSG_DID_PUBLISH: &str = "https://affinidi.com/webvh/1.0/did/publish";
 const MSG_DID_CONFIRM: &str = "https://affinidi.com/webvh/1.0/did/confirm";
+const MSG_DID_REGISTER: &str = "https://affinidi.com/webvh/1.0/did/register";
+const MSG_DID_REGISTER_CONFIRM: &str = "https://affinidi.com/webvh/1.0/did/register-confirm";
 const MSG_DELETE: &str = "https://affinidi.com/webvh/1.0/did/delete";
 const MSG_DELETE_CONFIRM: &str = "https://affinidi.com/webvh/1.0/did/delete-confirm";
 const MSG_PROBLEM_REPORT: &str = "https://affinidi.com/webvh/1.0/did/problem-report";
@@ -46,6 +48,38 @@ impl<'a> WebvhDIDCommClient<'a> {
 
         serde_json::from_value(response.body)
             .map_err(|e| AppError::Internal(format!("failed to parse did/offer response: {e}")))
+    }
+
+    /// Atomic claim-and-publish — see [`crate::webvh_client::WebvhClient::register_did_atomic`].
+    pub async fn register_did_atomic(
+        &self,
+        path: &str,
+        did_log: &str,
+        force: bool,
+    ) -> Result<RequestUriResponse, AppError> {
+        let body = serde_json::json!({
+            "path": path,
+            "did_log": did_log,
+            "force": force,
+        });
+
+        let response = self
+            .bridge
+            .send_and_wait(
+                self.server_did,
+                MSG_DID_REGISTER,
+                body,
+                MSG_DID_REGISTER_CONFIRM,
+                MSG_PROBLEM_REPORT,
+                30,
+            )
+            .await?;
+
+        serde_json::from_value(response.body).map_err(|e| {
+            AppError::Internal(format!(
+                "failed to parse did/register-confirm response: {e}"
+            ))
+        })
     }
 
     /// Publish a DID log to the WebVH server.

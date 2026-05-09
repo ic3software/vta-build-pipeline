@@ -485,6 +485,7 @@ pub async fn run_register_did(
     config_path: Option<PathBuf>,
     did: String,
     server: String,
+    force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::load(config_path)?;
     let store = Store::open(&config.store)?;
@@ -503,6 +504,7 @@ pub async fn run_register_did(
         operations::did_webvh::RegisterDidWithServerParams {
             did,
             server_id: server,
+            force,
         },
         "vta-cli-offline",
     )

@@ -646,10 +646,11 @@ enum WebvhCommands {
     },
     /// Register an existing serverless WebVH DID with a webvh hosting server.
     ///
-    /// Pushes the local `did.jsonl` to the host and flips the DID's
-    /// `server_id` so future `pnm services …` mutations
-    /// auto-publish there. Useful when the VTA was set up
-    /// serverless and a host became available later.
+    /// Pushes the local `did.jsonl` to the host atomically (single
+    /// batched write — no resolver gap) and flips the DID's
+    /// `server_id` so future `pnm services …` mutations auto-publish
+    /// there. Useful when the VTA was set up serverless and a host
+    /// became available later.
     ///
     /// Refused if the DID is already server-managed.
     RegisterDid {
@@ -659,6 +660,12 @@ enum WebvhCommands {
         /// Registered server id (from `pnm webvh add-server`).
         #[arg(long)]
         server: String,
+        /// Take over a slot owned by a different DID. Honoured only
+        /// when this VTA authenticates to the host as an admin. An
+        /// owner re-registering their own slot is idempotent and
+        /// always succeeds without `--force`.
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
     /// List WebVH DIDs
     ListDids {
@@ -2196,8 +2203,8 @@ async fn main() {
                 };
                 webvh::cmd_webvh_did_edit(&client, &did, flags, no_confirm).await
             }
-            WebvhCommands::RegisterDid { did, server } => {
-                webvh::cmd_webvh_did_register_server(&client, &did, &server).await
+            WebvhCommands::RegisterDid { did, server, force } => {
+                webvh::cmd_webvh_did_register_server(&client, &did, &server, force).await
             }
             WebvhCommands::ListDids { context, server } => {
                 webvh::cmd_webvh_did_list(&client, context.as_deref(), server.as_deref()).await

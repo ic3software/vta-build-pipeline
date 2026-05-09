@@ -129,19 +129,28 @@ pub async fn cmd_webvh_server_remove(
     Ok(())
 }
 
-/// `pnm webvh register-did --did <did> --server <id>` —
+/// `pnm webvh register-did --did <did> --server <id> [--force]` —
 /// promote a serverless WebVH DID to a server-managed one.
 ///
-/// Pushes the local `did.jsonl` to the host and flips the local
-/// record's `server_id` so future `pnm services …` mutations
-/// auto-publish there. Refused if the DID is already
-/// server-managed (re-pointing a hosted DID is out of scope).
+/// Pushes the local `did.jsonl` to the host atomically (single
+/// batched write — no resolver gap) and flips the local record's
+/// `server_id` so future `pnm services …` mutations auto-publish
+/// there. Refused if the DID is already server-managed
+/// (re-pointing a hosted DID is out of scope).
+///
+/// `--force` is honoured only when the VTA's DID authenticates to
+/// the host as an admin replacing a slot owned by a different DID.
+/// An owner re-registering their own slot is idempotent and always
+/// succeeds without `--force`.
 pub async fn cmd_webvh_did_register_server(
     client: &VtaClient,
     did: &str,
     server_id: &str,
+    force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let result = client.register_did_with_server(did, server_id).await?;
+    let result = client
+        .register_did_with_server(did, server_id, force)
+        .await?;
     println!("DID registered with WebVH server.");
     println!("  DID:        {}", result.did);
     println!("  Server:     {}", result.server_id);

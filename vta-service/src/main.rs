@@ -687,6 +687,10 @@ enum WebvhCommands {
         /// Registered server id (from `vta webvh add-server`).
         #[arg(long)]
         server: String,
+        /// Take over a slot owned by a different DID. Honoured only
+        /// when this VTA's DID authenticates to the host as an admin.
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
 }
 
@@ -1192,8 +1196,8 @@ async fn main() {
                     )
                     .await
                 }
-                WebvhCommands::RegisterDid { did, server } => {
-                    webvh_cli::run_register_did(cli.config, did, server).await
+                WebvhCommands::RegisterDid { did, server, force } => {
+                    webvh_cli::run_register_did(cli.config, did, server, force).await
                 }
             };
             if let Err(e) = result {

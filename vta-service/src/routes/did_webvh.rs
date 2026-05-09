@@ -309,6 +309,7 @@ pub async fn register_did_with_server_handler(
         RegisterDidWithServerParams {
             did: body.did,
             server_id: body.server_id,
+            force: body.force,
         },
         "rest",
     )
@@ -323,8 +324,8 @@ pub async fn register_did_with_server_handler(
 
 /// Map `RegisterDidWithServerError` onto `AppError` so the
 /// existing route-error machinery surfaces an appropriate status
-/// (404 for missing DID/server, 409 for already-server-managed,
-/// 502 for transport/publish failures, 500 otherwise).
+/// (404 for missing DID/server/log, 409 for already-server-managed,
+/// 400 for malformed DID URLs, 500 otherwise).
 fn map_register_err(e: RegisterDidWithServerError) -> AppError {
     use RegisterDidWithServerError as E;
     match e {
@@ -332,9 +333,7 @@ fn map_register_err(e: RegisterDidWithServerError) -> AppError {
         E::DidNotFound(msg) | E::ServerNotFound(msg) | E::LogMissing(msg) => {
             AppError::NotFound(msg)
         }
-        E::AlreadyServerManaged { .. } | E::PathAllocationMismatch { .. } => {
-            AppError::Conflict(e.to_string())
-        }
+        E::AlreadyServerManaged { .. } => AppError::Conflict(e.to_string()),
         E::Transport(msg) | E::Publish(msg) => AppError::Internal(format!("publish: {msg}")),
         E::DidUrlParse { .. } => AppError::Validation(e.to_string()),
         E::Storage(msg) => AppError::Internal(msg),

@@ -1023,11 +1023,13 @@ impl VtaClient {
         &self,
         did: &str,
         server_id: &str,
+        force: bool,
     ) -> Result<crate::protocols::did_management::servers::RegisterDidWithServerResultBody, VtaError>
     {
         let body = crate::protocols::did_management::servers::RegisterDidWithServerBody {
             did: did.to_string(),
             server_id: server_id.to_string(),
+            force,
         };
         self.rpc(
             did_management::REGISTER_DID_WITH_SERVER,

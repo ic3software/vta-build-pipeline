@@ -45,6 +45,13 @@ const SERVERLESS_MARKER: &str = "serverless";
 pub struct RegisterDidWithServerParams {
     pub did: String,
     pub server_id: String,
+    /// When true, asks the host to take this slot even if it is owned
+    /// by a different DID. Honoured only when the caller authenticates
+    /// to the host as an admin; an owner re-registering their own slot
+    /// is always allowed without force (the operation is idempotent in
+    /// that case). Maps to the `force` field on the host's
+    /// `did/register` request.
+    pub force: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -81,13 +88,6 @@ pub enum RegisterDidWithServerError {
     Publish(String),
     #[error("storage error: {0}")]
     Storage(String),
-    #[error(
-        "server allocated `{allocated}` but DID resolves at `{expected}`. \
-         The path component is likely already claimed on this host — \
-         choose a different webvh server, or have the host operator \
-         release that path."
-    )]
-    PathAllocationMismatch { allocated: String, expected: String },
     #[error("could not derive URL from DID `{did}`: {reason}")]
     DidUrlParse { did: String, reason: String },
 }
@@ -143,65 +143,38 @@ pub async fn register_did_with_server(
         .await
         .map_err(|e| RegisterDidWithServerError::Transport(e.to_string()))?;
 
-    // 5. The serverless DID has no mnemonic (it was minted with one
-    //    artifact: a local `did.jsonl`, no host involvement). Ask the
-    //    target host to allocate a slot for the DID's *existing* path
-    //    component — same path the DID identifier already resolves at —
-    //    and use the freshly-issued mnemonic to publish.
+    // 5. Atomic claim-and-publish on the host. One round-trip writes
+    //    slot allocation + log content + owner index in a single batch,
+    //    so any in-flight resolver hits either the prior content or the
+    //    new content — never the empty 404 window the older two-step
+    //    `request_uri` + `publish_did` flow had.
     //
     //    `WebVHURL::parse_did_url` returns `path` with leading and
-    //    trailing slashes (`/glenn-vta/`). The host's `request_uri`
-    //    expects the path without slashes; an empty/`.well-known/`
-    //    path gets passed as `None` so the server applies its default.
+    //    trailing slashes (`/glenn-vta/`). The host expects the path
+    //    without surrounding slashes. Empty or `.well-known` paths
+    //    aren't supported here — atomic-register requires an explicit
+    //    path on the host side; root-DID registration is a separate
+    //    admin-only flow.
     let parsed = WebVHURL::parse_did_url(&params.did).map_err(|e| {
         RegisterDidWithServerError::DidUrlParse {
             did: params.did.clone(),
             reason: e.to_string(),
         }
     })?;
-    let trimmed_path = parsed.path.trim_matches('/');
-    let request_path = if trimmed_path.is_empty() || trimmed_path == ".well-known" {
-        None
-    } else {
-        Some(trimmed_path)
-    };
+    let request_path = parsed.path.trim_matches('/').to_string();
 
-    let uri_response = transport
-        .request_uri(request_path)
-        .await
-        .map_err(|e| RegisterDidWithServerError::Publish(format!("request_uri: {e}")))?;
-
-    // Verify the host allocated the URL the DID already resolves at.
-    // If the path is taken, the server allocates a different one — we
-    // refuse rather than silently break resolution. The expected URL
-    // mirrors `WebvhServer::published_did_url` shape: scheme + host
-    // (+ port) + path + `did.jsonl`.
-    let port_segment = parsed.port.map(|p| format!(":{p}")).unwrap_or_default();
-    let expected_url = format!(
-        "https://{host}{port}{path}did.jsonl",
-        host = parsed.domain,
-        port = port_segment,
-        path = parsed.path,
-    );
-    if uri_response.did_url != expected_url {
-        return Err(RegisterDidWithServerError::PathAllocationMismatch {
-            allocated: uri_response.did_url,
-            expected: expected_url,
-        });
-    }
-
-    transport
-        .publish_did(&uri_response.mnemonic, &did_log)
+    let response = transport
+        .register_did_atomic(&request_path, &did_log, params.force)
         .await
         .map_err(|e| RegisterDidWithServerError::Publish(e.to_string()))?;
 
     // 6. Flip `server_id` on the local record AND persist the
-    //    server-issued mnemonic. From here on, `update_did_webvh` will
-    //    treat this as a server-managed DID and auto-publish on every
-    //    subsequent change (including the `services` runtime mutations)
-    //    using this mnemonic.
+    //    server-issued mnemonic (equals the path for custom-path slots).
+    //    From here on, `update_did_webvh` will treat this as a
+    //    server-managed DID and auto-publish on every subsequent change
+    //    (including the `services` runtime mutations) using this mnemonic.
     record.server_id = params.server_id.clone();
-    record.mnemonic = uri_response.mnemonic;
+    record.mnemonic = response.mnemonic;
     record.updated_at = Utc::now();
     let log_entry_count = record.log_entry_count;
     webvh_store::store_did(webvh_ks, &record).await?;
@@ -336,6 +309,7 @@ mod tests {
             RegisterDidWithServerParams {
                 did: "did:webvh:scid:host:vta".into(),
                 server_id: "primary".into(),
+                force: false,
             },
             "test",
         )
@@ -358,6 +332,7 @@ mod tests {
             RegisterDidWithServerParams {
                 did: "did:webvh:nonexistent:host:vta".into(),
                 server_id: "primary".into(),
+                force: false,
             },
             "test",
         )
@@ -385,6 +360,7 @@ mod tests {
             RegisterDidWithServerParams {
                 did: did.into(),
                 server_id: "primary".into(),
+                force: false,
             },
             "test",
         )
@@ -418,6 +394,7 @@ mod tests {
             RegisterDidWithServerParams {
                 did: did.into(),
                 server_id: "missing-host".into(),
+                force: false,
             },
             "test",
         )
@@ -449,6 +426,7 @@ mod tests {
             RegisterDidWithServerParams {
                 did: did.into(),
                 server_id: "primary".into(),
+                force: false,
             },
             "test",
         )

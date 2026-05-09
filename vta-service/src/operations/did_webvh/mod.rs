@@ -1141,6 +1141,26 @@ impl<'a> WebvhTransport<'a> {
         }
     }
 
+    /// Atomic claim-and-publish — single round-trip alternative to
+    /// `request_uri` + `publish_did`. The server commits slot
+    /// allocation, log content, and owner index in one batch, so
+    /// resolvers never see the slot empty.
+    pub(super) async fn register_did_atomic(
+        &self,
+        path: &str,
+        did_log: &str,
+        force: bool,
+    ) -> Result<RequestUriResponse, AppError> {
+        match self {
+            Self::Rest(c) => c.register_did_atomic(path, did_log, force).await,
+            Self::DIDComm { bridge, server_did } => {
+                WebvhDIDCommClient::new(bridge, server_did)
+                    .register_did_atomic(path, did_log, force)
+                    .await
+            }
+        }
+    }
+
     async fn delete_did(&self, mnemonic: &str) -> Result<(), AppError> {
         match self {
             Self::Rest(c) => c.delete_did(mnemonic).await,
