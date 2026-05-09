@@ -6,12 +6,15 @@
 //! - `lifecycle` — read ops on stored DID records (`get`, `list`, log)
 //! - `servers` — webvh hosting-server CRUD + DID validation
 
+mod concurrency;
 mod document;
 mod lifecycle;
 mod register_server;
 mod servers;
 mod update;
 mod webvh_keys;
+
+pub(crate) use concurrency::{RaceDetected, RecordSnapshot};
 
 pub(crate) use document::build_did_document_with_options;
 pub use document::{build_did_document, build_vta_did_document_with_sealed_transfer};

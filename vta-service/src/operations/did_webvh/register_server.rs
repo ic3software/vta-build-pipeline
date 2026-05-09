@@ -34,7 +34,7 @@ use crate::error::AppError;
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
 
-use super::WebvhTransport;
+use super::{RaceDetected, RecordSnapshot, WebvhTransport};
 
 /// `server_id` value stored on a DID record that has not yet been
 /// associated with a webvh hosting server. Mirrors the literal used
@@ -90,6 +90,17 @@ pub enum RegisterDidWithServerError {
     Storage(String),
     #[error("could not derive URL from DID `{did}`: {reason}")]
     DidUrlParse { did: String, reason: String },
+    /// Optimistic-concurrency race: the local DID record changed
+    /// between the initial read (where we asserted serverless +
+    /// looked up server + fetched log) and the final store (where
+    /// we flip server_id + persist mnemonic). Wraps the structured
+    /// `RaceDetected` reason from the shared snapshot helper.
+    #[error(
+        "DID was modified concurrently between read and write — re-run \
+         `pnm webvh register-did` after confirming no other operator \
+         is registering the same DID. Reason: {0}"
+    )]
+    Conflict(RaceDetected),
 }
 
 impl From<AppError> for RegisterDidWithServerError {
@@ -115,10 +126,18 @@ pub async fn register_did_with_server(
         .map_err(|e| RegisterDidWithServerError::Auth(e.to_string()))?;
 
     // 1. Look up the DID record. Refuse if not found, or if already
-    //    server-managed.
+    //    server-managed. Snapshot the version-vector fields so we can
+    //    detect any concurrent mutation before the final store —
+    //    without this, two concurrent calls (e.g. operator + a bot
+    //    that just set `server_id`, or a rollback racing the original
+    //    register) both pass the serverless check then both write,
+    //    and the second `store_did` clobbers the first. The local
+    //    record then points at one of two upstream hosts that each
+    //    think they own the DID.
     let mut record = webvh_store::get_did(webvh_ks, &params.did)
         .await?
         .ok_or_else(|| RegisterDidWithServerError::DidNotFound(params.did.clone()))?;
+    let snapshot = RecordSnapshot::capture(&record);
 
     if record.server_id != SERVERLESS_MARKER {
         return Err(RegisterDidWithServerError::AlreadyServerManaged {
@@ -168,7 +187,22 @@ pub async fn register_did_with_server(
         .await
         .map_err(|e| RegisterDidWithServerError::Publish(e.to_string()))?;
 
-    // 6. Flip `server_id` on the local record AND persist the
+    // 6. Optimistic-concurrency check. Re-load the record and assert
+    //    nothing changed between the initial read and now (where we're
+    //    about to flip server_id + persist mnemonic). This catches a
+    //    second register call (or any concurrent record-mutating op)
+    //    that ran while we were doing the host round-trip — without
+    //    this, the loser's `store_did` silently overwrites the
+    //    winner's, and the local record points at the wrong upstream
+    //    while the host actually owning the slot is left orphaned.
+    let current = webvh_store::get_did(webvh_ks, &params.did)
+        .await?
+        .ok_or_else(|| RegisterDidWithServerError::DidNotFound(params.did.clone()))?;
+    snapshot
+        .assert_unchanged(&current)
+        .map_err(RegisterDidWithServerError::Conflict)?;
+
+    // 7. Flip `server_id` on the local record AND persist the
     //    server-issued mnemonic (equals the path for custom-path slots).
     //    From here on, `update_did_webvh` will treat this as a
     //    server-managed DID and auto-publish on every subsequent change
@@ -433,5 +467,33 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, RegisterDidWithServerError::LogMissing(_)));
+    }
+
+    /// The `Conflict` error variant must map cleanly through to the
+    /// HTTP 409 / DIDComm `e.p.msg.conflict` boundary. Pin the
+    /// constructor wiring so the route + DIDComm error mappers (which
+    /// match exhaustively on this enum) stay in sync if a future
+    /// edit changes the variant shape.
+    ///
+    /// Real end-to-end concurrent-call coverage lives at the
+    /// integration layer (would need two WebvhTransports racing the
+    /// same DID); the within-op snapshot mechanism itself is unit-
+    /// tested in `super::concurrency::tests`.
+    #[test]
+    fn conflict_variant_carries_race_reason() {
+        use super::super::RaceDetected;
+        let err = RegisterDidWithServerError::Conflict(RaceDetected::ServerIdChanged {
+            did: "did:webvh:foo".into(),
+            expected: "serverless".into(),
+            current: "webvh-prod".into(),
+        });
+        let msg = err.to_string();
+        assert!(
+            msg.contains("modified concurrently"),
+            "user-facing wrapper text missing: {msg}"
+        );
+        assert!(msg.contains("serverless"), "race reason inlined: {msg}");
+        assert!(msg.contains("webvh-prod"), "race reason inlined: {msg}");
+        assert!(matches!(err, RegisterDidWithServerError::Conflict(_)));
     }
 }
