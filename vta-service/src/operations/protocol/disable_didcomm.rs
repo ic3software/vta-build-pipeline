@@ -46,7 +46,6 @@ use crate::operations::did_webvh::{UpdateDidWebvhError, UpdateDidWebvhOptions, u
 use crate::operations::protocol::document::{DocumentPatchError, without_didcomm_service};
 use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 /// Spec minimum drain TTL when called over DIDComm transport: 1
 /// hour. Avoids the race where the inbound listener's response
@@ -126,6 +125,21 @@ pub enum DisableDidcommError {
 impl From<AppError> for DisableDidcommError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
+    }
+}
+
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for DisableDidcommError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
     }
 }
 
@@ -284,60 +298,40 @@ async fn read_preconditions(
     use crate::operations::protocol::snapshot::ServiceKind;
     use vta_sdk::error::VtaError;
 
-    let cfg = config.read().await;
-    if !cfg.services.didcomm {
-        return Err(DisableDidcommError::DidcommNotEnabled);
+    // Op-specific config gating (services.didcomm enabled, brick-
+    // prevention, drain-TTL bounds) runs first under the read lock.
+    {
+        let cfg = config.read().await;
+        if !cfg.services.didcomm {
+            return Err(DisableDidcommError::DidcommNotEnabled);
+        }
+        // Brick-prevention via the shared §3.2 helper (T0.4) —
+        // single source of truth across all disable / rollback paths.
+        // VtaError::LastServiceRefused maps to the existing
+        // NoProtocolRemaining wire variant.
+        if let Err(VtaError::LastServiceRefused) = would_violate_last_service(
+            &CurrentServices::new(cfg.services.rest, cfg.services.didcomm),
+            ProposedOp::disable(ServiceKind::Didcomm),
+        ) {
+            return Err(DisableDidcommError::NoProtocolRemaining);
+        }
+        crate::operations::protocol::validate_drain_ttl(params.transport, params.drain_ttl)
+            .map_err(|e| DisableDidcommError::DrainTtlOutOfBounds {
+                min: e.min,
+                max: e.max,
+                requested: e.requested,
+            })?;
     }
-    // Brick-prevention via the shared §3.2 helper (T0.4) —
-    // single source of truth across all disable / rollback paths.
-    // VtaError::LastServiceRefused maps to the existing
-    // DisableDidcommError::NoProtocolRemaining wire variant so
-    // operators see the same error string as before this refactor.
-    if let Err(VtaError::LastServiceRefused) = would_violate_last_service(
-        &CurrentServices::new(cfg.services.rest, cfg.services.didcomm),
-        ProposedOp::disable(ServiceKind::Didcomm),
-    ) {
-        return Err(DisableDidcommError::NoProtocolRemaining);
-    }
-    crate::operations::protocol::validate_drain_ttl(params.transport, params.drain_ttl).map_err(
-        |e| DisableDidcommError::DrainTtlOutOfBounds {
-            min: e.min,
-            max: e.max,
-            requested: e.requested,
-        },
-    )?;
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(DisableDidcommError::VtaDidNotConfigured)?;
-    drop(cfg);
 
-    let record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| DisableDidcommError::VtaDidRecordMissing(vta_did.clone()))?;
-    let scid = record.scid.clone();
-
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| DisableDidcommError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = crate::operations::protocol::document::current_document_from_log(&did_log)?;
+    // Common load: `vta_did`, `scid`, `did_log`, `current_doc`.
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
 
     let prior_mediator =
-        crate::operations::protocol::document::current_didcomm_service(&current_doc)
+        crate::operations::protocol::document::current_didcomm_service(&state.current_doc)
             .map(|s| s.mediator_did)
             .ok_or(DisableDidcommError::NoActiveMediator)?;
 
-    Ok((vta_did, scid, current_doc, prior_mediator))
-}
-
-impl From<crate::operations::protocol::document::CurrentDocumentError> for DisableDidcommError {
-    fn from(value: crate::operations::protocol::document::CurrentDocumentError) -> Self {
-        use crate::operations::protocol::document::CurrentDocumentError as E;
-        match value {
-            E::EmptyLog => Self::EmptyLog,
-            E::Parse(s) => Self::Storage(s),
-        }
-    }
+    Ok((state.vta_did, state.scid, state.current_doc, prior_mediator))
 }
 
 async fn persist_didcomm_disabled(

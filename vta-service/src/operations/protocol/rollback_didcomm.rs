@@ -66,7 +66,6 @@ use crate::operations::protocol::update_didcomm::{
     MigrateAuditKind, UpdateDidcommError, UpdateDidcommParams, update_didcomm,
 };
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 /// Handshake timeout when re-promoting a prior mediator. Matches
 /// the default that the route layer applies for forward
@@ -156,6 +155,21 @@ pub enum RollbackDidcommError {
 impl From<AppError> for RollbackDidcommError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
+    }
+}
+
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for RollbackDidcommError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
     }
 }
 
@@ -344,33 +358,8 @@ async fn read_current_didcomm_mediator(
     config: &Arc<RwLock<AppConfig>>,
     webvh_ks: &KeyspaceHandle,
 ) -> Result<Option<String>, RollbackDidcommError> {
-    let cfg = config.read().await;
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(RollbackDidcommError::VtaDidNotConfigured)?;
-    drop(cfg);
-
-    let _record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| RollbackDidcommError::VtaDidRecordMissing(vta_did.clone()))?;
-
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| RollbackDidcommError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = crate::operations::protocol::document::current_document_from_log(&did_log)?;
-
-    Ok(current_didcomm_service(&current_doc).map(|svc| svc.mediator_did))
-}
-
-impl From<crate::operations::protocol::document::CurrentDocumentError> for RollbackDidcommError {
-    fn from(value: crate::operations::protocol::document::CurrentDocumentError) -> Self {
-        use crate::operations::protocol::document::CurrentDocumentError as E;
-        match value {
-            E::EmptyLog => Self::EmptyLog,
-            E::Parse(s) => Self::Storage(s),
-        }
-    }
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
+    Ok(current_didcomm_service(&state.current_doc).map(|svc| svc.mediator_did))
 }
 
 #[cfg(test)]

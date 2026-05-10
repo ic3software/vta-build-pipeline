@@ -36,7 +36,6 @@
 use std::sync::Arc;
 
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
-use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -60,7 +59,6 @@ use crate::operations::protocol::snapshot::{
 };
 use crate::operations::protocol::update_rest::{UpdateRestError, UpdateRestParams, update_rest};
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 #[derive(Debug, Clone, Default)]
 pub struct RollbackRestParams;
@@ -135,6 +133,21 @@ pub enum RollbackRestError {
 impl From<AppError> for RollbackRestError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
+    }
+}
+
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for RollbackRestError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
     }
 }
 
@@ -290,34 +303,8 @@ async fn read_current_rest_url(
     config: &Arc<RwLock<AppConfig>>,
     webvh_ks: &KeyspaceHandle,
 ) -> Result<Option<String>, RollbackRestError> {
-    let cfg = config.read().await;
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(RollbackRestError::VtaDidNotConfigured)?;
-    drop(cfg);
-
-    let _record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| RollbackRestError::VtaDidRecordMissing(vta_did.clone()))?;
-
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| RollbackRestError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
-
-    Ok(current_rest_service(&current_doc).map(|svc| svc.url))
-}
-
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, RollbackRestError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(RollbackRestError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| RollbackRestError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
+    Ok(current_rest_service(&state.current_doc).map(|svc| svc.url))
 }
 
 #[cfg(test)]

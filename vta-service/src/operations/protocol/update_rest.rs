@@ -46,7 +46,6 @@ use crate::operations::protocol::document::{
 use crate::operations::protocol::snapshot::{self, RestSnapshot, ServiceConfigSnapshot};
 use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 #[derive(Debug, Clone)]
 pub struct UpdateRestParams {
@@ -96,6 +95,21 @@ pub enum UpdateRestError {
 impl From<AppError> for UpdateRestError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
+    }
+}
+
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for UpdateRestError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
     }
 }
 
@@ -209,41 +223,20 @@ async fn read_preconditions(
     config: &Arc<RwLock<AppConfig>>,
     webvh_ks: &KeyspaceHandle,
 ) -> Result<(String, String, JsonValue, String), UpdateRestError> {
-    let cfg = config.read().await;
-    if !cfg.services.rest {
-        return Err(UpdateRestError::ServiceNotPresent);
+    {
+        let cfg = config.read().await;
+        if !cfg.services.rest {
+            return Err(UpdateRestError::ServiceNotPresent);
+        }
     }
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(UpdateRestError::VtaDidNotConfigured)?;
-    drop(cfg);
 
-    let record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| UpdateRestError::VtaDidRecordMissing(vta_did.clone()))?;
-    let scid = record.scid.clone();
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
 
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| UpdateRestError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = crate::operations::protocol::document::current_document_from_log(&did_log)?;
-
-    let prior_url = current_rest_service(&current_doc)
+    let prior_url = current_rest_service(&state.current_doc)
         .map(|s| s.url)
         .ok_or(UpdateRestError::ServiceNotPresent)?;
 
-    Ok((vta_did, scid, current_doc, prior_url))
-}
-
-impl From<crate::operations::protocol::document::CurrentDocumentError> for UpdateRestError {
-    fn from(value: crate::operations::protocol::document::CurrentDocumentError) -> Self {
-        use crate::operations::protocol::document::CurrentDocumentError as E;
-        match value {
-            E::EmptyLog => Self::EmptyLog,
-            E::Parse(s) => Self::Storage(s),
-        }
-    }
+    Ok((state.vta_did, state.scid, state.current_doc, prior_url))
 }
 
 #[cfg(test)]
