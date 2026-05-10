@@ -411,7 +411,10 @@ impl IntoResponse for DisableDidcommHttpError {
                     error: "didcomm_not_enabled",
                     message: "DIDComm is not currently enabled.".into(),
                     suggested_fix: Some(
-                        "Use `pnm services enable didcomm --mediator-did <did>` first.".into(),
+                        "Enable DIDComm first: `pnm services didcomm enable --mediator-did <did>` \
+                         (online) or `vta services didcomm enable --mediator-did <did>` \
+                         (offline, daemon stopped)."
+                            .into(),
                     ),
                     stage: None,
                 },
@@ -422,7 +425,10 @@ impl IntoResponse for DisableDidcommHttpError {
                     error: "no_protocol_remaining",
                     message: "Cannot disable DIDComm — REST is also disabled. The VTA would have no protocol surface left.".into(),
                     suggested_fix: Some(
-                        "Run `pnm services enable rest` first, then retry.".into(),
+                        "Enable REST first: `pnm services rest enable --url <url>` (online) \
+                         or `vta services rest enable --url <url>` (offline, daemon stopped). \
+                         Then retry."
+                            .into(),
                     ),
                     stage: None,
                 },

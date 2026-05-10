@@ -160,7 +160,7 @@ pub async fn run_open(
             }
             println!();
             println!("To install this credential, use the online bootstrap flow:");
-            println!("  pnm bootstrap connect --vta-url <url> [--token <token>]");
+            println!("  pnm bootstrap connect --vta-url <url> [--expect-digest <sha256>]");
         }
         SealedPayloadV1::ContextProvision(p) => {
             println!("Payload: ContextProvision");

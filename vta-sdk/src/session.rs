@@ -685,7 +685,7 @@ async fn rotate_key_didcomm(
     let acl_entry = client.get_acl(&session.client_did).await.map_err(|e| {
         format!(
             "rotate (DIDComm): cannot read temp DID's ACL entry: {e} — \
-             has your admin run `vta acl create --did {} --role admin` yet?",
+             has your admin run `vta import-did --did {} --role admin` yet?",
             session.client_did
         )
     })?;
@@ -812,7 +812,7 @@ async fn rotate_key(
         let status = acl_resp.status();
         let body = acl_resp.text().await.unwrap_or_default();
         return Err(format!(
-            "rotate: cannot read temp DID's ACL entry ({status}): {body} — has your admin run `vta acl create --did {} --role admin` yet?",
+            "rotate: cannot read temp DID's ACL entry ({status}): {body} — has your admin run `vta import-did --did {} --role admin` yet?",
             session.client_did
         )
         .into());

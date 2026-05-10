@@ -78,7 +78,11 @@ enum Commands {
     ///
     /// Requires proof of super admin key ownership via challenge-response:
     /// the VTA generates a random challenge, you sign it with your admin
-    /// private key using `pnm auth sign-challenge`, and paste the signature.
+    /// private key using either `pnm auth sign-challenge <hex>` (online,
+    /// uses PNM's stored admin key) or `vta auth sign-challenge --did
+    /// <did> --challenge <hex>` (offline cold-start, signs from the local
+    /// keystore — daemon must be stopped). Paste the signature back into
+    /// the prompt.
     Unseal,
     /// Export admin DID and credential (blocked when sealed)
     ExportAdmin,

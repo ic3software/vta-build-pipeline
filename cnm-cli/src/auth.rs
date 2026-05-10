@@ -95,8 +95,11 @@ pub fn status(keyring_key: &str) {
         }
         None => {
             println!("Not authenticated.");
-            println!("\nTo authenticate, import a credential from your VTA administrator:");
-            println!("  cnm auth login <credential-string>");
+            println!(
+                "\nTo authenticate, import a sealed credential bundle from your VTA administrator:"
+            );
+            println!("  cnm auth login --credential-bundle <bundle.armored>");
+            println!("    [--expect-digest <sha256-hex>]   # recommended; OOB-supplied digest");
         }
     }
 }

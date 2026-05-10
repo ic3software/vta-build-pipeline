@@ -327,7 +327,7 @@ pub async fn provision_integration(
         .map_err(|e| match e {
             AppError::NotFound(_) => AppError::Validation(format!(
                 "integration template '{template_name}' is not registered on this VTA. \
-                 Register it via 'pnm did-templates upload {template_name} --file <path>' \
+                 Register it via 'pnm did-templates create {template_name} --file <path>' \
                  then retry."
             )),
             other => other,
@@ -1164,7 +1164,7 @@ mod tests {
     // `resolve_admin_template` and `did_webvh::resolve_template_for_render`.
     // Built-ins like `didcomm-mediator` ship inside `vta_sdk::did_templates`
     // and must resolve without an operator ever running
-    // `pnm did-templates upload`.
+    // `pnm did-templates create`.
 
     use vta_sdk::did_templates::{DidTemplate, DidTemplateRecord, Scope};
 

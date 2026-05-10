@@ -77,7 +77,8 @@ pub enum RegisterDidWithServerError {
     AlreadyServerManaged { did: String, server_id: String },
     #[error(
         "webvh server `{0}` is not registered. \
-         Add it first with `pnm webvh add-server --id {0} --did <server-did>`."
+         Add it first with `pnm webvh add-server --id {0} --did <server-did>` (online) \
+         or `vta webvh add-server --id {0} --did <server-did>` (offline, daemon stopped)."
     )]
     ServerNotFound(String),
     #[error("DID `{0}` has no published log on disk (cannot push to server)")]

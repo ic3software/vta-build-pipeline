@@ -82,13 +82,16 @@ pub struct DisableDidcommResult {
 #[derive(Debug, Error)]
 pub enum DisableDidcommError {
     #[error(
-        "DIDComm is not currently enabled. Use `pnm services enable didcomm --mediator-did <did>` first."
+        "DIDComm is not currently enabled. Enable it first: \
+         `pnm services didcomm enable --mediator-did <did>` (online) \
+         or `vta services didcomm enable --mediator-did <did>` (offline, daemon stopped)."
     )]
     DidcommNotEnabled,
     #[error(
         "cannot disable DIDComm — REST is also disabled. The VTA would have no protocol surface left. \
-         Run `pnm services enable rest` first, or use `pnm services disable didcomm --drain-ttl 0s` \
-         after enabling REST."
+         Enable REST first: `pnm services rest enable --url <url>` (online) \
+         or `vta services rest enable --url <url>` (offline, daemon stopped). \
+         Then retry the disable."
     )]
     NoProtocolRemaining,
     #[error("drain ttl {requested}s outside allowed range [{min}s, {max}s]")]

@@ -170,7 +170,7 @@ pub struct AdminRotationAsk {
 #[serde(deny_unknown_fields)]
 pub struct DidTemplateRef {
     /// Template name the VTA already knows (built-in or operator-
-    /// uploaded via `pnm did-templates upload`).
+    /// uploaded via `pnm did-templates create`).
     pub name: String,
     /// Variable bindings to pass to the template renderer. Must satisfy
     /// the template's `requiredVars`; `optionalVars` overrides accepted.
