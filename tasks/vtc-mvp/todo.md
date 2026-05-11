@@ -96,7 +96,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Deps**: M0.1.0
 - **Pre-impl decision**: D3 (audit_key storage)
 
-### `[ ]` M0.1.3 — Idempotency keyspace + middleware
+### `[x]` M0.1.3 — Idempotency keyspace + middleware
 
 - **Acceptance**
   - `IdempotencyClass` enum: `NonDestructive` (24 h TTL) and

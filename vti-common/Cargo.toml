@@ -24,7 +24,7 @@ cli-synthesis = []
 # `AppState` and gain reusable enrolment + login storage primitives. The
 # concrete route handlers ship in a follow-up so this feature stays
 # storage-only for now.
-passkey = ["dep:webauthn-rs", "dep:url", "dep:hex"]
+passkey = ["dep:webauthn-rs", "dep:url"]
 
 [dependencies]
 async-trait = "0.1"
@@ -45,6 +45,11 @@ hkdf = { workspace = true }
 rand = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
+hex = { workspace = true }
+# Idempotency middleware buffers request + response bodies (bounded by
+# `MAX_BODY_BYTES`) so it can hash inputs + cache outputs.
+http-body-util = "0.1"
+bytes = "1"
 
 # Secrets resolver (for error type)
 affinidi-tdk = { workspace = true }
@@ -58,11 +63,11 @@ zeroize = { version = "1", features = ["derive"], optional = true }
 tokio-vsock = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 
-# Passkey feature deps (`rand` already declared above for `encryption`;
-# `uuid` is non-optional and lives in the main dep block).
+# Passkey feature deps. `rand` / `uuid` / `hex` are non-optional and
+# live in the main dep block since audit + idempotency need them
+# unconditionally.
 webauthn-rs = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
-hex = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

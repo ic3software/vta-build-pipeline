@@ -67,6 +67,14 @@ pub enum AppError {
     #[error("malformed Trust-Task identifier: {0}")]
     TrustTaskMalformed(String),
 
+    /// A request reused an `Idempotency-Key` it had previously sent
+    /// with a *different* body hash. The cached response is preserved
+    /// for the original requester; the conflicting retry is rejected
+    /// with 422 so clients don't silently get a stale response from a
+    /// drifting payload.
+    #[error("Idempotency-Key conflict: same key, different request body")]
+    IdempotencyKeyConflict,
+
     /// Catch-all for service-specific errors (e.g., KeyDerivation, BadGateway, TeeAttestation).
     /// Services create helper functions to construct these with appropriate status codes.
     #[error("{message}")]
@@ -114,6 +122,7 @@ impl IntoResponse for AppError {
             AppError::TrustTaskMissing => StatusCode::BAD_REQUEST,
             AppError::TrustTaskMismatch { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             AppError::TrustTaskMalformed(_) => StatusCode::BAD_REQUEST,
+            AppError::IdempotencyKeyConflict => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::ServiceError { status, .. } => *status,
             AppError::Vsock { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -143,6 +152,10 @@ impl IntoResponse for AppError {
                 "error": "TrustTaskMalformed",
                 "message": self.to_string(),
                 "received": value,
+            }),
+            AppError::IdempotencyKeyConflict => serde_json::json!({
+                "error": "IdempotencyKeyConflict",
+                "message": self.to_string(),
             }),
             _ => serde_json::json!({ "error": self.to_string() }),
         };
