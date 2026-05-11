@@ -75,6 +75,15 @@ pub enum AppError {
     #[error("Idempotency-Key conflict: same key, different request body")]
     IdempotencyKeyConflict,
 
+    /// A pagination cursor failed integrity verification — either the
+    /// HMAC tag didn't validate (tampered, forged, or signed under a
+    /// different community's audit_key) or the encoded form was
+    /// malformed. Returned as 400 with no extra detail so an attacker
+    /// can't learn whether their guessed cursor was structurally
+    /// close to a valid one.
+    #[error("invalid pagination cursor")]
+    InvalidCursor,
+
     /// Catch-all for service-specific errors (e.g., KeyDerivation, BadGateway, TeeAttestation).
     /// Services create helper functions to construct these with appropriate status codes.
     #[error("{message}")]
@@ -123,6 +132,7 @@ impl IntoResponse for AppError {
             AppError::TrustTaskMismatch { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             AppError::TrustTaskMalformed(_) => StatusCode::BAD_REQUEST,
             AppError::IdempotencyKeyConflict => StatusCode::UNPROCESSABLE_ENTITY,
+            AppError::InvalidCursor => StatusCode::BAD_REQUEST,
             AppError::ServiceError { status, .. } => *status,
             AppError::Vsock { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };

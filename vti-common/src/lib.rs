@@ -5,6 +5,7 @@ pub mod config;
 pub mod error;
 pub mod idempotency;
 pub mod identifier;
+pub mod pagination;
 pub mod seed_store;
 pub mod store;
 pub mod telemetry;

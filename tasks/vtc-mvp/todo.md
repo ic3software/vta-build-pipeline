@@ -126,7 +126,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Deps**: M0.1.1
 - **Pre-impl decision**: D6 (destructive op identification)
 
-### `[ ]` M0.1.4 — Cursor pagination contract
+### `[x]` M0.1.4 — Cursor pagination contract
 
 - **Acceptance**
   - `Cursor` newtype: opaque base64url-encoded
