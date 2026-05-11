@@ -157,6 +157,15 @@ azure_identity = "0.35"
 # that want the offline-only cache can opt out via `default-features = false`.
 affinidi-did-resolver-cache-sdk = { version = "0.8", features = ["network"] }
 
+# WebAuthn / passkey infrastructure. Used by vti-common's `passkey` feature
+# for shared enrolment + login ceremonies — both VTA (admin auth, later) and
+# VTC (install + admin login) consume it. The version pin matches what
+# `affinidi-webvh-service` ships against, since we adopt that crate's
+# passkey module pattern.
+webauthn-rs = { version = "0.5", features = [
+  "danger-allow-state-serialisation",
+] }
+
 # OS keyring API (replaces legacy `keyring` v3 crate). keyring-core 1.0 split
 # the API from the backend stores; each binary picks a platform-native store
 # and registers it once at startup via `vta_sdk::keyring_init::install_default_store`.
