@@ -135,7 +135,6 @@ mod hash32_opt_b64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn sample_envelope() -> AuditEnvelope {
         AuditEnvelope {
@@ -150,10 +149,11 @@ mod tests {
             actor_did_plain: Some("did:key:z6Mk".into()),
             target_did_hash: Some([0xCD; 32]),
             target_did_plain: Some("did:key:z6Mk2".into()),
-            event: AuditEvent::Generic {
-                kind: "TestEvent".into(),
-                payload: json!({ "answer": 42 }),
-            },
+            event: AuditEvent::CommunityProfileUpdated(
+                crate::audit::event::CommunityProfileUpdatedData {
+                    fields_changed: vec!["name".into()],
+                },
+            ),
         }
     }
 

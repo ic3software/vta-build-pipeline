@@ -146,7 +146,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
   - `vti-common/src/lib.rs`
 - **Deps**: M0.1.2 (uses audit_key for cursor signing)
 
-### `[ ]` M0.1.5 — Phase-0 audit event variants
+### `[x]` M0.1.5 — Phase-0 audit event variants
 
 - **Acceptance**
   - `AuditEvent` variants added (replacing the `Generic` placeholder):

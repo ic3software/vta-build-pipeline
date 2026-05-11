@@ -143,7 +143,6 @@ mod tests {
     use crate::audit::key_store::RotationReason;
     use crate::config::StoreConfig;
     use crate::store::Store;
-    use serde_json::json;
 
     struct Fixture {
         writer: AuditWriter,
@@ -169,10 +168,9 @@ mod tests {
     }
 
     fn sample_event() -> AuditEvent {
-        AuditEvent::Generic {
-            kind: "TestEvent".into(),
-            payload: json!({ "x": 1 }),
-        }
+        AuditEvent::CommunityProfileUpdated(crate::audit::event::CommunityProfileUpdatedData {
+            fields_changed: vec!["name".into()],
+        })
     }
 
     #[tokio::test]

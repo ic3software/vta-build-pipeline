@@ -3,16 +3,17 @@
 //! survives right-to-be-forgotten rotations.
 //!
 //! See spec §11 of `docs/05-design-notes/vtc-mvp.md` for the design
-//! rationale. This crate ships the workspace-wide foundation; the
-//! Phase-0 audit-event vocabulary (`CommunityInstalled`,
-//! `AdminPasskeyRegistered`, `ConfigChanged`, …) lands in M0.1.5
-//! and gets folded into [`event::AuditEvent`] there.
+//! rationale.
 //!
 //! ## Module layout
 //!
-//! - [`event`] — the tagged [`AuditEvent`] enum. A single `Generic`
-//!   placeholder variant ships now; concrete variants are added per
-//!   the spec's event vocabulary as the rest of Phase 0 lands.
+//! - [`event`] — the tagged [`AuditEvent`] enum and its per-variant
+//!   data structs. Ships the Phase-0 vocabulary
+//!   (`CommunityInstalled`, `EmergencyBootstrapInvoked`,
+//!   `AdminPasskey{Registered,Revoked}`, `Config{Changed,Reloaded}`,
+//!   `RestartRequested`, `CommunityProfileUpdated`,
+//!   `AuditKeyRotated`). Phase-1+ variants land alongside their
+//!   owning features.
 //! - [`envelope`] — the [`AuditEnvelope`] wire shape (event id,
 //!   version, timestamps, HMAC-hashed + plaintext identifier pairs).
 //! - [`key_store`] — the [`AuditKeyStore`] managing per-community
@@ -29,6 +30,10 @@ pub mod key_store;
 pub mod writer;
 
 pub use envelope::{AuditEnvelope, EVENT_VERSION, SCHEMA_VERSION};
-pub use event::AuditEvent;
+pub use event::{
+    AdminPasskeyData, AuditEvent, AuditKeyRotatedData, CommunityInstalledData,
+    CommunityProfileUpdatedData, ConfigChange, ConfigChangedData, ConfigReloadedData, ConfigSource,
+    EmergencyBootstrapData, REDACTED_MARKER, RestartRequestedData,
+};
 pub use key_store::{AuditKey, AuditKeyStore, KeyId, RotationReason};
 pub use writer::AuditWriter;
