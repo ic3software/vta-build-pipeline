@@ -36,7 +36,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
   - `vtc-service/src/lib.rs` (add module)
 - **Deps**: none
 
-### `[ ]` M0.1.1 — Trust-Task extractor + `TrustTaskRouter` builder
+### `[x]` M0.1.1 — Trust-Task extractor + `TrustTaskRouter` builder
 
 - **Acceptance**
   - `vti-common::trust_task::TrustTask` newtype around a validated
