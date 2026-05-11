@@ -66,7 +66,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Pre-impl decision**: D1 (schema format), D8 (header name), D9
   (builder vs macros)
 
-### `[ ]` M0.1.2 — Audit envelope + HMAC actor hashing + `audit_key` keyspace
+### `[x]` M0.1.2 — Audit envelope + HMAC actor hashing + `audit_key` keyspace
 
 - **Acceptance**
   - `AuditEnvelope` struct per spec §11.1, including `event_version`,

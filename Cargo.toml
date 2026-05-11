@@ -143,6 +143,12 @@ hex = "0.4"
 aes-gcm = "0.10"
 hkdf = "0.13"
 
+# HMAC-SHA256 for vti-common's audit-log actor/target identifier
+# hashing. The key is per-community and rotated on RTBF, so a plain
+# SHA-256 over a DID would be reversible by enumeration — see spec
+# §11.1.
+hmac = "0.13"
+
 # Vsock-store deps shared by vti-common's vsock keyspace and the enclave
 # bootstrap; libc is also used by vta-service's vsock-bridge helpers.
 tokio-vsock = "0.7"
