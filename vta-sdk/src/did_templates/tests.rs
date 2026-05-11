@@ -636,3 +636,85 @@ fn webvh_server_builtin_rejects_unknown_placeholder_in_template() {
         "got: {err}"
     );
 }
+
+// ─── vtc-host built-in ───────────────────────────────────────────────
+
+#[test]
+fn vtc_host_renders_with_minimal_vars() {
+    let tpl = load_embedded("vtc-host").unwrap();
+    let mut vars = ambient_vars();
+    vars.insert_string("KA_KEY_MB", "z6LSKeyAgreement");
+    vars.insert_string("URL", "https://vtc.example.com");
+
+    let out = tpl.render(&vars).unwrap();
+
+    assert_eq!(out["id"], "did:webvh:example.com:abc");
+    assert_eq!(
+        out["verificationMethod"][0]["id"],
+        "did:webvh:example.com:abc#key-0"
+    );
+    assert_eq!(
+        out["verificationMethod"][0]["publicKeyMultibase"],
+        "z6MkSigning"
+    );
+    assert_eq!(
+        out["verificationMethod"][1]["id"],
+        "did:webvh:example.com:abc#key-1"
+    );
+    assert_eq!(
+        out["verificationMethod"][1]["publicKeyMultibase"],
+        "z6LSKeyAgreement"
+    );
+    assert_eq!(out["assertionMethod"][0], "did:webvh:example.com:abc#key-0");
+    assert_eq!(out["authentication"][0], "did:webvh:example.com:abc#key-0");
+    assert_eq!(out["keyAgreement"][0], "did:webvh:example.com:abc#key-1");
+
+    // Two services: #vtc-rest at the URL, #vtc-status-list at URL + default path.
+    assert_eq!(
+        out["service"][0]["id"],
+        "did:webvh:example.com:abc#vtc-rest"
+    );
+    assert_eq!(out["service"][0]["type"], "VTCRest");
+    assert_eq!(
+        out["service"][0]["serviceEndpoint"],
+        "https://vtc.example.com"
+    );
+    assert_eq!(
+        out["service"][1]["id"],
+        "did:webvh:example.com:abc#vtc-status-list"
+    );
+    assert_eq!(out["service"][1]["type"], "VTCStatusList");
+    assert_eq!(
+        out["service"][1]["serviceEndpoint"],
+        "https://vtc.example.com/v1/status-lists",
+    );
+}
+
+#[test]
+fn vtc_host_status_list_path_override() {
+    let tpl = load_embedded("vtc-host").unwrap();
+    let mut vars = ambient_vars();
+    vars.insert_string("KA_KEY_MB", "z6LSKeyAgreement");
+    vars.insert_string("URL", "https://vtc.example.com");
+    vars.insert_string("STATUS_LIST_PATH", "/custom/status");
+
+    let out = tpl.render(&vars).unwrap();
+    assert_eq!(
+        out["service"][1]["serviceEndpoint"],
+        "https://vtc.example.com/custom/status",
+    );
+}
+
+#[test]
+fn vtc_host_requires_url() {
+    let tpl = load_embedded("vtc-host").unwrap();
+    let mut vars = ambient_vars();
+    vars.insert_string("KA_KEY_MB", "z6LSKeyAgreement");
+    // URL deliberately omitted.
+
+    let err = tpl.render(&vars).expect_err("URL is required");
+    assert!(
+        matches!(&err, TemplateError::MissingVars(m) if m.contains("URL")),
+        "got: {err}"
+    );
+}

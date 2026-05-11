@@ -11,6 +11,7 @@ use super::{DidTemplate, TemplateError};
 pub const BUILTIN_NAMES: &[&str] = &[
     "didcomm-mediator",
     "vta-admin",
+    "vtc-host",
     "webvh-control",
     "webvh-daemon",
     "webvh-server",
@@ -18,6 +19,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
 
 const DIDCOMM_MEDIATOR: &str = include_str!("../../templates/didcomm-mediator.json");
 const VTA_ADMIN: &str = include_str!("../../templates/vta-admin.json");
+const VTC_HOST: &str = include_str!("../../templates/vtc-host.json");
 const WEBVH_CONTROL: &str = include_str!("../../templates/webvh-control.json");
 const WEBVH_DAEMON: &str = include_str!("../../templates/webvh-daemon.json");
 const WEBVH_SERVER: &str = include_str!("../../templates/webvh-server.json");
@@ -28,6 +30,7 @@ pub fn load_embedded(name: &str) -> Result<DidTemplate, TemplateError> {
     let raw = match name {
         "didcomm-mediator" => DIDCOMM_MEDIATOR,
         "vta-admin" => VTA_ADMIN,
+        "vtc-host" => VTC_HOST,
         "webvh-control" => WEBVH_CONTROL,
         "webvh-daemon" => WEBVH_DAEMON,
         "webvh-server" => WEBVH_SERVER,

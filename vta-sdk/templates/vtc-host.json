@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "name": "vtc-host",
+  "kind": "vtc-host",
+  "description": "Verifiable Trust Community (VTC) service identity. Provisions the did:webvh that a vtc-service binary operates under. The document advertises the VTC's REST endpoint and the URL where its BitstringStatusList credentials will be hosted (populated in Phase 2 of the VTC MVP — the endpoint is gracefully present in the DID document from day one so external verifiers can pre-cache the resolution). DIDComm is not advertised here by default; communities that need a mediator add it later via the runtime-service-management flow (see docs/03-integrating/runtime-service-management.md). The URL variable must not end with a trailing slash to avoid double-slash artefacts in the status-list endpoint.",
+  "methods": ["webvh", "web"],
+  "requiredVars": ["URL"],
+  "optionalVars": {
+    "STATUS_LIST_PATH": "/v1/status-lists"
+  },
+  "defaults": {
+    "preRotationCount": 2,
+    "portable": false
+  },
+  "document": {
+    "@context": [
+      "https://www.w3.org/ns/did/v1",
+      "https://www.w3.org/ns/cid/v1",
+      "https://w3id.org/security/multikey/v1"
+    ],
+    "id": "{DID}",
+    "verificationMethod": [
+      {
+        "id": "{DID}#key-0",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{SIGNING_KEY_MB}"
+      },
+      {
+        "id": "{DID}#key-1",
+        "type": "Multikey",
+        "controller": "{DID}",
+        "publicKeyMultibase": "{KA_KEY_MB}"
+      }
+    ],
+    "assertionMethod": ["{DID}#key-0"],
+    "authentication": ["{DID}#key-0"],
+    "keyAgreement": ["{DID}#key-1"],
+    "service": [
+      {
+        "id": "{DID}#vtc-rest",
+        "type": "VTCRest",
+        "serviceEndpoint": "{URL}"
+      },
+      {
+        "id": "{DID}#vtc-status-list",
+        "type": "VTCStatusList",
+        "serviceEndpoint": "{URL}{STATUS_LIST_PATH}"
+      }
+    ]
+  }
+}

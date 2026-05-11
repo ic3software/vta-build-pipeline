@@ -14,7 +14,7 @@ consumer gets the new shape on the next create. No redeploy.
 
 - **Data, not code.** An operator can ship a new agent kind by dropping a JSON
   file, no recompile. The built-ins (`didcomm-mediator`, `vta-admin`,
-  `webvh-control`, `webvh-daemon`, `webvh-server`) are baseline shapes, not
+  `vtc-host`, `webvh-control`, `webvh-daemon`, `webvh-server`) are baseline shapes, not
   the only shapes.
 - **Method-agnostic.** Same format works for `did:webvh`, `did:web`, or
   `did:key` — the loader only knows about `{TOKEN}` placeholders. Method-
@@ -140,6 +140,15 @@ template without explicit scope is **context → global → builtin**:
   - `didcomm-mediator` — DIDComm v2 routing mediator with a URL-based service
     endpoint.
   - `vta-admin` — did:key admin DID for provision-integration admin rollover.
+  - `vtc-host` — Verifiable Trust Community (VTC) service identity. Mints
+    the did:webvh under which a `vtc-service` binary operates and advertises
+    its REST endpoint plus a placeholder URL for the BitstringStatusList
+    credentials (populated in Phase 2 of the VTC MVP). DIDComm is not
+    advertised by default — communities that need a mediator add it later
+    via the runtime-service-management flow (see
+    `runtime-service-management.md`). Requires `URL`; optional
+    `STATUS_LIST_PATH` (default `/v1/status-lists`). `URL` must not have a
+    trailing slash.
   - `webvh-control` — webvh control-plane node exposing both a
     `WebVHHosting` service (URL-based) **and** a `DIDCommMessaging` service
     routed through a mediator. Use for nodes that publish DID logs over

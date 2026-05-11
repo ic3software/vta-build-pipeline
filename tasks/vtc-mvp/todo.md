@@ -213,7 +213,7 @@ consumer yet; primitives ready for the rest of Phase 0 to depend on.
 
 ## M0.2 — `vtc-host` DID template (`vta-sdk`)
 
-### `[ ]` M0.2.1 — Author `vtc-host.json` template
+### `[x]` M0.2.1 — Author `vtc-host.json` template
 
 - **Acceptance**
   - `vta-sdk/templates/vtc-host.json` exists, structurally validated
@@ -239,7 +239,7 @@ consumer yet; primitives ready for the rest of Phase 0 to depend on.
     + `load_embedded` switch)
 - **Deps**: none — fully parallel with M0.1
 
-### `[ ]` M0.2.2 — Documentation entry for `vtc-host`
+### `[x]` M0.2.2 — Documentation entry for `vtc-host`
 
 - **Acceptance**
   - `docs/03-integrating/did-templates.md` updated with `vtc-host`

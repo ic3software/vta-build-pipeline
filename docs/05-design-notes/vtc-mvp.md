@@ -138,16 +138,28 @@ and is explicitly forbidden.
 
 ### 4.4 The `vtc-host` DID template
 
-New built-in template in `vta-sdk::did_templates::builtin`. Required
-vars: `vtc_url`, `community_name`. Mints:
+Built-in template in `vta-sdk::did_templates::builtin`. Required
+var: `URL` (no trailing slash). Optional: `STATUS_LIST_PATH`
+(default `/v1/status-lists`).
 
-- one `assertionMethod` Ed25519 (credential signatures)
-- one `authentication` Ed25519 (session auth)
-- one `keyAgreement` X25519 (sealed-transfer + DIDComm reception)
+Mints two keys, following the workspace convention used by every
+other built-in template:
 
-Service entries: `#vtc-rest`, `#vtc-status-list`. DIDComm service is
-not advertised by default — added later via the existing
-runtime-service-management flow if the community needs a mediator.
+- **`#key-0`** Ed25519 — `assertionMethod` + `authentication` (one
+  signing key serves both purposes; matches `webvh-control` and
+  friends).
+- **`#key-1`** X25519 — `keyAgreement` (sealed-transfer + later
+  DIDComm reception).
+
+Service entries: `#vtc-rest` (`type: VTCRest`, endpoint = `{URL}`),
+`#vtc-status-list` (`type: VTCStatusList`, endpoint =
+`{URL}{STATUS_LIST_PATH}`). The status-list endpoint is gracefully
+present from day one so external verifiers can pre-cache resolution;
+the actual BitstringStatusList credentials are populated in Phase 2.
+
+DIDComm is not advertised by default — communities that need a
+mediator add it later via the existing runtime-service-management
+flow.
 
 ### 4.5 Emergency bootstrap (recovery)
 
