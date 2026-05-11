@@ -80,6 +80,7 @@ ADR if circumstances change.
 | **Public community website is feature-gated** | Cargo feature `website`. Operators who use an external host disable the feature; routes 404. |
 | **Extensibility model = Rego + opaque JSON blobs** | Communities customize *behavior* via policies and *data* via `extensions: JsonValue` slots. No plugin loader, no WASM hooks, no custom REST modules. |
 | **Hygiene baked in from day one** | Versioned audit events, idempotency keys, `/v1/` URL prefix, cursor pagination on lists, multi-passkey-per-admin. These are load-bearing retrofits, not features. |
+| **VTC never targets TEE deployment** | Only the VTA runs in Nitro Enclave / TEE. The VTC stays a regular service. This is a *permanent* non-goal, not a deferral — public website serves from local filesystem, no vsock parity is required, and the storage abstraction can stay simple. If TEE-grade trust is needed for a community, the trust anchor remains the VTA. |
 
 ## 4. Bootstrap and setup
 
@@ -601,10 +602,20 @@ collection.
 
 ### 9.4 CORS
 
-`config.toml` carries an `allowed_origins: Vec<String>` list. Defaults
-to empty; install flow writes the admin UX origin during step 6.
+`config.toml` carries a `cors.allowed_origins: Vec<String>` list.
 Wildcard origins refused at config-load time. Preflight responses
 include `Idempotency-Key` in `Access-Control-Allow-Headers`.
+
+Interaction with admin UX hosting mode (§12.2):
+
+* `admin_ui.mode = "embedded"` — admin UX served same-origin (or by
+  Host-header routing to a configured subdomain); no CORS entry
+  required for the admin UX itself.
+* `admin_ui.mode = "external"` — the install flow writes the external
+  admin origin into `cors.allowed_origins` during step 6.
+
+The public website's own origin is auto-allowed so that static-site
+JS can POST to `/v1/join-requests` without a separate CORS config.
 
 ### 9.5 REST surface (representative — full OpenAPI in §16 followup)
 
@@ -667,6 +678,15 @@ DELETE /v1/relationships/{id}
 POST   /v1/credentials/endorsements      # mint VEC
 POST   /v1/credentials/witnesses         # mint VWC
 POST   /v1/credentials/rcards            # mint RCard
+
+# Public website (feature: website)
+GET    /v1/website/files                 # list current site tree
+GET    /v1/website/files/{path}          # fetch a file
+PUT    /v1/website/files/{path}          # upload (admin/moderator)
+DELETE /v1/website/files/{path}
+POST   /v1/website/deploy                # tar.gz bundle (atomic if managed)
+GET    /v1/website/generations           # managed mode only
+POST   /v1/website/rollback/{gen}        # managed mode only
 
 # Status lists
 GET    /v1/status-lists/revocation       # public (the VC)
@@ -921,20 +941,220 @@ See §6.5.
 
 ### 12.1 Public community website (`website` feature)
 
-* Markdown blobs stored in the `website_content` keyspace, keyed by
-  path (`/`, `/about`, `/join`).
-* Server-rendered HTML (pulldown-cmark) at request time. No client-side
-  scripting layer.
-* Asset passthrough for static files (logo, images).
-* Submit endpoint: `POST /v1/website/forms/join` (rate-limited, no
-  auth) routes to `POST /v1/join-requests` internally. CSRF token
-  required; double-submit cookie pattern.
-* Disabled (feature off): all `/v1/website/*` routes 404. Operator
-  points DNS at an external host.
-* No CMS UI in MVP. Authoring is REST: `PUT /v1/website/pages/{path}`
-  (admin/moderator).
+A generic static-file host. Community admins upload arbitrary HTML,
+CSS, JS, images, fonts — whatever they want — and the VTC serves it.
+No template language, no markdown rendering, no opinions about site
+structure. Operators can use plain HTML, an SPA, a static-site
+generator's output, or just dump a folder of files.
 
-### 12.2 VRC graph
+**Backing storage: local filesystem** (not fjall). Operators can
+update site files directly with `scp`, `rsync`, `git pull`, or a
+local editor and the changes are served on the next request. The
+REST API endpoints exist as the *convenient* way to update; direct
+filesystem editing is the *primary* one. This is possible because
+the VTC never runs in a TEE (§3) and the filesystem is reliably
+addressable.
+
+#### Configuration
+
+```toml
+[website]
+enabled       = true
+root_dir      = "/var/lib/vtc/website"  # served from here
+deploy_mode   = "live"                  # or "managed"
+spa_fallback  = false                   # serve /index.html for unmatched paths
+max_file_size_mb     = 10
+max_bundle_size_mb   = 50
+max_files_per_bundle = 1000
+```
+
+`deploy_mode`:
+
+* **`"live"`** (default) — files in `root_dir` are served as-is. No
+  generations, no atomic swap, no rollback. Operator owns the
+  filesystem layout. Bundle deploys overwrite files in place.
+  Matches the "just copy files and they're live" mental model.
+* **`"managed"`** — `root_dir` contains `gen-N/` subdirectories and a
+  `current → gen-N` symlink. Bundle deploys extract to a fresh
+  `gen-N+1/`, then atomically swap the symlink. Last 5 generations
+  retained (configurable). Rollback via `POST /v1/website/rollback/{gen}`.
+  Operators who need rollback semantics opt in.
+
+#### REST surface
+
+```
+GET    /v1/website/files            # list current site tree
+GET    /v1/website/files/{path}     # fetch a file
+PUT    /v1/website/files/{path}     # upload/overwrite (admin/moderator)
+DELETE /v1/website/files/{path}     # remove a file
+POST   /v1/website/deploy           # tar.gz bundle, atomic if managed
+GET    /v1/website/generations      # managed mode only
+POST   /v1/website/rollback/{gen}   # managed mode only
+```
+
+`POST /v1/website/deploy` accepts a `tar.gz` body up to
+`max_bundle_size_mb`. In `"live"` mode: extracted directly into
+`root_dir`, overwriting matching paths. In `"managed"` mode:
+extracted into a new generation, symlink swapped atomically.
+
+#### Serving
+
+* MIME types detected by file extension (`mime_guess`).
+* `ETag` (SHA-256 of content) + `Cache-Control: public, max-age=3600`
+  on every response so operators can put a CDN in front.
+* Directory paths (`/about/`) resolve to `index.html` in that
+  directory.
+* Unmatched paths: 404, or fall back to `/index.html` if
+  `spa_fallback = true`.
+* Path traversal (`..` escape) rejected with 400.
+* Hidden files (leading `.`) not served.
+
+#### Form submissions to the join flow
+
+The static site can POST directly to `/v1/join-requests` (CORS
+allows the website's own origin by default). No special "form
+proxy" endpoint — the API endpoint is the form target.
+
+#### Disabled mode
+
+`enabled = false` (or `website` cargo feature off): all
+`/v1/website/*` routes 404. Operator points DNS at an external host
+(GitHub Pages, Netlify, S3, whatever) and the community site is
+hosted externally.
+
+### 12.2 Admin UX hosting (`admin-ui` feature)
+
+The admin UX is a static SPA built and released from a separate
+sibling repository (`OpenVTC/vtc-admin-ui`). The VTC binary embeds
+that SPA at build time, then serves it from a configurable mount.
+
+#### Embedded build
+
+`vtc-service/build.rs` reads a pinned version from `Cargo.toml`
+(metadata field `[package.metadata.admin_ui] version = "x.y.z"`) and
+fetches the release artifact:
+
+```
+https://github.com/OpenVTC/vtc-admin-ui/releases/download/v{version}/admin-ui-dist.tar.gz
+```
+
+Extracts to `OUT_DIR/admin-ui-dist/`, then `include_dir!` bakes the
+tree into the binary. Build is reproducible: the release tarball is
+checksum-pinned (SHA-256 also in `Cargo.toml` metadata), and `build.rs`
+verifies before extracting.
+
+Offline builds: a vendored fallback at `vtc-service/vendor/admin-ui-dist/`
+is used if `VTC_OFFLINE_BUILD=1` is set. CI populates this; release
+tarballs ship with it bundled.
+
+#### Configuration
+
+```toml
+[admin_ui]
+enabled = true
+mode    = "embedded"   # or "external"
+mount   = "/admin"     # path; or use host below for subdomain mode
+host    = null         # e.g. "admin.example.com" for subdomain mode
+```
+
+* `mode = "embedded"`: VTC serves the baked-in SPA from `mount` /
+  `host`. No CORS needed (same origin or near-origin).
+* `mode = "external"`: VTC does not serve the SPA. The operator hosts
+  it elsewhere; the only thing VTC needs is the origin in
+  `cors.allowed_origins`. Useful when the operator wants to host the
+  admin UX on their own static infrastructure.
+
+#### WebAuthn `RP ID` and routing interaction
+
+The WebAuthn `RP ID` set at passkey registration must remain stable
+for passkeys to keep working. With path-prefix routing
+(`example.com/admin`) the `RP ID` is `example.com` and there's no
+issue. With subdomain routing (`admin.example.com`) the `RP ID`
+should be set to the *base* domain (`example.com`) so the credential
+is valid across subdomains. Otherwise moving the admin UX path later
+breaks every registered passkey. Codified in §17 as an operator-
+runbook item.
+
+### 12.3 Routing modes
+
+Each surface (API, admin UX, website) can be mounted on a path
+prefix, bound to a Host header, or both. Default is **path-prefix
+on the same host** — works on day one without DNS configuration.
+
+#### Default config (path-prefix mode)
+
+```toml
+[routing.api]
+mount = "/v1"
+
+[routing.admin_ui]
+mount = "/admin"
+
+[routing.website]
+mount = "/"          # catch-all, lowest priority
+```
+
+A single host serves everything. Route priority (highest first):
+
+1. `/health` (always)
+2. `/v1/*` → API
+3. `/admin/*` → admin UX (if enabled)
+4. `/v1/website/*` → website management API
+5. `/*` → public website (if enabled)
+
+#### Subdomain mode
+
+```toml
+[routing.api]
+host = "api.example.com"
+
+[routing.admin_ui]
+host = "admin.example.com"
+
+[routing.website]
+host = "example.com"
+```
+
+Tower middleware routes by `Host` header. Requests to a host that
+doesn't match any configured surface return 404.
+
+#### Mixed mode
+
+Any combination. Common pattern:
+
+```toml
+[routing.api]
+mount = "/v1"                        # same host as website
+host  = "example.com"
+
+[routing.admin_ui]
+host  = "admin.example.com"          # admin on its own subdomain
+
+[routing.website]
+mount = "/"
+host  = "example.com"
+```
+
+#### Combined vs separated daemon
+
+**MVP**: combined daemon only. One `vtc` process serves all three
+surfaces. The cargo features control what's compiled in; runtime
+config controls how each is exposed.
+
+**Separated daemons** (running multiple VTC binaries that share
+storage) is **not** in MVP. fjall is not multi-process-safe, so
+splitting requires either a proxy/cache architecture or a different
+storage backend. Documented as v2 work. Operators who need
+isolation today should:
+
+* Strip surfaces at compile time via cargo features per build.
+* Put a reverse proxy (nginx / Caddy / CloudFront) in front for
+  caching, TLS termination, and per-surface rate limiting.
+* Use subdomain routing with separate TLS certs.
+
+99% of communities never need to split.
+
+### 12.4 VRC graph
 
 * Self-issued only in MVP. Bilateral counter-signing v2.
 * `POST /v1/relationships` (or `relationships/1.0/publish`) — caller
@@ -965,10 +1185,16 @@ See §6.5.
 | `audit` | new | `timestamp → AuditEnvelope`; indices by type/actor/target |
 | `idempotency` | new | `key → (request_hash, response, expires_at)` |
 | `config` | new | `key → ConfigValue` — DB-layer overrides for runtime config |
-| `website_content` | new (gated) | `path → WebsitePage` |
 
-All keyspaces use the existing `KeyspaceHandle` enum (local fjall
-today; vsock parity later if VTC ever runs in a TEE).
+Public website content is **not** in fjall — it lives on the local
+filesystem at `website.root_dir` (§12.1). This keeps the storage
+abstraction small and lets operators update site files with standard
+filesystem tools.
+
+All fjall keyspaces use the existing `KeyspaceHandle` enum. Because
+the VTC never targets TEE (§3), no vsock-store parity work is
+required for the VTC and `KeyspaceHandle::Vsock` variants stay
+unused on the VTC code path.
 
 ## 14. Operational
 
@@ -1125,6 +1351,16 @@ users get a k8s `Deployment`.
 | `restart.drain_timeout` | ✓ | | ✓ | |
 | `storage.path` | | ✓ | ✓ | |
 | `community.profile.*` | ✓ | | ✓ | Goes through `/v1/community/profile`, not `/v1/admin/config`. |
+| `routing.api.{mount,host}` | | ✓ | ✓ | Affects URL surface. |
+| `routing.admin_ui.{mount,host}` | | ✓ | ✓ | |
+| `routing.website.{mount,host}` | | ✓ | ✓ | |
+| `admin_ui.mode` | | ✓ | ✓ | `"embedded"` vs `"external"`. |
+| `admin_ui.external_origin` | ✓ | | ✓ | Sets the CORS entry; only meaningful if mode = external. |
+| `website.enabled` | | ✓ | ✓ | Disabling unmounts the routes. |
+| `website.root_dir` | | ✓ | ✓ | Filesystem path. |
+| `website.deploy_mode` | ✓ | | ✓ | `"live"` vs `"managed"`. |
+| `website.spa_fallback` | ✓ | | ✓ | |
+| `website.max_*` | ✓ | | ✓ | Size limits on uploads. |
 | Secret backend (keyring / AWS / GCP / Azure) | | n/a | n/a | Selected by cargo feature at compile time; UX surfaces "active backend". |
 | Cargo features (`website`, etc.) | n/a | n/a | n/a | Compile-time only. UX surfaces "feature available" / "not built in". |
 
@@ -1191,7 +1427,7 @@ operator-visible increment.
 | **2 — Policy engine + DTG issuance** | regorus engine, policy upload/activate, `join.rego` driving the join flow, `removal.rego`, VMC + VEC issuance via VTA oracle, status-list publication, renewal endpoint, DID rotation (both methods). | The community has live policies and proper credential issuance. |
 | **3 — Trust-registry + extensibility** | Trust-registry publish on startup, three departure dispositions, `registry.rego`, `MembershipSyncer`, RTBF override path, hash-tagged audit envelopes, cross-community recognition policies. | The community is part of the wider DTG network. |
 | **4 — VRC + Personhood** | Self-issued VRC publishing + storage, `relationships.rego`, `personhood.rego` (deny-all stub) + assert/revoke endpoints, custom endorsement issuance (issuer role). | The graph and personhood semantics are live. |
-| **5 — Optional surfaces** | Public community website (feature-gated), admin web UX (separate repo, can land in parallel with any prior phase once REST surface is stable after phase 2). | MVP complete. |
+| **5 — Optional surfaces** | Public community website (filesystem-backed static hosting, `"live"` + `"managed"` deploy modes, bundle + per-file APIs), admin web UX (sibling repo `OpenVTC/vtc-admin-ui` consumed via `build.rs` tarball embed), routing config (path-prefix default + subdomain mode). Web UX repo can land in parallel with any prior phase once REST surface stabilises after phase 2. | MVP complete. |
 
 Phase 5 sub-tasks parallelize with phases 3 and 4. Phases 0–4 are
 strictly serial.
@@ -1231,9 +1467,26 @@ remains to validate during implementation.
    but adds state. Defer to a phase 2.5 hardening step.
 
 6. **CORS + WebAuthn `RP ID` coupling.** The admin UX origin must
-   match the WebAuthn `RP ID` set at passkey registration. Operators
-   who migrate the admin UX to a new domain re-register all passkeys.
-   Document as expected; codify in operator runbook.
+   match the WebAuthn `RP ID` set at passkey registration. With
+   subdomain routing (`admin.example.com`) the `RP ID` should be set
+   to the base domain (`example.com`) so credentials remain valid
+   across subdomains. Operators who migrate the admin UX to a new
+   base domain re-register all passkeys. Document as expected;
+   codify in operator runbook.
+
+7. **Admin UX release-tarball checksum management.** `build.rs`
+   pins the admin-ui release artifact by SHA-256. Bumping the admin
+   UX version requires an in-repo metadata change in `Cargo.toml`.
+   Operationally fine; tooling (`cargo xtask bump-admin-ui x.y.z`)
+   useful to write at phase 5.
+
+8. **Public website + filesystem reload semantics.** In
+   `deploy_mode = "live"`, files are served directly from disk. The
+   first request after an external edit pays an `mtime` stat
+   per-file; subsequent requests within a configurable window hit a
+   cached descriptor. Cache duration is a tradeoff between
+   live-reload-feel and per-request overhead. Spec'd as
+   `website.live_cache_ttl_seconds` (default 5).
 
 ## 18. Explicitly NOT in MVP
 
@@ -1255,8 +1508,18 @@ To preserve clarity about scope, the following are out:
 * **VPC (Persona credentials)** beyond reserving the type. Land in
   v2 when display-identity needs concrete.
 * **Bilateral VRC counter-signing.** Self-issued only in MVP.
-* **TEE / Nitro Enclave deployment** of the VTC binary. The vsock
-  store parity work in `vti-common` carries over when needed.
+* **TEE / Nitro Enclave deployment of the VTC binary** — *permanent*
+  non-goal, not a deferral. Only the VTA targets TEE. The VTC stays
+  a regular service. Communities that need TEE-grade trust anchor
+  back through the VTA.
+* **Separated daemons sharing storage** (running multiple `vtc`
+  binaries off the same fjall path). fjall is not multi-process-safe;
+  this requires a proxy/cache architecture or different storage
+  backend. v2 work. Operators who need isolation today use cargo
+  features per build + reverse proxy.
+* **Filesystem / S3 backends for fjall keyspaces** beyond what is
+  already explicitly filesystem-based (the public website root).
+  Other keyspaces stay in fjall.
 * **VTC-to-VTC community migration tooling.** Config export +
   community-data backup already give operators the primitives;
   packaged migration scripts are a follow-up.
