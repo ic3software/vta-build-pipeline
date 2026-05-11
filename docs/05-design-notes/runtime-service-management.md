@@ -1,6 +1,6 @@
 # Spec: Runtime service-endpoint management
 
-Status: **DRAFT — Phase 1 (Specify)**
+Status: **Implemented**
 Owner: Glenn Gore
 Last updated: 2026-05-06
 
@@ -133,7 +133,7 @@ share the rule.
 
 ### 3.5 DIDComm-specific behavior
 
-`services didcomm enable --mediator <did>` is REST-only by nature
+`services didcomm enable --mediator-did <did>` is REST-only by nature
 (can't bootstrap DIDComm over DIDComm). Internally identical to
 today's `enable_didcomm` operation:
 
@@ -142,7 +142,7 @@ today's `enable_didcomm` operation:
 3. On success, mediator pinned, transient teardown
 4. LogEntry published with DIDComm service entry
 
-`services didcomm update --mediator <new-did> [--drain-ttl <dur>]`
+`services didcomm update --mediator-did <new-did> [--drain-ttl <dur>]`
 replaces today's `pnm mediator migrate`:
 
 1. Live `DIDCommServiceProver` handshake against new mediator
@@ -226,14 +226,23 @@ operator can avoid by checking `services list` first).
 
 ### 3.7 Audit & telemetry
 
-Each successful mutation emits a telemetry event via the existing
-`vti_common::telemetry::TelemetrySink`. Event names:
+Each successful mutation emits a telemetry event via
+`vti_common::telemetry::TelemetrySink`. Event-kind wire form is
+the snake-case `TelemetryKind` discriminant (serialized via
+`#[serde(rename_all = "snake_case")]`):
 
-* `service.rest.enabled` / `service.rest.updated` / `service.rest.disabled`
-* `service.didcomm.enabled` / `service.didcomm.updated` /
-  `service.didcomm.disabled` / `service.didcomm.rolled_back`
-* Existing drain events (`drain.started`, `drain.expired`,
-  `drain.cancelled`) keep their current names
+* `services_rest_enable` / `services_rest_update` / `services_rest_disable`
+* `services_didcomm_enable` / `services_didcomm_update` /
+  `services_didcomm_disable`
+* Drain events: `mediator_drain_start`, `mediator_drain_cancel`,
+  `mediator_drain_expire`
+
+**No separate rollback events.** Per §3.5a, rollback dispatches into
+the equivalent forward operation, so the emitted event is the
+forward op's event with a `triggered_by: "rollback"` field. An
+external verifier filtering on `triggered_by` distinguishes rolled-
+back mutations from direct ones without needing a parallel event
+namespace.
 
 Each event carries the new LogEntry version-id so an external
 verifier can join telemetry to WebVH history.
@@ -308,8 +317,8 @@ pnm services rest enable      --url <url>
 pnm services rest update      --url <url>
 pnm services rest disable
 pnm services rest rollback
-pnm services didcomm enable   --mediator <did> [--routing-keys <k1,k2>]
-pnm services didcomm update   --mediator <did> [--routing-keys ...] [--drain-ttl 24h]
+pnm services didcomm enable   --mediator-did <did> [--routing-keys <k1,k2>]
+pnm services didcomm update   --mediator-did <did> [--drain-ttl 24h]
 pnm services didcomm disable  [--drain-ttl 24h]
 pnm services didcomm rollback [--drain-ttl 24h]
 pnm services didcomm drain list
@@ -384,9 +393,9 @@ are not sufficient.
       existing entry; one new LogEntry.
 - [ ] `pnm services rest disable` removes the REST entry; one new
       LogEntry; rejected with `LastServiceRefused` if DIDComm is off.
-- [ ] `pnm services didcomm enable --mediator did:…` mints DIDComm
+- [ ] `pnm services didcomm enable --mediator-did did:…` mints DIDComm
       service entry via existing `enable_didcomm` flow; one LogEntry.
-- [ ] `pnm services didcomm update --mediator did:new` migrates;
+- [ ] `pnm services didcomm update --mediator-did did:new` migrates;
       old mediator joins drain set with default 24h TTL.
 - [ ] `pnm services didcomm disable` removes DIDComm entry; previous
       mediator drains for 24h by default; rejected with

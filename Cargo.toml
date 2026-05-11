@@ -91,7 +91,16 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 multibase = "0.9"
 
 # JWT
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# Switched off `rust_crypto` (the all-algos bundle) because it pulls in
+# the `rsa` crate which is exposed to RUSTSEC-2023-0071 (Marvin Attack
+# timing sidechannel). We use jsonwebtoken only for EdDSA JWTs
+# (`Algorithm::EdDSA` in vti-common/auth/jwt.rs).
+#
+# Use the `aws_lc_rs` backend instead — it provides a single
+# `CryptoProvider` for every algorithm and is already in our dep tree
+# via `aws-sdk-kms`, so we don't add a new transitive. The backend is
+# the AWS-vetted libcrypto fork; same primitives, no `rsa` crate.
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 
 # Axum extras (typed headers for Bearer auth)
 axum-extra = { version = "0.12", features = ["typed-header"] }

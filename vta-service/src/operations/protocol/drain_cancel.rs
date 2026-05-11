@@ -73,38 +73,20 @@ pub async fn drain_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ServerConfig, ServicesConfig, StoreConfig};
+    use crate::config::AppConfig;
     use crate::messaging::registry::MediatorBinding;
     use crate::store::Store;
+    use crate::test_support::test_app_config;
     use chrono::{Duration, Utc};
     use vti_common::telemetry::RingBufferTelemetry;
 
     fn config(tmpdir: &std::path::Path) -> Arc<RwLock<AppConfig>> {
-        Arc::new(RwLock::new(AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: Default::default(),
-            store: StoreConfig {
-                data_dir: tmpdir.into(),
-            },
-            services: ServicesConfig {
-                rest: true,
-                didcomm: true,
-            },
-            vta_did: Some("did:webvh:scid:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            auth: Default::default(),
-            audit: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            resolver_url: None,
-            config_path: tmpdir.join("config.toml"),
-        }))
+        let mut cfg = test_app_config(tmpdir.into());
+        cfg.services.rest = true;
+        cfg.services.didcomm = true;
+        cfg.vta_did = Some("did:webvh:scid:host:vta".into());
+        cfg.config_path = tmpdir.join("config.toml");
+        Arc::new(RwLock::new(cfg))
     }
 
     async fn registry_with_drain() -> (
@@ -113,8 +95,9 @@ mod tests {
         tempfile::TempDir,
         KeyspaceHandle,
     ) {
+        use vti_common::config::StoreConfig as VtiStoreConfig;
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&StoreConfig {
+        let store = Store::open(&VtiStoreConfig {
             data_dir: dir.path().into(),
         })
         .unwrap();

@@ -11,10 +11,21 @@
 //! bootstrap, use the `vta bootstrap provision-integration` CLI on the
 //! VTA host.
 //!
-//! Auth model: DIDComm authcrypt authenticates the sender; the VTA
-//! also verifies the VP's `DataIntegrityProof` and rejects with a
-//! `Forbidden` problem-report when the DIDComm sender DID and the VP
-//! holder DID disagree (privilege-laundering guard).
+//! Auth model — layered like an onion. The DIDComm authcrypt
+//! sender authenticates the *relayer* and is gated by the VTA's
+//! ACL (sender must be admin in the target context). Inside the
+//! body, the VP's `DataIntegrityProof` authenticates the *holder*
+//! — the bundle is HPKE-sealed to the holder's X25519 derivation,
+//! so only the holder can open it. Sender and holder may legitimately
+//! differ; the air-gap onboarding flow relies on this:
+//!
+//!   1. Third-party integration (air-gapped) signs a BootstrapRequest
+//!      with its own ephemeral did:key.
+//!   2. Request is transferred to the operator's host.
+//!   3. Operator's PNM relays the request over its DIDComm session.
+//!   4. VTA issues the bundle, sealed to the integration.
+//!   5. Operator carries the (encrypted) bundle back across the
+//!      air-gap; only the integration can decrypt.
 
 use crate::didcomm_session::DIDCommSession;
 use crate::error::VtaError;
@@ -45,18 +56,28 @@ const DEFAULT_TIMEOUT_SECS: u64 = 60;
 /// `adminTemplate`).
 ///
 /// `assertion` defaults to [`AssertionMode::DidSigned`] when `None`.
+///
+/// `create_context` opts into super-admin context creation when the
+/// target context isn't yet registered — same semantics as the REST
+/// path. Default is `false` (caller must have created the context
+/// out-of-band).
 pub async fn provision_integration_didcomm(
     session: &DIDCommSession,
     request: BootstrapRequest,
     context: String,
     assertion: Option<AssertionMode>,
     vc_validity_seconds: Option<i64>,
+    create_context: bool,
 ) -> Result<ProvisionIntegrationResponse, VtaError> {
+    // No "session DID must equal VP holder" pre-check. The flow is
+    // intentionally layered (outer authcrypt = relayer, inner VP =
+    // holder); see the module-level docs for the air-gap rationale.
     let body_struct = ProvisionIntegrationRequest {
         request,
         context,
         assertion,
         vc_validity_seconds,
+        create_context,
     };
     let body = serde_json::to_value(&body_struct).map_err(VtaError::from)?;
 

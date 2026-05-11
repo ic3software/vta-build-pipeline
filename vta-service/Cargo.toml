@@ -1,7 +1,7 @@
 [package]
 name = "vta-service"
 description = "Service for Verifiable Trust Agents operating in Verifiable Trust Communities"
-version = "0.5.1"
+version = "0.6.0"
 edition.workspace = true
 publish.workspace = true
 authors.workspace = true
@@ -68,13 +68,13 @@ path = "src/main.rs"
 required-features = ["cli-synthesis"]
 
 [dependencies]
-vti-common = { path = "../vti-common", version = "0.5", features = ["encryption"] }
-vta-sdk = { path = "../vta-sdk", version = "0.5", features = ["didcomm", "sealed-transfer", "provision-integration"] }
+vti-common = { path = "../vti-common", version = "0.6", features = ["encryption"] }
+vta-sdk = { path = "../vta-sdk", version = "0.6", features = ["didcomm", "sealed-transfer", "provision-integration"] }
 # Shared CLI helpers for the consumer side of sealed-transfer (request
 # generation, bundle opening). Used by `vta bootstrap request` /
 # `vta bootstrap open` so cold-start clients can run the offline flow
 # without depending on `pnm`.
-vta-cli-common = { path = "../vta-cli-common", version = "0.5" }
+vta-cli-common = { path = "../vta-cli-common", version = "0.6" }
 affinidi-crypto = { workspace = true }
 # Low-level `Secret` type for loading the VTA's signing key at
 # provision time. Already transitively present via affinidi-tdk; made
@@ -164,6 +164,11 @@ aws-lc-rs = { version = "1", optional = true }
 tempfile = "3"
 http-body-util = "0.1"
 urlencoding = "2"
+# Self-dep with `test-support` enabled so integration tests under
+# `tests/` get the shared `test_support::build_test_app` HTTP scaffolding
+# without each having to copy ~140 LoC of AppState-wiring boilerplate.
+# Production builds remain unaffected — this is dev-deps only.
+vta-service = { path = ".", features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -39,6 +39,18 @@ pub struct UpdateDidWebvhBody {
     /// Operator-facing audit label.
     #[serde(default)]
     pub label: Option<String>,
+    /// Optimistic-concurrency precondition. When `Some`, the VTA refuses
+    /// the update if the DID's latest log entry no longer matches this
+    /// versionId — i.e. someone else updated the DID between the
+    /// caller's `GetDid` and this save. Lets a `get → edit → save` flow
+    /// detect lost updates instead of silently overwriting another
+    /// operator's edits with a chain that's structurally valid but
+    /// content-wise based on a stale read.
+    ///
+    /// `None` (default) preserves prior behaviour for scripted callers
+    /// that don't care about concurrent edits.
+    #[serde(default)]
+    pub expected_version_id: Option<String>,
 }
 
 /// Caller-supplied parameters for a rotate-keys call.
@@ -61,6 +73,18 @@ pub struct UpdateDidWebvhResultBody {
     pub new_log_entry: String,
     pub update_keys_count: u32,
     pub pre_rotation_key_count: u32,
+    /// True when the DID is self-hosted (the VTA's stored
+    /// `server_id` is `"serverless"`). The new log entry is
+    /// persisted locally but NOT pushed to any webvh host — the
+    /// operator must fetch the updated `did.jsonl` and redeploy it.
+    /// `false` when the VTA published to a registered host as part
+    /// of this call.
+    ///
+    /// `#[serde(default)]` for back-compat with VTAs that don't
+    /// emit the field; absent → `false` (i.e. assume hosted, which
+    /// keeps old CLIs from showing a spurious self-host hint).
+    #[serde(default)]
+    pub serverless: bool,
 }
 
 #[cfg(test)]
@@ -85,12 +109,30 @@ mod tests {
             watchers: Some(vec!["https://watcher.example.com".into()]),
             ttl: Some(3600),
             label: Some("rotate after audit".into()),
+            expected_version_id: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         let restored: UpdateDidWebvhBody = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.pre_rotation_count, Some(2));
         assert_eq!(restored.ttl, Some(3600));
         assert_eq!(restored.label.as_deref(), Some("rotate after audit"));
+    }
+
+    #[test]
+    fn update_body_expected_version_id_round_trips_and_defaults_none() {
+        // Absent on the wire → defaults to None (back-compat).
+        let body: UpdateDidWebvhBody =
+            serde_json::from_str(r#"{"document":{"id":"did:webvh:abc"}}"#).unwrap();
+        assert!(body.expected_version_id.is_none());
+
+        // Present → preserved.
+        let body = UpdateDidWebvhBody {
+            expected_version_id: Some("2-QmHash".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let restored: UpdateDidWebvhBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.expected_version_id.as_deref(), Some("2-QmHash"));
     }
 
     #[test]
@@ -113,10 +155,29 @@ mod tests {
             new_log_entry: "{\"versionId\":\"3-...\"}".into(),
             update_keys_count: 1,
             pre_rotation_key_count: 2,
+            serverless: true,
         };
         let json = serde_json::to_string(&r).unwrap();
         let restored: UpdateDidWebvhResultBody = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.update_keys_count, 1);
         assert_eq!(restored.new_version_id, "3-zVer");
+        assert!(restored.serverless);
+    }
+
+    /// Old VTA → new client: `serverless` absent on the wire must
+    /// default to `false`, not fail deserialization. Pins the
+    /// back-compat guarantee `#[serde(default)]` provides.
+    #[test]
+    fn result_body_serverless_defaults_to_false_when_absent() {
+        let legacy = r#"{
+            "did": "did:webvh:abc",
+            "new_version_id": "3-zVer",
+            "new_scid": "abc",
+            "new_log_entry": "{}",
+            "update_keys_count": 1,
+            "pre_rotation_key_count": 2
+        }"#;
+        let r: UpdateDidWebvhResultBody = serde_json::from_str(legacy).unwrap();
+        assert!(!r.serverless);
     }
 }

@@ -6,7 +6,10 @@ use serde::Deserialize;
 use vta_sdk::protocols::did_management::{
     create::{CreateDidWebvhBody, CreateDidWebvhResultBody},
     list::ListDidsWebvhResultBody,
-    servers::{AddWebvhServerResultBody, ListWebvhServersResultBody, UpdateWebvhServerResultBody},
+    servers::{
+        AddWebvhServerResultBody, ListWebvhServersResultBody, RegisterDidWithServerBody,
+        RegisterDidWithServerResultBody, UpdateWebvhServerResultBody,
+    },
 };
 use vta_sdk::webvh::WebvhDidRecord;
 
@@ -14,7 +17,8 @@ use crate::auth::{AdminAuth, AuthClaims, SuperAdminAuth};
 use crate::error::AppError;
 use crate::operations;
 use crate::operations::did_webvh::{
-    RotateDidWebvhKeysOptions, UpdateDidWebvhOptions, UpdateDidWebvhResult,
+    RegisterDidWithServerError, RegisterDidWithServerParams, RotateDidWebvhKeysOptions,
+    UpdateDidWebvhOptions, UpdateDidWebvhResult, register_did_with_server,
 };
 use crate::server::AppState;
 
@@ -274,4 +278,64 @@ pub async fn rotate_did_keys_handler(
     )
     .await?;
     Ok(Json(result))
+}
+
+/// `POST /webvh/dids/{did}/register-server` — promote a serverless
+/// DID to a server-managed one. Auth: super-admin. The DID in the
+/// path must match the body's `did` field; the body's `server_id`
+/// must be a previously-registered server.
+pub async fn register_did_with_server_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Path(did): Path<String>,
+    Json(body): Json<RegisterDidWithServerBody>,
+) -> Result<Json<RegisterDidWithServerResultBody>, AppError> {
+    if did != body.did {
+        return Err(AppError::Validation(format!(
+            "DID in path (`{did}`) does not match body `did` (`{}`)",
+            body.did
+        )));
+    }
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let result = register_did_with_server(
+        &state.webvh_ks,
+        &state.audit_ks,
+        &auth.0,
+        did_resolver,
+        &state.didcomm_bridge,
+        RegisterDidWithServerParams {
+            did: body.did,
+            server_id: body.server_id,
+            force: body.force,
+        },
+        "rest",
+    )
+    .await
+    .map_err(map_register_err)?;
+    Ok(Json(RegisterDidWithServerResultBody {
+        did: result.did,
+        server_id: result.server_id,
+        log_entry_count: result.log_entry_count,
+    }))
+}
+
+/// Map `RegisterDidWithServerError` onto `AppError` so the
+/// existing route-error machinery surfaces an appropriate status
+/// (404 for missing DID/server/log, 409 for already-server-managed,
+/// 400 for malformed DID URLs, 500 otherwise).
+fn map_register_err(e: RegisterDidWithServerError) -> AppError {
+    use RegisterDidWithServerError as E;
+    match e {
+        E::Auth(msg) => AppError::Forbidden(msg),
+        E::DidNotFound(msg) | E::ServerNotFound(msg) | E::LogMissing(msg) => {
+            AppError::NotFound(msg)
+        }
+        E::AlreadyServerManaged { .. } | E::Conflict(_) => AppError::Conflict(e.to_string()),
+        E::Transport(msg) | E::Publish(msg) => AppError::Internal(format!("publish: {msg}")),
+        E::DidUrlParse { .. } => AppError::Validation(e.to_string()),
+        E::Storage(msg) => AppError::Internal(msg),
+    }
 }

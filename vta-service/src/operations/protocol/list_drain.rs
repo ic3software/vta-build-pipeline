@@ -80,31 +80,14 @@ mod tests {
     #[tokio::test]
     async fn empty_drain_set_returns_empty_list() {
         let (_dir, ks) = empty_drains_ks().await;
-        let cfg = Arc::new(RwLock::new(crate::config::AppConfig {
-            server: crate::config::ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: Default::default(),
-            store: crate::config::StoreConfig {
-                data_dir: _dir.path().into(),
-            },
-            services: crate::config::ServicesConfig {
-                rest: true,
-                didcomm: true,
-            },
-            vta_did: Some("did:webvh:scid:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            resolver_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            audit: Default::default(),
-            auth: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            config_path: _dir.path().join("vta.toml"),
-        }));
+        let cfg = {
+            let mut c = crate::test_support::test_app_config(_dir.path().into());
+            c.services.rest = true;
+            c.services.didcomm = true;
+            c.vta_did = Some("did:webvh:scid:host:vta".into());
+            c.config_path = _dir.path().join("vta.toml");
+            Arc::new(RwLock::new(c))
+        };
         let super_admin = AuthClaims::unsafe_local_cli_super_admin("test");
         let response = list_drain(&cfg, &ks, &super_admin).await.unwrap();
         assert!(response.entries.is_empty());
@@ -126,31 +109,14 @@ mod tests {
         .await
         .unwrap();
 
-        let cfg = Arc::new(RwLock::new(crate::config::AppConfig {
-            server: crate::config::ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: Default::default(),
-            store: crate::config::StoreConfig {
-                data_dir: _dir.path().into(),
-            },
-            services: crate::config::ServicesConfig {
-                rest: true,
-                didcomm: true,
-            },
-            vta_did: Some("did:webvh:scid:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            resolver_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            audit: Default::default(),
-            auth: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            config_path: _dir.path().join("vta.toml"),
-        }));
+        let cfg = {
+            let mut c = crate::test_support::test_app_config(_dir.path().into());
+            c.services.rest = true;
+            c.services.didcomm = true;
+            c.vta_did = Some("did:webvh:scid:host:vta".into());
+            c.config_path = _dir.path().join("vta.toml");
+            Arc::new(RwLock::new(c))
+        };
         let super_admin = AuthClaims::unsafe_local_cli_super_admin("test");
         let response = list_drain(&cfg, &ks, &super_admin).await.unwrap();
         assert_eq!(response.entries.len(), 1);

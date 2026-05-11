@@ -295,57 +295,118 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Producer returns**: HPKE-sealed `TemplateBootstrapPayload` (integration
   DID, private keys, `did.jsonl`, VC-issued admin authorization, VTA trust
   bundle) in armor with SHA-256 digest communicated out-of-band.
-- **Transports**:
+- **Transports** (REST and DIDComm both support relayer ≠ holder):
   - **Offline file**: `vta bootstrap provision-request` / `provision-integration` / `open`.
   - **PNM REST bridge**: `pnm bootstrap provision-request` →
     `pnm bootstrap provision-integration` (authenticated, hits
-    `POST /bootstrap/provision-integration`).
-  - **DIDComm**: `provision-integration/1.0` protocol (authcrypt; ACL gates).
+    `POST /bootstrap/provision-integration`). Supports
+    `--create-context` to create the target context inline when
+    missing — same flag the offline `vta` CLI exposes. Wire
+    field `create_context: bool` on the request body, paired
+    with `context_created: bool` on the response so operators
+    see whether the flag actually did something. Super-admin
+    only (`operations::contexts::create_context`'s auth gate).
+  - **DIDComm**: same `pnm bootstrap provision-integration`
+    command when the client is on DIDComm transport. The
+    `provision-integration/1.0` message carries the VP and
+    receives the same sealed bundle. `VtaClient::
+    provision_integration` dispatches based on the
+    `Transport::Rest`/`Transport::DIDComm` variant.
+- **Auth model** (both transports — onion layers):
+  - **Outer**: bearer token (REST) / authcrypt sender (DIDComm)
+    authenticates the *relayer*. ACL-gated.
+  - **Inner**: VP `DataIntegrityProof` authenticates the
+    *holder*. The bundle is HPKE-sealed to the holder's X25519
+    derivation.
+  - Relayer and holder may legitimately differ — the air-gap
+    onboarding flow relies on this. The relayer can't decrypt
+    the bundle (no holder private key), and the VP signature
+    can't be forged without the holder's key, so there's no
+    privilege escalation. Use `e.p.msg.forbidden` for genuine
+    permission failures (caller authenticated but not admin in
+    the context); the standard `e.p.msg.unauthorized` code is
+    reserved for actual auth failures so the CLI doesn't print
+    a misleading "Token may be expired" hint.
 - **Code**: `vta-service/src/operations/provision_integration.rs`,
-  `vta-sdk/src/provision_integration/`,
-  `vta-service/src/routes/bootstrap.rs:provision_integration`.
+  `vta-sdk/src/provision_integration/{http,didcomm}.rs`,
+  `vta-service/src/routes/bootstrap.rs:provision_integration`,
+  `vta-service/src/messaging/handlers.rs:handle_provision_integration`.
 - **Docs**: `docs/03-integrating/provision-integration.md`.
 
-### DIDComm protocol management
-- **What**: Enable, disable, or migrate the DIDComm protocol surface
-  on a *running* VTA without rebuilding it, re-issuing admin
-  credentials, or rotating verification keys. Each operation
+### Runtime service management
+- **What**: Add, update, remove, or roll back the VTA's
+  advertised transport services (REST + DIDComm) on a *running*
+  VTA without rebuilding it, re-issuing admin credentials, or
+  rotating verification keys. Generalises the earlier
+  DIDComm-only protocol-management surface — both transports get
+  the same `services {kind} {verb}` operations. Each mutation
   publishes a new WebVH LogEntry; `verificationMethod` stays
   byte-identical before and after.
-- **Operator commands**:
-  - `pnm services {enable,disable} didcomm` — flip the protocol
-    surface on/off (REST-only; `enable` needs the operator to
-    declare the mediator DID).
-  - `pnm mediator {migrate,rollback,drain cancel,report}` — change
-    or roll back the active mediator; cancel an in-progress drain;
-    pull the per-mediator inbound counts + per-sender last-seen
-    mediator from the telemetry sink.
-- **Drain mechanics**: mediator changes go through a fjall-persisted
-  drain set with a 30-day TTL cap. In-flight messages from senders
-  with stale DID-doc caches keep landing while the new mediator
-  picks up traffic. State is restart-resilient — boot replays
-  outstanding drain timers via `DrainSweeper`.
-- **Handshake**: `migrate`/`rollback` use a *live*
+- **Operator commands** (spec §5.1):
+  - `pnm services list` — show currently-advertised services.
+  - `pnm services rest {enable,update,disable,rollback}` — manage
+    REST advertisement (`#vta-rest` service entry).
+  - `pnm services didcomm {enable,update,disable,rollback}` —
+    manage DIDComm mediator advertisement (`#vta-didcomm`).
+  - `pnm services didcomm drain {list,cancel}` — inspect or cancel
+    drain entries.
+  - `pnm services report` — per-mediator inbound counts +
+    per-sender last-seen mediator from the telemetry sink.
+- **Brick-prevention** (§3.2): at least one transport must remain
+  advertised at all times. Single source of truth in
+  `protocol::invariant::would_violate_last_service`; no `--force`
+  escape hatch. Disable / rollback paths consult it before any
+  I/O.
+- **Fail-forward rollback** (§3.5a): WebVH is append-only;
+  rollback never rewinds the chain. Reads the per-kind snapshot
+  store (`protocol::snapshot`, fjall keyspace
+  `service_prev_config`) and dispatches into the equivalent
+  forward op (e.g. `enable` rolls back via `disable`).
+  Single-step per kind; REST and DIDComm rollback are independent.
+- **Drain mechanics** (DIDComm only): mediator changes go through
+  a fjall-persisted drain set with a 30-day TTL cap and a 24h
+  default. In-flight messages from senders with stale DID-doc
+  caches keep landing while the new mediator picks up traffic.
+  State is restart-resilient — boot replays outstanding drain
+  timers via `DrainSweeper`. REST has no drain semantics.
+- **Service[] ordering** (§3.3): when both transports are
+  advertised, DIDComm comes first. Encoded via array order, not
+  DIDComm v2's `priority` key — DID-Core resolvers walking the
+  array pick DIDComm first. Enforced in
+  `protocol::document::sort_services_canonical` at the end of
+  every `with_*_service` patcher.
+- **Handshake**: `update`/`rollback`-into-update uses a *live*
   `DIDCommServiceProver` against the running service; first-enable
-  spins up a transient `DIDCommService` just for the round-trip and
-  tears it down regardless of outcome (`messaging::transient_handshake`).
+  spins up a transient `DIDCommService` just for the round-trip
+  (`messaging::transient_handshake`).
 - **Telemetry**: pluggable `vti_common::telemetry::TelemetrySink`
-  trait; default impl is a 10k-event ring buffer
-  (`RingBufferTelemetry`). The swappability test in
-  `vti-common/src/telemetry/mod.rs::swappability_tests` defines the
-  contract for alternate impls.
-- **Transport**: all five admin operations are available over both
-  REST and DIDComm (`enable_didcomm` is REST-only by nature). DIDComm
-  message types live at
-  `vta_sdk::protocols::protocol_management`; route handlers at
-  `vta-service/src/messaging/handlers_protocol.rs`.
-- **Code**: `vta-service/src/operations/protocol/*`,
-  `vta-service/src/messaging/{registry,drain_store,drain_sweeper,handshake,live_prover,transient_handshake}.rs`,
+  trait; default impl is a ring buffer (`RingBufferTelemetry`).
+  Forward operations carry an `OpContext::{Direct,Rollback}`
+  parameter — rollback-dispatched ops emit
+  `triggered_by: "rollback"` on their telemetry event.
+- **Transport**: all operations except `services didcomm enable`
+  are reachable over both REST and DIDComm. `enable_didcomm` is
+  REST-only by nature (DIDComm isn't running yet). Wire types
+  live in `vta_sdk::protocol::services`; DIDComm message types
+  in `vta_sdk::protocols::protocol_management` under
+  `services-management/1.0/`.
+- **Code**: `vta-service/src/operations/protocol/{enable_rest,
+  update_rest,disable_rest,rollback_rest,enable_didcomm,
+  update_didcomm,disable_didcomm,rollback_didcomm,list,
+  list_drain,snapshot,invariant,document}.rs`,
+  `vta-service/src/messaging/{registry,drain_store,drain_sweeper,
+  handshake,live_prover,transient_handshake}.rs`,
   `vta-service/src/routes/protocol.rs`,
-  `vta_sdk::protocol`, `vta_cli_common::commands::{services,mediator}`.
-- **Docs**: `docs/03-integrating/didcomm-protocol-management.md`
-  (operator guide), `docs/05-design-notes/didcomm-protocol-management.md`
-  (design notes).
+  `vta_sdk::protocol::{mod,services}`,
+  `vta_cli_common::commands::services` (the `mediator`
+  submodule was deleted in P5),
+  `vta-service/src/services_cli.rs` (the offline
+  `vta services …` surface — direct fjall access, no auth
+  ceremony, not for TEE deployments).
+- **Docs**: `docs/03-integrating/runtime-service-management.md`
+  (operator guide), `docs/05-design-notes/runtime-service-management.md`
+  (spec). The earlier `didcomm-protocol-management.md` docs in
+  both directories are superseded redirects.
 
 ### Sealed-transfer envelope format
 - **Inner**: CBOR-serialized `SealedPayloadV1` enum variant.
@@ -377,6 +438,26 @@ new flow, update both this section and the relevant `docs/*.md`.
   accepts any backup; a configured VTA rejects backups whose `vta_did`
   doesn't match. Tested at `backup.rs:867-911`.
 - **Code**: `vta-service/src/operations/backup.rs`.
+
+### Promote a serverless DID to a server-managed one
+- **What**: An operator who set up the VTA serverless (no webvh
+  host configured at setup time) decides later they want their
+  DID published to a host. This op pushes the existing local
+  `did.jsonl` to the host and flips the local record's
+  `server_id` from `"serverless"` to the registered server id —
+  the DID identifier is unchanged, so every existing integration
+  keeps working.
+- **Refused if** the DID is already server-managed (re-pointing
+  a hosted DID at a different host needs coordinated teardown on
+  the old host and is out of scope for this op).
+- **CLI**: `pnm webvh register-did --did <did> --server <id>`
+  (online, REST). `vta webvh register-did …` (offline; daemon
+  must be stopped, fjall lock; not available in TEE).
+- **Code**: `vta-service/src/operations/did_webvh/register_server.rs`,
+  `vta-service/src/routes/did_webvh.rs::register_did_with_server_handler`,
+  `vta_sdk::client::VtaClient::register_did_with_server`.
+- **Docs**: `docs/03-integrating/runtime-service-management.md`
+  (walkthrough section).
 
 ### DID template management
 - **Offline**: `pnm did-templates init <kind>`, `validate`, `list-builtins`.

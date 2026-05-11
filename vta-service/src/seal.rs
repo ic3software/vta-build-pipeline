@@ -152,9 +152,16 @@ pub async fn run_unseal_challenge(store: &Store) -> Result<(), AppError> {
     eprintln!("  Challenge (hex):");
     eprintln!("  {challenge_hex}");
     eprintln!();
-    eprintln!("  Sign this challenge with your super admin key using PNM:");
+    eprintln!("  Sign this challenge with your super admin key. Either:");
     eprintln!();
-    eprintln!("    pnm auth sign-challenge {challenge_hex}");
+    eprintln!(
+        "    pnm auth sign-challenge {challenge_hex}                      # online: \
+         signs with PNM's stored admin key"
+    );
+    eprintln!(
+        "    vta auth sign-challenge --did <admin-did> --challenge {challenge_hex}   \
+         # offline: signs from this VTA's local keystore (daemon stopped)"
+    );
     eprintln!();
     eprintln!("  Then paste the signature (hex) and your DID below.");
     eprintln!();

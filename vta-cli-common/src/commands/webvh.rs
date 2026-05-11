@@ -129,6 +129,156 @@ pub async fn cmd_webvh_server_remove(
     Ok(())
 }
 
+/// `pnm webvh register-did --did <did> --server <id> [--force]` —
+/// promote a serverless WebVH DID to a server-managed one.
+///
+/// Pushes the local `did.jsonl` to the host atomically (single
+/// batched write — no resolver gap) and flips the local record's
+/// `server_id` so future `pnm services …` mutations auto-publish
+/// there. Refused if the DID is already server-managed
+/// (re-pointing a hosted DID is out of scope).
+///
+/// `--force` is honoured only when the VTA's DID authenticates to
+/// the host as an admin replacing a slot owned by a different DID.
+/// An owner re-registering their own slot is idempotent and always
+/// succeeds without `--force`.
+pub async fn cmd_webvh_did_register_server(
+    client: &VtaClient,
+    did: &str,
+    server_id: &str,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = client
+        .register_did_with_server(did, server_id, force)
+        .await?;
+    println!("DID registered with WebVH server.");
+    println!("  DID:        {}", result.did);
+    println!("  Server:     {}", result.server_id);
+    println!("  Log entries: {}", result.log_entry_count);
+    println!();
+    println!(
+        "Future `pnm services …` mutations will auto-publish to `{}`.",
+        result.server_id
+    );
+    Ok(())
+}
+
+/// `pnm webvh edit-did --did <did>` — interactive or
+/// non-interactive update of an existing WebVH DID document.
+///
+/// **Interactive (no flags):** fetches the latest published DID
+/// document, opens it in `$EDITOR`, asks whether to change any of
+/// the webvh parameters (pre-rotation, watchers, TTL, label),
+/// confirms, then publishes a new LogEntry.
+///
+/// **Non-interactive:** supply `--document <file>` (and optionally
+/// the per-field flags) or `--options-file <file>` to skip prompts
+/// entirely. Useful for scripted flows.
+///
+/// Refuses to publish if the operator changed the DID's top-level
+/// `id` field — the WebVH method treats the DID id as a permanent
+/// commitment from the first LogEntry.
+pub async fn cmd_webvh_did_edit(
+    client: &VtaClient,
+    did: &str,
+    flags: super::webvh_edit::EditFlags,
+    no_confirm: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use super::webvh_edit::{
+        build_options_from_flags, confirm_publish, diff_summary, document_id,
+        extract_current_document, extract_latest_version_id, extract_pre_rotation_status,
+        launch_editor, prompt_webvh_params,
+    };
+
+    // Fetch the DID record (for context_id + scid) — this also
+    // surfaces a clean 404 if the DID isn't registered.
+    let record = client.get_did_webvh(did).await?;
+    let context_id = record.context_id.clone();
+    let scid = record.scid.clone();
+
+    // Decide between interactive and non-interactive paths. The
+    // non-interactive heuristic: any flag set → skip the editor
+    // and prompt chain. Interactive mode (no flags) opens $EDITOR
+    // and asks the parameter questions.
+    let any_flag_set = flags.document_file.is_some()
+        || flags.options_file.is_some()
+        || flags.pre_rotation.is_some()
+        || flags.ttl.is_some()
+        || !flags.watchers.is_empty()
+        || flags.no_watchers
+        || flags.label.is_some();
+
+    let mut body = if any_flag_set {
+        let body = build_options_from_flags(&flags)?;
+        // Validate the supplied document doesn't change the DID id.
+        if let Some(edited) = &body.document {
+            let log = client.get_did_webvh_log(did).await?;
+            let log_str = log.log.ok_or_else(|| -> Box<dyn std::error::Error> {
+                "DID has no published log on the VTA — nothing to edit".into()
+            })?;
+            let prior = extract_current_document(&log_str)?;
+            super::webvh_edit::assert_did_id_unchanged(&prior, edited)?;
+        }
+        body
+    } else {
+        // Interactive path: fetch the log, extract the latest doc,
+        // open in $EDITOR, then walk the parameter prompts. Capture
+        // the latest versionId so the save call can carry an
+        // optimistic-concurrency precondition (lost-update guard).
+        let log = client.get_did_webvh_log(did).await?;
+        let log_str = log.log.ok_or_else(|| -> Box<dyn std::error::Error> {
+            "DID has no published log on the VTA — nothing to edit".into()
+        })?;
+        let prior = extract_current_document(&log_str)?;
+        let prior_id = document_id(&prior)?.to_string();
+        let fetched_version_id = extract_latest_version_id(&log_str).ok();
+        let pre_rotation_status = extract_pre_rotation_status(&log_str);
+        eprintln!("Editing DID document for {prior_id}.");
+        if let Some(ref v) = fetched_version_id {
+            eprintln!("  Current versionId: {v}");
+        }
+        eprintln!("Opening $EDITOR — save and exit to continue, or quit without saving to abort.");
+
+        let edited = match launch_editor(&prior)? {
+            Some(doc) => {
+                let summary = diff_summary(&prior, &doc);
+                eprintln!();
+                eprintln!("Document diff:");
+                for line in summary.lines() {
+                    eprintln!("  {line}");
+                }
+                eprintln!();
+                Some(doc)
+            }
+            None => {
+                eprintln!("Editor cancelled. No changes will be published.");
+                return Ok(());
+            }
+        };
+
+        let mut body = prompt_webvh_params(edited, Some(&pre_rotation_status))?;
+        // Stamp the precondition so the VTA refuses the save if the
+        // DID was updated by another operator while we were editing.
+        body.expected_version_id = fetched_version_id;
+        body
+    };
+    // Suppress the unused_mut warning when the flag-driven branch
+    // doesn't mutate `body` after construction.
+    let _ = &mut body;
+
+    confirm_publish(&body, no_confirm)?;
+
+    let result = client.update_did_webvh(&context_id, &scid, body).await?;
+    println!("WebVH DID updated.");
+    println!("  DID:             {}", result.did);
+    println!("  New version ID:  {}", result.new_version_id);
+    println!("  New SCID:        {}", result.new_scid);
+    println!("  Update keys:     {}", result.update_keys_count);
+    println!("  Pre-rotation:    {}", result.pre_rotation_key_count);
+    crate::commands::services::print_serverless_hint(result.serverless, &result.did);
+    Ok(())
+}
+
 // ── DID commands ────────────────────────────────────────────────────
 
 pub async fn cmd_webvh_did_create(

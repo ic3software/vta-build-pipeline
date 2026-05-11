@@ -872,7 +872,9 @@ async fn main() {
                             eprintln!(
                                 "Either configure a community with `cnm setup`, or provide a URL:"
                             );
-                            eprintln!("  cnm health --url http://localhost:8100");
+                            // `--url` is a top-level flag (cli::Cli::url) so it must
+                            // appear BEFORE the subcommand or clap rejects the parse.
+                            eprintln!("  cnm --url http://localhost:8100 health");
                             std::process::exit(1);
                         }
                     };
@@ -904,7 +906,8 @@ async fn main() {
             eprintln!(
                 "Error: could not bootstrap session from personal VTA: {e}\n\n\
                          To fix this, either:\n  \
-                         1. Import a credential: cnm auth login <credential>\n  \
+                         1. Import a sealed credential bundle from your VTA admin:\n     \
+                            cnm auth login --credential-bundle <bundle.armored> [--expect-digest <sha256>]\n  \
                          2. Re-run setup: cnm setup"
             );
             std::process::exit(1);

@@ -1,6 +1,6 @@
 # Tasks: Runtime service-endpoint management
 
-Status: **DRAFT — Phase 3 (Tasks)**
+Status: **Implemented**
 Companion to: `runtime-service-management.md` (spec) and
 `runtime-service-management-plan.md` (plan).
 Owner: Glenn Gore

@@ -57,7 +57,6 @@ use crate::operations::protocol::snapshot::{
 };
 use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 #[derive(Debug, Clone, Default)]
 pub struct DisableRestParams;
@@ -68,6 +67,10 @@ pub struct DisableRestResult {
     /// Pre-disable URL — recorded so callers / telemetry / audit
     /// can graph what was just unadvertised.
     pub prior_url: String,
+    /// The VTA's own DID. See [`super::enable_rest::EnableRestResult`].
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted.
+    pub serverless: bool,
 }
 
 #[derive(Debug, Error)]
@@ -76,7 +79,7 @@ pub enum DisableRestError {
     ServiceNotPresent,
     #[error(
         "refusing operation: would leave the VTA with no advertised services. \
-         Enable DIDComm first via `services didcomm enable --mediator <did>`, \
+         Enable DIDComm first via `services didcomm enable --mediator-did <did>`, \
          then retry."
     )]
     LastServiceRefused,
@@ -103,6 +106,21 @@ pub enum DisableRestError {
 impl From<AppError> for DisableRestError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
+    }
+}
+
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for DisableRestError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
     }
 }
 
@@ -142,20 +160,27 @@ pub async fn disable_rest(
 
     let _guard = PROTOCOL_LOCK.lock().await;
 
-    // 1. Read preconditions: REST must be on (config + on-chain).
-    //    Capture the prior URL while we're at it for the snapshot
-    //    + telemetry.
-    let (vta_did, scid, current_doc, prior_url, didcomm_enabled) =
-        read_preconditions(config, webvh_ks).await?;
-
-    // 2. Brick-prevention. If DIDComm is also off, disabling REST
-    //    leaves no transport advertised — refuse via the shared
-    //    helper (T0.4). Single source of truth for spec §3.2; no
-    //    --force escape hatch.
+    // 1. Brick-prevention runs FIRST — fail-fast on the cheap
+    //    config-only check before any I/O. Mirrors disable_didcomm's
+    //    order, where the §3.2 invariant is checked before reading
+    //    the webvh log. The prior_url for the snapshot is captured
+    //    later, after the brick check has already passed.
+    let didcomm_enabled = {
+        let cfg = config.read().await;
+        if !cfg.services.rest {
+            return Err(DisableRestError::ServiceNotPresent);
+        }
+        cfg.services.didcomm
+    };
     would_violate_last_service(
         &CurrentServices::new(true, didcomm_enabled),
         ProposedOp::disable(ServiceKind::Rest),
     )?;
+
+    // 2. Read on-chain state: VTA DID record + DID log. Validates
+    //    services.rest == true (already done above) AND captures
+    //    the prior URL for the snapshot.
+    let (vta_did, scid, current_doc, prior_url, _) = read_preconditions(config, webvh_ks).await?;
 
     // 3. Persist snapshot BEFORE the runtime mutation per spec
     //    §3.5a. Pre-state is RestSnapshot::Enabled with the prior
@@ -220,6 +245,8 @@ pub async fn disable_rest(
     Ok(DisableRestResult {
         new_version_id: update_result.new_version_id,
         prior_url,
+        vta_did,
+        serverless: update_result.serverless,
     })
 }
 
@@ -227,43 +254,34 @@ async fn read_preconditions(
     config: &Arc<RwLock<AppConfig>>,
     webvh_ks: &KeyspaceHandle,
 ) -> Result<(String, String, JsonValue, String, bool), DisableRestError> {
-    let cfg = config.read().await;
-    if !cfg.services.rest {
-        return Err(DisableRestError::ServiceNotPresent);
-    }
-    let didcomm_enabled = cfg.services.didcomm;
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(DisableRestError::VtaDidNotConfigured)?;
-    drop(cfg);
+    // Op-specific config check first — this is what `services.rest`
+    // gates. Capture `didcomm_enabled` while we hold the read-lock
+    // so the caller knows whether disabling REST would brick the
+    // VTA (no protocol surface).
+    let didcomm_enabled = {
+        let cfg = config.read().await;
+        if !cfg.services.rest {
+            return Err(DisableRestError::ServiceNotPresent);
+        }
+        cfg.services.didcomm
+    };
 
-    let record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| DisableRestError::VtaDidRecordMissing(vta_did.clone()))?;
-    let scid = record.scid.clone();
+    // Common load: `vta_did`, `scid`, `did_log`, `current_doc` —
+    // shared with every other protocol op via
+    // `super::preconditions::load_vta_doc_state`.
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
 
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| DisableRestError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
-
-    let prior_url = current_rest_service(&current_doc)
+    let prior_url = current_rest_service(&state.current_doc)
         .map(|s| s.url)
         .ok_or(DisableRestError::ServiceNotPresent)?;
 
-    Ok((vta_did, scid, current_doc, prior_url, didcomm_enabled))
-}
-
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, DisableRestError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(DisableRestError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| DisableRestError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+    Ok((
+        state.vta_did,
+        state.scid,
+        state.current_doc,
+        prior_url,
+        didcomm_enabled,
+    ))
 }
 
 async fn persist_rest_disabled(config: &Arc<RwLock<AppConfig>>) -> Result<(), DisableRestError> {
@@ -283,7 +301,6 @@ async fn persist_rest_disabled(config: &Arc<RwLock<AppConfig>>) -> Result<(), Di
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LogConfig, ServerConfig, ServicesConfig, StoreConfig};
     use crate::store::Store;
     use vti_common::config::StoreConfig as VtiStoreConfig;
 
@@ -303,33 +320,13 @@ mod tests {
     }
 
     fn build_fixture(rest_initially: bool, didcomm_initially: bool) -> TestFixture {
+        use crate::test_support::test_app_config;
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("vta.toml");
-        let cfg = AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: LogConfig::default(),
-            store: StoreConfig {
-                data_dir: dir.path().into(),
-            },
-            services: ServicesConfig {
-                rest: rest_initially,
-                didcomm: didcomm_initially,
-            },
-            vta_did: Some("did:webvh:scid123:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            resolver_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            audit: Default::default(),
-            auth: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            config_path,
-        };
+        let mut cfg = test_app_config(dir.path().into());
+        cfg.services.rest = rest_initially;
+        cfg.services.didcomm = didcomm_initially;
+        cfg.vta_did = Some("did:webvh:scid123:host:vta".into());
+        cfg.config_path = dir.path().join("vta.toml");
         let initial = toml::to_string_pretty(&cfg).unwrap();
         std::fs::write(&cfg.config_path, initial).unwrap();
 

@@ -46,6 +46,31 @@ use crate::operations::protocol::update_rest::{UpdateRestParams, update_rest};
 
 type HandlerResult = Result<Option<DIDCommResponse>, DIDCommServiceError>;
 
+/// Best-effort assembly of a live `DIDCommServiceProver` from this
+/// handler's `VtaState`. Mirrors `routes::protocol::build_live_prover`
+/// — both transports use the same shared
+/// `messaging::live_prover::try_build_from_parts` helper so the
+/// rollback dispatcher's re-promotion handshake runs against the
+/// real mediator regardless of which transport invoked it. Returns
+/// `None` (caller falls back to `AlwaysOkProver`) when
+/// secrets-resolver / vm-ids haven't been threaded through yet.
+async fn build_live_prover_from_vta_state(
+    state: &VtaState,
+) -> Option<crate::messaging::live_prover::DIDCommServiceProver> {
+    let vta_did = {
+        let cfg = state.config.read().await;
+        cfg.vta_did.clone()?
+    };
+    crate::messaging::live_prover::try_build_from_parts(
+        &state.didcomm_bridge,
+        &vta_did,
+        state.secrets_resolver.as_ref()?,
+        state.signing_vm_id.as_ref()?,
+        state.ka_vm_id.as_ref()?,
+    )
+    .await
+}
+
 fn handler_err(e: impl std::fmt::Display) -> DIDCommServiceError {
     DIDCommServiceError::Handler(e.to_string())
 }
@@ -128,6 +153,8 @@ pub async fn handle_disable_didcomm(
                 "new_version_id": r.new_version_id,
                 "prior_mediator_did": r.prior_mediator_did,
                 "drains_until": r.drains_until.map(|t| t.to_rfc3339()),
+                "vta_did": r.vta_did,
+                "serverless": r.serverless,
             }),
         ),
         Err(DisableDidcommError::DidcommNotEnabled) => Ok(Some(problem_report_conflict(
@@ -136,11 +163,13 @@ pub async fn handle_disable_didcomm(
         Err(DisableDidcommError::NoProtocolRemaining) => Ok(Some(problem_report_conflict(
             "cannot disable DIDComm — REST is also disabled",
         ))),
-        Err(DisableDidcommError::DrainTtlTooShortForDidcomm) => {
-            Ok(Some(problem_report_bad_request(
-                "drain-ttl 0s over DIDComm transport is not permitted (1h minimum)",
-            )))
-        }
+        Err(DisableDidcommError::DrainTtlOutOfBounds {
+            min,
+            max,
+            requested,
+        }) => Ok(Some(problem_report_bad_request(format!(
+            "drain ttl {requested}s outside allowed range [{min}s, {max}s]"
+        )))),
         Err(DisableDidcommError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
         Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
     }
@@ -210,6 +239,7 @@ pub async fn handle_update_didcomm(
             force: body.force,
             handshake_timeout: timeout,
             audit_kind,
+            transport: crate::operations::protocol::disable_didcomm::DisableTransport::Didcomm,
         },
         OpContext::Direct,
         "didcomm",
@@ -226,6 +256,8 @@ pub async fn handle_update_didcomm(
                 "active_mediator_did": r.active_mediator_did,
                 "active_mediator_endpoint": r.active_mediator_endpoint,
                 "drains_until": r.drains_until.to_rfc3339(),
+                "vta_did": r.vta_did,
+                "serverless": r.serverless,
             }),
         ),
         Err(UpdateDidcommError::DidcommNotEnabled) => Ok(Some(problem_report_conflict(
@@ -237,6 +269,13 @@ pub async fn handle_update_didcomm(
         Err(UpdateDidcommError::AlreadyDraining(did)) => Ok(Some(problem_report_conflict(
             format!("{did} is currently in drain state — cancel or rollback first"),
         ))),
+        Err(UpdateDidcommError::DrainTtlOutOfBounds {
+            min,
+            max,
+            requested,
+        }) => Ok(Some(problem_report_bad_request(format!(
+            "drain ttl {requested}s outside allowed range [{min}s, {max}s]"
+        )))),
         Err(UpdateDidcommError::Auth(e)) => Ok(Some(problem_report_unauthorized(e))),
         Err(other) => Ok(Some(problem_report_internal(other.to_string()))),
     }
@@ -394,6 +433,8 @@ pub async fn handle_enable_rest(
                 "log_entry_version_id": r.new_version_id,
                 "effective_at": Utc::now().to_rfc3339(),
                 "url": r.url,
+                "vta_did": r.vta_did,
+                "serverless": r.serverless,
             }),
         ),
         Err(EnableRestError::ServiceAlreadyEnabled) => {
@@ -447,6 +488,8 @@ pub async fn handle_update_rest(
                 "effective_at": Utc::now().to_rfc3339(),
                 "prior_url": r.prior_url,
                 "url": r.url,
+                "vta_did": r.vta_did,
+                "serverless": r.serverless,
             }),
         ),
         Err(UpdateRestError::ServiceNotPresent) => Ok(Some(problem_report_conflict(
@@ -497,6 +540,8 @@ pub async fn handle_disable_rest(
                 "log_entry_version_id": r.new_version_id,
                 "effective_at": Utc::now().to_rfc3339(),
                 "prior_url": r.prior_url,
+                "vta_did": r.vta_did,
+                "serverless": r.serverless,
             }),
         ),
         Err(DisableRestError::ServiceNotPresent) => Ok(Some(problem_report_conflict(
@@ -555,6 +600,8 @@ pub async fn handle_rollback_rest(
                     crate::operations::protocol::rollback_rest::RollbackKind::Updated => "updated",
                     crate::operations::protocol::rollback_rest::RollbackKind::NoOp => "no_op",
                 },
+                "vta_did": r.vta_did,
+                "serverless": r.serverless,
             }),
         ),
         Err(RollbackRestError::NoPriorMutation) => Ok(Some(problem_report_conflict(
@@ -589,7 +636,16 @@ pub async fn handle_rollback_didcomm(
     let body: RollbackDidcommBody = serde_json::from_value(message.body).map_err(handler_err)?;
     let drain_ttl = std::time::Duration::from_secs(body.drain_ttl_secs.unwrap_or(86_400));
 
-    let prover = AlwaysOkProver;
+    // Try to assemble a live prover; fall back to AlwaysOkProver
+    // when the secrets / vm-ids haven't been threaded through yet
+    // (e.g. early-boot fixture). Mirrors the REST handler.
+    let live_prover = build_live_prover_from_vta_state(&state).await;
+    let always_ok = AlwaysOkProver;
+    let prover_ref: &(dyn crate::messaging::handshake::ListenerProver + Send + Sync) =
+        match live_prover.as_ref() {
+            Some(p) => p,
+            None => &always_ok,
+        };
 
     let result = rollback_didcomm(
         &state.config,
@@ -608,7 +664,7 @@ pub async fn handle_rollback_didcomm(
         &state.mediator_registry,
         &state.drain_sweeper,
         &state.telemetry,
-        &prover,
+        prover_ref,
         &auth,
         RollbackDidcommParams {
             drain_ttl,
@@ -635,6 +691,8 @@ pub async fn handle_rollback_didcomm(
                     crate::operations::protocol::rollback_didcomm::RollbackKind::NoOp => "no_op",
                 },
                 "draining_mediator": r.draining_mediator,
+                "vta_did": r.vta_did,
+                "serverless": r.serverless,
             }),
         ),
         Err(RollbackDidcommError::NoPriorMutation) => Ok(Some(problem_report_conflict(

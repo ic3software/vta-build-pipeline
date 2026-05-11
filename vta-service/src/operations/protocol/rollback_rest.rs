@@ -36,7 +36,6 @@
 use std::sync::Arc;
 
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
-use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -60,7 +59,6 @@ use crate::operations::protocol::snapshot::{
 };
 use crate::operations::protocol::update_rest::{UpdateRestError, UpdateRestParams, update_rest};
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 #[derive(Debug, Clone, Default)]
 pub struct RollbackRestParams;
@@ -85,6 +83,12 @@ pub struct RollbackRestResult {
     /// when the rollback was a no-op (snapshot ≡ current).
     pub new_version_id: Option<String>,
     pub kind: RollbackKind,
+    /// The VTA's own DID. Empty for no-op rollbacks (no LogEntry
+    /// was written). See [`super::enable_rest::EnableRestResult`].
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted. `false` on no-op
+    /// rollbacks (no follow-up redeploy needed).
+    pub serverless: bool,
 }
 
 #[derive(Debug, Error)]
@@ -135,6 +139,21 @@ pub enum RollbackRestError {
 impl From<AppError> for RollbackRestError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
+    }
+}
+
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for RollbackRestError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
     }
 }
 
@@ -214,6 +233,8 @@ pub async fn rollback_rest(
             Ok(RollbackRestResult {
                 new_version_id: Some(result.new_version_id),
                 kind: RollbackKind::Disabled,
+                vta_did: result.vta_did,
+                serverless: result.serverless,
             })
         }
 
@@ -239,6 +260,8 @@ pub async fn rollback_rest(
             Ok(RollbackRestResult {
                 new_version_id: Some(result.new_version_id),
                 kind: RollbackKind::Enabled,
+                vta_did: result.vta_did,
+                serverless: result.serverless,
             })
         }
 
@@ -265,6 +288,8 @@ pub async fn rollback_rest(
             Ok(RollbackRestResult {
                 new_version_id: Some(result.new_version_id),
                 kind: RollbackKind::Updated,
+                vta_did: result.vta_did,
+                serverless: result.serverless,
             })
         }
 
@@ -279,6 +304,11 @@ pub async fn rollback_rest(
             Ok(RollbackRestResult {
                 new_version_id: None,
                 kind: RollbackKind::NoOp,
+                // No LogEntry written — the CLI hint path is
+                // suppressed for no-ops anyway, so empty + false
+                // is the right "nothing to follow up on" signal.
+                vta_did: String::new(),
+                serverless: false,
             })
         }
     }
@@ -290,40 +320,13 @@ async fn read_current_rest_url(
     config: &Arc<RwLock<AppConfig>>,
     webvh_ks: &KeyspaceHandle,
 ) -> Result<Option<String>, RollbackRestError> {
-    let cfg = config.read().await;
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(RollbackRestError::VtaDidNotConfigured)?;
-    drop(cfg);
-
-    let _record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| RollbackRestError::VtaDidRecordMissing(vta_did.clone()))?;
-
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| RollbackRestError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
-
-    Ok(current_rest_service(&current_doc).map(|svc| svc.url))
-}
-
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, RollbackRestError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(RollbackRestError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| RollbackRestError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
+    Ok(current_rest_service(&state.current_doc).map(|svc| svc.url))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LogConfig, ServerConfig, ServicesConfig, StoreConfig};
     use crate::store::Store;
     use vti_common::config::StoreConfig as VtiStoreConfig;
 
@@ -343,30 +346,13 @@ mod tests {
     }
 
     fn build_fixture(rest: bool, didcomm: bool) -> TestFixture {
+        use crate::test_support::test_app_config;
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("vta.toml");
-        let cfg = AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: LogConfig::default(),
-            store: StoreConfig {
-                data_dir: dir.path().into(),
-            },
-            services: ServicesConfig { rest, didcomm },
-            vta_did: Some("did:webvh:scid123:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            resolver_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            audit: Default::default(),
-            auth: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            config_path,
-        };
+        let mut cfg = test_app_config(dir.path().into());
+        cfg.services.rest = rest;
+        cfg.services.didcomm = didcomm;
+        cfg.vta_did = Some("did:webvh:scid123:host:vta".into());
+        cfg.config_path = dir.path().join("vta.toml");
         let initial = toml::to_string_pretty(&cfg).unwrap();
         std::fs::write(&cfg.config_path, initial).unwrap();
         let store = Store::open(&VtiStoreConfig {

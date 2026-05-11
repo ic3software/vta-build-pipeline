@@ -36,8 +36,8 @@ use url::Url;
 use affinidi_did_resolver_cache_sdk::{DIDCacheClient, config::DIDCacheConfigBuilder};
 
 use crate::config::{
-    AppConfig, AuthConfig, LogConfig, MessagingConfig, SecretsConfig, ServerConfig, ServicesConfig,
-    StoreConfig,
+    AppConfig, AuditConfig, AuthConfig, LogConfig, MessagingConfig, SecretsConfig, ServerConfig,
+    ServicesConfig, StoreConfig,
 };
 use crate::contexts::store_context;
 use crate::keys::seed_store::{SeedStore, create_seed_store};
@@ -115,6 +115,20 @@ pub struct WizardInputs {
     /// Optional label attached to the seeded admin's ACL row.
     #[serde(default)]
     pub admin_label: Option<String>,
+
+    /// WebSocket URL of a remote DID resolver (e.g.
+    /// `ws://resolver.example.com/did/v1/ws`). When set, the VTA uses
+    /// the remote resolver instead of resolving DIDs locally. Required
+    /// for TEE network mode where DID resolution is bridged to a parent-
+    /// side `affinidi-did-resolver-cache-server` over vsock; useful for
+    /// any deployment that wants to share a resolver-cache across VTAs.
+    #[serde(default)]
+    pub resolver_url: Option<String>,
+
+    /// Audit-log retention. Defaults to 28 days; compliance-driven
+    /// deployments often want 90 or 365.
+    #[serde(default)]
+    pub audit: AuditConfig,
 }
 
 fn default_services() -> ServicesConfig {
@@ -137,6 +151,15 @@ pub enum ExistingDataDirPolicy {
 /// Per-backend seed-store config. The `backend` discriminator selects the
 /// variant; required fields per variant are validated at deserialization
 /// time via `serde(deny_unknown_fields)`.
+///
+/// `large_enum_variant` is suppressed deliberately: the `Vault` arm
+/// carries ~14 KV-v2 + auth-method fields, which dominates the
+/// stack size of an `Option<SecretsBackendInput>`. The enum is
+/// parsed exactly once at setup time from a TOML file and never
+/// stored on a hot path, so the per-variant size footprint isn't
+/// load-bearing — boxing just to mollify the lint would add
+/// indirection for no operational benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretsBackendInput {
@@ -168,12 +191,86 @@ pub enum SecretsBackendInput {
         vault_url: String,
         secret_name: String,
     },
+    /// HashiCorp Vault (KV v2). Authenticates via Kubernetes (default),
+    /// AppRole, or a static token. The seed is stored at
+    /// `<kv_mount>/<secret_path>` in the configured field (default
+    /// `seed`). See `docs/02-operating/vault-secrets.md` for the
+    /// auth-method matrix.
+    Vault {
+        /// Vault server URL (e.g. `https://vault.example.com:8200`).
+        addr: String,
+        /// KV v2 secret path under the mount, e.g. `vta/master-seed`.
+        secret_path: String,
+        /// KV v2 mount path. Defaults to `secret`.
+        #[serde(default = "default_vault_kv_mount")]
+        kv_mount: String,
+        /// Field name within the KV v2 secret holding the hex-encoded
+        /// seed. Defaults to `seed`.
+        #[serde(default = "default_vault_secret_key")]
+        secret_key: String,
+        /// Vault Enterprise namespace, if any.
+        #[serde(default)]
+        namespace: Option<String>,
+        /// Auth method: `kubernetes` (default), `token`, or `approle`.
+        #[serde(default = "default_vault_auth_method")]
+        auth_method: String,
+        /// Kubernetes auth role name (when `auth_method = "kubernetes"`).
+        #[serde(default)]
+        k8s_role: Option<String>,
+        /// Kubernetes auth mount path. Defaults to `kubernetes`.
+        #[serde(default = "default_vault_k8s_mount")]
+        k8s_mount: String,
+        /// File holding the ServiceAccount JWT presented to Vault.
+        /// Defaults to the kubelet-mounted projected volume path.
+        #[serde(default = "default_vault_k8s_jwt_path")]
+        k8s_jwt_path: String,
+        /// Static token (when `auth_method = "token"`). Prefer the
+        /// `VAULT_TOKEN` env var over hard-coding here.
+        #[serde(default)]
+        token: Option<String>,
+        /// AppRole role_id (when `auth_method = "approle"`).
+        #[serde(default)]
+        approle_role_id: Option<String>,
+        /// AppRole secret_id (when `auth_method = "approle"`).
+        #[serde(default)]
+        approle_secret_id: Option<String>,
+        /// AppRole mount path. Defaults to `approle`.
+        #[serde(default = "default_vault_approle_mount")]
+        approle_mount: String,
+        /// Skip TLS certificate verification — dev/test only.
+        #[serde(default)]
+        skip_verify: bool,
+    },
     /// Plaintext file under `data_dir`. **Not recommended** — for dev only.
     Plaintext,
 }
 
 fn default_keyring_service() -> String {
     "vta".into()
+}
+
+fn default_vault_kv_mount() -> String {
+    "secret".into()
+}
+
+fn default_vault_secret_key() -> String {
+    "seed".into()
+}
+
+fn default_vault_auth_method() -> String {
+    "kubernetes".into()
+}
+
+fn default_vault_k8s_mount() -> String {
+    "kubernetes".into()
+}
+
+fn default_vault_k8s_jwt_path() -> String {
+    "/var/run/secrets/kubernetes.io/serviceaccount/token".into()
+}
+
+fn default_vault_approle_mount() -> String {
+    "approle".into()
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -184,14 +281,51 @@ pub enum MessagingInput {
     Skip,
     /// Point at a mediator DID that already exists. ATM resolves the
     /// endpoint from the DID document.
-    Existing { did: String },
+    ///
+    /// `mediator_host` is the *external* hostname the VTA should resolve
+    /// to when dialling the mediator's DIDComm endpoint. Used in TEE
+    /// network mode where outbound traffic is bridged via a vsock proxy
+    /// on the parent EC2 instance and the proxy needs the real upstream
+    /// hostname for SNI / TLS validation. Leave unset for the standard
+    /// case where the URL in the resolved DID document is reachable
+    /// directly.
+    Existing {
+        did: String,
+        #[serde(default)]
+        mediator_host: Option<String>,
+    },
     /// Mint a new mediator DID using the built-in `didcomm-mediator`
     /// template. The mediator gets its own trust context (default name
     /// `"mediator"`).
+    ///
+    /// `url` is the DIDComm service endpoint — what clients dial to send
+    /// messages. It becomes the `URL` template var and lands in the
+    /// rendered DID document's `serviceEndpoint.uri`.
+    ///
+    /// `webvh_url` is where the mediator's `did.jsonl` is published; it
+    /// determines the `did:webvh:<scid>:host:path` identifier itself.
+    /// Optional — defaults to `url` for the common case where DIDComm
+    /// traffic and DID hosting share a host. Specify it explicitly when
+    /// the mediator endpoint and the DID document live on different
+    /// hosts (e.g. DIDComm at `https://mediator.example.com`, DID doc
+    /// at `https://trust.example.com/dids/mediator`).
+    ///
+    /// `mediator_host` — see `Existing::mediator_host`.
+    ///
+    /// `template_vars` is an escape hatch for overriding optional
+    /// `didcomm-mediator` template variables (`ROUTING_KEYS`, `ACCEPT`,
+    /// `WEBVH_SERVER`). The `URL` and `WS_URL` vars are always set by
+    /// the wizard from `url` and cannot be overridden here.
     CreateMediator {
         #[serde(default = "default_mediator_context")]
         context: String,
         url: String,
+        #[serde(default)]
+        webvh_url: Option<String>,
+        #[serde(default)]
+        mediator_host: Option<String>,
+        #[serde(default)]
+        template_vars: HashMap<String, serde_json::Value>,
     },
 }
 
@@ -354,27 +488,42 @@ pub async fn apply_inputs(inputs: WizardInputs) -> Result<(), Box<dyn std::error
     // 10. Messaging.
     let messaging = match &inputs.messaging {
         MessagingInput::Skip => None,
-        MessagingInput::Existing { did } => Some(MessagingConfig {
+        MessagingInput::Existing { did, mediator_host } => Some(MessagingConfig {
             mediator_url: String::new(),
             mediator_did: did.clone(),
-            mediator_host: None,
+            mediator_host: mediator_host.clone(),
         }),
-        MessagingInput::CreateMediator { context, url } => {
+        MessagingInput::CreateMediator {
+            context,
+            url,
+            webvh_url,
+            mediator_host,
+            template_vars,
+        } => {
             let _med_ctx =
                 create_seed_context(&contexts_ks, context, "DIDComm Messaging Mediator").await?;
-            let mut template_vars: HashMap<String, serde_json::Value> = HashMap::new();
-            template_vars.insert("URL".into(), json!(url));
+            // Operator-supplied vars first; then `URL` (and any auto-derived
+            // `WS_URL`) so the wizard's notion of the endpoint always wins
+            // even if an operator typo'd it under template_vars.
+            let mut effective_vars: HashMap<String, serde_json::Value> = template_vars.clone();
+            effective_vars.insert("URL".into(), json!(url));
+
+            // `url` is the DIDComm endpoint; `webvh_url` is the DID-document
+            // hosting URL. They are usually the same host but are semantically
+            // distinct, so we let operators specify them separately. Default to
+            // the DIDComm endpoint when no explicit hosting URL is set.
+            let did_hosting_url = webvh_url.as_deref().unwrap_or(url);
 
             let mediator_did = create_simple_webvh_did(
                 context,
                 context,
-                url,
+                did_hosting_url,
                 /* portable */ true,
                 /* pre_rotation_count */ 1,
                 /* additional_services */ None,
                 /* add_mediator_service */ false,
                 /* template */ Some("didcomm-mediator".into()),
-                template_vars,
+                effective_vars,
                 /* is_vta_identity */ false,
                 &keys_ks,
                 &imported_ks,
@@ -389,7 +538,7 @@ pub async fn apply_inputs(inputs: WizardInputs) -> Result<(), Box<dyn std::error
             Some(MessagingConfig {
                 mediator_url: url.clone(),
                 mediator_did,
-                mediator_host: None,
+                mediator_host: mediator_host.clone(),
             })
         }
     };
@@ -479,11 +628,11 @@ pub async fn apply_inputs(inputs: WizardInputs) -> Result<(), Box<dyn std::error
             jwt_signing_key: Some(jwt_signing_key),
             ..AuthConfig::default()
         },
-        audit: Default::default(),
+        audit: inputs.audit.clone(),
         secrets: secrets_config,
         #[cfg(feature = "tee")]
         tee: Default::default(),
-        resolver_url: None,
+        resolver_url: inputs.resolver_url.clone(),
         config_path: inputs.config_path.clone(),
     };
     config.save()?;
@@ -561,10 +710,20 @@ fn validate_inputs(inputs: &WizardInputs) -> Result<(), Box<dyn std::error::Erro
                 .into(),
         );
     }
-    if let MessagingInput::CreateMediator { context, .. } = &inputs.messaging
-        && context.trim().is_empty()
+    if let MessagingInput::CreateMediator {
+        context, webvh_url, ..
+    } = &inputs.messaging
     {
-        errors.push("messaging.context cannot be empty".into());
+        if context.trim().is_empty() {
+            errors.push("messaging.context cannot be empty".into());
+        }
+        if webvh_url.as_deref().is_some_and(str::is_empty) {
+            errors.push(
+                "messaging.webvh_url is set to an empty string; either remove the key to default \
+                 to messaging.url, or provide a hosting URL"
+                    .into(),
+            );
+        }
     }
     if let VtaDidInput::CreateWebvh {
         pre_rotation_count, ..
@@ -581,6 +740,20 @@ fn validate_inputs(inputs: &WizardInputs) -> Result<(), Box<dyn std::error::Erro
         errors.push(format!(
             "admin_did = {did:?} must be a DID (starts with `did:`)"
         ));
+    }
+    if inputs.resolver_url.as_deref().is_some_and(str::is_empty) {
+        errors.push(
+            "resolver_url is set to an empty string; either remove the key or provide a \
+             WebSocket URL (e.g. `ws://resolver.example.com/did/v1/ws`)"
+                .into(),
+        );
+    }
+    // `retention_days = 0` would silently disable retention. Reject it
+    // so an operator who meant "keep forever" has to think about it
+    // explicitly (we don't currently support unbounded retention; the
+    // sweeper assumes a positive window).
+    if inputs.audit.retention_days == 0 {
+        errors.push("audit.retention_days must be > 0 (default is 28)".into());
     }
 
     if errors.is_empty() {
@@ -695,6 +868,66 @@ fn secrets_config_from_input(
                 }
             }
         }
+        SecretsBackendInput::Vault {
+            addr,
+            secret_path,
+            kv_mount,
+            secret_key,
+            namespace,
+            auth_method,
+            k8s_role,
+            k8s_mount,
+            k8s_jwt_path,
+            token,
+            approle_role_id,
+            approle_secret_id,
+            approle_mount,
+            skip_verify,
+        } => {
+            #[cfg(not(feature = "vault-secrets"))]
+            {
+                let _ = (
+                    addr,
+                    secret_path,
+                    kv_mount,
+                    secret_key,
+                    namespace,
+                    auth_method,
+                    k8s_role,
+                    k8s_mount,
+                    k8s_jwt_path,
+                    token,
+                    approle_role_id,
+                    approle_secret_id,
+                    approle_mount,
+                    skip_verify,
+                );
+                return Err(
+                    "vault backend requested but vta-service was built without the `vault-secrets` feature"
+                        .into(),
+                );
+            }
+            #[cfg(feature = "vault-secrets")]
+            {
+                SecretsConfig {
+                    vault_addr: Some(addr.clone()),
+                    vault_secret_path: Some(secret_path.clone()),
+                    vault_kv_mount: kv_mount.clone(),
+                    vault_secret_key: secret_key.clone(),
+                    vault_namespace: namespace.clone(),
+                    vault_auth_method: auth_method.clone(),
+                    vault_k8s_role: k8s_role.clone(),
+                    vault_k8s_mount: k8s_mount.clone(),
+                    vault_k8s_jwt_path: k8s_jwt_path.clone(),
+                    vault_token: token.clone(),
+                    vault_approle_role_id: approle_role_id.clone(),
+                    vault_approle_secret_id: approle_secret_id.clone(),
+                    vault_approle_mount: approle_mount.clone(),
+                    vault_skip_verify: *skip_verify,
+                    ..SecretsConfig::default()
+                }
+            }
+        }
         SecretsBackendInput::Plaintext => {
             eprintln!();
             eprintln!(
@@ -736,7 +969,7 @@ fn scratch_config_for_seed_store(
 /// from Ed25519 at runtime (per the `did:key` spec) so a separate
 /// `#key-1` record would be a misleading second source of truth. No
 /// external hosting needed — `did:key` is self-resolving.
-async fn create_vta_did_key(
+pub(crate) async fn create_vta_did_key(
     context_id: &str,
     keys_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
@@ -1002,6 +1235,271 @@ mod tests {
         "#;
         let err = parse(raw).expect_err("unknown top-level field should fail");
         assert!(err.to_string().contains("bogus_field"), "got: {err}");
+    }
+
+    #[test]
+    fn create_mediator_webvh_url_optional_defaults_to_none() {
+        // Back-compat: TOML without `webvh_url` parses; the runtime falls
+        // back to `url` when none is set.
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [messaging]
+            kind = "create_mediator"
+            url  = "https://mediator.example.com"
+        "#;
+        let inputs = parse(raw).expect("parses");
+        match &inputs.messaging {
+            MessagingInput::CreateMediator { webvh_url, .. } => assert!(webvh_url.is_none()),
+            other => panic!("expected CreateMediator, got {other:?}"),
+        }
+        validate_inputs(&inputs).expect("absent webvh_url should validate");
+    }
+
+    #[test]
+    fn create_mediator_webvh_url_can_be_set() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [messaging]
+            kind      = "create_mediator"
+            url       = "https://mediator.example.com"
+            webvh_url = "https://trust.example.com/dids/mediator"
+        "#;
+        let inputs = parse(raw).expect("parses");
+        match &inputs.messaging {
+            MessagingInput::CreateMediator { webvh_url, .. } => {
+                assert_eq!(
+                    webvh_url.as_deref(),
+                    Some("https://trust.example.com/dids/mediator")
+                );
+            }
+            other => panic!("expected CreateMediator, got {other:?}"),
+        }
+        validate_inputs(&inputs).expect("explicit webvh_url should validate");
+    }
+
+    #[test]
+    fn create_mediator_empty_webvh_url_rejected() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [messaging]
+            kind      = "create_mediator"
+            url       = "https://mediator.example.com"
+            webvh_url = ""
+        "#;
+        let inputs = parse(raw).expect("parses");
+        let err = validate_inputs(&inputs).expect_err("empty webvh_url must be rejected");
+        assert!(
+            err.to_string().contains("messaging.webvh_url"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn create_mediator_mediator_host_round_trips() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [messaging]
+            kind          = "create_mediator"
+            url           = "https://mediator.example.com"
+            mediator_host = "mediator.example.com"
+        "#;
+        let inputs = parse(raw).expect("parses");
+        match &inputs.messaging {
+            MessagingInput::CreateMediator { mediator_host, .. } => {
+                assert_eq!(mediator_host.as_deref(), Some("mediator.example.com"));
+            }
+            other => panic!("expected CreateMediator, got {other:?}"),
+        }
+        validate_inputs(&inputs).expect("mediator_host should validate");
+    }
+
+    #[test]
+    fn existing_mediator_mediator_host_round_trips() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [messaging]
+            kind          = "existing"
+            did           = "did:webvh:scid:mediator.example.com:mediator"
+            mediator_host = "mediator.example.com"
+        "#;
+        let inputs = parse(raw).expect("parses");
+        match &inputs.messaging {
+            MessagingInput::Existing { mediator_host, .. } => {
+                assert_eq!(mediator_host.as_deref(), Some("mediator.example.com"));
+            }
+            other => panic!("expected Existing, got {other:?}"),
+        }
+        validate_inputs(&inputs).expect("Existing+mediator_host should validate");
+    }
+
+    #[test]
+    fn create_mediator_template_vars_round_trip() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [messaging]
+            kind = "create_mediator"
+            url  = "https://mediator.example.com"
+
+            [messaging.template_vars]
+            ROUTING_KEYS = ["did:key:zUpstream"]
+            ACCEPT       = ["didcomm/v2"]
+        "#;
+        let inputs = parse(raw).expect("parses");
+        match &inputs.messaging {
+            MessagingInput::CreateMediator { template_vars, .. } => {
+                assert!(template_vars.contains_key("ROUTING_KEYS"));
+                assert!(template_vars.contains_key("ACCEPT"));
+            }
+            other => panic!("expected CreateMediator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolver_url_round_trips() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+            resolver_url = "ws://resolver.example.com/did/v1/ws"
+
+            [secrets]
+            backend = "keyring"
+        "#;
+        let inputs = parse(raw).expect("parses");
+        assert_eq!(
+            inputs.resolver_url.as_deref(),
+            Some("ws://resolver.example.com/did/v1/ws")
+        );
+        validate_inputs(&inputs).expect("resolver_url should validate");
+    }
+
+    #[test]
+    fn empty_resolver_url_rejected() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+            resolver_url = ""
+
+            [secrets]
+            backend = "keyring"
+        "#;
+        let inputs = parse(raw).expect("parses");
+        let err = validate_inputs(&inputs).expect_err("empty resolver_url must be rejected");
+        assert!(err.to_string().contains("resolver_url"), "got: {err}");
+    }
+
+    #[test]
+    fn audit_retention_days_round_trips() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [audit]
+            retention_days = 365
+        "#;
+        let inputs = parse(raw).expect("parses");
+        assert_eq!(inputs.audit.retention_days, 365);
+        validate_inputs(&inputs).expect("retention_days = 365 should validate");
+    }
+
+    #[test]
+    fn audit_retention_days_zero_rejected() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [audit]
+            retention_days = 0
+        "#;
+        let inputs = parse(raw).expect("parses");
+        let err = validate_inputs(&inputs).expect_err("retention_days = 0 must be rejected");
+        assert!(
+            err.to_string().contains("audit.retention_days"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn vault_backend_round_trips() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend     = "vault"
+            addr        = "https://vault.example.com:8200"
+            secret_path = "vta/master-seed"
+            auth_method = "kubernetes"
+            k8s_role    = "vta"
+        "#;
+        let inputs = parse(raw).expect("parses");
+        match &inputs.secrets {
+            SecretsBackendInput::Vault {
+                addr,
+                secret_path,
+                auth_method,
+                k8s_role,
+                kv_mount,
+                secret_key,
+                ..
+            } => {
+                assert_eq!(addr, "https://vault.example.com:8200");
+                assert_eq!(secret_path, "vta/master-seed");
+                assert_eq!(auth_method, "kubernetes");
+                assert_eq!(k8s_role.as_deref(), Some("vta"));
+                // Defaults applied.
+                assert_eq!(kv_mount, "secret");
+                assert_eq!(secret_key, "seed");
+            }
+            other => panic!("expected Vault, got {other:?}"),
+        }
+        validate_inputs(&inputs).expect("vault backend should validate");
     }
 
     #[test]

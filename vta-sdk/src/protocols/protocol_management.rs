@@ -1,17 +1,19 @@
-//! DIDComm message types for post-setup protocol management
-//! (`pnm services disable didcomm`, `pnm mediator …`).
+//! DIDComm message types for runtime service management
+//! (`pnm services rest …` / `pnm services didcomm …`).
 //!
-//! Spec: `docs/05-design-notes/didcomm-protocol-management.md`.
+//! Spec: `docs/05-design-notes/runtime-service-management.md`.
 //!
 //! Naming follows the `firstperson.network/protocols/<name>/1.0`
 //! convention used elsewhere in this crate. Two protocols:
 //!
-//! - **services-management/1.0** — services on/off
-//!   (only `disable` is exposed over DIDComm; `enable` is REST-only
-//!   by nature, since DIDComm isn't running yet at first-enable
-//!   time).
-//! - **mediator-management/1.0** — migrate / rollback / drain-cancel
-//!   / report.
+//! - **services-management/1.0** — REST + DIDComm enable / update /
+//!   disable / rollback / list. (`didcomm-enable` is REST-only by
+//!   nature, since DIDComm isn't running yet at first-enable; the
+//!   `enable-not-available-via-didcomm` placeholder surfaces this
+//!   to callers who try.)
+//! - **mediator-management/1.0** — drain-cancel / report (the
+//!   per-mediator drain set + telemetry surface, which is DIDComm-
+//!   only by definition since REST has no in-flight state).
 //!
 //! For each request type, a matching `*-result` type exists on the
 //! response side. The body shapes mirror the REST request/response
@@ -25,9 +27,9 @@ pub const MEDIATOR_PROTOCOL_BASE: &str =
 // ── services-management ─────────────────────────────────────────────
 
 pub const DISABLE_DIDCOMM: &str =
-    "https://firstperson.network/protocols/services-management/1.0/disable";
+    "https://firstperson.network/protocols/services-management/1.0/didcomm-disable";
 pub const DISABLE_DIDCOMM_RESULT: &str =
-    "https://firstperson.network/protocols/services-management/1.0/disable-result";
+    "https://firstperson.network/protocols/services-management/1.0/didcomm-disable-result";
 
 // REST-side service management. Spec:
 // `docs/05-design-notes/runtime-service-management.md` §3.4.

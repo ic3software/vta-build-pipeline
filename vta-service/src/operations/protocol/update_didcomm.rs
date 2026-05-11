@@ -50,11 +50,10 @@ use crate::operations::protocol::document::{
 };
 use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 /// Distinguish a forward migrate from a rollback in telemetry. The
-/// CLI wrapper for `pnm mediator rollback` passes `Rollback` so
-/// reports can tell forward and reverse moves apart.
+/// CLI wrapper for `pnm services didcomm rollback` passes `Rollback`
+/// so reports can tell forward and reverse moves apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrateAuditKind {
     Forward,
@@ -77,6 +76,12 @@ pub struct UpdateDidcommParams {
     pub force: bool,
     pub handshake_timeout: Duration,
     pub audit_kind: MigrateAuditKind,
+    /// Transport over which the operator dispatched this request.
+    /// Drives the `MIN_DRAIN_TTL_OVER_DIDCOMM` floor — only meaningful
+    /// when the dispatching transport is the one being rotated, so
+    /// the conveying listener isn't torn down before the response
+    /// lands.
+    pub transport: crate::operations::protocol::disable_didcomm::DisableTransport,
 }
 
 #[derive(Debug, Clone)]
@@ -86,22 +91,28 @@ pub struct UpdateDidcommResult {
     pub active_mediator_did: String,
     pub active_mediator_endpoint: String,
     pub drains_until: chrono::DateTime<chrono::Utc>,
+    /// The VTA's own DID. See [`super::enable_rest::EnableRestResult`].
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted.
+    pub serverless: bool,
 }
 
 #[derive(Debug, Error)]
 pub enum UpdateDidcommError {
     #[error(
-        "DIDComm is not currently enabled. Use `pnm services enable didcomm --mediator-did <did>` first."
+        "DIDComm is not currently enabled. Use `pnm services didcomm enable --mediator-did <did>` first."
     )]
     DidcommNotEnabled,
     #[error("new mediator `{0}` is already the active mediator — nothing to migrate")]
     SameAsActive(String),
     #[error(
         "new mediator `{0}` is currently in drain state. \
-         Either run `pnm mediator drain cancel --mediator-did {0}` first, \
-         or use `pnm mediator rollback --to {0}` to make it active again."
+         Either run `pnm services didcomm drain cancel --mediator-did {0}` first, \
+         or use `pnm services didcomm rollback` to fail-forward to a state where `{0}` is active again."
     )]
     AlreadyDraining(String),
+    #[error("drain ttl {requested}s outside allowed range [{min}s, {max}s]")]
+    DrainTtlOutOfBounds { min: u64, max: u64, requested: u64 },
     #[error("VTA DID is not configured — run `vta setup` first")]
     VtaDidNotConfigured,
     #[error("VTA DID `{0}` has no webvh record")]
@@ -137,6 +148,21 @@ impl From<AppError> for UpdateDidcommError {
     }
 }
 
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for UpdateDidcommError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_didcomm(
     config: &Arc<RwLock<AppConfig>>,
@@ -163,13 +189,47 @@ pub async fn update_didcomm(
 
     let _guard = PROTOCOL_LOCK.lock().await;
 
-    // Pre-flight: must be enabled, new mediator must differ from
-    // active and not be in drain.
+    // 0. Drain-TTL bounds check — centralised in `protocol::
+    //    validate_drain_ttl` so disable, update, and rollback share
+    //    a single source of truth. Cheapest check; runs before any
+    //    storage I/O.
+    crate::operations::protocol::validate_drain_ttl(params.transport, params.drain_ttl).map_err(
+        |e| UpdateDidcommError::DrainTtlOutOfBounds {
+            min: e.min,
+            max: e.max,
+            requested: e.requested,
+        },
+    )?;
+
+    // 1. Pre-flight: must be enabled, new mediator must differ from
+    //    active and not be in drain. Read-only — purely captures
+    //    the prior state we'll snapshot.
     let (vta_did, scid, current_doc, prior_mediator) =
         read_preconditions(config, registry, webvh_ks, &params).await?;
 
-    // Step 1-5: handshake. Failure aborts before any LogEntry is
-    // published — the spec's atomicity guarantee.
+    // 2. Persist snapshot BEFORE any side-effecting I/O per spec
+    //    §3.5a. Mirrors `update_rest`'s ordering. The handshake
+    //    below is read-only on the VTA side, but if it fails
+    //    halfway through writing audit/registry state we want the
+    //    snapshot already on disk so a future rollback can find a
+    //    target. Pre-state is `DidcommSnapshot::Enabled` with the
+    //    prior mediator. `routing_keys` is empty — the existing
+    //    `#vta-didcomm` service entry doesn't carry routing-keys
+    //    today (tracked: list.rs's matching gap).
+    use crate::operations::protocol::snapshot::{self, DidcommSnapshot, ServiceConfigSnapshot};
+    snapshot::write(
+        snapshot_ks,
+        ServiceConfigSnapshot::Didcomm(DidcommSnapshot::Enabled {
+            mediator_did: prior_mediator.clone(),
+            routing_keys: vec![],
+        }),
+    )
+    .await
+    .map_err(|e| UpdateDidcommError::Storage(format!("snapshot write: {e}")))?;
+
+    // 3. Handshake. Failure aborts before any LogEntry is published
+    //    — the spec's atomicity guarantee. Snapshot already on disk
+    //    is harmless; a subsequent successful update overwrites it.
     let resolved = mediator_handshake(
         did_resolver,
         prover,
@@ -182,22 +242,6 @@ pub async fn update_didcomm(
         },
     )
     .await?;
-
-    // Persist snapshot BEFORE the runtime mutation per spec §3.5a.
-    // Pre-state is DidcommSnapshot::Enabled with the prior mediator
-    // so a future `services didcomm rollback` re-promotes that
-    // mediator. routing_keys is empty — the existing #vta-didcomm
-    // service entry doesn't carry routing-keys today.
-    use crate::operations::protocol::snapshot::{self, DidcommSnapshot, ServiceConfigSnapshot};
-    snapshot::write(
-        snapshot_ks,
-        ServiceConfigSnapshot::Didcomm(DidcommSnapshot::Enabled {
-            mediator_did: prior_mediator.clone(),
-            routing_keys: vec![],
-        }),
-    )
-    .await
-    .map_err(|e| UpdateDidcommError::Storage(format!("snapshot write: {e}")))?;
 
     // Patch document: replace #vta-didcomm to point at new
     // mediator. Preserves verificationMethod byte-identical.
@@ -278,6 +322,8 @@ pub async fn update_didcomm(
         active_mediator_did: resolved.mediator_did,
         active_mediator_endpoint: resolved.endpoint,
         drains_until: deadline,
+        vta_did,
+        serverless: update_result.serverless,
     })
 }
 
@@ -287,27 +333,16 @@ async fn read_preconditions(
     webvh_ks: &KeyspaceHandle,
     params: &UpdateDidcommParams,
 ) -> Result<(String, String, JsonValue, String), UpdateDidcommError> {
-    let cfg = config.read().await;
-    if !cfg.services.didcomm {
-        return Err(UpdateDidcommError::DidcommNotEnabled);
+    {
+        let cfg = config.read().await;
+        if !cfg.services.didcomm {
+            return Err(UpdateDidcommError::DidcommNotEnabled);
+        }
     }
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(UpdateDidcommError::VtaDidNotConfigured)?;
-    drop(cfg);
 
-    let record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| UpdateDidcommError::VtaDidRecordMissing(vta_did.clone()))?;
-    let scid = record.scid.clone();
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
 
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| UpdateDidcommError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
-
-    let prior_mediator = current_didcomm_service(&current_doc)
+    let prior_mediator = current_didcomm_service(&state.current_doc)
         .map(|s| s.mediator_did)
         .ok_or(UpdateDidcommError::NoActiveMediator)?;
 
@@ -329,18 +364,7 @@ async fn read_preconditions(
         ));
     }
 
-    Ok((vta_did, scid, current_doc, prior_mediator))
-}
-
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, UpdateDidcommError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(UpdateDidcommError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| UpdateDidcommError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+    Ok((state.vta_did, state.scid, state.current_doc, prior_mediator))
 }
 
 async fn persist_new_mediator(
@@ -375,7 +399,7 @@ async fn best_effort_endpoint(resolver: &DIDCacheClient, mediator_did: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ServerConfig, ServicesConfig, StoreConfig};
+    use crate::config::AppConfig;
     use crate::keys::seed_store::PlaintextSeedStore;
     use crate::messaging::handshake::AlwaysOkProver;
     use crate::operations::protocol::snapshot;
@@ -383,31 +407,12 @@ mod tests {
     use vti_common::telemetry::RingBufferTelemetry;
 
     fn fresh_config(tmpdir: &std::path::Path, didcomm: bool) -> Arc<RwLock<AppConfig>> {
-        let cfg = AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: Default::default(),
-            store: StoreConfig {
-                data_dir: tmpdir.into(),
-            },
-            services: ServicesConfig {
-                rest: true,
-                didcomm,
-            },
-            vta_did: Some("did:webvh:scid123:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            auth: Default::default(),
-            audit: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            resolver_url: None,
-            config_path: tmpdir.join("config.toml"),
-        };
+        use crate::test_support::test_app_config;
+        let mut cfg = test_app_config(tmpdir.into());
+        cfg.services.rest = true;
+        cfg.services.didcomm = didcomm;
+        cfg.vta_did = Some("did:webvh:scid123:host:vta".into());
+        cfg.config_path = tmpdir.join("config.toml");
         Arc::new(RwLock::new(cfg))
     }
 
@@ -431,8 +436,9 @@ mod tests {
     }
 
     async fn empty_keyspace(name: &str) -> (tempfile::TempDir, KeyspaceHandle) {
+        use vti_common::config::StoreConfig as VtiStoreConfig;
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&StoreConfig {
+        let store = Store::open(&VtiStoreConfig {
             data_dir: dir.path().into(),
         })
         .unwrap();
@@ -463,6 +469,7 @@ mod tests {
             force: false,
             handshake_timeout: Duration::from_secs(1),
             audit_kind: MigrateAuditKind::Forward,
+            transport: crate::operations::protocol::disable_didcomm::DisableTransport::Rest,
         }
     }
 

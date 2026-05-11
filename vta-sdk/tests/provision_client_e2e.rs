@@ -177,6 +177,7 @@ impl Respond for SealResponder {
                 secret_count: 2,
                 output_count: 1,
                 webvh_server_id: None,
+                context_created: false,
             },
         };
 
@@ -429,6 +430,7 @@ impl Respond for AdminRotationResponder {
                 secret_count: 1,
                 output_count: 0,
                 webvh_server_id: None,
+                context_created: false,
             },
         };
 
@@ -511,6 +513,7 @@ async fn admin_rotated_via_rest_round_trip() {
         context: "ctx-1".into(),
         assertion: None,
         vc_validity_seconds: None,
+        create_context: false,
     };
     let response = client
         .provision_integration(req)
@@ -616,6 +619,7 @@ async fn admin_rotated_didcomm_response_decoder_extracts_rotated_credentials() {
             secret_count: 1,
             output_count: 0,
             webvh_server_id: None,
+            context_created: false,
         },
     };
 

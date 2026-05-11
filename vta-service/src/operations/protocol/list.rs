@@ -19,7 +19,6 @@
 
 use std::sync::Arc;
 
-use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
@@ -87,12 +86,16 @@ pub async fn list_services(
     let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
         .await?
         .ok_or_else(|| ListServicesError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
+    let current_doc = crate::operations::protocol::document::current_document_from_log(&did_log)?;
 
     // Pull the kind-specific config from the on-chain doc — it's
     // the source of truth for what SDK consumers will resolve.
     let rest_url = current_rest_service(&current_doc).map(|s| s.url);
-    let didcomm_mediator = current_didcomm_service(&current_doc).map(|s| s.mediator_did);
+    let didcomm = current_didcomm_service(&current_doc);
+    let (didcomm_mediator, didcomm_routing_keys) = match didcomm {
+        Some(svc) => (Some(svc.mediator_did), svc.routing_keys),
+        None => (None, Vec::new()),
+    };
 
     // Canonical order: DIDComm first when present, REST second.
     // Empty kinds (disabled in both config and the doc) still
@@ -101,7 +104,7 @@ pub async fn list_services(
         ServiceState::Didcomm {
             enabled: cfg_view.didcomm_enabled && didcomm_mediator.is_some(),
             mediator_did: didcomm_mediator,
-            routing_keys: vec![],
+            routing_keys: didcomm_routing_keys,
         },
         ServiceState::Rest {
             enabled: cfg_view.rest_enabled && rest_url.is_some(),
@@ -118,69 +121,70 @@ struct ConfigView {
     vta_did: Option<String>,
 }
 
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, ListServicesError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(ListServicesError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| ListServicesError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+impl From<crate::operations::protocol::document::CurrentDocumentError> for ListServicesError {
+    fn from(value: crate::operations::protocol::document::CurrentDocumentError) -> Self {
+        use crate::operations::protocol::document::CurrentDocumentError as E;
+        match value {
+            E::EmptyLog => Self::EmptyLog,
+            E::Parse(s) => Self::Storage(s),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LogConfig, ServerConfig, ServicesConfig, StoreConfig};
     use crate::store::Store;
     use vti_common::config::StoreConfig as VtiStoreConfig;
 
-    /// `auth.require_super_admin()` rejects non-super-admin
-    /// callers — pin via direct construction since the full
-    /// fixture chain is not needed.
+    /// `list_services` rejects callers without super-admin role —
+    /// drives the production code path with a non-super-admin
+    /// `AuthClaims` and asserts the typed `Auth` error variant
+    /// fires before any storage I/O.
     #[tokio::test]
     async fn rejects_non_super_admin() {
-        // Caller without super-admin role can't construct a valid
-        // claims object via the public surface, so we exercise
-        // the rejection through the typed error variant directly.
-        // The auth check is the first thing list_services does;
-        // any non-super-admin AuthClaims would return the same
-        // typed error.
-        let err = ListServicesError::Auth("not super-admin".into());
-        assert!(matches!(err, ListServicesError::Auth(_)));
+        use crate::test_support::test_app_config;
+        use vti_common::acl::Role;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_app_config(dir.path().into());
+        cfg.services.rest = true;
+        cfg.services.didcomm = true;
+        cfg.vta_did = Some("did:webvh:scid:host:vta".into());
+        cfg.config_path = dir.path().join("vta.toml");
+        let config = Arc::new(RwLock::new(cfg));
+        let store = Store::open(&VtiStoreConfig {
+            data_dir: dir.path().into(),
+        })
+        .unwrap();
+        let webvh_ks = store.keyspace("webvh").unwrap();
+        let context_admin = AuthClaims {
+            did: "did:key:z6Mk-context-admin".into(),
+            role: Role::Admin,
+            allowed_contexts: vec!["vta".into()],
+        };
+
+        let err = list_services(&config, &webvh_ks, &context_admin)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ListServicesError::Auth(_)),
+            "expected Auth rejection, got {err:?}"
+        );
     }
 
     /// Exercises the precondition check: a config without a VTA
     /// DID returns the typed `VtaDidNotConfigured` variant.
     #[tokio::test]
     async fn rejects_when_vta_did_not_configured() {
+        use crate::test_support::test_app_config;
+
         let dir = tempfile::tempdir().unwrap();
-        let cfg = AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: LogConfig::default(),
-            store: StoreConfig {
-                data_dir: dir.path().into(),
-            },
-            services: ServicesConfig {
-                rest: true,
-                didcomm: true,
-            },
-            vta_did: None,
-            vta_name: None,
-            public_url: None,
-            resolver_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            audit: Default::default(),
-            auth: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            config_path: dir.path().join("vta.toml"),
-        };
+        let mut cfg = test_app_config(dir.path().into());
+        cfg.services.rest = true;
+        cfg.services.didcomm = true;
+        cfg.vta_did = None;
+        cfg.config_path = dir.path().join("vta.toml");
         let config = Arc::new(RwLock::new(cfg));
         let store = Store::open(&VtiStoreConfig {
             data_dir: dir.path().into(),
@@ -195,31 +199,107 @@ mod tests {
         assert!(matches!(err, ListServicesError::VtaDidNotConfigured));
     }
 
-    /// `ServicesListResponse` ordering — DIDComm comes first per
-    /// spec §3.3, REST second. Pin the order so a future refactor
-    /// can't accidentally swap them.
-    #[test]
-    fn response_order_is_didcomm_then_rest() {
-        let response = ServicesListResponse {
-            services: vec![
-                ServiceState::Didcomm {
-                    enabled: true,
-                    mediator_did: Some("did:peer:2.M".into()),
-                    routing_keys: vec![],
-                },
-                ServiceState::Rest {
-                    enabled: true,
-                    url: Some("https://x.example".into()),
-                },
-            ],
+    /// Drives production `list_services` end-to-end against an
+    /// on-disk DID-doc fixture; asserts the response array's
+    /// canonical order (DIDComm first, REST second per spec §3.3)
+    /// and that the kind-specific config (mediator DID, REST URL)
+    /// is correctly extracted from the on-chain document. Replaces
+    /// the prior hand-rolled response assertion that bypassed the
+    /// production code path entirely.
+    #[tokio::test]
+    async fn list_services_returns_didcomm_first_rest_second() {
+        use crate::test_support::test_app_config;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vta_did = "did:webvh:scid:host:vta";
+        let mut cfg = test_app_config(dir.path().into());
+        cfg.services.rest = true;
+        cfg.services.didcomm = true;
+        cfg.vta_did = Some(vta_did.into());
+        cfg.config_path = dir.path().join("vta.toml");
+        let config = Arc::new(RwLock::new(cfg));
+        let store = Store::open(&VtiStoreConfig {
+            data_dir: dir.path().into(),
+        })
+        .unwrap();
+        let webvh_ks = store.keyspace("webvh").unwrap();
+
+        // Stage a webvh record + log line so list_services can read
+        // the on-chain document. Service array deliberately puts
+        // REST first to verify the response renders in the
+        // canonical DIDComm-first order regardless of input.
+        let log_line = serde_json::json!({
+            "versionId": "1-test",
+            "versionTime": "2026-05-06T00:00:00Z",
+            "parameters": {},
+            "state": {
+                "id": vta_did,
+                "service": [
+                    {
+                        "id": format!("{vta_did}#vta-rest"),
+                        "type": "VTARest",
+                        "serviceEndpoint": "https://vta.example/api",
+                    },
+                    {
+                        "id": format!("{vta_did}#vta-didcomm"),
+                        "type": "DIDCommMessaging",
+                        "serviceEndpoint": {
+                            "uri": "did:peer:2.MEDIATOR",
+                            "accept": ["didcomm/v2"],
+                            "routingKeys": [],
+                        },
+                    },
+                ],
+            },
+        });
+        let log = serde_json::to_string(&log_line).unwrap();
+        let now = chrono::Utc::now();
+        let record = vta_sdk::webvh::WebvhDidRecord {
+            did: vta_did.into(),
+            server_id: "test-server".into(),
+            mnemonic: String::new(),
+            scid: "scid".into(),
+            context_id: "vta".into(),
+            portable: false,
+            log_entry_count: 1,
+            pre_rotation_count: 0,
+            next_fragment_id: 1,
+            created_at: now,
+            updated_at: now,
         };
-        assert!(matches!(
-            response.services.first(),
-            Some(ServiceState::Didcomm { .. })
-        ));
-        assert!(matches!(
-            response.services.get(1),
-            Some(ServiceState::Rest { .. })
-        ));
+        webvh_store::store_did(&webvh_ks, &record).await.unwrap();
+        webvh_store::store_did_log(&webvh_ks, vta_did, &log)
+            .await
+            .unwrap();
+
+        let super_admin = AuthClaims::unsafe_local_cli_super_admin("test");
+        let response = list_services(&config, &webvh_ks, &super_admin)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.services.len(),
+            2,
+            "expected one entry per kind; got {response:?}"
+        );
+        // Canonical order: DIDComm first.
+        match &response.services[0] {
+            ServiceState::Didcomm {
+                enabled,
+                mediator_did,
+                ..
+            } => {
+                assert!(enabled);
+                assert_eq!(mediator_did.as_deref(), Some("did:peer:2.MEDIATOR"));
+            }
+            other => panic!("expected DIDComm first; got {other:?}"),
+        }
+        match &response.services[1] {
+            ServiceState::Rest { enabled, url } => {
+                assert!(enabled);
+                assert_eq!(url.as_deref(), Some("https://vta.example/api"));
+            }
+            other => panic!("expected REST second; got {other:?}"),
+        }
     }
 }

@@ -144,3 +144,69 @@ pub fn generate_keypair() -> (Zeroizing<[u8; 32]>, [u8; 32]) {
         .expect("X25519 public is 32 bytes");
     (Zeroizing::new(sk_bytes), pk_bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trip: seal to a recipient, open with that recipient's
+    /// secret. Confirms the HPKE pipeline is wired correctly before
+    /// the negative-path tests below try to break it.
+    #[test]
+    fn seal_open_round_trip() {
+        let (sk, pk) = generate_keypair();
+        let plaintext = b"the quick brown fox";
+        let aad = b"binding context";
+        let sealed = seal(&pk, plaintext, aad).expect("seal");
+        let opened = open(&sk, &sealed, aad).expect("open");
+        assert_eq!(opened, plaintext);
+    }
+
+    /// Opening a bundle sealed to recipient A with a *different*
+    /// recipient's X25519 secret must fail. This is the load-bearing
+    /// confidentiality property of `sealed_transfer` — without it, any
+    /// stray X25519 secret could decrypt any bundle. The reviewer
+    /// flagged this case as missing from the test suite even though
+    /// the AEAD-tamper paths were thorough.
+    #[test]
+    fn open_with_wrong_recipient_secret_rejected() {
+        let (_sk_intended, pk_intended) = generate_keypair();
+        let (sk_attacker, _pk_attacker) = generate_keypair();
+        let sealed = seal(&pk_intended, b"secret content", b"aad").expect("seal");
+        let err = open(&sk_attacker, &sealed, b"aad")
+            .expect_err("opening with the wrong X25519 secret must fail");
+        assert!(
+            matches!(err, SealedTransferError::Hpke(_)),
+            "expected Hpke variant, got {err:?}"
+        );
+    }
+
+    /// AAD binding test: open with the wrong AAD must fail even when
+    /// the recipient secret is correct. Confirms the AEAD's
+    /// authenticated-data binding is wired through (the chunk header
+    /// fields the workspace AADs into HPKE — see `bundle.rs`).
+    #[test]
+    fn open_with_wrong_aad_rejected() {
+        let (sk, pk) = generate_keypair();
+        let sealed = seal(&pk, b"payload", b"correct aad").expect("seal");
+        let err = open(&sk, &sealed, b"different aad")
+            .expect_err("AAD mismatch must fail authentication");
+        assert!(matches!(err, SealedTransferError::Hpke(_)), "got {err:?}");
+    }
+
+    /// Tampering with the KEM encapsulation (i.e. swapping in a
+    /// different sender's ephemeral pubkey) must fail to open. Pins
+    /// that an attacker can't substitute their own KEM output and
+    /// have the recipient still decrypt the original ciphertext.
+    #[test]
+    fn open_with_tampered_kem_encap_rejected() {
+        let (sk, pk) = generate_keypair();
+        let mut sealed = seal(&pk, b"payload", b"aad").expect("seal");
+        // Flip a single byte of the encap. Almost certainly produces
+        // either a malformed encap or a successful decap to wrong
+        // shared secret → AEAD failure either way.
+        sealed.kem_encap[0] ^= 0x01;
+        let err = open(&sk, &sealed, b"aad").expect_err("KEM-encap tampering must fail to open");
+        assert!(matches!(err, SealedTransferError::Hpke(_)), "got {err:?}");
+    }
+}

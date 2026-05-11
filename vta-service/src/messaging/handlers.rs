@@ -52,9 +52,18 @@ fn app_err_to_response(e: AppError) -> DIDCommResponse {
         AppError::Authentication(msg) | AppError::Unauthorized(msg) => {
             ProblemReport::unauthorized(msg.clone())
         }
-        // No `forbidden` code in the didcomm-service taxonomy — reuse
-        // `unauthorized` so clients can still distinguish from 500s.
-        AppError::Forbidden(msg) => ProblemReport::unauthorized(msg.clone()),
+        // The affinidi taxonomy doesn't define a `forbidden` code,
+        // but collapsing into `unauthorized` means SDK clients see
+        // "Token may be expired" for what's actually a permission /
+        // privilege-laundering rejection. Emit a workspace-specific
+        // `e.p.msg.forbidden` code; SDK clients that don't know it
+        // fall back to `DidcommRemote { code, comment }` cleanly.
+        AppError::Forbidden(msg) => ProblemReport {
+            code: vta_sdk::protocols::problem_report_codes::FORBIDDEN.to_string(),
+            comment: msg.clone(),
+            args: Vec::new(),
+            escalate_to: None,
+        },
         AppError::Validation(msg) => ProblemReport::bad_request(msg.clone()),
         _ => ProblemReport::internal_error(e.to_string()),
     };
@@ -866,6 +875,68 @@ pub async fn handle_remove_webvh_server(
     )
 }
 
+/// DIDComm handler for `did-management/1.0/register-did-with-server`.
+/// Mirrors [`crate::routes::did_webvh::register_did_with_server_handler`]:
+/// promotes a serverless WebVH DID to a server-managed one by pushing the
+/// existing log to the host and flipping the local record's `server_id`.
+#[cfg(feature = "webvh")]
+pub async fn handle_register_did_with_server(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
+    let body: vta_sdk::protocols::did_management::servers::RegisterDidWithServerBody =
+        serde_json::from_value(message.body).map_err(handler_err)?;
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| handler_err("DID resolver not available"))?;
+    let result = app_try!(
+        operations::did_webvh::register_did_with_server(
+            &state.webvh_ks,
+            &state.audit_ks,
+            &auth,
+            did_resolver,
+            &state.didcomm_bridge,
+            operations::did_webvh::RegisterDidWithServerParams {
+                did: body.did,
+                server_id: body.server_id,
+                force: body.force,
+            },
+            "didcomm",
+        )
+        .await
+        .map_err(register_err_to_app_error)
+    );
+    let body = vta_sdk::protocols::did_management::servers::RegisterDidWithServerResultBody {
+        did: result.did,
+        server_id: result.server_id,
+        log_entry_count: result.log_entry_count,
+    };
+    response(
+        vta_sdk::protocols::did_management::REGISTER_DID_WITH_SERVER_RESULT,
+        &body,
+    )
+}
+
+/// Map `RegisterDidWithServerError` onto `AppError` for the DIDComm
+/// handler. Mirrors `routes::did_webvh::map_register_err`.
+#[cfg(feature = "webvh")]
+fn register_err_to_app_error(e: operations::did_webvh::RegisterDidWithServerError) -> AppError {
+    use operations::did_webvh::RegisterDidWithServerError as E;
+    match e {
+        E::Auth(msg) => AppError::Forbidden(msg),
+        E::DidNotFound(msg) | E::ServerNotFound(msg) | E::LogMissing(msg) => {
+            AppError::NotFound(msg)
+        }
+        E::AlreadyServerManaged { .. } | E::Conflict(_) => AppError::Conflict(e.to_string()),
+        E::Transport(msg) | E::Publish(msg) => AppError::Internal(format!("publish: {msg}")),
+        E::DidUrlParse { .. } => AppError::Validation(e.to_string()),
+        E::Storage(msg) => AppError::Internal(msg),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TEE Attestation (feature-gated, unauthenticated)
 // ---------------------------------------------------------------------------
@@ -1159,17 +1230,34 @@ pub async fn handle_provision_integration(
         }
     };
 
-    // Enforce DIDComm-sender == VP-holder. Without this check, an
-    // ACL-registered admin could relay a VP signed by anyone else
-    // and the VTA would issue a bundle binding the *VP holder* (not
-    // the relayer) to a fresh admin DID — a privilege-laundering vector.
-    if auth.did != verified.holder() {
-        return Ok(Some(app_err_to_response(AppError::Forbidden(format!(
-            "DIDComm sender '{}' does not match VP holder '{}'",
-            auth.did,
-            verified.holder()
-        )))));
-    }
+    // No "sender must equal VP holder" check — by design.
+    //
+    // The provision-integration flow is layered like an onion:
+    //
+    //   * Outer (DIDComm authcrypt): the *relayer* is
+    //     authenticated by the authcrypt sender. ACL authorization
+    //     above (`auth_from_message` + the upstream context-admin
+    //     check) gates whether the relayer is allowed to make the
+    //     call.
+    //   * Inner (VP): the *holder* is authenticated by the VP's
+    //     `DataIntegrityProof`. The VTA issues a bundle bound to
+    //     this holder and HPKE-sealed to the holder's X25519
+    //     derivation.
+    //
+    // Sender ≠ holder is the **air-gap onboarding** case: a
+    // third-party integration on a disconnected network signs a
+    // BootstrapRequest using its own ephemeral did:key, ships the
+    // request to the operator, and the operator's PNM relays it to
+    // the VTA. The bundle returned is encrypted to the integration
+    // and only the integration can open it — the relayer carries
+    // ciphertext back across the air-gap. There is no
+    // privilege-laundering: the relayer can't decrypt the bundle,
+    // and the VP signature requires the holder's private key (so
+    // the relayer can't forge a VP claiming to be a third party
+    // either).
+    //
+    // Same model as the REST path, where `auth.did` (the bearer
+    // token's DID) and the VP holder can also legitimately differ.
 
     let assertion_mode = body
         .assertion
@@ -1186,6 +1274,18 @@ pub async fn handle_provision_integration(
     let vc_validity = body.vc_validity_seconds.map(chrono::Duration::seconds);
 
     let deps = operations::provision_integration::ProvisionIntegrationDeps::from(state.as_ref());
+    // `--create-context` from the wire body. Same semantics as the
+    // REST handler — super-admin gate enforced inside
+    // `operations::contexts::create_context`. Idempotent.
+    let context_created = app_try!(
+        operations::provision_integration::ensure_target_context_or_create(
+            &deps.contexts_ks,
+            &auth,
+            &body.context,
+            body.create_context,
+        )
+        .await
+    );
     let output = app_try!(
         operations::provision_integration::provision_integration(
             &deps,
@@ -1215,6 +1315,7 @@ pub async fn handle_provision_integration(
             secret_count: output.summary.secret_count,
             output_count: output.summary.output_count,
             webvh_server_id: output.summary.webvh_server_id,
+            context_created,
         },
     };
 
@@ -1273,6 +1374,7 @@ pub async fn handle_update_did_webvh(
         watchers: env.body.watchers,
         ttl: env.body.ttl,
         label: env.body.label,
+        expected_version_id: env.body.expected_version_id,
     };
 
     let result = app_try!(
@@ -1299,6 +1401,7 @@ pub async fn handle_update_did_webvh(
         new_log_entry: result.new_log_entry,
         update_keys_count: result.update_keys_count,
         pre_rotation_key_count: result.pre_rotation_key_count,
+        serverless: result.serverless,
     };
     response(
         vta_sdk::protocols::did_management::UPDATE_DID_WEBVH_RESULT,
@@ -1350,6 +1453,7 @@ pub async fn handle_rotate_did_webvh_keys(
         new_log_entry: result.new_log_entry,
         update_keys_count: result.update_keys_count,
         pre_rotation_key_count: result.pre_rotation_key_count,
+        serverless: result.serverless,
     };
     response(
         vta_sdk::protocols::did_management::ROTATE_DID_WEBVH_KEYS_RESULT,

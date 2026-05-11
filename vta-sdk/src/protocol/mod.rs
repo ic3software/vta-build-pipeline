@@ -16,8 +16,11 @@ pub mod services;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "client")]
 use crate::client::VtaClient;
+#[cfg(feature = "client")]
 use crate::error::VtaError;
+#[cfg(feature = "client")]
 use crate::protocols::protocol_management;
 
 /// Request body for `POST /services/didcomm/enable`.
@@ -59,6 +62,19 @@ pub struct EnableDidcommResponse {
     pub new_version_id: String,
     pub mediator_did: String,
     pub mediator_endpoint: String,
+    /// The VTA's own DID — subject of the LogEntry this enable
+    /// wrote. Carried so the CLI can print follow-up commands like
+    /// `pnm webvh did-log <vta_did>` for serverless deployments.
+    /// `#[serde(default)]` + elide-when-empty keeps the wire form
+    /// back-compat with older servers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted (`server_id =
+    /// "serverless"`). The new LogEntry is local only — operators
+    /// must fetch the updated `did.jsonl` and redeploy.
+    /// `#[serde(default)]` for back-compat.
+    #[serde(default)]
+    pub serverless: bool,
 }
 
 /// Request body for `POST /services/didcomm/disable`.
@@ -83,8 +99,16 @@ pub struct DisableDidcommResponse {
     /// `None` when it was torn down immediately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drains_until: Option<String>,
+    /// The VTA's own DID. See [`EnableDidcommResponse::vta_did`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted. See
+    /// [`EnableDidcommResponse::serverless`].
+    #[serde(default)]
+    pub serverless: bool,
 }
 
+#[cfg(feature = "client")]
 impl VtaClient {
     /// Enable DIDComm on a REST-only VTA. Spec: success criterion #1.
     ///
@@ -94,15 +118,14 @@ impl VtaClient {
     /// LogEntry advertising the mediator and registers it as
     /// active.
     ///
-    /// **Phase 3 limitation:** the live mediator handshake (steps
-    /// 2-5) requires a running `DIDCommService`, which doesn't
-    /// exist yet at first-enable. This call therefore bypasses
-    /// steps 2-5; the connection is validated implicitly when the
-    /// DIDComm runtime starts up after the next service restart.
-    /// To validate a mediator pre-publish today, run
-    /// `pnm services enable didcomm` followed by
-    /// `pnm mediator migrate --to <same>` — the migrate path runs
-    /// the full handshake.
+    /// **First-enable handshake:** the route runs a transient
+    /// `DIDCommService` round-trip against the candidate mediator
+    /// before publishing — see
+    /// `vta_service::messaging::transient_handshake`. The operation
+    /// itself uses [`AlwaysOkProver`] because the steady-state
+    /// `DIDCommService` doesn't exist yet at first-enable. The
+    /// live-prover path through `update_didcomm` covers the
+    /// steady-state case.
     pub async fn enable_didcomm(
         &self,
         req: EnableDidcommRequest,
@@ -330,6 +353,13 @@ pub struct UpdateDidcommResponse {
     pub active_mediator_did: String,
     pub active_mediator_endpoint: String,
     pub drains_until: String,
+    /// The VTA's own DID. See [`EnableDidcommResponse::vta_did`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted. See
+    /// [`EnableDidcommResponse::serverless`].
+    #[serde(default)]
+    pub serverless: bool,
 }
 
 /// Request body for `POST /mediators/drain/cancel`.
@@ -367,6 +397,7 @@ pub struct MediatorReport {
     pub senders: Vec<SenderLastSeen>,
 }
 
+#[cfg(feature = "client")]
 impl VtaClient {
     /// Cancel a drain entry early, dropping the listener for that
     /// mediator immediately. Refuses if the named DID is the
@@ -420,6 +451,7 @@ impl VtaClient {
     }
 }
 
+#[cfg(feature = "client")]
 fn build_report_query(since: Option<&str>, until: Option<&str>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(s) = since {
@@ -431,6 +463,7 @@ fn build_report_query(since: Option<&str>, until: Option<&str>) -> String {
     parts.join("&")
 }
 
+#[cfg(feature = "client")]
 fn url_encode(s: &str) -> String {
     // RFC 3339 timestamps contain `:` and `+`; the latter is the
     // form-urlencoded representation of a space and would mangle

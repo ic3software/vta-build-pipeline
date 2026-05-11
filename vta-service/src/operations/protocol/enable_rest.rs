@@ -46,7 +46,6 @@ use crate::operations::protocol::document::{
 use crate::operations::protocol::snapshot::{self, RestSnapshot, ServiceConfigSnapshot};
 use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 #[derive(Debug, Clone)]
 pub struct EnableRestParams {
@@ -62,6 +61,14 @@ pub struct EnableRestResult {
     /// The validated URL that was published — canonicalised from
     /// `params.url` by `url::Url`.
     pub url: String,
+    /// The VTA's own DID — subject of the LogEntry this enable
+    /// wrote. Propagated upward so route + DIDComm response
+    /// shapes can emit the "fetch did.jsonl + redeploy" hint to
+    /// operators running serverless deployments.
+    pub vta_did: String,
+    /// True when `record.server_id == "serverless"` — the new
+    /// LogEntry is local-only.
+    pub serverless: bool,
 }
 
 #[derive(Debug, Error)]
@@ -93,6 +100,21 @@ pub enum EnableRestError {
 impl From<AppError> for EnableRestError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
+    }
+}
+
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for EnableRestError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
     }
 }
 
@@ -194,6 +216,12 @@ pub async fn enable_rest(
     Ok(EnableRestResult {
         new_version_id: update_result.new_version_id,
         url: canonical_url,
+        vta_did,
+        // `update_did_webvh` derives `serverless` from the same
+        // record we loaded in `read_preconditions`; trust its
+        // answer so this op layer stays a single source of truth
+        // (no parallel `server_id == "serverless"` check here).
+        serverless: update_result.serverless,
     })
 }
 
@@ -201,27 +229,16 @@ async fn read_preconditions(
     config: &Arc<RwLock<AppConfig>>,
     webvh_ks: &KeyspaceHandle,
 ) -> Result<(String, String, JsonValue), EnableRestError> {
-    let cfg = config.read().await;
-    if cfg.services.rest {
-        return Err(EnableRestError::ServiceAlreadyEnabled);
+    {
+        let cfg = config.read().await;
+        if cfg.services.rest {
+            return Err(EnableRestError::ServiceAlreadyEnabled);
+        }
     }
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(EnableRestError::VtaDidNotConfigured)?;
-    drop(cfg);
 
-    let record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| EnableRestError::VtaDidRecordMissing(vta_did.clone()))?;
-    let scid = record.scid.clone();
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
 
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| EnableRestError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
-
-    if current_rest_service(&current_doc).is_some() {
+    if current_rest_service(&state.current_doc).is_some() {
         // Config and on-chain doc disagree (config: rest=false,
         // doc: rest entry present). Surface as ServiceAlreadyEnabled
         // — reconciling means the operator should run `services
@@ -229,18 +246,7 @@ async fn read_preconditions(
         return Err(EnableRestError::ServiceAlreadyEnabled);
     }
 
-    Ok((vta_did, scid, current_doc))
-}
-
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, EnableRestError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(EnableRestError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| EnableRestError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+    Ok((state.vta_did, state.scid, state.current_doc))
 }
 
 async fn persist_rest_enabled(config: &Arc<RwLock<AppConfig>>) -> Result<(), EnableRestError> {
@@ -260,7 +266,6 @@ async fn persist_rest_enabled(config: &Arc<RwLock<AppConfig>>) -> Result<(), Ena
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LogConfig, ServerConfig, ServicesConfig, StoreConfig};
     use crate::operations::protocol::snapshot::ServiceKind;
     use crate::store::Store;
     use vti_common::config::StoreConfig as VtiStoreConfig;
@@ -285,33 +290,15 @@ mod tests {
     }
 
     fn build_fixture(rest_initially: bool) -> TestFixture {
+        use crate::test_support::test_app_config;
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("vta.toml");
-        let cfg = AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: LogConfig::default(),
-            store: StoreConfig {
-                data_dir: dir.path().into(),
-            },
-            services: ServicesConfig {
-                rest: rest_initially,
-                didcomm: true, // satisfy the §3.2 brick-prevention default
-            },
-            vta_did: Some("did:webvh:scid123:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            resolver_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            audit: Default::default(),
-            auth: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            config_path,
-        };
+        let mut cfg = test_app_config(dir.path().into());
+        cfg.services.rest = rest_initially;
+        // §3.2 brick-prevention: keep DIDComm on so an enable-rest
+        // test never needs to consider the no-transport edge case.
+        cfg.services.didcomm = true;
+        cfg.vta_did = Some("did:webvh:scid123:host:vta".into());
+        cfg.config_path = dir.path().join("vta.toml");
         // Persist so `persist_rest_enabled` has a file to write to.
         let initial = toml::to_string_pretty(&cfg).unwrap();
         std::fs::write(&cfg.config_path, initial).unwrap();

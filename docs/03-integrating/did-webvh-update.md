@@ -213,12 +213,25 @@ the new convention; subsequent updates use the fast path.
   portable toggle. The underlying `didwebvh-rs` library exposes them
   but the VTA reserves separate operations for those.
 
+## Promoting a serverless DID to a server-managed one
+
+If a DID was created with `server_id: "serverless"` (no webvh host
+at the time) and the operator later wants it published to a host,
+use:
+
+```bash
+pnm webvh add-server --id primary --did did:web:webvh.example.com
+pnm webvh register-did --did <serverless-did> --server primary
+```
+
+The second command pushes the existing local `did.jsonl` to the
+host and flips `server_id` so subsequent updates auto-publish.
+The DID identifier is unchanged. See
+`docs/03-integrating/runtime-service-management.md` for the full
+walkthrough. Refused if the DID is already server-managed.
+
 ## Open follow-ups
 
-- Publish the new log entry to the webvh hosting server when the DID
-  isn't serverless. Currently the local log is written but not
-  re-published — operators with non-serverless DIDs need to manually
-  push the new `did.jsonl` until this lands.
 - `did.update` audit event emission.
 - End-to-end integration test against `didwebvh_rs::resolve` (the
   log-entry-validity invariant).

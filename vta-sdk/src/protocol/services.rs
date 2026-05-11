@@ -204,6 +204,23 @@ pub struct RollbackResponse {
     /// `None` for REST and DIDComm enable / no-op arms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draining_mediator: Option<String>,
+    /// The VTA's own DID — the subject of the LogEntry this
+    /// rollback wrote. Carried so the CLI can print follow-up
+    /// commands like `pnm webvh did-log <vta_did>` for serverless
+    /// deployments without forcing the operator to look it up.
+    /// Empty string in `no_op` responses where no LogEntry was
+    /// written. Serialized as `vta_did` on the wire; elided when
+    /// empty for compactness.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted (`server_id =
+    /// "serverless"`). The rollback's new LogEntry is persisted
+    /// locally but NOT pushed to any webvh host — the operator
+    /// must fetch the updated `did.jsonl` and redeploy.
+    /// `#[serde(default)]` for back-compat — older servers don't
+    /// emit the field and old clients treat absent → false.
+    #[serde(default)]
+    pub serverless: bool,
 }
 
 /// Response body for `GET /services` — the operator-facing read
@@ -271,6 +288,22 @@ pub struct ServiceMutationResponse {
     /// drain; `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_until: Option<String>,
+    /// The VTA's own DID — subject of the LogEntry this mutation
+    /// wrote. Carried so the CLI can print follow-up commands like
+    /// `pnm webvh did-log <vta_did>` for serverless deployments
+    /// without forcing the operator to look it up.
+    /// `#[serde(default)]` + `skip_serializing_if = "String::is_empty"`
+    /// keep the wire compact and back-compat with older servers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted (`server_id =
+    /// "serverless"`). The new LogEntry is persisted locally but
+    /// NOT pushed to any webvh host — the operator must fetch the
+    /// updated `did.jsonl` and redeploy. `#[serde(default)]` for
+    /// back-compat — older servers don't emit the field; old
+    /// clients treat absent → false (no spurious hint).
+    #[serde(default)]
+    pub serverless: bool,
 }
 
 #[cfg(test)]
@@ -351,6 +384,8 @@ mod tests {
             log_entry_version_id: "1-zQm...A".into(),
             effective_at: "2026-05-06T13:00:00Z".into(),
             drain_until: None,
+            vta_did: "did:webvh:scid:host:vta".into(),
+            serverless: false,
         };
         let json = serde_json::to_value(&rest_response).unwrap();
         assert_eq!(json["log_entry_version_id"], "1-zQm...A");
@@ -366,11 +401,29 @@ mod tests {
             log_entry_version_id: "2-zQm...B".into(),
             effective_at: "2026-05-06T13:00:00Z".into(),
             drain_until: Some("2026-05-07T13:00:00Z".into()),
+            vta_did: "did:webvh:scid:host:vta".into(),
+            serverless: true,
         };
         let json = serde_json::to_value(&didcomm_response).unwrap();
         assert_eq!(json["drain_until"], "2026-05-07T13:00:00Z");
+        assert_eq!(json["vta_did"], "did:webvh:scid:host:vta");
+        assert_eq!(json["serverless"], true);
         let restored: ServiceMutationResponse = serde_json::from_value(json).unwrap();
         assert_eq!(restored, didcomm_response);
+    }
+
+    /// Back-compat: older servers don't emit `vta_did` /
+    /// `serverless`. Absent on the wire → string default ("") +
+    /// bool default (false). Pins what `#[serde(default)]` buys.
+    #[test]
+    fn service_mutation_response_decodes_legacy_payload() {
+        let legacy = r#"{
+            "log_entry_version_id": "1-zQm...A",
+            "effective_at": "2026-05-06T13:00:00Z"
+        }"#;
+        let r: ServiceMutationResponse = serde_json::from_str(legacy).unwrap();
+        assert_eq!(r.vta_did, "");
+        assert!(!r.serverless);
     }
 
     // ── validate_service_url ──────────────────────────────────────

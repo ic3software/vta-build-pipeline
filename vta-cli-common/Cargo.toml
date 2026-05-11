@@ -2,7 +2,7 @@
 name = "vta-cli-common"
 description = "Shared CLI command handlers and rendering helpers for VTA CLIs"
 readme = "README.md"
-version = "0.5.0"
+version = "0.6.0"
 edition.workspace = true
 publish.workspace = true
 authors.workspace = true
@@ -11,7 +11,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-vta-sdk = { path = "../vta-sdk", version = "0.5", features = [
+vta-sdk = { path = "../vta-sdk", version = "0.6", features = [
   "client",
   "sealed-transfer",
   "provision-integration",
@@ -34,6 +34,12 @@ rand = { workspace = true }
 # endpoints; this one is public so a bare reqwest call is simpler than
 # threading it through VtaClient.
 reqwest = { workspace = true }
+# Interactive prompts ($EDITOR, Confirm, Input) for the
+# `webvh edit-did` command. Already present transitively via
+# vta-service; declaring it here so vta-cli-common can use it directly
+# without leaning on a transitive dep.
+dialoguer = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

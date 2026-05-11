@@ -1,3 +1,4 @@
+use ed25519_dalek::{Signer, SigningKey};
 use vta_sdk::session::{SessionStore, TokenStatus};
 
 pub use vta_sdk::session::SessionInfo;
@@ -56,6 +57,68 @@ pub fn logout(keyring_key: &str) {
     println!("Logged out. Credentials and tokens removed.");
 }
 
+/// `pnm auth sign-challenge <hex>` — sign a 32-byte challenge from
+/// `vta unseal` using this PNM's stored admin key.
+///
+/// The cold-start companion is `vta auth sign-challenge --did <did>
+/// --challenge <hex>`, which signs from the VTA's local fjall keystore
+/// (daemon must be stopped). This online form is friendlier for
+/// operators whose admin key already lives in PNM — no DID flag, no
+/// daemon stop, no fjall lock juggling.
+pub fn sign_unseal_challenge(
+    keyring_key: &str,
+    challenge_hex: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let session = loaded_session(keyring_key).ok_or_else(|| -> Box<dyn std::error::Error> {
+        "no PNM session — run `pnm setup` first, or use `vta auth sign-challenge` \
+         (the offline cold-start path)"
+            .into()
+    })?;
+
+    let challenge_bytes: [u8; 32] = hex::decode(challenge_hex.trim())
+        .map_err(|e| format!("challenge is not valid hex: {e}"))?
+        .try_into()
+        .map_err(|v: Vec<u8>| format!("challenge must be 32 bytes (got {} bytes)", v.len()))?;
+
+    // The session stores the Ed25519 secret as a multibase-encoded
+    // 32-byte seed (matches `derive_and_store_did_key`'s
+    // `encode_private_multibase` for KeyType::Ed25519). Decode and
+    // construct the SigningKey directly.
+    let (_, decoded) = multibase::decode(&session.private_key_multibase)
+        .map_err(|e| format!("stored private key is not valid multibase: {e}"))?;
+    // Strip the multicodec prefix `[0x80, 0x26]` (ed25519-priv,
+    // varint 0x1300). Defensive: some flows store raw 32-byte seeds
+    // without the codec prefix — accept either shape.
+    let seed_bytes: [u8; 32] = if decoded.len() == 34 && decoded[0] == 0x80 && decoded[1] == 0x26 {
+        decoded[2..]
+            .try_into()
+            .map_err(|_| "decoded private key not 32 bytes after stripping codec")?
+    } else if decoded.len() == 32 {
+        decoded
+            .as_slice()
+            .try_into()
+            .map_err(|_| "decoded private key not 32 bytes")?
+    } else {
+        return Err(format!(
+            "stored private key is {} bytes (expected 32 raw or 34 with multicodec prefix)",
+            decoded.len()
+        )
+        .into());
+    };
+
+    let signing_key = SigningKey::from_bytes(&seed_bytes);
+    let signature = signing_key.sign(&challenge_bytes);
+
+    eprintln!();
+    eprintln!("  Admin DID: {}", session.client_did);
+    eprintln!("  Signature (hex):");
+    println!("{}", hex::encode(signature.to_bytes()));
+    eprintln!();
+    eprintln!("  Paste the DID and signature above into the `vta unseal` prompt.");
+    eprintln!();
+    Ok(())
+}
+
 /// Load the stored session for diagnostics.
 pub fn loaded_session(keyring_key: &str) -> Option<SessionInfo> {
     store().loaded_session(keyring_key)
@@ -64,6 +127,53 @@ pub fn loaded_session(keyring_key: &str) -> Option<SessionInfo> {
 /// Return current session status (for health diagnostics).
 pub fn session_status(keyring_key: &str) -> Option<vta_sdk::session::SessionStatus> {
     store().session_status(keyring_key)
+}
+
+#[cfg(test)]
+mod sign_challenge_tests {
+    use super::*;
+    use ed25519_dalek::Verifier;
+
+    /// Verifier mirror of the `vta unseal` chain in
+    /// `vta-service::seal::verify_challenge_signature`. Pin the
+    /// signature shape so a refactor of either side surfaces here.
+    fn verify(seed: &[u8; 32], challenge: &[u8; 32], sig_hex: &str) -> bool {
+        let sig_bytes = hex::decode(sig_hex).unwrap();
+        let signing = SigningKey::from_bytes(seed);
+        let verifying = signing.verifying_key();
+        let sig = ed25519_dalek::Signature::from_slice(&sig_bytes).unwrap();
+        verifying.verify(challenge, &sig).is_ok()
+    }
+
+    #[test]
+    fn sign_then_verify_round_trip() {
+        let seed = [0x42u8; 32];
+        let challenge = [0x55u8; 32];
+        let signing = SigningKey::from_bytes(&seed);
+        let sig = signing.sign(&challenge);
+        let sig_hex = hex::encode(sig.to_bytes());
+        assert!(verify(&seed, &challenge, &sig_hex));
+    }
+
+    #[test]
+    fn signature_is_64_bytes_hex() {
+        let seed = [0x01u8; 32];
+        let challenge = [0x02u8; 32];
+        let sig = SigningKey::from_bytes(&seed).sign(&challenge);
+        let sig_hex = hex::encode(sig.to_bytes());
+        // 64-byte Ed25519 signature → 128 hex chars.
+        assert_eq!(sig_hex.len(), 128);
+    }
+
+    #[test]
+    fn wrong_seed_fails_verify() {
+        let seed_a = [0xAAu8; 32];
+        let seed_b = [0xBBu8; 32];
+        let challenge = [0x33u8; 32];
+        let sig = SigningKey::from_bytes(&seed_a).sign(&challenge);
+        let sig_hex = hex::encode(sig.to_bytes());
+        assert!(!verify(&seed_b, &challenge, &sig_hex));
+    }
 }
 
 /// Show current authentication status.

@@ -26,6 +26,17 @@ pub struct ProvisionIntegrationRequest {
     /// Optional override for the VC's validity window (seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vc_validity_seconds: Option<i64>,
+    /// Create the target context as part of provisioning if it
+    /// doesn't already exist. Requires **super-admin** on the VTA;
+    /// context-admin callers get `Forbidden` against a missing
+    /// context. Idempotent when the context already exists.
+    /// Defaults to `false` for compatibility with older clients.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub create_context: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// Producer assertion mode on the returned sealed bundle. Mirrors the
@@ -96,4 +107,12 @@ pub struct ProvisionSummary {
     /// pre-date this field omit it on the wire; deserialize as `None`.
     #[serde(default)]
     pub webvh_server_id: Option<String>,
+    /// `true` when the target context didn't exist before this call
+    /// and was created inline because the caller passed
+    /// `create_context: true`. `false` when the context already
+    /// existed (or `create_context` was `false`). Lets operators
+    /// see whether `--create-context` actually did something.
+    /// Defaults to `false` on the wire for backward compatibility.
+    #[serde(default)]
+    pub context_created: bool,
 }

@@ -46,7 +46,6 @@ use crate::operations::protocol::document::{
 use crate::operations::protocol::snapshot::{self, RestSnapshot, ServiceConfigSnapshot};
 use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 #[derive(Debug, Clone)]
 pub struct UpdateRestParams {
@@ -65,6 +64,10 @@ pub struct UpdateRestResult {
     /// The validated new URL that was published — canonicalised
     /// from `params.url` by `url::Url`.
     pub url: String,
+    /// The VTA's own DID. See [`super::enable_rest::EnableRestResult`].
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted.
+    pub serverless: bool,
 }
 
 #[derive(Debug, Error)]
@@ -96,6 +99,21 @@ pub enum UpdateRestError {
 impl From<AppError> for UpdateRestError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
+    }
+}
+
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for UpdateRestError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
     }
 }
 
@@ -202,6 +220,8 @@ pub async fn update_rest(
         new_version_id: update_result.new_version_id,
         prior_url,
         url: canonical_url,
+        vta_did,
+        serverless: update_result.serverless,
     })
 }
 
@@ -209,48 +229,25 @@ async fn read_preconditions(
     config: &Arc<RwLock<AppConfig>>,
     webvh_ks: &KeyspaceHandle,
 ) -> Result<(String, String, JsonValue, String), UpdateRestError> {
-    let cfg = config.read().await;
-    if !cfg.services.rest {
-        return Err(UpdateRestError::ServiceNotPresent);
+    {
+        let cfg = config.read().await;
+        if !cfg.services.rest {
+            return Err(UpdateRestError::ServiceNotPresent);
+        }
     }
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(UpdateRestError::VtaDidNotConfigured)?;
-    drop(cfg);
 
-    let record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| UpdateRestError::VtaDidRecordMissing(vta_did.clone()))?;
-    let scid = record.scid.clone();
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
 
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| UpdateRestError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
-
-    let prior_url = current_rest_service(&current_doc)
+    let prior_url = current_rest_service(&state.current_doc)
         .map(|s| s.url)
         .ok_or(UpdateRestError::ServiceNotPresent)?;
 
-    Ok((vta_did, scid, current_doc, prior_url))
-}
-
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, UpdateRestError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(UpdateRestError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| UpdateRestError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+    Ok((state.vta_did, state.scid, state.current_doc, prior_url))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LogConfig, ServerConfig, ServicesConfig, StoreConfig};
     use crate::operations::protocol::snapshot::ServiceKind;
     use crate::store::Store;
     use vti_common::config::StoreConfig as VtiStoreConfig;
@@ -274,33 +271,13 @@ mod tests {
     }
 
     fn build_fixture(rest_initially: bool) -> TestFixture {
+        use crate::test_support::test_app_config;
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("vta.toml");
-        let cfg = AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: LogConfig::default(),
-            store: StoreConfig {
-                data_dir: dir.path().into(),
-            },
-            services: ServicesConfig {
-                rest: rest_initially,
-                didcomm: true,
-            },
-            vta_did: Some("did:webvh:scid123:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            resolver_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            audit: Default::default(),
-            auth: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            config_path,
-        };
+        let mut cfg = test_app_config(dir.path().into());
+        cfg.services.rest = rest_initially;
+        cfg.services.didcomm = true;
+        cfg.vta_did = Some("did:webvh:scid123:host:vta".into());
+        cfg.config_path = dir.path().join("vta.toml");
         let initial = toml::to_string_pretty(&cfg).unwrap();
         std::fs::write(&cfg.config_path, initial).unwrap();
 

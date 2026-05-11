@@ -1,6 +1,23 @@
-# Spec: DIDComm Protocol Management (post-setup)
+# Spec: DIDComm Protocol Management (post-setup) — SUPERSEDED
 
-Status: Draft — awaiting human review before implementation
+> **Status:** Superseded by
+> `docs/05-design-notes/runtime-service-management.md`. This
+> document remains as historical context for the DIDComm-only
+> precursor that shipped on the `sealed-bootstrap` branch
+> (commits up to 88dab00). The follow-on runtime
+> service-management feature generalised the same machinery
+> (per-kind snapshot store, drain-set, brick-prevention helper,
+> WebVH LogEntry per mutation) to cover REST as well, with
+> fail-forward rollback and a unified `services {kind} {verb}`
+> CLI.
+>
+> See:
+> - `docs/05-design-notes/runtime-service-management.md` (the
+>   active spec)
+> - `docs/03-integrating/runtime-service-management.md` (the
+>   active operator guide)
+
+Status: ~~Draft — awaiting human review before implementation~~ — Superseded
 Owner: Glenn Gore
 Related: `docs/03-integrating/did-webvh-update.md`, `docs/05-design-notes/pnm-setup-deferred-vta-did.md`
 

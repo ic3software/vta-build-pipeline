@@ -102,6 +102,7 @@ pub fn sample_provision_result(rolled_over: bool) -> ProvisionResult {
             secret_count: if rolled_over { 2 } else { 1 },
             output_count: 1,
             webvh_server_id: None,
+            context_created: false,
         },
         payload,
     }

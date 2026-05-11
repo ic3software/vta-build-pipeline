@@ -1,6 +1,6 @@
 [package]
 name = "vti-e2e-tests"
-version = "0.5.0"
+version = "0.6.0"
 description = "End-to-end integration tests for the VTI workspace (VTA + pnm + mediator + webvh)"
 edition.workspace = true
 authors.workspace = true
@@ -31,7 +31,7 @@ vti-common = { path = "../../vti-common" }
 affinidi-tdk = { workspace = true }
 affinidi-secrets-resolver = { workspace = true }
 affinidi-did-resolver-cache-sdk = { workspace = true }
-affinidi-messaging-sdk = "0.17"
+affinidi-messaging-sdk = "0.18"
 affinidi-messaging-didcomm = "0.13"
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
@@ -45,6 +45,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 url = "2"
+chrono = { workspace = true }
 
 [lints]
 workspace = true

@@ -46,7 +46,6 @@ use crate::operations::did_webvh::{UpdateDidWebvhError, UpdateDidWebvhOptions, u
 use crate::operations::protocol::document::{DocumentPatchError, without_didcomm_service};
 use crate::operations::protocol::{OpContext, PROTOCOL_LOCK};
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 /// Spec minimum drain TTL when called over DIDComm transport: 1
 /// hour. Avoids the race where the inbound listener's response
@@ -77,25 +76,29 @@ pub struct DisableDidcommResult {
     /// `Some(deadline)` if the prior listener entered drain state;
     /// `None` if the listener was torn down immediately (TTL = 0).
     pub drains_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// The VTA's own DID. See [`super::enable_rest::EnableRestResult`].
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted.
+    pub serverless: bool,
 }
 
 #[derive(Debug, Error)]
 pub enum DisableDidcommError {
     #[error(
-        "DIDComm is not currently enabled. Use `pnm services enable didcomm --mediator-did <did>` first."
+        "DIDComm is not currently enabled. Enable it first: \
+         `pnm services didcomm enable --mediator-did <did>` (online) \
+         or `vta services didcomm enable --mediator-did <did>` (offline, daemon stopped)."
     )]
     DidcommNotEnabled,
     #[error(
         "cannot disable DIDComm — REST is also disabled. The VTA would have no protocol surface left. \
-         Run `pnm services enable rest` first, or use `pnm services disable didcomm --drain-ttl 0s` \
-         after enabling REST."
+         Enable REST first: `pnm services rest enable --url <url>` (online) \
+         or `vta services rest enable --url <url>` (offline, daemon stopped). \
+         Then retry the disable."
     )]
     NoProtocolRemaining,
-    #[error(
-        "drain-ttl 0s over DIDComm transport is not permitted (minimum 1h). \
-         Either retry over REST transport (`--transport rest`) or use a TTL >= 1h."
-    )]
-    DrainTtlTooShortForDidcomm,
+    #[error("drain ttl {requested}s outside allowed range [{min}s, {max}s]")]
+    DrainTtlOutOfBounds { min: u64, max: u64, requested: u64 },
     #[error("VTA DID is not configured — run `vta setup` first")]
     VtaDidNotConfigured,
     #[error("VTA DID `{0}` has no webvh record")]
@@ -129,6 +132,21 @@ impl From<AppError> for DisableDidcommError {
     }
 }
 
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for DisableDidcommError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn disable_didcomm(
     config: &Arc<RwLock<AppConfig>>,
@@ -155,7 +173,7 @@ pub async fn disable_didcomm(
     let _guard = PROTOCOL_LOCK.lock().await;
 
     // Pre-flight checks (atomic; nothing mutated until past here).
-    let (_vta_did, scid, current_doc, prior_mediator) =
+    let (vta_did, scid, current_doc, prior_mediator) =
         read_preconditions(config, webvh_ks, &params).await?;
 
     // Persist snapshot BEFORE the runtime mutation per spec §3.5a.
@@ -270,6 +288,8 @@ pub async fn disable_didcomm(
         new_version_id: update_result.new_version_id,
         prior_mediator_did: prior_mediator,
         drains_until,
+        vta_did,
+        serverless: update_result.serverless,
     })
 }
 
@@ -284,59 +304,40 @@ async fn read_preconditions(
     use crate::operations::protocol::snapshot::ServiceKind;
     use vta_sdk::error::VtaError;
 
-    let cfg = config.read().await;
-    if !cfg.services.didcomm {
-        return Err(DisableDidcommError::DidcommNotEnabled);
-    }
-    // Brick-prevention via the shared §3.2 helper (T0.4) —
-    // single source of truth across all disable / rollback paths.
-    // VtaError::LastServiceRefused maps to the existing
-    // DisableDidcommError::NoProtocolRemaining wire variant so
-    // operators see the same error string as before this refactor.
-    if let Err(VtaError::LastServiceRefused) = would_violate_last_service(
-        &CurrentServices::new(cfg.services.rest, cfg.services.didcomm),
-        ProposedOp::disable(ServiceKind::Didcomm),
-    ) {
-        return Err(DisableDidcommError::NoProtocolRemaining);
-    }
-    if params.transport == DisableTransport::Didcomm
-        && params.drain_ttl < MIN_DRAIN_TTL_OVER_DIDCOMM
+    // Op-specific config gating (services.didcomm enabled, brick-
+    // prevention, drain-TTL bounds) runs first under the read lock.
     {
-        return Err(DisableDidcommError::DrainTtlTooShortForDidcomm);
+        let cfg = config.read().await;
+        if !cfg.services.didcomm {
+            return Err(DisableDidcommError::DidcommNotEnabled);
+        }
+        // Brick-prevention via the shared §3.2 helper (T0.4) —
+        // single source of truth across all disable / rollback paths.
+        // VtaError::LastServiceRefused maps to the existing
+        // NoProtocolRemaining wire variant.
+        if let Err(VtaError::LastServiceRefused) = would_violate_last_service(
+            &CurrentServices::new(cfg.services.rest, cfg.services.didcomm),
+            ProposedOp::disable(ServiceKind::Didcomm),
+        ) {
+            return Err(DisableDidcommError::NoProtocolRemaining);
+        }
+        crate::operations::protocol::validate_drain_ttl(params.transport, params.drain_ttl)
+            .map_err(|e| DisableDidcommError::DrainTtlOutOfBounds {
+                min: e.min,
+                max: e.max,
+                requested: e.requested,
+            })?;
     }
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(DisableDidcommError::VtaDidNotConfigured)?;
-    drop(cfg);
 
-    let record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| DisableDidcommError::VtaDidRecordMissing(vta_did.clone()))?;
-    let scid = record.scid.clone();
-
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| DisableDidcommError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
+    // Common load: `vta_did`, `scid`, `did_log`, `current_doc`.
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
 
     let prior_mediator =
-        crate::operations::protocol::document::current_didcomm_service(&current_doc)
+        crate::operations::protocol::document::current_didcomm_service(&state.current_doc)
             .map(|s| s.mediator_did)
             .ok_or(DisableDidcommError::NoActiveMediator)?;
 
-    Ok((vta_did, scid, current_doc, prior_mediator))
-}
-
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, DisableDidcommError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(DisableDidcommError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| DisableDidcommError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+    Ok((state.vta_did, state.scid, state.current_doc, prior_mediator))
 }
 
 async fn persist_didcomm_disabled(
@@ -370,35 +371,19 @@ async fn best_effort_endpoint(resolver: &DIDCacheClient, mediator_did: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ServerConfig, ServicesConfig, StoreConfig};
+    use crate::config::AppConfig;
     use crate::keys::seed_store::PlaintextSeedStore;
     use crate::operations::protocol::snapshot;
     use crate::store::Store;
+    use crate::test_support::test_app_config;
     use vti_common::telemetry::RingBufferTelemetry;
 
     fn fresh_config(tmpdir: &std::path::Path, didcomm: bool, rest: bool) -> Arc<RwLock<AppConfig>> {
-        let cfg = AppConfig {
-            server: ServerConfig {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            log: Default::default(),
-            store: StoreConfig {
-                data_dir: tmpdir.into(),
-            },
-            services: ServicesConfig { rest, didcomm },
-            vta_did: Some("did:webvh:scid123:host:vta".into()),
-            vta_name: None,
-            public_url: None,
-            messaging: None,
-            secrets: Default::default(),
-            auth: Default::default(),
-            audit: Default::default(),
-            #[cfg(feature = "tee")]
-            tee: Default::default(),
-            resolver_url: None,
-            config_path: tmpdir.join("config.toml"),
-        };
+        let mut cfg = test_app_config(tmpdir.into());
+        cfg.services.rest = rest;
+        cfg.services.didcomm = didcomm;
+        cfg.vta_did = Some("did:webvh:scid123:host:vta".into());
+        cfg.config_path = tmpdir.join("config.toml");
         Arc::new(RwLock::new(cfg))
     }
 
@@ -422,8 +407,9 @@ mod tests {
     }
 
     async fn empty_keyspace(name: &str) -> (tempfile::TempDir, KeyspaceHandle) {
+        use vti_common::config::StoreConfig as VtiStoreConfig;
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&StoreConfig {
+        let store = Store::open(&VtiStoreConfig {
             data_dir: dir.path().into(),
         })
         .unwrap();
@@ -585,10 +571,62 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(
-            err,
-            DisableDidcommError::DrainTtlTooShortForDidcomm
-        ));
+        assert!(
+            matches!(
+                err,
+                DisableDidcommError::DrainTtlOutOfBounds { min: 3600, .. }
+            ),
+            "expected DrainTtlOutOfBounds with 1h min, got {err:?}"
+        );
+    }
+
+    /// Spec §7a.4 row: `--drain-ttl 31d` is rejected with
+    /// `DrainTtlOutOfBounds`. Pins the upper bound at the op layer
+    /// so the check no longer relies on the registry-layer guard
+    /// firing late in the publication path.
+    #[tokio::test]
+    async fn refuses_drain_ttl_above_max() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = fresh_config(dir.path(), true, true);
+        let (bridge, reg, sink) = registry();
+        let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_d2, contexts_ks) = empty_keyspace("contexts").await;
+        let (_d3, webvh_ks) = empty_keyspace("webvh").await;
+        let (_d4, audit_ks) = empty_keyspace("audit").await;
+        let (_d5, drains_ks) = empty_keyspace("drains").await;
+        let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let resolver = resolver().await;
+        let seed = dummy_seed(dir.path());
+
+        // 31 days > 30-day MAX_DRAIN_TTL.
+        let err = disable_didcomm(
+            &config,
+            &keys_ks,
+            &contexts_ks,
+            &webvh_ks,
+            &audit_ks,
+            &drains_ks,
+            &snapshot_ks,
+            &*seed,
+            &resolver,
+            &bridge,
+            &reg,
+            &sweeper_for(Arc::clone(&reg), drains_ks.clone()),
+            &sink,
+            &super_admin(),
+            rest_params(Duration::from_secs(31 * 86_400)),
+            OpContext::Direct,
+            "test",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DisableDidcommError::DrainTtlOutOfBounds { max: 2_592_000, .. }
+            ),
+            "expected DrainTtlOutOfBounds with 30d max, got {err:?}"
+        );
     }
 
     #[tokio::test]

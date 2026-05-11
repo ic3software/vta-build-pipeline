@@ -36,7 +36,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use affinidi_did_resolver_cache_sdk::DIDCacheClient;
-use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -67,7 +66,6 @@ use crate::operations::protocol::update_didcomm::{
     MigrateAuditKind, UpdateDidcommError, UpdateDidcommParams, update_didcomm,
 };
 use crate::store::KeyspaceHandle;
-use crate::webvh_store;
 
 /// Handshake timeout when re-promoting a prior mediator. Matches
 /// the default that the route layer applies for forward
@@ -117,6 +115,12 @@ pub struct RollbackDidcommResult {
     /// previously-active one), or `None` for `Enabled` /
     /// `NoOp` arms where no drain is scheduled.
     pub draining_mediator: Option<String>,
+    /// The VTA's own DID. Empty for no-op rollbacks. See
+    /// [`super::enable_rest::EnableRestResult`].
+    pub vta_did: String,
+    /// True when the VTA's DID is self-hosted. `false` on no-op
+    /// rollbacks.
+    pub serverless: bool,
 }
 
 #[derive(Debug, Error)]
@@ -157,6 +161,21 @@ pub enum RollbackDidcommError {
 impl From<AppError> for RollbackDidcommError {
     fn from(value: AppError) -> Self {
         Self::Storage(value.to_string())
+    }
+}
+
+impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
+    for RollbackDidcommError
+{
+    fn from(value: crate::operations::protocol::preconditions::ProtocolPreconditionError) -> Self {
+        use crate::operations::protocol::preconditions::ProtocolPreconditionError as E;
+        match value {
+            E::VtaDidNotConfigured => Self::VtaDidNotConfigured,
+            E::VtaDidRecordMissing(s) => Self::VtaDidRecordMissing(s),
+            E::VtaDidLogMissing(s) => Self::VtaDidLogMissing(s),
+            E::EmptyLog => Self::EmptyLog,
+            E::Storage(s) | E::DocumentParse(s) => Self::Storage(s),
+        }
     }
 }
 
@@ -238,6 +257,8 @@ pub async fn rollback_didcomm(
                 new_version_id: Some(result.new_version_id),
                 kind: RollbackKind::Disabled,
                 draining_mediator: Some(prior.to_string()),
+                vta_did: result.vta_did,
+                serverless: result.serverless,
             })
         }
 
@@ -278,6 +299,8 @@ pub async fn rollback_didcomm(
                 new_version_id: Some(result.new_version_id),
                 kind: RollbackKind::Enabled,
                 draining_mediator: None,
+                vta_did: result.vta_did,
+                serverless: result.serverless,
             })
         }
 
@@ -313,6 +336,7 @@ pub async fn rollback_didcomm(
                     force: false,
                     handshake_timeout: DEFAULT_ROLLBACK_HANDSHAKE_TIMEOUT,
                     audit_kind: MigrateAuditKind::Rollback,
+                    transport: params.transport,
                 },
                 OpContext::Rollback,
                 channel,
@@ -322,6 +346,8 @@ pub async fn rollback_didcomm(
                 new_version_id: Some(result.new_version_id),
                 kind: RollbackKind::Updated,
                 draining_mediator: Some(result.prior_mediator_did),
+                vta_did: result.vta_did,
+                serverless: result.serverless,
             })
         }
 
@@ -335,6 +361,11 @@ pub async fn rollback_didcomm(
                 new_version_id: None,
                 kind: RollbackKind::NoOp,
                 draining_mediator: None,
+                // No LogEntry written — empty `vta_did` + `false`
+                // are the "no follow-up needed" sentinel for the
+                // CLI hint path.
+                vta_did: String::new(),
+                serverless: false,
             })
         }
     }
@@ -344,34 +375,8 @@ async fn read_current_didcomm_mediator(
     config: &Arc<RwLock<AppConfig>>,
     webvh_ks: &KeyspaceHandle,
 ) -> Result<Option<String>, RollbackDidcommError> {
-    let cfg = config.read().await;
-    let vta_did = cfg
-        .vta_did
-        .clone()
-        .ok_or(RollbackDidcommError::VtaDidNotConfigured)?;
-    drop(cfg);
-
-    let _record = webvh_store::get_did(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| RollbackDidcommError::VtaDidRecordMissing(vta_did.clone()))?;
-
-    let did_log = webvh_store::get_did_log(webvh_ks, &vta_did)
-        .await?
-        .ok_or_else(|| RollbackDidcommError::VtaDidLogMissing(vta_did.clone()))?;
-    let current_doc = current_document_from_log(&did_log)?;
-
-    Ok(current_didcomm_service(&current_doc).map(|svc| svc.mediator_did))
-}
-
-fn current_document_from_log(did_log: &str) -> Result<JsonValue, RollbackDidcommError> {
-    use didwebvh_rs::log_entry::{LogEntry, LogEntryMethods};
-    let line = did_log
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .ok_or(RollbackDidcommError::EmptyLog)?;
-    let entry: LogEntry = serde_json::from_str(line)
-        .map_err(|e| RollbackDidcommError::Storage(format!("DID log line parse: {e}")))?;
-    Ok(entry.get_state().clone())
+    let state = super::preconditions::load_vta_doc_state(config, webvh_ks).await?;
+    Ok(current_didcomm_service(&state.current_doc).map(|svc| svc.mediator_did))
 }
 
 #[cfg(test)]

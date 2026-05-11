@@ -77,6 +77,40 @@ impl WebvhClient {
             .map_err(|e| AppError::Internal(format!("webvh-server response parse error: {e}")))
     }
 
+    /// POST /api/dids/register — atomic claim-and-publish.
+    ///
+    /// Single round-trip equivalent to `request_uri(path)` +
+    /// `publish_did(mnemonic, log_content)` but committed in one fjall
+    /// batch on the server, so resolvers never see the slot empty
+    /// between allocation and content upload. The relevant flow for
+    /// promoting an existing serverless DID to a host without a
+    /// resolvability gap.
+    ///
+    /// `force` is honoured only when the caller is an admin replacing a
+    /// slot owned by a different DID. The owner re-registering their
+    /// own slot is idempotent and needs no force.
+    pub async fn register_did_atomic(
+        &self,
+        path: &str,
+        did_log: &str,
+        force: bool,
+    ) -> Result<RequestUriResponse, AppError> {
+        let url = format!("{}/api/dids/register", self.server_url);
+        info!(method = "POST", %url, "webvh: sending via rest");
+        let req = self
+            .with_auth(self.http.post(&url))
+            .json(&serde_json::json!({
+                "path": path,
+                "did_log": did_log,
+                "force": force,
+            }));
+        let resp = self.send(req, "POST /api/dids/register").await?;
+        debug!(method = "POST", status = 200, "webvh: received via rest");
+        resp.json()
+            .await
+            .map_err(|e| AppError::Internal(format!("webvh-server response parse error: {e}")))
+    }
+
     /// PUT /api/dids/{mnemonic} — publish DID log.
     pub async fn publish_did(&self, mnemonic: &str, log_content: &str) -> Result<(), AppError> {
         let url = format!("{}/api/dids/{mnemonic}", self.server_url);

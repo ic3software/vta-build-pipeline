@@ -160,7 +160,7 @@ pub async fn run_open(
             }
             println!();
             println!("To install this credential, use the online bootstrap flow:");
-            println!("  pnm bootstrap connect --vta-url <url> [--token <token>]");
+            println!("  pnm bootstrap connect --vta-url <url> [--expect-digest <sha256>]");
         }
         SealedPayloadV1::ContextProvision(p) => {
             println!("Payload: ContextProvision");
@@ -373,13 +373,21 @@ pub async fn run_connect(
 }
 
 /// `pnm bootstrap provision-integration` — bridge a VP-framed
-/// BootstrapRequest to the VTA's `POST /bootstrap/provision-integration`
-/// endpoint over the authenticated session, writing the returned
+/// BootstrapRequest to the VTA over whichever transport the client
+/// is currently using (REST or DIDComm), writing the returned
 /// armored bundle to disk.
 ///
-/// The VTA runs the same shared library fn as the offline
-/// `vta bootstrap provision-integration` CLI; the difference is
-/// transport only.
+/// The VTA runs the same shared library fn for both transports and
+/// the offline `vta bootstrap provision-integration` CLI; the only
+/// difference between paths is the wire form of the request /
+/// response. `VtaClient::provision_integration` dispatches:
+/// - REST → `POST /bootstrap/provision-integration` with the
+///   bearer token from the open session.
+/// - DIDComm → `provision-integration/1.0` message over the open
+///   authcrypt session. The VTA enforces that the DIDComm sender
+///   DID matches the VP holder before issuing the bundle
+///   (privilege-laundering guard).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_provision_integration(
     client: &vta_sdk::client::VtaClient,
     request: PathBuf,
@@ -387,6 +395,7 @@ pub async fn run_provision_integration(
     assertion: String,
     vc_validity_seconds: Option<i64>,
     out: PathBuf,
+    create_context: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use vta_sdk::provision_integration::http::{
         AssertionMode as WireAssertionMode, ProvisionIntegrationRequest,
@@ -422,6 +431,7 @@ pub async fn run_provision_integration(
             context: target_context.clone(),
             assertion: Some(assertion_mode),
             vc_validity_seconds,
+            create_context,
         })
         .await?;
 
@@ -435,7 +445,15 @@ pub async fn run_provision_integration(
     );
     eprintln!();
     eprintln!("  Bundle-Id:       {}", resp.summary.bundle_id_hex);
-    eprintln!("  Context:         {target_context}");
+    if resp.summary.context_created {
+        eprintln!("  Context:         {target_context} (created inline via --create-context)");
+    } else if create_context {
+        eprintln!(
+            "  Context:         {target_context} (already existed; --create-context was a no-op)"
+        );
+    } else {
+        eprintln!("  Context:         {target_context}");
+    }
     eprintln!("  Client DID:      {}", resp.summary.client_did);
     if resp.summary.admin_rolled_over {
         eprintln!(

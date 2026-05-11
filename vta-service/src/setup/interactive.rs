@@ -23,8 +23,8 @@ use serde_json::json;
 use affinidi_did_resolver_cache_sdk::{DIDCacheClient, config::DIDCacheConfigBuilder};
 
 use crate::config::{
-    AppConfig, AuthConfig, LogConfig, LogFormat, MessagingConfig, SecretsConfig, ServerConfig,
-    ServicesConfig, StoreConfig,
+    AppConfig, AuditConfig, AuthConfig, LogConfig, LogFormat, MessagingConfig, SecretsConfig,
+    ServerConfig, ServicesConfig, StoreConfig,
 };
 use crate::contexts::store_context;
 use crate::keys::seed_store::create_seed_store;
@@ -89,6 +89,12 @@ async fn configure_secrets() -> Result<SecretsConfig, Box<dyn std::error::Error>
         tags.push("azure");
     }
 
+    #[cfg(feature = "vault-secrets")]
+    {
+        labels.push("HashiCorp Vault");
+        tags.push("vault");
+    }
+
     #[cfg(feature = "config-seed")]
     {
         labels.push("Config file (hex-encoded seed in config.toml)");
@@ -130,6 +136,11 @@ async fn configure_secrets() -> Result<SecretsConfig, Box<dyn std::error::Error>
     #[cfg(feature = "azure-secrets")]
     if tag == "azure" {
         return prompt_azure_secrets().await;
+    }
+
+    #[cfg(feature = "vault-secrets")]
+    if tag == "vault" {
+        return prompt_vault_secrets();
     }
 
     #[cfg(feature = "config-seed")]
@@ -377,6 +388,92 @@ async fn prompt_azure_secrets() -> Result<SecretsConfig, Box<dyn std::error::Err
     })
 }
 
+/// Prompt for HashiCorp Vault settings. Synchronous because everything
+/// is local input — actual Vault auth happens at first seed-store call.
+#[cfg(feature = "vault-secrets")]
+fn prompt_vault_secrets() -> Result<SecretsConfig, Box<dyn std::error::Error>> {
+    let addr: String = Input::new()
+        .with_prompt("Vault server URL (e.g. https://vault.example.com:8200)")
+        .interact_text()?;
+
+    let secret_path: String = Input::new()
+        .with_prompt("KV v2 secret path (e.g. vta/master-seed)")
+        .interact_text()?;
+
+    let kv_mount: String = Input::new()
+        .with_prompt("KV v2 mount path")
+        .default("secret".into())
+        .interact_text()?;
+
+    let secret_key: String = Input::new()
+        .with_prompt("Field name within the KV entry holding the hex seed")
+        .default("seed".into())
+        .interact_text()?;
+
+    let namespace: String = Input::new()
+        .with_prompt("Vault Enterprise namespace (leave empty if not using)")
+        .allow_empty(true)
+        .interact_text()?;
+    let namespace = if namespace.is_empty() {
+        None
+    } else {
+        Some(namespace)
+    };
+
+    let auth_methods = &["kubernetes", "token", "approle"];
+    let auth_idx = Select::new()
+        .with_prompt("Auth method")
+        .items(auth_methods)
+        .default(0)
+        .interact()?;
+    let auth_method = auth_methods[auth_idx].to_string();
+
+    let mut config = SecretsConfig {
+        vault_addr: Some(addr),
+        vault_secret_path: Some(secret_path),
+        vault_kv_mount: kv_mount,
+        vault_secret_key: secret_key,
+        vault_namespace: namespace,
+        vault_auth_method: auth_method.clone(),
+        ..Default::default()
+    };
+
+    match auth_method.as_str() {
+        "kubernetes" => {
+            let role: String = Input::new()
+                .with_prompt("Kubernetes auth role name")
+                .interact_text()?;
+            config.vault_k8s_role = Some(role);
+            // k8s_mount and jwt_path keep their defaults.
+        }
+        "token" => {
+            eprintln!(
+                "  \x1b[2mLeave empty to read from the VAULT_TOKEN env var at runtime.\x1b[0m"
+            );
+            let token: String = Input::new()
+                .with_prompt("Vault token")
+                .allow_empty(true)
+                .interact_text()?;
+            if !token.is_empty() {
+                config.vault_token = Some(token);
+            }
+        }
+        "approle" => {
+            let role_id: String = Input::new()
+                .with_prompt("AppRole role_id")
+                .interact_text()?;
+            let secret_id: String = Input::new()
+                .with_prompt("AppRole secret_id")
+                .interact_text()?;
+            config.vault_approle_role_id = Some(role_id);
+            config.vault_approle_secret_id = Some(secret_id);
+        }
+        _ => unreachable!("auth_method came from a fixed list"),
+    }
+
+    Ok(config)
+}
+
 pub async fn run_setup_wizard(
     config_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -492,6 +589,36 @@ pub async fn run_setup_wizard(
     let log_format = match log_format_idx {
         1 => LogFormat::Json,
         _ => LogFormat::Text,
+    };
+
+    // 7b. Optional remote DID resolver — required for TEE network mode
+    // (resolver-cache-server sidecar bridged via vsock); useful for
+    // any deployment that wants to share a resolver-cache.
+    let resolver_url: String = Input::new()
+        .with_prompt("Remote DID resolver WebSocket URL (leave empty to resolve locally)")
+        .allow_empty(true)
+        .interact_text()?;
+    let resolver_url = if resolver_url.is_empty() {
+        None
+    } else {
+        Some(resolver_url)
+    };
+
+    // 7c. Audit-log retention. Default 28 days; compliance-driven
+    // deployments often want 90 or 365.
+    let audit_retention_days: u32 = Input::new()
+        .with_prompt("Audit-log retention (days)")
+        .default(AuditConfig::default().retention_days)
+        .validate_with(|v: &u32| -> Result<(), String> {
+            if *v == 0 {
+                Err("retention must be > 0; the audit sweeper assumes a positive window".into())
+            } else {
+                Ok(())
+            }
+        })
+        .interact_text()?;
+    let audit = AuditConfig {
+        retention_days: audit_retention_days,
     };
 
     // 8. Data directory
@@ -691,11 +818,11 @@ pub async fn run_setup_wizard(
             jwt_signing_key: Some(jwt_signing_key),
             ..AuthConfig::default()
         },
-        audit: Default::default(),
+        audit,
         secrets: secrets_config,
         #[cfg(feature = "tee")]
         tee: Default::default(),
-        resolver_url: None,
+        resolver_url,
         config_path: config_path.clone(),
     };
     config.save()?;
@@ -1022,7 +1149,8 @@ async fn create_vta_did(
     config: &AppConfig,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let did_options = &[
-        "Create a new did:webvh DID",
+        "Create a new did:webvh DID (recommended for production)",
+        "Create a new did:key (no external hosting; great for local dev)",
         "Enter an existing DID",
         "Skip (no VTA DID for now)",
     ];
@@ -1058,12 +1186,48 @@ async fn create_vta_did(
             Ok(Some(did))
         }
         1 => {
+            let did = super::create_vta_did_key("vta", keys_ks, contexts_ks, seed_store).await?;
+            Ok(Some(did))
+        }
+        2 => {
             let did: String = Input::new().with_prompt("VTA DID").interact_text()?;
 
             Ok(Some(did))
         }
         _ => Ok(None),
     }
+}
+
+/// Prompt for the optional `mediator_host` override. Used in TEE
+/// network mode where the VTA dials the mediator via a vsock proxy
+/// on the parent EC2 instance and that proxy needs the real upstream
+/// hostname for SNI / TLS validation. Empty input means "not set",
+/// returned as `None`.
+fn prompt_optional_mediator_host() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let host: String = Input::new()
+        .with_prompt("Mediator hostname for vsock-bridged TEE deployments (leave empty to skip)")
+        .allow_empty(true)
+        .interact_text()?;
+    Ok(if host.is_empty() { None } else { Some(host) })
+}
+
+/// Prompt for an optional comma-separated list of routing-key DIDs
+/// for the `didcomm-mediator` template's `ROUTING_KEYS` variable.
+/// Used when this mediator forwards traffic through an upstream
+/// mediator. Empty input means no routing keys.
+fn prompt_routing_keys() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let raw: String = Input::new()
+        .with_prompt(
+            "Upstream routing-key DIDs for this mediator (comma-separated, leave empty to skip)",
+        )
+        .allow_empty(true)
+        .interact_text()?;
+    Ok(raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 /// Guide the user through DIDComm messaging configuration.
@@ -1109,10 +1273,12 @@ async fn configure_messaging(
                 })
                 .interact_text()?;
 
+            let mediator_host = prompt_optional_mediator_host()?;
+
             Ok(Some(MessagingConfig {
                 mediator_url: String::new(),
                 mediator_did: did,
-                mediator_host: None,
+                mediator_host,
             }))
         }
         // Create new did:webvh — needs a mediator context
@@ -1132,6 +1298,15 @@ async fn configure_messaging(
 
             let mediator_url: String = Input::new().with_prompt("Mediator URL").interact_text()?;
 
+            let mediator_host = prompt_optional_mediator_host()?;
+
+            // Optional ROUTING_KEYS escape hatch (mediator chains). The
+            // didcomm-mediator template's other optional vars (ACCEPT,
+            // WEBVH_SERVER) have correct defaults; operators who need to
+            // tweak those should use `--from <toml>` and the
+            // `[messaging.template_vars]` table.
+            let routing_keys = prompt_routing_keys()?;
+
             // Create mediator context
             let _med_ctx =
                 create_seed_context(contexts_ks, &mediator_context, "DIDComm Messaging Mediator")
@@ -1147,6 +1322,9 @@ async fn configure_messaging(
             let mut template_vars: std::collections::HashMap<String, serde_json::Value> =
                 std::collections::HashMap::new();
             template_vars.insert("URL".into(), json!(mediator_url));
+            if !routing_keys.is_empty() {
+                template_vars.insert("ROUTING_KEYS".into(), json!(routing_keys));
+            }
 
             let mediator_did = build_wizard_did(
                 &mediator_context,
@@ -1169,7 +1347,7 @@ async fn configure_messaging(
             Ok(Some(MessagingConfig {
                 mediator_url,
                 mediator_did,
-                mediator_host: None,
+                mediator_host,
             }))
         }
         // Skip DIDComm

@@ -78,6 +78,19 @@ pub struct VtaState {
     pub did_resolver: Option<DIDCacheClient>,
     /// DIDComm bridge for outbound WebVH server communication.
     pub didcomm_bridge: Arc<DIDCommBridge>,
+    /// Secrets resolver — present iff DIDComm is configured. Used
+    /// (alongside `signing_vm_id` / `ka_vm_id`) by service-management
+    /// rollback over DIDComm transport to assemble a live
+    /// `ListenerProver` for re-promotion handshakes.
+    #[cfg(feature = "didcomm")]
+    pub secrets_resolver: Option<Arc<affinidi_tdk::secrets_resolver::ThreadedSecretsResolver>>,
+    /// VM id of the VTA's signing key. Threaded through to the live
+    /// prover for service-management ops dispatched over DIDComm.
+    #[cfg(feature = "didcomm")]
+    pub signing_vm_id: Option<String>,
+    /// VM id of the VTA's key-agreement key.
+    #[cfg(feature = "didcomm")]
+    pub ka_vm_id: Option<String>,
     #[cfg(feature = "tee")]
     pub tee_state: Option<crate::tee::TeeState>,
     /// Send `true` to trigger a soft restart.
@@ -345,6 +358,10 @@ pub fn build_handler(
             .route(
                 did_management::ROTATE_DID_WEBVH_KEYS,
                 handler_fn(handlers::handle_rotate_did_webvh_keys),
+            )?
+            .route(
+                did_management::REGISTER_DID_WITH_SERVER,
+                handler_fn(handlers::handle_register_did_with_server),
             )?;
 
         // Protocol management over DIDComm. `enable` is REST-only

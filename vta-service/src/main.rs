@@ -6,6 +6,7 @@ mod did_key;
 mod did_webvh;
 mod import_did;
 mod keys_cli;
+mod services_cli;
 #[cfg(feature = "setup")]
 mod setup;
 #[cfg(feature = "webvh")]
@@ -77,8 +78,22 @@ enum Commands {
     ///
     /// Requires proof of super admin key ownership via challenge-response:
     /// the VTA generates a random challenge, you sign it with your admin
-    /// private key using `pnm auth sign-challenge`, and paste the signature.
+    /// private key using either `pnm auth sign-challenge <hex>` (online,
+    /// uses PNM's stored admin key) or `vta auth sign-challenge --did
+    /// <did> --challenge <hex>` (offline cold-start, signs from the local
+    /// keystore — daemon must be stopped). Paste the signature back into
+    /// the prompt.
     Unseal,
+    /// Authentication helpers (offline; safe to run while sealed).
+    ///
+    /// Today: only the `sign-challenge` subcommand, which signs the
+    /// challenge from `vta unseal` using a key from the local fjall
+    /// keystore. Useful for cold-start operators who can't reach PNM
+    /// yet (no network, no PNM auth setup, etc.).
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
+    },
     /// Export admin DID and credential (blocked when sealed)
     ExportAdmin,
     /// Show VTA status and statistics
@@ -157,6 +172,29 @@ enum Commands {
     Bootstrap {
         #[command(subcommand)]
         command: BootstrapCommands,
+    },
+    /// Manage the VTA's advertised transport services offline.
+    ///
+    /// Mirrors the `pnm services …` surface but operates directly
+    /// on the local fjall keystore — no HTTP, no auth ceremony,
+    /// no running VTA required. Filesystem access to the data
+    /// directory is the security boundary (same model as
+    /// `vta acl …`, `vta keys …`, etc.).
+    ///
+    /// **Not for TEE deployments.** Inside a Nitro Enclave the VTA's
+    /// fjall store lives behind a vsock proxy; the offline `vta`
+    /// binary on the parent has no access. Use `pnm services …`
+    /// against the running VTA instead.
+    ///
+    /// **Don't run while the VTA daemon is running.** fjall's file
+    /// lock will reject the open if the daemon holds it, so
+    /// concurrent corruption is impossible — but offline writes
+    /// won't be picked up until the daemon restarts. Prefer
+    /// `pnm services` against the live VTA when both are available.
+    #[cfg(feature = "webvh")]
+    Services {
+        #[command(subcommand)]
+        command: ServicesCommands,
     },
 }
 
@@ -616,6 +654,58 @@ enum WebvhCommands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Edit an existing WebVH DID document. Offline equivalent of
+    /// `pnm webvh edit-did`. Operates directly on the local fjall
+    /// keystore — VTA daemon must be stopped (fjall lock).
+    ///
+    /// Interactive mode opens the latest DID document in `$EDITOR`,
+    /// then asks about webvh parameters. Non-interactive mode takes
+    /// `--document` / `--options-file` and per-field flags.
+    EditDid {
+        /// The DID to edit.
+        #[arg(long)]
+        did: String,
+        /// Path to a JSON file with the new DID document. Skips
+        /// `$EDITOR`.
+        #[arg(long)]
+        document: Option<PathBuf>,
+        /// Path to a JSON file with a full UpdateDidWebvhBody.
+        /// Mutually exclusive with the per-field flags below.
+        #[arg(long)]
+        options_file: Option<PathBuf>,
+        #[arg(long)]
+        pre_rotation: Option<u32>,
+        #[arg(long)]
+        ttl: Option<u32>,
+        #[arg(long = "watcher")]
+        watchers: Vec<String>,
+        #[arg(long)]
+        no_watchers: bool,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        no_confirm: bool,
+    },
+    /// Register an existing serverless WebVH DID with a registered
+    /// hosting server. Pushes the local `did.jsonl` to the host and
+    /// flips the DID's `server_id` so future updates auto-publish.
+    ///
+    /// Offline equivalent of `pnm webvh register-did`. Operates
+    /// directly on the local fjall keystore — VTA daemon must be
+    /// stopped (fjall holds an exclusive lock when the daemon is
+    /// running).
+    RegisterDid {
+        /// The serverless WebVH DID to promote.
+        #[arg(long)]
+        did: String,
+        /// Registered server id (from `vta webvh add-server`).
+        #[arg(long)]
+        server: String,
+        /// Take over a slot owned by a different DID. Honoured only
+        /// when this VTA's DID authenticates to the host as an admin.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -626,6 +716,32 @@ enum ConfigCommands {
     /// mediator) plus the config/data paths. No network calls; the data
     /// store is not opened, so this works while the VTA is running.
     Show,
+}
+
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Sign an unseal challenge using a key from the local fjall keystore.
+    ///
+    /// The cold-start companion to `pnm auth sign-challenge`. When
+    /// `vta unseal` prints a challenge, run this in a *second* terminal
+    /// (the daemon must be stopped — fjall takes an exclusive lock per
+    /// data dir) to produce the Ed25519 signature, then paste it back
+    /// into the unseal prompt.
+    ///
+    /// Only supports `did:key:` admin DIDs; for other DID methods the
+    /// unseal flow itself rejects via the verifier in `seal::
+    /// verify_challenge_signature`.
+    SignChallenge {
+        /// The admin DID to sign as. Must match a key record in the
+        /// local keystore — typically the super-admin's `did:key:zXxx`
+        /// from `vta bootstrap-admin`.
+        #[arg(long)]
+        did: String,
+        /// The 32-byte challenge in hex (exactly as printed by
+        /// `vta unseal`).
+        #[arg(long)]
+        challenge: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -665,6 +781,98 @@ enum AclCommands {
         /// Skip confirmation prompt
         #[arg(short, long)]
         yes: bool,
+    },
+}
+
+// ── `vta services …` offline subcommand surface (mirrors `pnm
+//    services …` from spec §5.1) ────────────────────────────────
+
+#[cfg(feature = "webvh")]
+#[derive(Subcommand)]
+enum ServicesCommands {
+    /// Show currently-advertised transport services.
+    List,
+    /// Manage REST advertisement.
+    Rest {
+        #[command(subcommand)]
+        command: RestCommands,
+    },
+    /// Manage DIDComm advertisement.
+    Didcomm {
+        #[command(subcommand)]
+        command: DidcommCommands,
+    },
+    /// Show inbound-message attribution by mediator and sender.
+    /// Note: the offline binary's telemetry sink is fresh per
+    /// invocation, so the report is empty by design — for the
+    /// running VTA's full record use `pnm services report`.
+    Report {
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
+}
+
+#[cfg(feature = "webvh")]
+#[derive(Subcommand)]
+enum RestCommands {
+    Enable {
+        #[arg(long)]
+        url: String,
+    },
+    Update {
+        #[arg(long)]
+        url: String,
+    },
+    Disable,
+    Rollback,
+}
+
+#[cfg(feature = "webvh")]
+#[derive(Subcommand)]
+enum DidcommCommands {
+    Enable {
+        #[arg(long)]
+        mediator_did: String,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        handshake_timeout: Option<u64>,
+    },
+    Update {
+        #[arg(long = "mediator-did", visible_alias = "to")]
+        new_mediator_did: String,
+        #[arg(long, default_value_t = 86_400)]
+        drain_ttl: u64,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        handshake_timeout: Option<u64>,
+    },
+    Disable {
+        #[arg(long, default_value_t = 86_400)]
+        drain_ttl: u64,
+    },
+    Rollback {
+        #[arg(long)]
+        drain_ttl: Option<u64>,
+    },
+    Drain {
+        #[command(subcommand)]
+        command: DrainCommands,
+    },
+}
+
+#[cfg(feature = "webvh")]
+#[derive(Subcommand)]
+enum DrainCommands {
+    List,
+    Cancel {
+        #[arg(long)]
+        mediator_did: String,
     },
 }
 
@@ -715,6 +923,29 @@ async fn main() {
             };
             let store = store::Store::open(&config.store).expect("failed to open store");
             if let Err(e) = seal::run_unseal_challenge(&store).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Auth { command }) => {
+            // `auth` subcommands are intentionally not gated on the seal —
+            // sign-challenge produces an Ed25519 signature offline; it
+            // never mutates state and is the cold-start companion to
+            // `vta unseal` itself. Gating it on `check_seal` would be a
+            // chicken-and-egg paradox.
+            let config = match AppConfig::load(cli.config) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let result = match command {
+                AuthCommands::SignChallenge { did, challenge } => {
+                    auth_sign_challenge(&config, &did, &challenge).await
+                }
+            };
+            if let Err(e) = result {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
@@ -1003,6 +1234,34 @@ async fn main() {
                 WebvhCommands::DidLog { did, out } => {
                     webvh_cli::run_did_log(cli.config, did, out).await
                 }
+                WebvhCommands::EditDid {
+                    did,
+                    document,
+                    options_file,
+                    pre_rotation,
+                    ttl,
+                    watchers,
+                    no_watchers,
+                    label,
+                    no_confirm,
+                } => {
+                    webvh_cli::run_edit_did(
+                        cli.config,
+                        did,
+                        document,
+                        options_file,
+                        pre_rotation,
+                        ttl,
+                        watchers,
+                        no_watchers,
+                        label,
+                        no_confirm,
+                    )
+                    .await
+                }
+                WebvhCommands::RegisterDid { did, server, force } => {
+                    webvh_cli::run_register_did(cli.config, did, server, force).await
+                }
             };
             if let Err(e) = result {
                 eprintln!("Error: {e}");
@@ -1082,6 +1341,105 @@ async fn main() {
             };
             if let Err(e) = result {
                 eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(feature = "webvh")]
+        Some(Commands::Services { command }) => {
+            // SEALED CHECK: every service mutation modifies the
+            // VTA's state on disk + publishes a new LogEntry.
+            // List/report/drain-list are read-only and skip the
+            // check.
+            match &command {
+                ServicesCommands::List
+                | ServicesCommands::Report { .. }
+                | ServicesCommands::Didcomm {
+                    command:
+                        DidcommCommands::Drain {
+                            command: DrainCommands::List,
+                        },
+                } => {}
+                _ => check_seal(&cli.config).await,
+            }
+            let result = match command {
+                ServicesCommands::List => services_cli::run_services_list(cli.config).await,
+                ServicesCommands::Rest { command } => match command {
+                    RestCommands::Enable { url } => {
+                        services_cli::run_services_rest_enable(cli.config, url).await
+                    }
+                    RestCommands::Update { url } => {
+                        services_cli::run_services_rest_update(cli.config, url).await
+                    }
+                    RestCommands::Disable => {
+                        services_cli::run_services_rest_disable(cli.config).await
+                    }
+                    RestCommands::Rollback => {
+                        services_cli::run_services_rest_rollback(cli.config).await
+                    }
+                },
+                ServicesCommands::Didcomm { command } => match command {
+                    DidcommCommands::Enable {
+                        mediator_did,
+                        force,
+                        handshake_timeout,
+                    } => {
+                        services_cli::run_services_didcomm_enable(
+                            cli.config,
+                            mediator_did,
+                            force,
+                            handshake_timeout,
+                        )
+                        .await
+                    }
+                    DidcommCommands::Update {
+                        new_mediator_did,
+                        drain_ttl,
+                        force,
+                        handshake_timeout,
+                    } => {
+                        services_cli::run_services_didcomm_update(
+                            cli.config,
+                            new_mediator_did,
+                            drain_ttl,
+                            force,
+                            handshake_timeout,
+                        )
+                        .await
+                    }
+                    DidcommCommands::Disable { drain_ttl } => {
+                        services_cli::run_services_didcomm_disable(cli.config, drain_ttl).await
+                    }
+                    DidcommCommands::Rollback { drain_ttl } => {
+                        services_cli::run_services_didcomm_rollback(cli.config, drain_ttl).await
+                    }
+                    DidcommCommands::Drain { command } => match command {
+                        DrainCommands::List => {
+                            services_cli::run_services_didcomm_drain_list(cli.config).await
+                        }
+                        DrainCommands::Cancel { mediator_did } => {
+                            services_cli::run_services_didcomm_drain_cancel(
+                                cli.config,
+                                mediator_did,
+                            )
+                            .await
+                        }
+                    },
+                },
+                ServicesCommands::Report {
+                    since,
+                    until,
+                    format,
+                } => services_cli::run_services_report(cli.config, since, until, format).await,
+            };
+            if let Err(e) = result {
+                // services_cli already prints typed VtaError via
+                // print_cli_error and surfaces a SilentExit so we
+                // don't double-print. Other error kinds get a
+                // simple format here.
+                let s = e.to_string();
+                if !s.is_empty() {
+                    eprintln!("Error: {s}");
+                }
                 std::process::exit(1);
             }
         }
@@ -1318,6 +1676,89 @@ fn run_config_show(config_path: Option<PathBuf>) -> Result<(), Box<dyn std::erro
         Some(&config.store.data_dir.display().to_string()),
     );
     println!();
+    Ok(())
+}
+
+/// `vta auth sign-challenge` — sign the 32-byte challenge from `vta unseal`
+/// using the admin's Ed25519 private key, loaded from the local fjall
+/// keystore. The cold-start companion to `pnm auth sign-challenge` for
+/// operators who can't reach PNM yet (no network, no PNM auth setup).
+///
+/// Daemon must be stopped — fjall holds an exclusive lock per data dir.
+/// Only `did:key:` admin DIDs are supported (matches the verifier in
+/// `seal::verify_challenge_signature`).
+async fn auth_sign_challenge(
+    config: &AppConfig,
+    did: &str,
+    challenge_hex: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ed25519_dalek::Signer;
+    use keys::{KeyRecord, KeyType};
+
+    if !did.starts_with("did:key:") {
+        return Err(format!(
+            "vta auth sign-challenge only supports did:key admin DIDs (got: {did}). \
+             For other DID methods, unseal via the REST API with a running VTA."
+        )
+        .into());
+    }
+
+    // 32-byte challenge from `vta unseal`.
+    let challenge_bytes: [u8; 32] = hex::decode(challenge_hex.trim())
+        .map_err(|e| format!("challenge is not valid hex: {e}"))?
+        .try_into()
+        .map_err(|v: Vec<u8>| format!("challenge must be 32 bytes (got {} bytes)", v.len()))?;
+
+    // For `did:key:zXxx` the key_id is `did:key:zXxx#zXxx` (the
+    // verifying key's multibase IS the DID-suffix). Construct
+    // directly rather than scanning the keyspace.
+    let multibase = did.strip_prefix("did:key:").unwrap();
+    let key_id = format!("{did}#{multibase}");
+
+    let store = store::Store::open(&config.store)?;
+    let keys_ks = store.keyspace("keys")?;
+    let record: KeyRecord = keys_ks
+        .get(keys::store_key(&key_id))
+        .await?
+        .ok_or_else(|| {
+            format!(
+                "no key record found for `{did}` in this VTA's keystore. \
+                 If the admin DID was minted on a different host, run \
+                 `pnm auth sign-challenge {challenge_hex}` from that host instead."
+            )
+        })?;
+
+    if record.key_type != KeyType::Ed25519 {
+        return Err(format!(
+            "key for `{did}` is not Ed25519 (found: {:?}); cannot sign unseal challenge",
+            record.key_type
+        )
+        .into());
+    }
+
+    let seed_store = create_seed_store(config).map_err(|e| e.to_string())?;
+    let seed = load_seed_bytes(&keys_ks, &*seed_store, record.seed_id).await?;
+
+    let bip32 = ExtendedSigningKey::from_seed(&seed)
+        .map_err(|e| format!("BIP-32 root key derivation failed: {e}"))?;
+    let derivation_path: DerivationPath = record
+        .derivation_path
+        .parse()
+        .map_err(|e| format!("invalid stored derivation path: {e}"))?;
+    let derived = bip32
+        .derive(&derivation_path)
+        .map_err(|e| format!("key derivation failed: {e}"))?;
+
+    let signing_key = SigningKey::from_bytes(derived.signing_key.as_bytes());
+    let signature = signing_key.sign(&challenge_bytes);
+
+    eprintln!();
+    eprintln!("  Signature (hex):");
+    println!("{}", hex::encode(signature.to_bytes()));
+    eprintln!();
+    eprintln!("  Paste the signature above into the `vta unseal` prompt.");
+    eprintln!();
+
     Ok(())
 }
 

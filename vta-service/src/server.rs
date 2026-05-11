@@ -440,6 +440,9 @@ pub async fn run(
                 config: Arc::new(RwLock::new(config.clone())),
                 did_resolver: auth.did_resolver.clone(),
                 didcomm_bridge: didcomm_bridge.clone(),
+                secrets_resolver: auth.secrets_resolver.clone(),
+                signing_vm_id: auth.signing_vm_id.clone(),
+                ka_vm_id: auth.ka_vm_id.clone(),
                 #[cfg(feature = "tee")]
                 tee_state: tee_context.as_ref().map(|tc| tc.state.clone()),
                 restart_tx: restart_tx.clone(),

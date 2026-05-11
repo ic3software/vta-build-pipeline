@@ -543,6 +543,12 @@ mod provision {
         /// Omit for the 1-hour default.
         #[serde(default)]
         pub vc_validity_seconds: Option<i64>,
+        /// Create the target context as part of provisioning if it
+        /// doesn't already exist. **Requires super-admin** — the
+        /// op-layer `create_context` enforces this. Idempotent when
+        /// the context already exists. Defaults to `false`.
+        #[serde(default)]
+        pub create_context: bool,
     }
 
     /// Wire-form enum for `assertion` (camelCase-serialised via
@@ -595,6 +601,12 @@ mod provision {
         pub output_count: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub webvh_server_id: Option<String>,
+        /// `true` when the target context didn't exist before this
+        /// call and was created inline because the caller passed
+        /// `create_context: true`. Lets operators see whether
+        /// `--create-context` actually did something.
+        #[serde(default)]
+        pub context_created: bool,
     }
 
     /// Handler. Gated by `AdminAuth` — the caller must have admin role
@@ -615,6 +627,19 @@ mod provision {
         let vc_validity = req.vc_validity_seconds.map(chrono::Duration::seconds);
 
         let deps = crate::operations::provision_integration::ProvisionIntegrationDeps::from(&state);
+        // `--create-context`: create the target context inline if
+        // it doesn't exist. Hits the super-admin gate inside
+        // `operations::contexts::create_context` — context-admin
+        // callers surface as Forbidden here. Idempotent when the
+        // context already exists.
+        let context_created =
+            crate::operations::provision_integration::ensure_target_context_or_create(
+                &deps.contexts_ks,
+                &auth.0,
+                &req.context,
+                req.create_context,
+            )
+            .await?;
         let output = provision_integration_lib(
             &deps,
             &auth.0,
@@ -642,6 +667,7 @@ mod provision {
                 secret_count: output.summary.secret_count,
                 output_count: output.summary.output_count,
                 webvh_server_id: output.summary.webvh_server_id,
+                context_created,
             },
         }))
     }

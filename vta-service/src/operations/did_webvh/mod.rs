@@ -6,15 +6,23 @@
 //! - `lifecycle` — read ops on stored DID records (`get`, `list`, log)
 //! - `servers` — webvh hosting-server CRUD + DID validation
 
+mod concurrency;
 mod document;
 mod lifecycle;
+mod register_server;
 mod servers;
 mod update;
 mod webvh_keys;
 
+pub(crate) use concurrency::{RaceDetected, RecordSnapshot};
+
 pub(crate) use document::build_did_document_with_options;
 pub use document::{build_did_document, build_vta_did_document_with_sealed_transfer};
 pub use lifecycle::{GetDidWebvhLogResult, get_did_webvh, get_did_webvh_log, list_dids_webvh};
+pub use register_server::{
+    RegisterDidWithServerError, RegisterDidWithServerParams, RegisterDidWithServerResult,
+    register_did_with_server,
+};
 pub use servers::{add_webvh_server, list_webvh_servers, remove_webvh_server, update_webvh_server};
 pub use update::{
     RotateDidWebvhKeysOptions, UpdateDidWebvhError, UpdateDidWebvhOptions, UpdateDidWebvhResult,
@@ -720,7 +728,7 @@ pub async fn create_did_webvh(
             None
         } else {
             Some(Arc::new(
-                next_key_hashes.into_iter().map(Into::into).collect(),
+                next_key_hashes.iter().cloned().map(Into::into).collect(),
             ))
         },
         ..Default::default()
@@ -821,6 +829,58 @@ pub async fn create_did_webvh(
         )
         .await
         .map_err(|e| AppError::Internal(format!("{e}")))?;
+    }
+
+    // Index every minted key into the per-version `webvh_keys` keyspace so
+    // `update_did_webvh` can resolve handles by hash without legacy-scan
+    // fallbacks. Pre-rotation handles MUST be installed here — the webvh
+    // signing-key check on the first update consults `previous.next_key_hashes`,
+    // and the secret behind those hashes lives only at the BIP-32 paths
+    // captured by these handles. Without this, an update-with-pre-rotation
+    // path can't find the right secret.
+    let genesis_version_id = result
+        .log_entry()
+        .get_version_id_fields()
+        .map(|(n, h)| format!("{n}-{h}"))
+        .map_err(|e| AppError::Internal(format!("read genesis version id: {e}")))?;
+
+    let signing_hash = Secret::base58_hash_string(&derived.signing_pub)
+        .map_err(|e| AppError::Internal(format!("hash genesis signing pubkey: {e}")))?;
+    let now_ts = Utc::now();
+    let signing_handle = webvh_keys::WebvhKeyHandle {
+        scid: scid.clone(),
+        version_id: genesis_version_id.clone(),
+        hash: signing_hash,
+        public_key: derived.signing_pub.clone(),
+        derivation_path: derived.signing_path.clone(),
+        seed_id: active_seed_id,
+        role: webvh_keys::WebvhKeyRole::UpdateKey,
+        label: derived.signing_label.clone(),
+        created_at: now_ts,
+    };
+    webvh_keys::install(keys_ks, &signing_handle)
+        .await
+        .map_err(|e| AppError::Internal(format!("install genesis update-key handle: {e}")))?;
+
+    for (i, (hash, pk)) in next_key_hashes
+        .iter()
+        .zip(pre_rotation_keys.iter())
+        .enumerate()
+    {
+        let handle = webvh_keys::WebvhKeyHandle {
+            scid: scid.clone(),
+            version_id: genesis_version_id.clone(),
+            hash: hash.clone(),
+            public_key: pk.public_key.clone(),
+            derivation_path: pk.path.clone(),
+            seed_id: Some(pre_rotation_seed_id),
+            role: webvh_keys::WebvhKeyRole::PreRotation,
+            label: format!("genesis pre-rotation #{i}"),
+            created_at: now_ts,
+        };
+        webvh_keys::install(keys_ks, &handle).await.map_err(|e| {
+            AppError::Internal(format!("install genesis pre-rotation handle #{i}: {e}"))
+        })?;
     }
 
     // Optionally set as primary DID
@@ -1079,6 +1139,26 @@ impl<'a> WebvhTransport<'a> {
             Self::DIDComm { bridge, server_did } => {
                 WebvhDIDCommClient::new(bridge, server_did)
                     .publish_did(mnemonic, log_content)
+                    .await
+            }
+        }
+    }
+
+    /// Atomic claim-and-publish — single round-trip alternative to
+    /// `request_uri` + `publish_did`. The server commits slot
+    /// allocation, log content, and owner index in one batch, so
+    /// resolvers never see the slot empty.
+    pub(super) async fn register_did_atomic(
+        &self,
+        path: &str,
+        did_log: &str,
+        force: bool,
+    ) -> Result<RequestUriResponse, AppError> {
+        match self {
+            Self::Rest(c) => c.register_did_atomic(path, did_log, force).await,
+            Self::DIDComm { bridge, server_did } => {
+                WebvhDIDCommClient::new(bridge, server_did)
+                    .register_did_atomic(path, did_log, force)
                     .await
             }
         }

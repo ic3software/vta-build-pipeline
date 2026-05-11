@@ -171,6 +171,44 @@ pub fn default_restart_policy() -> RestartPolicy {
     }
 }
 
+/// Best-effort assembly of a [`DIDCommServiceProver`] from the
+/// raw prerequisites that live on `AppState` / `VtaState`. Returns
+/// `None` when any required piece is missing — the caller falls
+/// back to [`super::handshake::AlwaysOkProver`] in that case.
+///
+/// Centralised here so REST and DIDComm transport handlers (and
+/// future surfaces) build the prover the same way without each
+/// site copying the secrets-resolver / vm-id plumbing.
+pub async fn try_build_from_parts(
+    bridge: &Arc<DIDCommBridge>,
+    vta_did: &str,
+    secrets_resolver: &Arc<affinidi_tdk::secrets_resolver::ThreadedSecretsResolver>,
+    signing_vm_id: &str,
+    ka_vm_id: &str,
+) -> Option<DIDCommServiceProver> {
+    use affinidi_tdk::secrets_resolver::SecretsResolver;
+
+    let service = bridge.try_get_service()?;
+
+    let mut secrets = Vec::with_capacity(2);
+    if let Some(s) = secrets_resolver.get_secret(signing_vm_id).await {
+        secrets.push(s);
+    }
+    if let Some(s) = secrets_resolver.get_secret(ka_vm_id).await {
+        secrets.push(s);
+    }
+    if secrets.is_empty() {
+        return None;
+    }
+
+    let builder = Arc::new(StaticListenerConfigBuilder::new(vta_did, secrets, None));
+    Some(DIDCommServiceProver::new(
+        service,
+        Arc::clone(bridge),
+        builder,
+    ))
+}
+
 /// Pre-baked listener-config builder that captures the VTA's DID,
 /// secrets, and TDK config at construction time. The route layer
 /// builds one of these per migrate request from the secrets it

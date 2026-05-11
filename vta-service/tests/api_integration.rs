@@ -8,170 +8,32 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, watch};
 use tower::ServiceExt;
 
 use vti_common::acl::Role;
 use vti_common::auth::jwt::JwtKeys;
 use vti_common::auth::session::{Session, SessionState, store_session};
-use vti_common::config::StoreConfig;
-use vti_common::store::Store;
 
-use vta_service::config::AppConfig;
-use vta_service::routes;
-use vta_service::server::AppState;
 use vta_service::store::KeyspaceHandle;
+use vta_service::test_support::{TestAppContext, build_test_app};
 
-// ── Test harness ───────────────────────────────────────────────────
+// ── Test harness — thin wrapper over the workspace's `test_support`
+// `build_test_app` helper. The substantial AppState wiring (every
+// keyspace, the JWT keys, the DID resolver, the registry, the drain
+// sweeper, etc.) was duplicated here pre-consolidation; it now lives
+// in `vta_service::test_support` so any future integration test gets
+// it for free with two lines of setup.
 
 struct TestApp {
     router: axum::Router,
 }
 
-/// Pin jsonwebtoken's default `CryptoProvider` to `rust_crypto` once
-/// per process. The workspace pins `jsonwebtoken = { features =
-/// ["rust_crypto"] }` for vta-service's normal build, but when this
-/// test is compiled as part of `cargo test --workspace`, Cargo
-/// unifies features across every workspace member — including
-/// `tests/e2e`, which transitively pulls in `aws_lc_rs`. With both
-/// providers compiled in, `jsonwebtoken`'s auto-select panics on
-/// first use because it can't pick a default. Install one explicitly
-/// to break the tie.
-fn init_jwt_provider() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
-    });
-}
-
 impl TestApp {
     async fn new() -> (Self, TestContext) {
-        init_jwt_provider();
-        let dir = tempfile::tempdir().expect("temp dir");
-        let store_config = StoreConfig {
-            data_dir: dir.path().to_path_buf(),
-        };
-        let store = Store::open(&store_config).expect("open store");
-
-        let keys_ks = store.keyspace("keys").unwrap();
-        let sessions_ks = store.keyspace("sessions").unwrap();
-        let acl_ks = store.keyspace("acl").unwrap();
-        let contexts_ks = store.keyspace("contexts").unwrap();
-        let audit_ks = store.keyspace("audit").unwrap();
-        let cache_ks = store.keyspace("cache").unwrap();
-        #[cfg(feature = "webvh")]
-        let webvh_ks = store.keyspace("webvh").unwrap();
-
-        let jwt_seed = [0x42u8; 32];
-        let jwt_keys = Arc::new(JwtKeys::from_ed25519_bytes(&jwt_seed, "VTA").expect("jwt keys"));
-
-        let seed_store: Arc<dyn vta_service::keys::seed_store::SeedStore> =
-            Arc::new(TestSeedStore(vec![0xABu8; 32]));
-
-        let mut config: AppConfig = toml::from_str(&format!(
-            r#"
-            vta_did = "did:key:z6MkTestVTA"
-            [store]
-            data_dir = "{}"
-            [auth]
-            jwt_signing_key = "{}"
-            "#,
-            dir.path().display(),
-            BASE64.encode(jwt_seed),
-        ))
-        .expect("parse config");
-        // Set config_path to a writable location so update_config can persist
-        config.config_path = dir.path().join("config.toml");
-
-        let (restart_tx, _rx) = watch::channel(false);
-
-        let imported_ks = store.keyspace("imported_secrets").unwrap();
-        let sealed_nonces_ks = store.keyspace("sealed_nonces").unwrap();
-        let did_templates_ks = store.keyspace("did_templates").unwrap();
-        #[cfg(feature = "webvh")]
-        let drains_ks = store.keyspace("drains").unwrap();
-        #[cfg(feature = "webvh")]
-        let snapshot_ks = store
-            .keyspace(vta_service::operations::protocol::snapshot::KEYSPACE_NAME)
-            .unwrap();
-        let telemetry: vti_common::telemetry::SharedTelemetrySink =
-            Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
-        #[cfg(feature = "webvh")]
-        let mediator_registry = Arc::new(
-            vta_service::messaging::registry::MediatorListenerRegistry::new(Arc::clone(&telemetry)),
-        );
-        #[cfg(feature = "webvh")]
-        let drain_sweeper = {
-            let (tx, _rx) = vta_service::messaging::drain_sweeper::teardown_channel(8);
-            Arc::new(vta_service::messaging::drain_sweeper::DrainSweeper::new(
-                Arc::clone(&mediator_registry),
-                drains_ks.clone(),
-                tx,
-            ))
-        };
-        let state = AppState {
-            keys_ks: keys_ks.clone(),
-            sessions_ks: sessions_ks.clone(),
-            acl_ks: acl_ks.clone(),
-            contexts_ks,
-            did_templates_ks,
-            audit_ks: audit_ks.clone(),
-            imported_ks,
-            cache_ks,
-            sealed_nonces_ks,
-            #[cfg(feature = "webvh")]
-            webvh_ks,
-            #[cfg(feature = "webvh")]
-            drains_ks,
-            #[cfg(feature = "webvh")]
-            snapshot_ks,
-            #[cfg(feature = "webvh")]
-            mediator_registry,
-            #[cfg(feature = "webvh")]
-            drain_sweeper,
-            telemetry,
-            wrapping_cache: vta_service::keys::wrapping::WrappingKeyCache::new(),
-            config: Arc::new(RwLock::new(config)),
-            seed_store,
-            did_resolver: {
-                use affinidi_did_resolver_cache_sdk::{
-                    DIDCacheClient, config::DIDCacheConfigBuilder,
-                };
-                DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
-                    .await
-                    .ok()
-            },
-            secrets_resolver: None,
-            #[cfg(feature = "didcomm")]
-            signing_vm_id: None,
-            #[cfg(feature = "didcomm")]
-            ka_vm_id: None,
-            #[cfg(feature = "didcomm")]
-            didcomm_bridge: Arc::new(vta_service::didcomm_bridge::DIDCommBridge::placeholder()),
-            jwt_keys: Some(jwt_keys.clone()),
-            atm: None,
-            tee: None,
-            restart_tx,
-            metrics_handle: None,
-        };
-
-        let router = routes::router()
-            .with_state(state.clone())
-            .merge(routes::health_router().with_state(state));
-
-        let ctx = TestContext {
-            jwt_keys,
-            sessions_ks,
-            acl_ks,
-            _dir: dir,
-        };
-
-        (Self { router }, ctx)
+        let (router, ctx) = build_test_app().await;
+        (Self { router }, TestContext { inner: ctx })
     }
 
     async fn request(&self, req: Request<Body>) -> (StatusCode, Value) {
@@ -190,11 +52,22 @@ impl TestApp {
 }
 
 struct TestContext {
-    jwt_keys: Arc<JwtKeys>,
-    sessions_ks: KeyspaceHandle,
+    inner: TestAppContext,
+}
+
+impl TestContext {
+    fn jwt_keys(&self) -> &Arc<JwtKeys> {
+        &self.inner.jwt_keys
+    }
+
+    fn sessions_ks(&self) -> &KeyspaceHandle {
+        &self.inner.sessions_ks
+    }
+
     #[allow(dead_code)]
-    acl_ks: KeyspaceHandle,
-    _dir: tempfile::TempDir,
+    fn acl_ks(&self) -> &KeyspaceHandle {
+        &self.inner.acl_ks
+    }
 }
 
 impl TestContext {
@@ -211,11 +84,11 @@ impl TestContext {
             refresh_expires_at: None,
             tee_attested: false,
         };
-        store_session(&self.sessions_ks, &session)
+        store_session(self.sessions_ks(), &session)
             .await
             .expect("store session");
 
-        let claims = self.jwt_keys.new_claims(
+        let claims = self.jwt_keys().new_claims(
             did.to_string(),
             session_id,
             role.to_string(),
@@ -223,7 +96,7 @@ impl TestContext {
             900,
             false,
         );
-        self.jwt_keys.encode(&claims).expect("encode jwt")
+        self.jwt_keys().encode(&claims).expect("encode jwt")
     }
 
     /// Mint a token signed with a different audience. Used to verify
@@ -265,36 +138,10 @@ impl TestContext {
             created_by: "test".to_string(),
             expires_at: None,
         };
-        self.acl_ks
+        self.acl_ks()
             .insert(format!("acl:{did}"), &entry)
             .await
             .expect("insert acl");
-    }
-}
-
-/// Minimal seed store for tests.
-struct TestSeedStore(Vec<u8>);
-
-impl vta_service::keys::seed_store::SeedStore for TestSeedStore {
-    fn get(
-        &self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Option<Vec<u8>>, vti_common::error::AppError>>
-                + Send
-                + '_,
-        >,
-    > {
-        let seed = self.0.clone();
-        Box::pin(async move { Ok(Some(seed)) })
-    }
-    fn set(
-        &self,
-        _seed: &[u8],
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), vti_common::error::AppError>> + Send + '_>,
-    > {
-        Box::pin(async { Ok(()) })
     }
 }
 
@@ -433,7 +280,7 @@ async fn invalid_token_returns_401() {
 async fn expired_session_returns_401() {
     let (app, ctx) = TestApp::new().await;
     // Create a token with a valid JWT but no session in the store
-    let claims = ctx.jwt_keys.new_claims(
+    let claims = ctx.jwt_keys().new_claims(
         "did:key:z6MkGhost".into(),
         "nonexistent-session".into(),
         "admin".into(),
@@ -441,7 +288,7 @@ async fn expired_session_returns_401() {
         900,
         false,
     );
-    let token = ctx.jwt_keys.encode(&claims).unwrap();
+    let token = ctx.jwt_keys().encode(&claims).unwrap();
     let (status, _) = app.request(get_auth("/config", &token)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
@@ -3093,4 +2940,81 @@ async fn unknown_audience_token_rejected_by_vta_route() {
         ctx.auth_token_with_audience("did:key:z6MkAdmin", "admin", vec![], "EVIL-SERVICE-V99");
     let (status, _body) = app.request(get_auth("/contexts", &foreign_token)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ── Runtime guards (rate limit + body cap) ─────────────────────────────
+//
+// Both flagged in CLAUDE.md as load-bearing protections we must never
+// silently regress on. One test per bound — burst-then-throttled for the
+// per-IP rate limiter, then >1 MB body returns 413 for the global cap.
+
+/// `tower_governor` is wired at 5 req/sec with a 10-burst per source IP
+/// across every unauthenticated endpoint. Send 12 requests in a tight
+/// loop and assert at least one comes back as 429 — confirming the
+/// layer is wired into the router. Without this test, a future router
+/// refactor that drops the `GovernorLayer` would silently land.
+#[tokio::test]
+async fn unauth_endpoint_rate_limit_returns_429_after_burst() {
+    let (app, _ctx) = TestApp::new().await;
+
+    // `/auth/challenge` is the canonical unauth route the limiter
+    // protects (CLAUDE.md flags this as a load-bearing surface). Send
+    // requests serially — the limiter is per-IP, so even concurrent
+    // calls would all hash to the same bucket; serial is simpler.
+    // `tower::oneshot` doesn't carry a real peer IP; the `SmartIpKey`
+    // extractor reads `X-Forwarded-For` / `X-Real-IP` first, then
+    // falls back to the connection. Stamp a stable client IP via
+    // `X-Forwarded-For` so every request hashes to the same bucket.
+    let mut saw_429 = false;
+    for _ in 0..20 {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/challenge")
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", "192.0.2.1")
+            .body(Body::from(
+                json!({"client_did": "did:key:zTest"}).to_string(),
+            ))
+            .unwrap();
+        let (status, _) = app.request(req).await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(
+        saw_429,
+        "expected at least one 429 within 20 sequential POST /auth/challenge calls; \
+         the GovernorLayer (5 rps + 10 burst) appears to be missing"
+    );
+}
+
+/// `MAX_BODY_SIZE` (1 MB) is enforced via axum's `DefaultBodyLimit::max`
+/// across every authenticated mutation endpoint. A 1.5 MB body must
+/// be rejected with 413 — this is the protection against memory
+/// exhaustion CLAUDE.md flags as critical for TEE deployments.
+#[tokio::test]
+async fn body_cap_returns_413_for_oversized_payload() {
+    let (app, ctx) = TestApp::new().await;
+    let token = ctx.auth_token("did:key:zAdmin", "admin", vec![]).await;
+
+    // 1.5 MB of 'A' bytes wrapped in a JSON-string envelope so the
+    // axum body extractor accepts it as a candidate (rejection happens
+    // at the body-limit layer, not at the parser). The total wire
+    // body is ~1.5 MB + a few bytes of JSON framing.
+    let huge_payload = json!({"data": "A".repeat(1_500_000)});
+    let req = Request::builder()
+        .method("POST")
+        .uri("/contexts")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(huge_payload.to_string()))
+        .unwrap();
+    let (status, _) = app.request(req).await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "expected 413 Payload Too Large for a 1.5 MB body; the \
+         DefaultBodyLimit::max(1 MB) layer appears to be missing"
+    );
 }

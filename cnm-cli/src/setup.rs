@@ -216,7 +216,7 @@ pub async fn run_setup_wizard() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!();
             eprintln!("Share this DID with the community administrator.");
             eprintln!("They will run:");
-            eprintln!("  vta import-did --did {admin_did}");
+            eprintln!("  vta import-did --did {admin_did} --role admin");
             eprintln!();
             eprintln!("Once access is granted, cnm will authenticate automatically.");
             eprintln!();
@@ -357,7 +357,7 @@ pub async fn bootstrap_community_session(
     eprintln!("\x1b[1;32mBootstrapped community session with new DID:\x1b[0m {admin_did}");
     eprintln!();
     eprintln!("This is a NEW DID. You must grant it access on the community VTA:");
-    eprintln!("  vta import-did --did {admin_did}");
+    eprintln!("  vta import-did --did {admin_did} --role admin");
     eprintln!();
 
     Ok(())

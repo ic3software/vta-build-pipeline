@@ -61,6 +61,14 @@ pub struct TestStore {
     pub imported_ks: KeyspaceHandle,
     pub webvh_ks: KeyspaceHandle,
     pub sealed_nonces_ks: KeyspaceHandle,
+    /// Persisted drain set for the runtime service-management
+    /// surface. Required by `disable_didcomm` / `update_didcomm` /
+    /// rollback ops.
+    pub drains_ks: KeyspaceHandle,
+    /// Per-kind previous-config snapshot store for fail-forward
+    /// rollback (spec §3.5a). Required by every forward op + the
+    /// rollback dispatchers.
+    pub snapshot_ks: KeyspaceHandle,
     pub data_dir: PathBuf,
 }
 
@@ -81,6 +89,10 @@ pub async fn open_test_store() -> TestStore {
         imported_ks: store.keyspace("imported").expect("imported ks"),
         webvh_ks: store.keyspace("webvh").expect("webvh ks"),
         sealed_nonces_ks: store.keyspace("sealed_nonces").expect("nonces ks"),
+        drains_ks: store.keyspace("drains").expect("drains ks"),
+        snapshot_ks: store
+            .keyspace(crate::operations::protocol::snapshot::KEYSPACE_NAME)
+            .expect("snapshot ks"),
         _dir: dir,
         _store: store,
         data_dir,
@@ -326,4 +338,214 @@ pub async fn bootstrap_test_vta(ts: &TestStore) -> (String, ProvisionIntegration
         didcomm_bridge: Arc::new(DIDCommBridge::placeholder()),
     };
     (vta_did, deps)
+}
+
+// ---------------------------------------------------------------------------
+// HTTP test scaffolding — shared by `tests/api_integration.rs` and any future
+// route-level test crate. The `TestApp` type returned here owns the axum
+// `Router` so the caller can `.oneshot(req)` against it directly.
+//
+// Pre-consolidation, every integration-test file built its own ~140 LoC
+// `TestApp::new()` from scratch. That duplication scaled poorly and made
+// the rate-limit / body-cap regression tests impractical to write. The
+// helpers below collapse the common substrate to ~10 LoC at the call
+// site.
+// ---------------------------------------------------------------------------
+
+/// Pin jsonwebtoken's default `CryptoProvider` to `aws_lc` once per
+/// process. The workspace compiles `jsonwebtoken` with only the
+/// `aws_lc_rs` backend (the `rust_crypto` bundle pulls in `rsa`,
+/// exposed to RUSTSEC-2023-0071). When `cargo test --workspace`
+/// unifies features and a sibling crate brings in a second provider,
+/// `jsonwebtoken`'s auto-select panics; installing one explicitly
+/// here avoids that. Idempotent — safe to call from every test file.
+pub fn init_jwt_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
+    });
+}
+
+/// In-memory seed store for tests that need a stable seed without touching
+/// the filesystem-backed `PlaintextSeedStore`. The bytes are the seed; the
+/// caller chooses the value.
+pub struct TestSeedStore(pub Vec<u8>);
+
+impl crate::keys::seed_store::SeedStore for TestSeedStore {
+    fn get(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<Vec<u8>>, crate::error::AppError>>
+                + Send
+                + '_,
+        >,
+    > {
+        let v = self.0.clone();
+        Box::pin(async move { Ok(Some(v)) })
+    }
+    fn set(
+        &self,
+        _seed: &[u8],
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), crate::error::AppError>> + Send + '_>,
+    > {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Bag of cloned references the integration test needs to mutate state
+/// that the router otherwise owns (insert sessions / ACL rows / etc.).
+/// Returned alongside [`build_test_app`] so tests don't have to re-open
+/// the store to find these.
+pub struct TestAppContext {
+    pub jwt_keys: Arc<vti_common::auth::jwt::JwtKeys>,
+    pub sessions_ks: KeyspaceHandle,
+    pub acl_ks: KeyspaceHandle,
+    pub keys_ks: KeyspaceHandle,
+    pub config: Arc<RwLock<AppConfig>>,
+    /// Owns the on-disk fjall data dir. When this drops, files are
+    /// removed; the caller MUST keep it alive for the duration of the
+    /// test (`TestAppContext` is normally bound to a `let _ctx = …`).
+    pub _dir: tempfile::TempDir,
+}
+
+/// Spin up an in-memory router suitable for `tower::ServiceExt::oneshot`
+/// HTTP testing. Uses [`TestSeedStore`] so no filesystem seed I/O,
+/// `aws_lc` JWT provider via [`init_jwt_provider`], and the full
+/// `routes::router()` + `routes::health_router()` merged together.
+///
+/// `vta_did` is `did:key:z6MkTestVTA` — a sentinel that resolves
+/// nowhere but satisfies the routes that just compare it as a string.
+/// `vta_name` and `public_url` are set so the JWT audience / DID
+/// document construction don't take their None branches in tests.
+pub async fn build_test_app() -> (axum::Router, TestAppContext) {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
+    use tokio::sync::watch;
+
+    init_jwt_provider();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store_config = StoreConfig {
+        data_dir: dir.path().to_path_buf(),
+    };
+    let store = Store::open(&store_config).expect("open store");
+
+    let keys_ks = store.keyspace("keys").unwrap();
+    let sessions_ks = store.keyspace("sessions").unwrap();
+    let acl_ks = store.keyspace("acl").unwrap();
+    let contexts_ks = store.keyspace("contexts").unwrap();
+    let audit_ks = store.keyspace("audit").unwrap();
+    let cache_ks = store.keyspace("cache").unwrap();
+    let imported_ks = store.keyspace("imported_secrets").unwrap();
+    let sealed_nonces_ks = store.keyspace("sealed_nonces").unwrap();
+    let did_templates_ks = store.keyspace("did_templates").unwrap();
+    #[cfg(feature = "webvh")]
+    let webvh_ks = store.keyspace("webvh").unwrap();
+    #[cfg(feature = "webvh")]
+    let drains_ks = store.keyspace("drains").unwrap();
+    #[cfg(feature = "webvh")]
+    let snapshot_ks = store
+        .keyspace(crate::operations::protocol::snapshot::KEYSPACE_NAME)
+        .unwrap();
+
+    let jwt_seed = [0x42u8; 32];
+    let jwt_keys = Arc::new(
+        vti_common::auth::jwt::JwtKeys::from_ed25519_bytes(&jwt_seed, "VTA").expect("jwt keys"),
+    );
+
+    let seed_store: Arc<dyn crate::keys::seed_store::SeedStore> =
+        Arc::new(TestSeedStore(vec![0xABu8; 32]));
+
+    let mut config: AppConfig = toml::from_str(&format!(
+        r#"
+        vta_did = "did:key:z6MkTestVTA"
+        [store]
+        data_dir = "{}"
+        [auth]
+        jwt_signing_key = "{}"
+        "#,
+        dir.path().display(),
+        BASE64.encode(jwt_seed),
+    ))
+    .expect("parse config");
+    config.config_path = dir.path().join("config.toml");
+
+    let (restart_tx, _rx) = watch::channel(false);
+
+    let telemetry: vti_common::telemetry::SharedTelemetrySink =
+        Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
+    #[cfg(feature = "webvh")]
+    let mediator_registry = Arc::new(crate::messaging::registry::MediatorListenerRegistry::new(
+        Arc::clone(&telemetry),
+    ));
+    #[cfg(feature = "webvh")]
+    let drain_sweeper = {
+        let (tx, _rx) = crate::messaging::drain_sweeper::teardown_channel(8);
+        Arc::new(crate::messaging::drain_sweeper::DrainSweeper::new(
+            Arc::clone(&mediator_registry),
+            drains_ks.clone(),
+            tx,
+        ))
+    };
+
+    let config = Arc::new(RwLock::new(config));
+
+    let state = crate::server::AppState {
+        keys_ks: keys_ks.clone(),
+        sessions_ks: sessions_ks.clone(),
+        acl_ks: acl_ks.clone(),
+        contexts_ks,
+        did_templates_ks,
+        audit_ks,
+        imported_ks,
+        cache_ks,
+        sealed_nonces_ks,
+        #[cfg(feature = "webvh")]
+        webvh_ks,
+        #[cfg(feature = "webvh")]
+        drains_ks,
+        #[cfg(feature = "webvh")]
+        snapshot_ks,
+        #[cfg(feature = "webvh")]
+        mediator_registry,
+        #[cfg(feature = "webvh")]
+        drain_sweeper,
+        telemetry,
+        wrapping_cache: crate::keys::wrapping::WrappingKeyCache::new(),
+        config: config.clone(),
+        seed_store,
+        did_resolver: DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
+            .await
+            .ok(),
+        secrets_resolver: None,
+        #[cfg(feature = "didcomm")]
+        signing_vm_id: None,
+        #[cfg(feature = "didcomm")]
+        ka_vm_id: None,
+        #[cfg(feature = "didcomm")]
+        didcomm_bridge: Arc::new(DIDCommBridge::placeholder()),
+        jwt_keys: Some(jwt_keys.clone()),
+        atm: None,
+        tee: None,
+        restart_tx,
+        metrics_handle: None,
+    };
+
+    let router = crate::routes::router()
+        .with_state(state.clone())
+        .merge(crate::routes::health_router().with_state(state));
+
+    let ctx = TestAppContext {
+        jwt_keys,
+        sessions_ks,
+        acl_ks,
+        keys_ks,
+        config,
+        _dir: dir,
+    };
+
+    (router, ctx)
 }

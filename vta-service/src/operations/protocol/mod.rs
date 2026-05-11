@@ -1,11 +1,10 @@
-//! DIDComm protocol management operations.
+//! Runtime service-management operations.
 //!
-//! Spec: `docs/05-design-notes/didcomm-protocol-management.md`.
+//! Spec: `docs/05-design-notes/runtime-service-management.md`.
 //!
-//! This module orchestrates the post-setup state changes the spec
-//! requires (enable, disable, migrate, drain-cancel, report). Phase 1
-//! lands only the foundations; the operations themselves arrive in
-//! later phases.
+//! Orchestrates the post-setup state changes for both REST and
+//! DIDComm transports (enable / update / disable / rollback / list)
+//! plus the DIDComm-only drain set (cancel / list / report).
 
 pub mod disable_didcomm;
 pub mod disable_rest;
@@ -16,6 +15,7 @@ pub mod enable_rest;
 pub mod invariant;
 pub mod list;
 pub mod list_drain;
+pub mod preconditions;
 pub mod report;
 pub mod rollback_didcomm;
 pub mod rollback_rest;
@@ -23,15 +23,76 @@ pub mod snapshot;
 pub mod update_didcomm;
 pub mod update_rest;
 
-/// Process-wide lock serializing every protocol-state mutation
-/// (enable / disable / migrate / drain-cancel). Modeled on
-/// `MODE_B_LOCK` in `routes/bootstrap.rs`. Held across the entire
+/// Process-wide lock serializing every service-management mutation
+/// (enable / update / disable / rollback / drain-cancel). Modeled
+/// on `MODE_B_LOCK` in `routes/bootstrap.rs`. Held across the entire
 /// op (handshake → publish → registry update), not per-step.
 ///
-/// Read paths (`services list`, `mediator report`) do not need the
+/// Read paths (`services list`, `services report`) do not need the
 /// lock and intentionally do not take it. Mutation paths take it
 /// unconditionally.
 pub static PROTOCOL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Drain-TTL bounds violation, returned by [`validate_drain_ttl`].
+/// All values are seconds. Each per-op error type wraps this into
+/// its own variant so the route layer can map to the typed
+/// `VtaError::DrainTtlOutOfBounds` wire shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainTtlBoundsError {
+    pub min: u64,
+    pub max: u64,
+    pub requested: u64,
+}
+
+impl std::fmt::Display for DrainTtlBoundsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "drain ttl {}s outside allowed range [{}s, {}s]",
+            self.requested, self.min, self.max
+        )
+    }
+}
+
+impl std::error::Error for DrainTtlBoundsError {}
+
+/// Validate a drain TTL against the [§3.6 bounds].
+///
+/// Lower bound depends on the transport the command was delivered
+/// over: 1h floor for DIDComm (so the listener that's *carrying* the
+/// disable command isn't torn down before the response lands), 0s
+/// for REST. Upper bound is the workspace-wide
+/// [`crate::messaging::registry::MAX_DRAIN_TTL`] (30 days).
+///
+/// Centralised here so all three op layers — `disable_didcomm`,
+/// `update_didcomm`, `rollback_didcomm` — enforce the same bounds.
+/// Mirrors the spec §7a.4 "drain-ttl 31d" / "drain-ttl 30s over
+/// DIDComm" matrix cells.
+pub fn validate_drain_ttl(
+    transport: crate::operations::protocol::disable_didcomm::DisableTransport,
+    ttl: std::time::Duration,
+) -> Result<(), DrainTtlBoundsError> {
+    use crate::messaging::registry::MAX_DRAIN_TTL;
+    use crate::operations::protocol::disable_didcomm::{
+        DisableTransport, MIN_DRAIN_TTL_OVER_DIDCOMM,
+    };
+
+    let min: u64 = match transport {
+        DisableTransport::Didcomm => MIN_DRAIN_TTL_OVER_DIDCOMM.as_secs(),
+        DisableTransport::Rest => 0,
+    };
+    let max: u64 = MAX_DRAIN_TTL.num_seconds() as u64;
+    let requested = ttl.as_secs();
+
+    if requested < min || requested > max {
+        return Err(DrainTtlBoundsError {
+            min,
+            max,
+            requested,
+        });
+    }
+    Ok(())
+}
 
 /// Whether a forward operation was invoked directly by the
 /// operator or as the fail-forward dispatch from a rollback.

@@ -188,6 +188,7 @@ pub(crate) async fn run_rest_attempt_full_setup(
         context: ask.context.clone(),
         assertion: None,
         vc_validity_seconds: None,
+        create_context: false,
     };
     let response = match client.provision_integration(req).await {
         Ok(r) => r,
@@ -332,6 +333,7 @@ pub(crate) async fn run_rest_attempt_admin_rotated(
         context: ask.context.clone(),
         assertion: None,
         vc_validity_seconds: None,
+        create_context: false,
     };
     let response = match client.provision_integration(req).await {
         Ok(r) => r,

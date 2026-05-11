@@ -225,6 +225,65 @@ pub fn print_cli_error(err: &(dyn std::error::Error + 'static)) {
             VtaError::Protocol(msg) => {
                 eprintln!("{RED}\u{2717}{RESET} Protocol error: {msg}");
             }
+            // ── Runtime service-management variants (T0.2) ────────
+            VtaError::LastServiceRefused => {
+                let bin = bin_name();
+                eprintln!(
+                    "{RED}\u{2717}{RESET} Refused: would leave the VTA with no advertised services."
+                );
+                eprintln!(
+                    "  {DIM}At least one transport (REST or DIDComm) must remain advertised. \
+                     Enable the other transport first via `{bin} services <kind> enable …`, \
+                     then retry.{RESET}"
+                );
+            }
+            VtaError::ServiceNotPresent => {
+                let bin = bin_name();
+                eprintln!("{RED}\u{2717}{RESET} Service is not present.");
+                eprintln!(
+                    "  {DIM}The service kind isn't currently enabled. Use `{bin} services \
+                     <kind> enable …` to bring it online before updating, disabling, or rolling \
+                     it back.{RESET}"
+                );
+            }
+            VtaError::ServiceAlreadyEnabled => {
+                let bin = bin_name();
+                eprintln!("{RED}\u{2717}{RESET} Service is already enabled.");
+                eprintln!(
+                    "  {DIM}Use `{bin} services <kind> update …` to change its configuration, \
+                     or `{bin} services <kind> disable` to remove it.{RESET}"
+                );
+            }
+            VtaError::MediatorHandshakeFailed { reason } => {
+                eprintln!("{RED}\u{2717}{RESET} Mediator handshake failed: {reason}");
+                eprintln!(
+                    "  {DIM}Confirm the mediator DID is correct and the mediator is reachable. \
+                     The reason above is the specific cause from the handshake protocol.{RESET}"
+                );
+            }
+            VtaError::DrainTtlOutOfBounds {
+                min,
+                max,
+                requested,
+            } => {
+                eprintln!(
+                    "{RED}\u{2717}{RESET} Drain TTL {requested}s is outside the allowed range \
+                     [{min}s, {max}s]."
+                );
+                eprintln!(
+                    "  {DIM}Pick a value within those bounds. The minimum applies when the \
+                     command is delivered over DIDComm transport (so the listener stays up long \
+                     enough for the response).{RESET}"
+                );
+            }
+            VtaError::NoPriorMutation => {
+                let bin = bin_name();
+                eprintln!("{RED}\u{2717}{RESET} No prior mutation to roll back.");
+                eprintln!(
+                    "  {DIM}Use `{bin} services <kind> {{enable,update,disable}} …` directly \
+                     instead of rollback.{RESET}"
+                );
+            }
             other => eprintln!("{RED}\u{2717}{RESET} Error: {other}"),
         }
         return;

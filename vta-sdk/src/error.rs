@@ -181,6 +181,7 @@ impl VtaError {
             c::CONFLICT => Self::Conflict(comment),
             c::NOT_FOUND => Self::NotFound(comment),
             c::UNAUTHORIZED => Self::Auth(comment),
+            c::FORBIDDEN => Self::Forbidden(comment),
             c::BAD_REQUEST => Self::Validation(comment),
             c::INTERNAL => Self::Server {
                 status: 500,
