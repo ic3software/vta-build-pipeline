@@ -62,6 +62,11 @@ hex = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile = "3"
 base64 = { workspace = true }
+# Drives Router::oneshot in the trust_task router tests. Same pattern
+# vtc-service / vta-service use for integration tests.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+bytes = "1"
 
 [lints]
 workspace = true

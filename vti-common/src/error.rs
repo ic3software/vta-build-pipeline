@@ -44,6 +44,29 @@ pub enum AppError {
     #[error("validation error: {0}")]
     Validation(String),
 
+    /// The request did not carry a required `Trust-Task` header. Routes
+    /// registered via [`crate::trust_task::TrustTaskRouter::route_with_task`]
+    /// reject missing headers with this variant (400). Only `/health` is
+    /// allowed to omit it.
+    #[error("request is missing required Trust-Task header")]
+    TrustTaskMissing,
+
+    /// The request's `Trust-Task` header did not match the handler's
+    /// registered task. Returned as 415 per spec §16.2; the response body
+    /// carries the expected + received task URLs so clients can diagnose
+    /// without re-reading the route table.
+    #[error("Trust-Task header does not match handler (expected {expected})")]
+    TrustTaskMismatch {
+        expected: String,
+        received: Option<String>,
+    },
+
+    /// The supplied Trust-Task value was not a well-formed identifier
+    /// (empty, non-`https://`, or contained header-injection control
+    /// characters). Returned as 400.
+    #[error("malformed Trust-Task identifier: {0}")]
+    TrustTaskMalformed(String),
+
     /// Catch-all for service-specific errors (e.g., KeyDerivation, BadGateway, TeeAttestation).
     /// Services create helper functions to construct these with appropriate status codes.
     #[error("{message}")]
@@ -88,6 +111,9 @@ impl IntoResponse for AppError {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
+            AppError::TrustTaskMissing => StatusCode::BAD_REQUEST,
+            AppError::TrustTaskMismatch { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            AppError::TrustTaskMalformed(_) => StatusCode::BAD_REQUEST,
             AppError::ServiceError { status, .. } => *status,
             AppError::Vsock { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -98,7 +124,28 @@ impl IntoResponse for AppError {
             debug!(status = %status.as_u16(), error = %self, "client error");
         }
 
-        let body = serde_json::json!({ "error": self.to_string() });
+        // Trust-Task variants get structured payloads so clients can
+        // diagnose without re-reading the route table. Every other
+        // variant retains the existing `{ "error": "<display>" }` shape
+        // for backwards-compat with the workspace's existing consumers.
+        let body = match &self {
+            AppError::TrustTaskMissing => serde_json::json!({
+                "error": "TrustTaskMissing",
+                "message": self.to_string(),
+            }),
+            AppError::TrustTaskMismatch { expected, received } => serde_json::json!({
+                "error": "TrustTaskMismatch",
+                "message": self.to_string(),
+                "expected": expected,
+                "received": received,
+            }),
+            AppError::TrustTaskMalformed(value) => serde_json::json!({
+                "error": "TrustTaskMalformed",
+                "message": self.to_string(),
+                "received": value,
+            }),
+            _ => serde_json::json!({ "error": self.to_string() }),
+        };
         (status, axum::Json(body)).into_response()
     }
 }
