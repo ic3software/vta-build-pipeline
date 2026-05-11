@@ -163,47 +163,73 @@ Every PR must be DCO-signed (`git commit -s`) and pass
   - `vti-common/src/audit/envelope.rs`
 - **Deps**: M0.1.2
 
-### `[ ]` M0.1.6 — Reusable passkey infrastructure in `vti-common`
+### M0.1.6 — Reusable passkey infrastructure in `vti-common`
 
 Per **D11** + the `webvh-common::server::passkey` reference (see
-`plan.md` Reference implementations). This is foundational: M0.5
-consumes it, and a future VTA admin-passkey surface can too.
+`plan.md` Reference implementations). Split into two PRs during
+implementation: scaffold + storage lands first, route handlers
+follow once consumers (M0.5) need them.
+
+#### `[x]` M0.1.6a — Scaffold + types + storage
 
 - **Acceptance**
-  - New module `vti-common::auth::passkey` (feature-gated `passkey`)
-  - `PasskeyState` trait (extends existing `AuthState`):
-    `webauthn() -> Option<&Arc<Webauthn>>`, `acl_ks() -> &KeyspaceHandle`,
-    `access_token_expiry()`, `refresh_token_expiry()`,
-    `public_url() -> Option<&str>`, `enrollment_ttl()`
-  - `build_webauthn(public_url: &str) -> Result<Webauthn, AppError>`
-    — single-source RP ID derivation per **D7**
-  - Storage types: `Enrollment` (with manual redacted `Debug` per
-    **D13**), `PasskeyUser`, `CredentialMapping`
-  - Storage helpers: `store_enrollment`, `get_enrollment`,
-    `take_enrollment`, `store_passkey_user`, `get_passkey_user_by_did`,
-    `get_passkey_user_by_credential`
-  - `ENROLLMENT_CLAIM_WINDOW_SECS = 300` constant (claim-window
-    pattern per **D12**)
-  - Route handlers `enroll_start`, `enroll_finish`, `login_start`,
-    `login_finish` generic over `S: PasskeyState` — these are the
-    Phase-0 building blocks; M0.5 wires them into VTC-specific
-    install routes
-  - **No** VTC-specific install logic here — that goes in
-    `vtc-service::install` in M0.5
+  - `webauthn-rs` added to workspace dependencies.
+  - New feature `passkey` on `vti-common` gating the module.
+  - New module `vti-common::auth::passkey` containing:
+    - `PasskeyState` trait extending `AuthState`.
+    - `build_webauthn(public_url: &str) -> Result<Webauthn, AppError>`
+      with single-source RP-ID derivation per **D7**.
+    - `ENROLLMENT_CLAIM_WINDOW_SECS = 300` constant per **D12**.
+  - Sub-module `store` containing:
+    - Types: `Enrollment` (with manual redacted `Debug` per **D13**),
+      `PasskeyUser`, `CredentialMapping`.
+    - Module-local `take` / `take_raw` helpers (sequenced
+      `get` + `remove`; the atomicity gap is documented and
+      acceptable for in-process use).
+    - Storage helpers covering enrolments, registration state,
+      authentication state, registration → user mapping,
+      registration → enrolment mapping, passkey users, credential
+      mappings.
+  - 10 unit tests cover `build_webauthn` (happy + invalid URL +
+    no-domain), `Enrollment` `Debug` redaction, every storage
+    round-trip plus the `take` consumption semantics.
 - **Verify**
-  - Unit tests for `build_webauthn` (valid URL, no domain, malformed)
-  - Unit tests for `Enrollment` round-trip + `Debug` redaction
-  - End-to-end round-trip test via a stub `PasskeyState` impl in
-    `tests/` (creates an enrollment, runs ceremony via a test
-    authenticator, asserts ACL entry created)
+  - `cargo test --package vti-common --features passkey passkey::`
+    runs all 10 new tests green.
+  - `cargo clippy --package vti-common --features passkey -- -D warnings`
+    clean.
+  - `cargo build --workspace` clean (default features unaffected).
 - **Files**
+  - `Cargo.toml` (workspace `webauthn-rs` dep)
+  - `vti-common/Cargo.toml` (passkey feature + per-feature deps)
+  - `vti-common/src/auth/mod.rs` (gate the new module)
   - `vti-common/src/auth/passkey/mod.rs` (new)
   - `vti-common/src/auth/passkey/store.rs` (new)
+- **Deps**: none (replaces M0.1.0's "add webauthn-rs to workspace +
+  scaffold vtc-service import" — the dep is added here and `vtc-service`
+  will consume `vti-common::auth::passkey` rather than depending on
+  `webauthn-rs` directly).
+
+#### `[ ]` M0.1.6b — Route handlers
+
+- **Acceptance**
+  - `enroll_start`, `enroll_finish`, `login_start`, `login_finish`
+    route handlers generic over `S: PasskeyState`, in a new
+    `vti-common::auth::passkey::routes` module.
+  - Helper `require_webauthn`, `require_jwt_keys`, `token_prefix`.
+  - Uses the existing `vti-common::auth::session::create_authenticated_session`
+    + `vti-common::acl::check_acl` for post-ceremony session minting
+    (so the handler returns a `TokenResponse` ready for the service
+    to forward).
+  - Round-trip integration test using `webauthn-rs`'s deterministic
+    test authenticator harness — exercises `enroll_start` →
+    ceremony → `enroll_finish` end-to-end through a stub
+    `PasskeyState` impl.
+- **Files**
   - `vti-common/src/auth/passkey/routes.rs` (new)
-  - `vti-common/Cargo.toml` (add `webauthn-rs` behind `passkey` feature)
-  - `vti-common/src/lib.rs`
-- **Deps**: M0.1.2 (audit), M0.1.0 (workspace dep). Independent of
-  M0.1.1, M0.1.3, M0.1.4.
+  - `vti-common/src/auth/passkey/mod.rs` (re-export)
+- **Deps**: M0.1.6a + access to the existing session/ACL helpers
+  (already in vti-common).
 
 ### Checkpoint A — Hygiene foundation green
 After M0.1.0–M0.1.5: `cargo test --package vti-common` clean. No

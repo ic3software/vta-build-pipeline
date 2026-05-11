@@ -19,6 +19,12 @@ vsock-store = ["dep:tokio-vsock", "dep:libc"]
 # for the local/dev `vta` binary's CLI, where the trust boundary is the
 # OS process (not the network). NEVER enable in enclave builds.
 cli-synthesis = []
+# Shared WebAuthn / passkey infrastructure (types + storage). Services
+# (VTA, VTC) implement the `auth::passkey::PasskeyState` trait on their
+# `AppState` and gain reusable enrolment + login storage primitives. The
+# concrete route handlers ship in a follow-up so this feature stays
+# storage-only for now.
+passkey = ["dep:webauthn-rs", "dep:url", "dep:uuid", "dep:hex", "dep:rand"]
 
 [dependencies]
 async-trait = "0.1"
@@ -46,6 +52,12 @@ rand = { workspace = true, optional = true }
 # Vsock storage proxy client (feature-gated, Linux only)
 tokio-vsock = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
+
+# Passkey feature deps (`rand` already declared above for `encryption`)
+webauthn-rs = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
