@@ -81,6 +81,7 @@ ADR if circumstances change.
 | **Extensibility model = Rego + opaque JSON blobs** | Communities customize *behavior* via policies and *data* via `extensions: JsonValue` slots. No plugin loader, no WASM hooks, no custom REST modules. |
 | **Hygiene baked in from day one** | Versioned audit events, idempotency keys, `/v1/` URL prefix, cursor pagination on lists, multi-passkey-per-admin. These are load-bearing retrofits, not features. |
 | **VTC never targets TEE deployment** | Only the VTA runs in Nitro Enclave / TEE. The VTC stays a regular service. This is a *permanent* non-goal, not a deferral — public website serves from local filesystem, no vsock parity is required, and the storage abstraction can stay simple. If TEE-grade trust is needed for a community, the trust anchor remains the VTA. |
+| **Every wire operation is a registered Trust Task** | REST endpoints and DIDComm messages are bound to a versioned Trust Task identifier hosted on [trusttasks.org](https://trusttasks.org). A Trust Task is the formal definition of an operation — what's being requested, what inputs/credentials are required, what outputs are produced, and what trust assumptions the verifier makes. This is opt-in discipline applied **from day one** so the wire surface is self-describing; soft-gated for MVP (Draft IDs stable; Published status targets v1.0). See §16. |
 
 ## 4. Bootstrap and setup
 
@@ -1415,7 +1416,245 @@ the running process.
 CLI commands are thin wrappers over `vta-sdk` REST/DIDComm clients
 (workspace doctrine: CLI logic in `vta-cli-common`).
 
-## 16. Phasing / milestones
+## 16. Trust Tasks
+
+Every wire operation in the VTC — REST or DIDComm — is a registered
+Trust Task. A Trust Task is the formal, versioned definition of a
+task being requested. It combines:
+
+* **Operation semantics** — what the task does, and what success means.
+* **Inputs** — the credentials, claims, attestations, and parameters
+  the caller must present.
+* **Outputs** — the artefacts (records, credentials, audit events)
+  the task produces.
+* **Trust assumptions** — what the producer relies on about the
+  caller, the inputs, and the surrounding system.
+
+Trust Tasks are identified by a stable URL on
+[trusttasks.org](https://trusttasks.org) and referenced on the wire
+from day one. This is opt-in discipline applied **before MVP code
+ships**, not retrofitted later.
+
+### 16.1 Identifier scheme
+
+```
+https://trusttasks.org/{org}/{domain}/{path}/{major}.{minor}
+```
+
+For this workspace: `org = openvtc`, `domain = vtc`. Example:
+
+```
+https://trusttasks.org/openvtc/vtc/join/request/submit/1.0
+```
+
+Versioning:
+
+* Minor bumps are additive (new optional inputs, new response
+  fields). Backwards compatible.
+* Major bumps are breaking — a new registry entry, the old one stays
+  resolvable as Deprecated.
+
+### 16.2 Wire binding
+
+#### REST
+
+Every request carries a `Trust-Task` header naming the task it
+intends to invoke:
+
+```
+POST /v1/join-requests HTTP/1.1
+Host: vtc.example.com
+Trust-Task: https://trusttasks.org/openvtc/vtc/join/request/submit/1.0
+Idempotency-Key: 8a9c…
+Content-Type: application/json
+
+{ "applicant_did": "...", "vp": { ... } }
+```
+
+VTC checks the header matches the endpoint's registered task. A
+mismatch returns 415 `TrustTaskMismatch` with a structured payload
+identifying the expected task. Missing header on a registered
+endpoint returns 400 `TrustTaskMissing`. The header is not validated
+against trusttasks.org at request time — the URL is treated as an
+opaque identifier the workspace knows about. Network-resolution of
+the URL is the responsibility of operators inspecting traffic.
+
+Response bodies include `trust_task: "<resolved URL>"` so the caller
+sees which task the server actually invoked.
+
+#### DIDComm
+
+The DIDComm message `type` field **is** the Trust Task URL — same
+shape, same registry. The earlier-planned shorthand types like
+`community/1.0/join-request` are rewritten as:
+
+```
+https://trusttasks.org/openvtc/vtc/community/join-request/1.0
+```
+
+No additional envelope field is required; DIDComm v2 already routes
+by message type, and the Trust Task registry is just the canonical
+home for those types.
+
+### 16.3 Spec format
+
+Each Trust Task is two artefacts under a versioned directory in the
+workspace at `trust-tasks/{path}/{major}.{minor}/`:
+
+```
+trust-tasks/
+├── index.json                                    # registry manifest
+├── join/request/submit/1.0/
+│   ├── spec.md                                   # human-readable
+│   └── schema.json                               # JSON Schema for input/output
+├── members/renew/1.0/
+│   ├── spec.md
+│   └── schema.json
+└── …
+```
+
+`spec.md` carries structured frontmatter:
+
+```yaml
+---
+id: https://trusttasks.org/openvtc/vtc/join/request/submit/1.0
+title: VTC — Submit join request
+status: Draft                       # Draft | Reviewing | Published | Deprecated
+version: "1.0"
+authors:
+  - did:webvh:openvtc.org
+created: 2026-05-11
+updated: 2026-05-11
+applies_to:
+  - rest: POST /v1/join-requests
+  - didcomm: https://trusttasks.org/openvtc/vtc/community/join-request/1.0
+inputs:
+  - name: applicant_did
+    type: did
+    required: true
+  - name: vp
+    type: VerifiablePresentation
+    required: true
+  - name: registry_consent
+    type: RegistryConsentRequest
+    required: false
+outputs:
+  - JoinRequestRecord
+  - AuditEvent[JoinRequestSubmitted]
+trust_assumptions:
+  - Caller's outer auth (REST bearer / DIDComm authcrypt sender) authenticates the relayer.
+  - VP DataIntegrityProof authenticates the holder.
+related:
+  - https://trusttasks.org/openvtc/vtc/policy/join/evaluation/1.0
+  - https://trusttasks.org/openvtc/vtc/credentials/vmc/issue/1.0
+---
+```
+
+The body of `spec.md` is the narrative spec: motivation, normative
+behaviour, error vocabulary, examples, security considerations.
+
+`schema.json` is a JSON Schema covering the wire input + output. Used
+for runtime validation and for binding generation in client SDKs.
+
+`trust-tasks/index.json` is the workspace's registry manifest — a
+list of all task IDs the workspace defines, used by CI to publish to
+trusttasks.org and by the VTC at boot to register handlers.
+
+### 16.4 Catalog (VTC MVP)
+
+Approximately fifty Trust Tasks across the operation surface. Each
+entry below is a stable ID assigned at the time the corresponding
+endpoint is designed; the `spec.md` and `schema.json` may be skeletal
+at first and tightened during implementation.
+
+| Area | Trust Task IDs |
+|---|---|
+| Install | `install/claim/1.0`; `admin/bootstrap/1.0` |
+| Admin passkeys | `admin/passkeys/register/1.0`; `admin/passkeys/revoke/1.0`; `admin/passkeys/list/1.0` |
+| Admin config | `admin/config/show/1.0`; `admin/config/patch/1.0`; `admin/config/reload/1.0`; `admin/config/restart/1.0` |
+| Community profile | `community/profile/show/1.0`; `community/profile/update/1.0` |
+| Members | `members/list/1.0`; `members/show/1.0`; `members/role/update/1.0`; `members/remove-admin/1.0`; `members/remove-self/1.0`; `members/renew/1.0`; `members/rotate-did/1.0`; `members/personhood/assert/1.0`; `members/personhood/revoke/1.0`; `members/relationships/list/1.0` |
+| Join | `community/join-request/1.0`; `join/request/list/1.0`; `join/request/show/1.0`; `join/request/approve/1.0`; `join/request/reject/1.0`; `join/request/defer/1.0` |
+| Invitations | `invitations/issue/1.0`; `invitations/list/1.0`; `invitations/revoke/1.0`; `invitations/redeem/1.0` |
+| Policies | `policies/list/1.0`; `policies/upload/1.0`; `policies/activate/1.0`; `policies/test/1.0`; `policies/show-active/1.0` |
+| Relationships | `relationships/publish/1.0`; `relationships/list/1.0`; `relationships/remove/1.0`; `relationships/query/1.0` |
+| Credentials issued | `credentials/endorsement/issue/1.0` (VEC); `credentials/witness/issue/1.0` (VWC); `credentials/rcard/issue/1.0` |
+| Status lists | `status-lists/get/1.0` |
+| Audit | `audit/query/1.0` |
+| Backup | `backup/export/1.0`; `backup/import/1.0`; `config/export/1.0`; `config/import/1.0` |
+| Trust registry | `registry/profile/show/1.0`; `registry/refresh/1.0` |
+| Website | `website/files/list/1.0`; `website/files/get/1.0`; `website/files/upload/1.0`; `website/files/delete/1.0`; `website/deploy/1.0`; `website/generations/list/1.0`; `website/rollback/1.0` |
+| Health | `health/check/1.0`; `health/diagnostics/1.0` |
+
+(Full URLs in `trust-tasks/index.json`. The CLI surface §15 does not
+get its own Trust Task IDs — the CLI invokes the same REST tasks.)
+
+### 16.5 Publication workflow
+
+Source-of-truth for `openvtc/vtc/*` Trust Tasks lives in this
+workspace under `trust-tasks/`. trusttasks.org pulls published
+versions via a discovery manifest hosted at
+`https://openvtc.org/trust-tasks/manifest.json`. Status flow:
+
+```
+Draft ──── Reviewing ──── Published ──── Deprecated
+                            │                ▲
+                            └────(major bump)┘
+```
+
+* **Draft** — spec file exists with a stable ID. Wire surface may
+  reference it. `schema.json` may be incomplete.
+* **Reviewing** — open PR; schema stable; conformance tests in
+  progress. Visible publicly as Draft on trusttasks.org with a
+  "review" marker.
+* **Published** — ratified. Schema frozen. Promoted on the registry
+  site. Backwards-compatible minor revisions allowed; major changes
+  require a new registry entry.
+* **Deprecated** — superseded by a higher major. Stays resolvable for
+  a sunset window (default 1 year); registry entry includes a
+  `successor` pointer.
+
+CI publishes on every merge to main: Draft entries land as Draft;
+Reviewing entries get the review marker; Published entries are
+frozen-on-publish.
+
+### 16.6 Governance
+
+* Each `spec.md` has an `authors` list pinned to DIDs.
+* Changes to Draft / Reviewing tasks: PR against this repo.
+* Changes to Published tasks: only via deprecation + new major.
+* Adding a new Trust Task to `openvtc/vtc/*`: PR in this repo by an
+  author DID. Tasks under other paths (`openvtc/vta/*`,
+  `openvtc/dtg/*`, etc.) live in their own source repos.
+
+### 16.7 MVP gate (soft)
+
+Trust Tasks are a **soft gate** for MVP:
+
+* Every operation that ships in MVP must have a Trust Task with a
+  stable ID and at least a Draft `spec.md` before its endpoint
+  ships. ID assignment is non-negotiable; spec body can be skeletal.
+* No published-status requirement for MVP shipping. Promotion to
+  Published is a target for the v1.0 release of the VTC.
+* Published status for v1.0 requires: `schema.json` complete, at
+  least one conformance test in the workspace test suite, no breaking
+  changes since first Draft (or a clean major bump if there were).
+
+### 16.8 Workspace integration
+
+* New crate (or sub-module of `vti-common`) `vti-trust-tasks` holds
+  the registry manifest types + a `TrustTask` extractor for Axum.
+* REST routes register their expected `Trust-Task` value at handler
+  attach time. The extractor checks the header on each request and
+  emits structured 4xx on mismatch.
+* DIDComm dispatch already routes by message type; the trust-task
+  type URL replaces the previously planned shorthand.
+* The `vta-sdk` client gains a `with_trust_task(url)` builder method
+  for explicit task selection. SDK callers don't pick the task
+  manually — each client method sets the right one — but the API
+  surface allows it for protocol explorers.
+
+## 17. Phasing / milestones
 
 Phases are ordered by dependency. Each ships independently as an
 operator-visible increment.
@@ -1432,7 +1671,13 @@ operator-visible increment.
 Phase 5 sub-tasks parallelize with phases 3 and 4. Phases 0–4 are
 strictly serial.
 
-## 17. Open questions
+Each phase's PR set includes the Draft Trust Task spec files
+(`trust-tasks/.../{spec.md,schema.json}`) alongside the code that
+implements the operations. A phase doesn't ship until every wire op
+it introduces has a stable Trust Task ID assigned and at least a
+skeletal `spec.md` — see §16.7.
+
+## 18. Open questions
 
 These are *not* blockers — they have proposed answers documented in
 prior turns of design. Listed here so the spec is honest about what
@@ -1488,7 +1733,30 @@ remains to validate during implementation.
    live-reload-feel and per-request overhead. Spec'd as
    `website.live_cache_ttl_seconds` (default 5).
 
-## 18. Explicitly NOT in MVP
+9. **Trust Task source-of-truth location.** Initial proposal: live
+   under `trust-tasks/` in this workspace, published from here to
+   trusttasks.org via CI. Alternative: a dedicated
+   `OpenVTC/trust-tasks` repo aggregating tasks across multiple
+   workspace projects (VTC, VTA, DTG). Decision deferred until the
+   VTA workspace also wants registry entries. If VTA-side Trust
+   Tasks land before we hit that decision, expect to factor out.
+
+10. **trusttasks.org formal spec evolving in parallel.** The
+    Trust Task concept itself is not yet fully formalised on
+    trusttasks.org. The shape used here (frontmatter, schema,
+    publication workflow) is a reasonable starting point but may
+    need to align with the registry's eventual canonical format.
+    Workspace impact: if the canonical format changes, the
+    `trust-tasks/` files migrate but the wire URLs (which are the
+    contract) stay stable.
+
+11. **Conformance test pattern.** Each Published task needs at least
+    one conformance test. Pattern not yet pinned: probably golden
+    request/response pairs validated against `schema.json` plus a
+    minimal behavioural assertion. Land with the first Published
+    task and standardise from there.
+
+## 19. Explicitly NOT in MVP
 
 To preserve clarity about scope, the following are out:
 
@@ -1528,8 +1796,11 @@ To preserve clarity about scope, the following are out:
 * **Multi-tenant** (one VTC binary hosts multiple communities).
   Architectural rewrite, intentionally out.
 
-## 19. Related work
+## 20. Related work
 
+* [`trusttasks.org`](https://trusttasks.org) — the canonical
+  registry for Trust Task specifications referenced from the
+  VTC wire surface (§16).
 * `docs/05-design-notes/runtime-service-management.md` — the service-
   advertisement primitives the VTC inherits via `vta-sdk`.
 * `docs/03-integrating/provision-integration.md` — how the VTC's own
