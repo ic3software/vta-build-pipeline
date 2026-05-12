@@ -50,6 +50,13 @@ vta-sdk = { path = "../vta-sdk", version = "0.6", features = [
 ] }
 affinidi-tdk = { workspace = true }
 affinidi-messaging-didcomm-service = { workspace = true }
+# W3C VC builder + Data Integrity proof signing/verification. Used
+# by `crate::credentials` for VMC + VEC issuance (Phase 2 M2.9).
+# Same crates as `vta-sdk::provision_integration::credential` —
+# canonical workspace path for credential issuance.
+affinidi-vc = { workspace = true }
+affinidi-data-integrity = { workspace = true }
+affinidi-secrets-resolver = { workspace = true }
 # Lower-level DIDComm message types — needed for the join-request
 # message handler in `messaging.rs` (M1.8.2). The service crate
 # accepts `Message` / `UnpackMetadata` by value but doesn't

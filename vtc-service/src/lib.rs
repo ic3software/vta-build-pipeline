@@ -17,6 +17,7 @@ pub mod auth;
 pub mod community;
 pub mod config;
 pub mod config_store;
+pub mod credentials;
 pub mod did_key;
 #[cfg(feature = "setup")]
 pub mod emergency;

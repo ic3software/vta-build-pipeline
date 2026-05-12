@@ -201,7 +201,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.9 — VC builder + local signer
 
-### `[ ]` M2.9.1 — `vtc_service::credentials` module
+### `[x]` M2.9.1 — `vtc_service::credentials` module
 
 - **Acceptance**
   - `affinidi-vc` + `affinidi-data-integrity` added as
