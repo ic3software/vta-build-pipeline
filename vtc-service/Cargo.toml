@@ -31,11 +31,22 @@ name = "vtc"
 path = "src/main.rs"
 
 [dependencies]
-vti-common = { path = "../vti-common", version = "0.6", features = ["passkey"] }
+vti-common = { path = "../vti-common", version = "0.6", features = [
+  "passkey",
+  # `setup` gates the shared dialoguer-driven secrets-prompt helper
+  # the wizard calls into.
+  "setup",
+] }
 vta-sdk = { path = "../vta-sdk", version = "0.6", features = [
   "didcomm",
   "session",
   "config-session",
+  # `provision-client` pulls in `provision-integration` + `sealed-transfer`
+  # transitively, giving the `vtc setup` wizard the full
+  # `run_provision` orchestration + `TemplateBootstrapPayload`
+  # opener so it can bootstrap the VTC's identity against a VTA
+  # (see `tasks/vtc-mvp/vta-driven-keys.md` §3).
+  "provision-client",
 ] }
 affinidi-tdk = { workspace = true }
 affinidi-messaging-didcomm-service = { workspace = true }
@@ -90,6 +101,10 @@ gethostname = "1"
 # also surfaces ~300 unrelated symbols).
 webauthn-rs = { workspace = true }
 webauthn-rs-proto = "0.5"
+# `async_trait` is the dyn-compatibility helper for the
+# `emergency::VtaRecoveryProver` trait so production code +
+# integration tests can swap in their own provers.
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

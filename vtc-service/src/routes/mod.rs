@@ -3,6 +3,7 @@ mod admin;
 mod auth;
 mod community;
 mod config;
+pub(crate) mod did_log;
 mod health;
 pub(crate) mod install;
 
@@ -85,6 +86,12 @@ pub fn router() -> Router<AppState> {
 
     TrustTaskRouter::<AppState>::new()
         .route_exempt("/health", get(health::health))
+        // `did:webvh` log publication (Trust-Task-exempt — DID
+        // resolvers don't carry our extension header). The VTC is
+        // not a general-purpose did:webvh host: the handler matches
+        // the URL `scid` against the VTC's own DID and 404s on any
+        // other request. See `tasks/vtc-mvp/vta-driven-keys.md` §10.
+        .route_exempt("/v1/{scid}/did.jsonl", get(did_log::did_log))
         // Auth routes
         .route_with_task("/v1/auth/challenge", post(auth::challenge), auth_challenge)
         .route_with_task("/v1/auth/", post(auth::authenticate), auth_authenticate)

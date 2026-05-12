@@ -823,13 +823,13 @@ not code** — produces a markdown findings doc that drives M0.9.2.
   with M0.1
 - **Pre-impl decision**: D5
 
-### `[~]` M0.9.2 — New minimal `vtc setup` wizard
+### `[x]` M0.9.2 — New minimal `vtc setup` wizard
 
-> **In-flight across PR-A + PR-B per
-> `tasks/vtc-mvp/vta-driven-keys.md` §11.** PR-A ships the
-> `VtcKeyBundle` plumbing + `init_auth` refactor + stubs the
-> wizard. PR-B ships the live wizard + did-log route +
-> `vti-common::setup::secrets_prompt` promotion.
+> Shipped across PR-A (plumbing) + PR-B (live wizard) per
+> `tasks/vtc-mvp/vta-driven-keys.md` §11. The 5-prompt UX +
+> `provision-integration`-driven flow + did.jsonl publication
+> route are live. Spec amendment in
+> `docs/05-design-notes/vtc-mvp.md` §4.1.
 
 - **Acceptance**
   - Three questions: VTC URL, admin UX URL, VTA URL
@@ -886,13 +886,14 @@ everything the new path replaces.
 
 ## M0.10 — Emergency bootstrap
 
-### `[~]` M0.10.1 — `vtc admin emergency-bootstrap` subcommand
+### `[x]` M0.10.1 — `vtc admin emergency-bootstrap` subcommand
 
-> **Reworked across PR-A + PR-B per
-> `tasks/vtc-mvp/vta-driven-keys.md` §4.** Initial mnemonic-based
-> implementation (this section, below) shipped as PR #69 but is
-> incompatible with the VTA-provisioned key model. PR-A stubs
-> the command; PR-B reimplements via VTA `AdminRotated` recovery.
+> Reworked across PR-A (stub) + PR-B (live VTA-credential-based
+> recovery) per `tasks/vtc-mvp/vta-driven-keys.md` §4. The
+> mnemonic-based flow from PR #69 is replaced by a
+> `provision-integration`-driven gate where the VTA's accept of
+> a freshly-authorized ephemeral DID IS the recovery authority.
+> Spec amendment in `docs/05-design-notes/vtc-mvp.md` §4.5.
 
 - **Acceptance**
   - CLI subcommand `vtc admin emergency-bootstrap` (with optional
@@ -1061,12 +1062,17 @@ everything the new path replaces.
   - `vtc-service/tests/install_flow.rs` (new — ~370 lines)
 - **Deps**: M0.6.3, M0.7.2, M0.8.3, M0.11.2
 
-### `[~]` M0.12.2 — Emergency bootstrap integration test
+### `[x]` M0.12.2 — Emergency bootstrap integration test
 
 > Initial 6-test suite (mnemonic-based) shipped as PR #69, then
-> deleted in PR-A alongside M0.10.1's rework. PR-B reintroduces
-> 5 tests against the VTA `AdminRotated` recovery flow per
-> `tasks/vtc-mvp/vta-driven-keys.md` §6.1.
+> deleted in PR-A alongside M0.10.1's rework. PR-B ships 5 tests
+> against the VTA `AdminRotated` recovery flow per
+> `tasks/vtc-mvp/vta-driven-keys.md` §6.1:
+> `happy_path_clears_admin_via_vta_and_audits_on_restart`,
+> `vta_rejects_unauthorized_recovery_did_and_state_unchanged`,
+> `fresh_install_url_works_for_claim_start_after_emergency_bootstrap`,
+> `no_secret_in_store_yields_clean_config_error`,
+> `outcome_install_url_falls_back_to_vtc_scheme_when_public_url_missing`.
 
 - **Acceptance** — 6 tests in `tests/emergency_bootstrap.rs`:
   - `happy_path_clears_admin_reopens_carveout_and_audits_on_restart`

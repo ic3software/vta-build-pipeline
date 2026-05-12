@@ -1,5 +1,14 @@
 # `vtc setup` rewrite — mapping doc
 
+> **Superseded 2026-05-12 by `tasks/vtc-mvp/vta-driven-keys.md`.**
+> The mapping's BIP-39 mnemonic step in the call graph and its
+> three-prompt UX contradict the VTC's revised
+> "VTA-is-sole-key-authority" seed model. The successor doc
+> redrafts the wizard around a 5-prompt flow that drives the VTA's
+> `provision-integration` instead of generating a local mnemonic.
+> Kept for traceability — the per-helper decision table below is
+> still accurate for the helpers that *did* land.
+>
 > Output of **M0.9.1**. Drives the implementation of M0.9.2 (new
 > wizard) and M0.9.3 (legacy deletion).
 

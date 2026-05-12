@@ -65,18 +65,54 @@ do not restate.
 
 ### 4.1 CLI wizard — minimal handoff to web UX
 
-`vtc setup` asks three questions (public VTC URL, public admin UX
-URL, VTA URL), then does the bare minimum to make the daemon
-answerable:
+`vtc setup` is a five-prompt interactive wizard that provisions
+the VTC's identity against a running VTA and prints the one-shot
+install URL the operator uses to claim their admin passkey.
 
-1. Mints a 24-word BIP-39 seed via `affinidi-secrets-resolver`
-   (default backend: OS keyring).
-2. Provisions the VTC's `did:webvh` against the VTA using the new
-   `vtc-host` DID template (§4.4).
-3. Initialises all fjall keyspaces (§13).
-4. Mints a single-use **install token** (signed JWT, 15-minute TTL,
-   single-use, with a one-time WebAuthn ceremony nonce embedded).
-5. Prints an install URL and starts the daemon.
+**Amended 2026-05-12.** This section was originally specified as
+a three-prompt wizard that minted a local BIP-39 seed; that
+contradicted §4.5's recovery model and was reworked under
+`tasks/vtc-mvp/vta-driven-keys.md` §3. The VTA is now the sole
+key authority — there is no locally-held mnemonic anywhere.
+
+Prompts:
+
+1. Config path (default `config.toml`).
+2. VTC URL (e.g. `https://vtc.example.com/v1`).
+3. Admin UX URL (e.g. `https://admin.vtc.example.com`).
+4. VTA URL (e.g. `https://vta.example.com`).
+5. VTA DID (e.g. `did:webvh:vta.example.com:abc`).
+6. Context name at the VTA for this community.
+
+(Plus the secrets-backend prompt for `keyring` / `aws` / `gcp` /
+`azure` / `inline` / `plaintext`, surfaced via the shared
+`vti_common::setup::secrets_prompt` helper.)
+
+Flow:
+
+1. Mint an ephemeral Ed25519 `did:key` used only for the
+   round-trip.
+2. Print the ephemeral DID and pause. The operator runs
+   `pnm acl create --did <…> --role admin --contexts <ctx>
+   --expires 1h` against the VTA to authorize the ephemeral
+   DID, then presses Enter.
+3. Drive `vta_sdk::provision_client::run_provision` with
+   `VtaIntent::FullSetup` and `ProvisionAsk::for_template
+   ("vtc-host", { URL, ADMIN_UX_URL }, ctx)`.
+4. Open the returned sealed bundle. Extract the integration
+   DID + its `DidKeyMaterial` (Ed25519 + X25519) into a
+   `VtcKeyBundle`; write to the chosen secret-store backend.
+5. Write the `did.jsonl` log from
+   `TemplateBootstrapPayload.config.outputs` to
+   `<store.data_dir>/did/<scid>.jsonl`. The daemon publishes
+   it at `GET /v1/{scid}/did.jsonl` (Trust-Task-exempt).
+6. Write `config.toml` (`vtc_did`, `vta_did`, `public_url`,
+   `store`, `secrets`, `auth.jwt_signing_key`).
+7. Initialise all fjall keyspaces (§13).
+8. Mint a single-use **install token** (signed JWT, 15-minute
+   TTL, with a one-time WebAuthn ceremony nonce embedded).
+9. Print the install URL. The operator runs `vtc` to start
+   the daemon.
 
 **Install token transport hardening.** The install URL is printed
 once to the operator's terminal. The token alone is *insufficient*
@@ -163,14 +199,56 @@ flow.
 
 ### 4.5 Emergency bootstrap (recovery)
 
-If every admin passkey is lost: `vtc admin emergency-bootstrap` on a
-stopped daemon re-opens the install carve-out exactly once. **The
-command requires possession of the master seed mnemonic** — without
-the mnemonic, a filesystem-level attacker cannot trigger a takeover
-by stopping the process. Audit event `EmergencyBootstrapInvoked` is
-emitted on next daemon start, with operator hostname + timestamp,
-prominently surfaced in `/v1/health/diagnostics`. Documented as a
-destructive operator action.
+If every admin passkey is lost: `vtc admin emergency-bootstrap` on
+a stopped daemon clears the local admin state and reopens the
+install carve-out, **gated on the operator's continued ability to
+authenticate as an admin against the VTA**.
+
+**Amended 2026-05-12.** This section originally specified a
+mnemonic-gated recovery path; that was incompatible with §4.1's
+revised VTA-as-key-authority model (the VTA's `provision-integration`
+returns random integration keys that no BIP-39 mnemonic decodes
+to). Reworked under `tasks/vtc-mvp/vta-driven-keys.md` §4.
+
+Flow:
+
+1. Operator stops the daemon and runs
+   `vtc admin emergency-bootstrap [--context <ctx>]`.
+2. The command mints a fresh ephemeral Ed25519 `did:key` and
+   prints the `pnm acl create` command needed to authorize it
+   at the VTA. The operator runs that against PNM (or any
+   equivalent VTA admin tool they hold credentials for) and
+   presses Enter.
+3. The driver calls
+   `vta_sdk::provision_client::run_provision(VtaIntent::AdminRotated,
+   ProvisionAsk::vta_admin_rotated(ctx))`. The VTA's accept
+   IS the recovery authority: if the ephemeral DID was just
+   granted admin role in `ctx`, the call succeeds.
+4. On VTA accept: locally clear every `Role::Admin` ACL entry,
+   every `admin:<did>` sister record, every PasskeyUser /
+   credential mapping for those admins; reopen the install
+   carve-out; mint a fresh single-use install URL; persist a
+   one-shot `install:emergency_pending` marker so the daemon's
+   next boot emits an `EmergencyBootstrapInvoked` audit
+   envelope (operator hostname + timestamp).
+5. On VTA reject (`AppError::Unauthorized`): no local state is
+   touched. The recovery either re-runs after a successful
+   `pnm acl create`, or the operator has lost admin access at
+   the VTA too — at which point the community is lost (by
+   design; there is one trust root, not two).
+
+**What persists**: the community profile (§5.1), the audit log
+(emergency bootstrap is itself audited), and the `VtcKeyBundle`
+(the VTC's integration DID + keys stay put — only the admin ACL
+state resets).
+
+**Trust boundary**: a filesystem-level attacker who stops the
+process and runs this command still has to clear the VTA's
+`provision-integration` check. Possession of the VTC's data
+directory is not sufficient.
+
+Documented as a destructive operator action with a loud audit
+trail.
 
 ## 5. Domain model
 

@@ -25,6 +25,12 @@ cli-synthesis = []
 # concrete route handlers ship in a follow-up so this feature stays
 # storage-only for now.
 passkey = ["dep:webauthn-rs", "dep:url"]
+# Interactive setup helpers (dialoguer prompts) shared between
+# `vta-service` and `vtc-service`'s setup wizards. Headless consumers
+# (TEE enclave, server runtime) skip this to avoid pulling in
+# `dialoguer` + its console deps. The prompts return services'
+# own config shapes (each service has its own `SecretsConfig`).
+setup = ["dep:dialoguer"]
 
 [dependencies]
 async-trait = "0.1"
@@ -68,6 +74,9 @@ libc = { workspace = true, optional = true }
 # unconditionally.
 webauthn-rs = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+# Setup feature: shared dialoguer prompts for VTA + VTC `vtc setup` /
+# `vta setup` interactive wizards.
+dialoguer = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

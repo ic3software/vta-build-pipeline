@@ -7,6 +7,8 @@ pub mod idempotency;
 pub mod identifier;
 pub mod pagination;
 pub mod seed_store;
+#[cfg(feature = "setup")]
+pub mod setup;
 pub mod store;
 pub mod telemetry;
 pub mod trust_task;

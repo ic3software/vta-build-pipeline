@@ -111,12 +111,26 @@ impl VtcKeyBundle {
             ))
         })
     }
+    /// Construct a bundle directly from a VTA-returned
+    /// `DidKeyMaterial`. `integration_did` is supplied separately
+    /// because `DidKeyMaterial` only carries it as part of the
+    /// inner `KeyPair.key_id` (`did:webvh:…#key-0`) — promoting it
+    /// to the top-level field keeps the bundle self-contained.
+    pub fn from_did_key_material(
+        integration_did: String,
+        material: &vta_sdk::sealed_transfer::template_bootstrap::DidKeyMaterial,
+    ) -> Self {
+        Self {
+            integration_did,
+            ed25519_key_id: material.signing_key.key_id.clone(),
+            ed25519_public_multibase: material.signing_key.public_key_multibase.clone(),
+            ed25519_private_multibase: material.signing_key.private_key_multibase.clone(),
+            x25519_key_id: material.ka_key.key_id.clone(),
+            x25519_public_multibase: material.ka_key.public_key_multibase.clone(),
+            x25519_private_multibase: material.ka_key.private_key_multibase.clone(),
+        }
+    }
 }
-
-// Note: the `from_did_key_material(VtaDidKeyMaterial)` constructor
-// lands together with the live wizard in the follow-up PR — it
-// requires `vta-sdk/sealed-transfer` which is only useful once the
-// wizard actually opens bundles. PR A ships the serde-only shape.
 
 const ED25519_PRIV_CODEC: [u8; 2] = [0x80, 0x26];
 const X25519_PRIV_CODEC: [u8; 2] = [0x82, 0x26];
@@ -175,7 +189,12 @@ pub fn x25519_priv_codec() -> [u8; 2] {
 /// Test-only fixture builder: produce a bundle from two raw 32-byte
 /// scalars. Production code never calls this — bundles come from
 /// the VTA via [`VtcKeyBundle::from_did_key_material`].
-#[cfg(test)]
+///
+/// Exposed outside `#[cfg(test)]` so integration tests under
+/// `vtc-service/tests/` can stage a bundle without needing a live
+/// VTA. The function is otherwise harmless — given any two 32-byte
+/// scalars it produces a syntactically-valid bundle.
+#[doc(hidden)]
 pub fn bundle_from_raw(
     integration_did: &str,
     ed25519_priv: &[u8; 32],
@@ -199,7 +218,6 @@ pub fn bundle_from_raw(
     }
 }
 
-#[cfg(test)]
 fn encode_public_multibase(bytes: &[u8; 32], codec: [u8; 2]) -> String {
     let mut buf = Vec::with_capacity(2 + 32);
     buf.extend_from_slice(&codec);

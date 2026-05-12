@@ -163,35 +163,71 @@ async fn main() {
 
 /// Interactive `vtc admin emergency-bootstrap` flow.
 ///
-/// Stubbed pending the rework described in
-/// `tasks/vtc-mvp/vta-driven-keys.md` §4. The previous
-/// BIP-39-mnemonic-based recovery is incompatible with the
-/// VTA-provisioned key model; the live VTA-credential-based
-/// replacement ships in a follow-up PR.
+/// 1. Loud warning + confirmation (skippable with `--yes`).
+/// 2. Operator authorizes a fresh ephemeral DID at the VTA via
+///    `pnm acl create` (the wizard prints the exact command).
+/// 3. The driver calls the VTA's `provision-integration` flow
+///    (`VtaIntent::AdminRotated`) with that ephemeral DID. The
+///    VTA's accept/reject IS the recovery authority — see
+///    `tasks/vtc-mvp/vta-driven-keys.md` §4.
+/// 4. On success: local admin ACL + sister records cleared, install
+///    carve-out reopened, fresh install token minted.
 #[cfg(feature = "setup")]
 async fn run_emergency_bootstrap_cli(
     config_path: Option<std::path::PathBuf>,
-    _skip_confirm: bool,
-    _context: Option<String>,
+    skip_confirm: bool,
+    context: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = config_path;
+    use dialoguer::Confirm;
+
     eprintln!();
-    eprintln!("⚠️  EMERGENCY BOOTSTRAP — temporarily unavailable");
+    eprintln!("⚠️  EMERGENCY BOOTSTRAP");
     eprintln!(
-        "The mnemonic-based recovery path is being replaced by a VTA-credential\n\
-         flow (see `tasks/vtc-mvp/vta-driven-keys.md` §4). Until that lands,\n\
-         this command refuses to mutate state.\n\
+        "This clears every existing admin ACL entry and admin sister record, then\n\
+         reopens the install carve-out so a new operator can claim a fresh install URL.\n\
          \n\
-         If you've genuinely lost admin access, recover by:\n\
-         \n\
-         1. Stopping the daemon.\n\
-         2. Using `pnm` to provision a fresh VTC integration against the\n\
-            same VTA, with the existing `vtc_did` carried over from\n\
-            `config.toml`.\n\
-         3. Replacing the secret-store contents with the new VtcKeyBundle\n\
-            from the sealed bundle the VTA returns."
+         The VTA accepts or rejects the recovery: if your PNM admin credential at the\n\
+         VTA is still valid, the VTA will accept it; otherwise this command fails and\n\
+         no local state is touched. The daemon's next boot emits a loud\n\
+         `EmergencyBootstrapInvoked` audit event.\n"
     );
-    Err(emergency::emergency_bootstrap_unavailable().into())
+
+    if !skip_confirm {
+        let ok = Confirm::new()
+            .with_prompt("Proceed?")
+            .default(false)
+            .interact()?;
+        if !ok {
+            eprintln!("aborted.");
+            return Ok(());
+        }
+    }
+
+    let outcome = emergency::run_emergency_bootstrap(emergency::EmergencyBootstrapArgs {
+        config_path,
+        context,
+    })
+    .await?;
+
+    eprintln!();
+    eprintln!("✅ emergency bootstrap complete");
+    eprintln!(
+        "   admin ACL entries cleared:  {}",
+        outcome.admin_entries_cleared
+    );
+    eprintln!(
+        "   admin sister records:       {}",
+        outcome.admin_records_cleared
+    );
+    eprintln!();
+    eprintln!("Install URL (one-shot, 15 min TTL):");
+    eprintln!("   {}", outcome.install_url);
+    eprintln!();
+    eprintln!(
+        "Restart the daemon (`vtc`) so the `EmergencyBootstrapInvoked` audit event lands\n\
+         and the install carve-out reopens. Then claim the install URL with a fresh passkey."
+    );
+    Ok(())
 }
 
 fn print_banner() {
