@@ -8933,6 +8933,8 @@ dependencies = [
  "uuid",
  "vta-sdk 0.6.0",
  "vti-common",
+ "webauthn-rs",
+ "webauthn-rs-proto",
  "x25519-dalek",
  "zeroize",
 ]

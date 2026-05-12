@@ -23,6 +23,14 @@ use crate::store::{KeyspaceHandle, Store};
 use tokio::sync::{RwLock, watch};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
+use vti_common::auth::passkey::{PasskeyState, build_webauthn};
+use webauthn_rs::Webauthn;
+
+/// Default enrolment-invite TTL surfaced by `PasskeyState::enrollment_ttl`.
+/// Admin-invite enrolment lands in M0.6; until then this constant is the
+/// canonical "how long is an admin invite redeemable" value. An hour
+/// is the same default `webvh-common`'s passkey routes use.
+const DEFAULT_ENROLLMENT_TTL_SECS: u64 = 60 * 60;
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -31,11 +39,20 @@ pub struct AppState {
     pub acl_ks: KeyspaceHandle,
     pub community_ks: KeyspaceHandle,
     pub config_ks: KeyspaceHandle,
+    pub passkey_ks: KeyspaceHandle,
     pub config: Arc<RwLock<AppConfig>>,
     pub did_resolver: Option<DIDCacheClient>,
     pub secrets_resolver: Option<Arc<ThreadedSecretsResolver>>,
     pub jwt_keys: Option<Arc<JwtKeys>>,
     pub atm: Option<ATM>,
+    /// WebAuthn relying-party handle. `None` when `config.public_url`
+    /// is unset at startup — the install + admin-passkey routes 503
+    /// in that case (per `PasskeyState` contract).
+    pub webauthn: Option<Arc<Webauthn>>,
+    /// Cached `public_url` snapshot for `PasskeyState::public_url`.
+    /// Held alongside the `Webauthn` so the trait impl doesn't need
+    /// to take an async read-lock on the config every request.
+    pub public_url: Option<String>,
 }
 
 impl AuthState for AppState {
@@ -44,6 +61,45 @@ impl AuthState for AppState {
     }
     fn sessions_ks(&self) -> &KeyspaceHandle {
         &self.sessions_ks
+    }
+}
+
+impl PasskeyState for AppState {
+    fn webauthn(&self) -> Option<&Arc<Webauthn>> {
+        self.webauthn.as_ref()
+    }
+
+    fn acl_ks(&self) -> &KeyspaceHandle {
+        &self.acl_ks
+    }
+
+    fn access_token_expiry(&self) -> u64 {
+        // `config` is wrapped in an `Arc<RwLock<…>>`; the trait method
+        // is sync. `try_read` returns immediately — if a writer is
+        // mid-update we fall through to the workspace default so the
+        // auth layer never blocks. The default values match the
+        // compiled-in `AuthConfig::default()` and the runtime tax of
+        // missing a recently-updated value is bounded by the JWT TTL
+        // anyway.
+        self.config
+            .try_read()
+            .map(|c| c.auth.access_token_expiry)
+            .unwrap_or(AuthConfig::default().access_token_expiry)
+    }
+
+    fn refresh_token_expiry(&self) -> u64 {
+        self.config
+            .try_read()
+            .map(|c| c.auth.refresh_token_expiry)
+            .unwrap_or(AuthConfig::default().refresh_token_expiry)
+    }
+
+    fn public_url(&self) -> Option<&str> {
+        self.public_url.as_deref()
+    }
+
+    fn enrollment_ttl(&self) -> u64 {
+        DEFAULT_ENROLLMENT_TTL_SECS
     }
 }
 
@@ -57,9 +113,30 @@ pub async fn run(
     let acl_ks = store.keyspace("acl")?;
     let community_ks = store.keyspace("community")?;
     let config_ks = store.keyspace("config")?;
+    let passkey_ks = store.keyspace("passkey")?;
 
     // Initialize auth infrastructure
     let (did_resolver, secrets_resolver, jwt_keys, atm) = init_auth(&config, &*secret_store).await;
+
+    // Build WebAuthn relying party handle from `public_url`. Optional —
+    // a serverless / pre-setup deployment has no public URL yet and
+    // the install + admin-passkey routes will 503 until one is set.
+    let public_url = config.public_url.clone();
+    let webauthn = match &public_url {
+        Some(url) => match build_webauthn(url) {
+            Ok(w) => Some(Arc::new(w)),
+            Err(e) => {
+                warn!(
+                    "failed to build WebAuthn relying party from public_url '{url}': {e} — passkey routes disabled"
+                );
+                None
+            }
+        },
+        None => {
+            debug!("public_url not configured — WebAuthn / passkey routes disabled");
+            None
+        }
+    };
 
     // Bind TCP listener on the main thread for early port validation
     let addr = format!("{}:{}", config.server.host, config.server.port);
@@ -95,11 +172,14 @@ pub async fn run(
         acl_ks,
         community_ks,
         config_ks,
+        passkey_ks,
         config: Arc::new(RwLock::new(config)),
         did_resolver,
         secrets_resolver,
         jwt_keys,
         atm,
+        webauthn,
+        public_url,
     };
 
     // Spawn three named OS threads
