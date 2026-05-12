@@ -1,0 +1,57 @@
+{
+  "$schema": "https://trusttasks.org/manifest/v1.json",
+  "version": 1,
+  "org": "openvtc",
+  "domain": "vtc",
+  "description": "OpenVTC Verifiable Trust Community — Trust Task manifest. Source of truth for trusttasks.org publication; CI publishes Draft entries on every merge to main per spec §9.4.",
+  "tasks": [
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/auth/legacy/challenge/1.0",
+      "status": "Draft",
+      "path": "auth/legacy/challenge/1.0",
+      "rest": "POST /v1/auth/challenge"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/auth/legacy/authenticate/1.0",
+      "status": "Draft",
+      "path": "auth/legacy/authenticate/1.0",
+      "rest": "POST /v1/auth/"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/auth/legacy/refresh/1.0",
+      "status": "Draft",
+      "path": "auth/legacy/refresh/1.0",
+      "rest": "POST /v1/auth/refresh"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/auth/legacy/sessions/manage/1.0",
+      "status": "Draft",
+      "path": "auth/legacy/sessions/manage/1.0",
+      "rest": "GET, DELETE /v1/auth/sessions"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/auth/legacy/sessions/revoke/1.0",
+      "status": "Draft",
+      "path": "auth/legacy/sessions/revoke/1.0",
+      "rest": "DELETE /v1/auth/sessions/{session_id}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/config/legacy/manage/1.0",
+      "status": "Draft",
+      "path": "config/legacy/manage/1.0",
+      "rest": "GET, PATCH /v1/config"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/acl/legacy/manage/1.0",
+      "status": "Draft",
+      "path": "acl/legacy/manage/1.0",
+      "rest": "GET, POST /v1/acl"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/acl/legacy/entry/1.0",
+      "status": "Draft",
+      "path": "acl/legacy/entry/1.0",
+      "rest": "GET, PATCH, DELETE /v1/acl/{did}"
+    }
+  ]
+}

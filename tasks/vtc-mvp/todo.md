@@ -285,7 +285,7 @@ bundle containing a valid VTC `did:webvh`. No VTC binary needed yet.
 
 ## M0.3 — `/v1/` URL migration + Trust-Task wiring
 
-### `[ ]` M0.3.1 — Move existing routes under `/v1/` prefix
+### `[x]` M0.3.1 — Move existing routes under `/v1/` prefix
 
 - **Acceptance**
   - `vtc-service/src/routes/mod.rs` mounts auth + acl + config
@@ -300,7 +300,7 @@ bundle containing a valid VTC `did:webvh`. No VTC binary needed yet.
   - `vtc-service/tests/auth_audience.rs` (path updates)
 - **Deps**: M0.1.1 (for `TrustTaskRouter`)
 
-### `[ ]` M0.3.2 — Wire Trust-Task header on existing routes (placeholder IDs)
+### `[x]` M0.3.2 — Wire Trust-Task header on existing routes (placeholder IDs)
 
 - **Acceptance**
   - Each existing route registered with a placeholder Trust Task ID

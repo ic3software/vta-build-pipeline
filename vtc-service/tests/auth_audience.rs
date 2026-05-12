@@ -107,7 +107,11 @@ async fn vta_audience_token_rejected_by_vtc_route() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/acl")
+        .uri("/v1/acl")
+        .header(
+            "Trust-Task",
+            "https://trusttasks.org/openvtc/vtc/acl/legacy/manage/1.0",
+        )
         .header("Authorization", format!("Bearer {foreign_token}"))
         .body(Body::empty())
         .unwrap();
@@ -140,7 +144,11 @@ async fn unknown_audience_token_rejected_by_vtc_route() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/acl")
+        .uri("/v1/acl")
+        .header(
+            "Trust-Task",
+            "https://trusttasks.org/openvtc/vtc/acl/legacy/manage/1.0",
+        )
         .header("Authorization", format!("Bearer {foreign_token}"))
         .body(Body::empty())
         .unwrap();
@@ -154,7 +162,11 @@ async fn no_token_rejected_by_vtc_route() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/acl")
+        .uri("/v1/acl")
+        .header(
+            "Trust-Task",
+            "https://trusttasks.org/openvtc/vtc/acl/legacy/manage/1.0",
+        )
         .body(Body::empty())
         .unwrap();
     let (status, _body) = request(&router, req).await;
@@ -163,4 +175,49 @@ async fn no_token_rejected_by_vtc_route() {
         StatusCode::UNAUTHORIZED,
         "missing Authorization header must be rejected"
     );
+}
+
+#[tokio::test]
+async fn missing_trust_task_header_returns_400() {
+    let (router, _, _dir) = build_test_router().await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/acl")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = request(&router, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"], "TrustTaskMissing");
+}
+
+#[tokio::test]
+async fn mismatched_trust_task_header_returns_415() {
+    let (router, _, _dir) = build_test_router().await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/acl")
+        .header(
+            "Trust-Task",
+            "https://trusttasks.org/openvtc/vtc/auth/legacy/challenge/1.0",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let (status, _body) = request(&router, req).await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+async fn health_is_exempt_from_trust_task() {
+    let (router, _, _dir) = build_test_router().await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _body) = request(&router, req).await;
+    assert_eq!(status, StatusCode::OK);
 }

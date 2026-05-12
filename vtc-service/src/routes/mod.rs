@@ -6,30 +6,80 @@ mod health;
 use axum::Router;
 use axum::routing::{delete, get, post};
 
+use vti_common::trust_task::{TrustTask, TrustTaskRouter};
+
 use crate::server::AppState;
 
+/// Build the public router.
+///
+/// Migrates the pre-MVP route table under `/v1/` and attaches a
+/// Trust-Task header check to every endpoint per spec §9.4. The
+/// existing handlers are unchanged in behaviour — only the wire
+/// surface moves. Trust Task IDs use a `*/legacy/*` namespace
+/// because these endpoints will be re-shaped during M0.5+ to align
+/// with the install + passkey + admin flows; the placeholder IDs
+/// give the wire surface a stable identifier from day one (soft
+/// gate from spec §9.4 / plan M0.1.1).
+///
+/// `/health` is the **single** Trust-Task-exempt endpoint — kept at
+/// the root path for trivial monitoring integration.
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/health", get(health::health))
-        // Auth routes (flattened to avoid nest + root-route matching issues in Axum 0.8)
-        .route("/auth/challenge", post(auth::challenge))
-        .route("/auth/", post(auth::authenticate))
-        .route("/auth/refresh", post(auth::refresh))
-        .route(
-            "/auth/sessions",
+    let auth_challenge =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/challenge/1.0")
+            .expect("static Trust-Task URL");
+    let auth_authenticate =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/authenticate/1.0")
+            .expect("static Trust-Task URL");
+    let auth_refresh = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/refresh/1.0")
+        .expect("static Trust-Task URL");
+    let auth_sessions_manage =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/sessions/manage/1.0")
+            .expect("static Trust-Task URL");
+    let auth_sessions_revoke =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/sessions/revoke/1.0")
+            .expect("static Trust-Task URL");
+    let config_manage =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/config/legacy/manage/1.0")
+            .expect("static Trust-Task URL");
+    let acl_manage = TrustTask::new("https://trusttasks.org/openvtc/vtc/acl/legacy/manage/1.0")
+        .expect("static Trust-Task URL");
+    let acl_entry = TrustTask::new("https://trusttasks.org/openvtc/vtc/acl/legacy/entry/1.0")
+        .expect("static Trust-Task URL");
+
+    TrustTaskRouter::<AppState>::new()
+        .route_exempt("/health", get(health::health))
+        // Auth routes
+        .route_with_task("/v1/auth/challenge", post(auth::challenge), auth_challenge)
+        .route_with_task("/v1/auth/", post(auth::authenticate), auth_authenticate)
+        .route_with_task("/v1/auth/refresh", post(auth::refresh), auth_refresh)
+        .route_with_task(
+            "/v1/auth/sessions",
             get(auth::session_list).delete(auth::revoke_sessions_by_did),
+            auth_sessions_manage,
         )
-        .route("/auth/sessions/{session_id}", delete(auth::revoke_session))
-        .route(
-            "/config",
+        .route_with_task(
+            "/v1/auth/sessions/{session_id}",
+            delete(auth::revoke_session),
+            auth_sessions_revoke,
+        )
+        // Config
+        .route_with_task(
+            "/v1/config",
             get(config::get_config).patch(config::update_config),
+            config_manage,
         )
-        // ACL routes (flattened for consistency)
-        .route("/acl", get(acl::list_acl).post(acl::create_acl))
-        .route(
-            "/acl/{did}",
+        // ACL
+        .route_with_task(
+            "/v1/acl",
+            get(acl::list_acl).post(acl::create_acl),
+            acl_manage,
+        )
+        .route_with_task(
+            "/v1/acl/{did}",
             get(acl::get_acl)
                 .patch(acl::update_acl)
                 .delete(acl::delete_acl),
+            acl_entry,
         )
+        .into_router()
 }
