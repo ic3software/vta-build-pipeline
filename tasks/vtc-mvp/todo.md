@@ -872,28 +872,58 @@ everything the new path replaces.
 
 ## M0.10 — Emergency bootstrap
 
-### `[ ]` M0.10.1 — `vtc admin emergency-bootstrap` subcommand
+### `[x]` M0.10.1 — `vtc admin emergency-bootstrap` subcommand
 
 - **Acceptance**
-  - CLI subcommand runs only when the daemon is stopped (file-lock
-    check on the fjall directory)
-  - Prompts for the 24-word BIP-39 mnemonic; verifies it derives
-    the same VTC master seed as the stored seed
-  - On success: opens a fresh install token via the same
-    `mint_install_token()` path, reopens the install carve-out
-    keyspace marker, prints the install URL
-  - Persists a `pending_emergency_bootstrap_at: DateTime<Utc>`
-    marker that the daemon reads on next boot and emits the
-    `EmergencyBootstrapInvoked` audit event
-  - Trust Task ID: none (CLI-only, not a wire op)
-- **Verify**
-  - Wrong mnemonic → command refuses without changing state
-  - Correct mnemonic → install URL printed; daemon on next boot
-    emits the loud audit event
+  - CLI subcommand `vtc admin emergency-bootstrap` (with optional
+    `--yes` skip-confirm and a hidden `--mnemonic` for tests) runs
+    on a stopped daemon. fjall's directory lock makes the daemon-
+    must-be-stopped check natural — `Store::open` errors with a
+    clear "is the daemon still running?" message if the lock is
+    held.
+  - Mnemonic prompt via `dialoguer::Password`; verification
+    derives a 64-byte seed via `bip39::Mnemonic::to_seed("")` and
+    compares constant-time against the secret store contents.
+    Mismatch → `AppError::Unauthorized` with no state mutation.
+  - On success the driver:
+    1. Clears every `Role::Admin` ACL entry.
+    2. Removes every `admin:<did>` sister record (M0.6.1) plus
+       associated `PasskeyUser` / `pk_cred:*` / `pk_did:*` rows.
+    3. Calls `InstallTokenStore::reopen_carveout` (new — clears
+       the `install:carveout:closed` marker).
+    4. Mints a fresh install token via the same path as the
+       wizard.
+    5. Persists `install:emergency_pending` carrying
+       `{ operator_hostname, invoked_at }`.
+    6. Returns `EmergencyBootstrapOutcome { install_url,
+       admin_entries_cleared, admin_records_cleared }`.
+  - The daemon's `server::run` consumes the marker on next boot
+    via `take_pending_emergency()` and emits
+    `EmergencyBootstrapInvoked { operator_hostname, invoked_at }`
+    once — the marker is one-shot, so subsequent restarts don't
+    re-emit.
+  - Trust Task ID: none (CLI-only, not a wire op).
+- **Verify** ✓ 4 unit tests in `emergency::tests::*` cover
+  constant-time eq, mnemonic round-trip, mismatch, and malformed-
+  input handling. Integration coverage in M0.12.2 below.
 - **Files**
-  - `vtc-service/src/setup/emergency.rs` (new)
-  - `vtc-service/src/main.rs` (subcommand wiring)
-- **Deps**: M0.4.2, M0.9.2
+  - `vtc-service/src/emergency.rs` (new — ~330 lines incl. tests)
+  - `vtc-service/src/install/state_machine.rs` (new
+    `reopen_carveout`, `mark_emergency_pending`,
+    `take_pending_emergency` + the `PendingEmergencyBootstrap`
+    record)
+  - `vtc-service/src/install/mod.rs` (re-export)
+  - `vtc-service/src/server.rs` (consume + audit the pending
+    marker at startup)
+  - `vtc-service/src/main.rs` (`Commands::Admin` +
+    `AdminCommands::EmergencyBootstrap` clap surface,
+    `run_emergency_bootstrap_cli` interactive flow)
+  - `vtc-service/src/lib.rs` (`pub mod emergency`)
+  - `vtc-service/Cargo.toml` (`bip39`, `gethostname` deps)
+- **Deps**: M0.4.2. M0.9.2 dependency relaxed — emergency
+  bootstrap works against any community whose master seed is
+  BIP-39-derived; the wizard rewrite will eventually be the
+  canonical producer of such seeds.
 
 ---
 
@@ -1011,19 +1041,36 @@ everything the new path replaces.
   - `vtc-service/tests/install_flow.rs` (new — ~370 lines)
 - **Deps**: M0.6.3, M0.7.2, M0.8.3, M0.11.2
 
-### `[ ]` M0.12.2 — Emergency bootstrap integration test
+### `[x]` M0.12.2 — Emergency bootstrap integration test
 
-- **Acceptance**
-  - Test exercises the full recovery path:
-    1. Set up a VTC + bootstrap admin
-    2. Simulate "all passkeys lost" by removing them
-    3. Stop daemon, run `vtc admin emergency-bootstrap` with the
-       correct mnemonic
-    4. Restart daemon; confirm `EmergencyBootstrapInvoked` in audit
-    5. Re-claim install + bootstrap with a new admin
-- **Verify** test green
+- **Acceptance** — 6 tests in `tests/emergency_bootstrap.rs`:
+  - `happy_path_clears_admin_reopens_carveout_and_audits_on_restart`
+    — pre-state has one `Role::Admin` ACL + `admin:<did>` record +
+    PasskeyUser + closed carve-out. After running the driver with
+    the correct mnemonic: ACL cleared, admin sister record gone,
+    carve-out reopened, install URL minted, pending marker
+    persisted. Simulating daemon restart consumes the marker and
+    emits `EmergencyBootstrapInvoked`; the second restart sees no
+    marker and emits nothing (one-shot).
+  - `wrong_mnemonic_is_refused_and_state_unchanged` — different
+    BIP-39 entropy → `AppError::Unauthorized`, ACL still has the
+    old admin, carve-out still closed, no pending marker.
+  - `malformed_mnemonic_is_rejected_as_validation_error` —
+    non-BIP-39 input → `AppError::Validation`.
+  - `fresh_install_url_works_for_claim_start_after_emergency_bootstrap`
+    — extracts the token from the install URL, drives
+    `POST /v1/install/claim/start` via `Router::oneshot`, expects
+    200 + a valid `CreationChallengeResponse`. Without emergency
+    bootstrap the call would 401 (carve-out closed); after, it
+    succeeds — the recovery loop closes cleanly.
+  - `no_secret_in_store_yields_clean_config_error` — missing seed
+    → `AppError::Config` with operator-friendly text.
+  - `outcome_install_url_falls_back_to_vtc_scheme_when_public_url_missing`
+    — `vtc://install?token=...` for pre-`public_url` deployments.
 - **Files**
-  - `vtc-service/tests/emergency_bootstrap.rs` (new)
+  - `vtc-service/tests/emergency_bootstrap.rs` (new — ~400 lines)
+  - In-memory `SeedStore` impl (`InMemorySeedStore`) inline so the
+    driver test doesn't need OS keyring access.
 - **Deps**: M0.10.1, M0.12.1
 
 ### `[ ]` M0.12.3 — Workspace gate green

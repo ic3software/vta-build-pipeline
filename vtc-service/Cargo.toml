@@ -78,6 +78,11 @@ x25519-dalek = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }
 multibase = { workspace = true }
 url = { workspace = true, optional = true }
+# BIP-39 mnemonic parsing for `vtc admin emergency-bootstrap` (M0.10).
+# Same pin as `vta-service`.
+bip39 = "2"
+# Hostname capture for the `EmergencyBootstrapInvoked` audit event.
+gethostname = "1"
 # WebAuthn — used by `crate::webauthn` for Ed25519-only registration
 # wrappers (M0.5.1). The protocol crate is a direct dep so we can
 # reference `PubKeyCredParams` and `COSEAlgorithm` without funnelling

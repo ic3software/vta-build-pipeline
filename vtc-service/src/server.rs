@@ -231,6 +231,41 @@ pub async fn run(
         supervisor: detect_supervisor(),
     };
 
+    // M0.10: consume + audit any pending emergency-bootstrap marker
+    // left behind by `vtc admin emergency-bootstrap`. The marker is
+    // **one-shot**: `take_pending_emergency` deletes it as part of
+    // reading, so a restart loop emits the loud event exactly once.
+    if let (Some(pending), Some(writer)) = (
+        state
+            .install_store
+            .take_pending_emergency()
+            .await
+            .ok()
+            .flatten(),
+        state.audit_writer.as_ref(),
+    ) {
+        warn!(
+            operator_hostname = %pending.operator_hostname,
+            invoked_at = %pending.invoked_at,
+            "EMERGENCY BOOTSTRAP was invoked since the daemon last ran — auditing now",
+        );
+        if let Err(e) = writer
+            .write(
+                "did:key:vtc-emergency",
+                None,
+                vti_common::audit::AuditEvent::EmergencyBootstrapInvoked(
+                    vti_common::audit::EmergencyBootstrapData {
+                        operator_hostname: pending.operator_hostname,
+                        invoked_at: pending.invoked_at,
+                    },
+                ),
+            )
+            .await
+        {
+            error!(error = %e, "failed to emit EmergencyBootstrapInvoked envelope");
+        }
+    }
+
     // Snapshot the CORS allowlist before the AppState `move` into
     // the REST thread. The layer is fixed at start-up; a future
     // M0.8.x extension can swap the layer on `POST /v1/admin/config/reload`

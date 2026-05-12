@@ -3,7 +3,7 @@
 // pieces this binary needs at the top level.
 use vtc_service::{acl_cli, config, did_key, import_did, keys, server, status, store};
 #[cfg(feature = "setup")]
-use vtc_service::{did_webvh, setup};
+use vtc_service::{did_webvh, emergency, setup};
 
 use std::path::PathBuf;
 
@@ -60,6 +60,34 @@ enum Commands {
     Acl {
         #[command(subcommand)]
         command: AclCommands,
+    },
+    /// Operator-level recovery + administration (offline)
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminCommands {
+    /// Reset the install carve-out using the master-seed mnemonic.
+    ///
+    /// Run on a **stopped** daemon. Clears every admin ACL entry
+    /// and sister record, then mints a fresh install URL the
+    /// operator can claim with a new passkey. The daemon's next
+    /// boot emits a loud `EmergencyBootstrapInvoked` audit event
+    /// — emergency bootstrap is destructive and intentionally
+    /// noisy in the audit log.
+    EmergencyBootstrap {
+        /// Skip the "are you sure?" confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Provide the 24-word mnemonic non-interactively
+        /// (intended for automated tests; production use should
+        /// rely on the interactive prompt so the mnemonic doesn't
+        /// land in shell history).
+        #[arg(long, hide = true)]
+        mnemonic: Option<String>,
     },
 }
 
@@ -177,6 +205,26 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Commands::Admin { command }) => {
+            #[cfg(feature = "setup")]
+            {
+                match command {
+                    AdminCommands::EmergencyBootstrap { yes, mnemonic } => {
+                        if let Err(e) = run_emergency_bootstrap_cli(cli.config, yes, mnemonic).await
+                        {
+                            eprintln!("Emergency bootstrap failed: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "setup"))]
+            {
+                let _ = command;
+                eprintln!("admin subcommands are unavailable (compiled without 'setup')");
+                std::process::exit(1);
+            }
+        }
         Some(Commands::Acl { command }) => {
             let result = match command {
                 AclCommands::List { context, role } => {
@@ -224,6 +272,78 @@ async fn main() {
             }
         }
     }
+}
+
+/// Interactive `vtc admin emergency-bootstrap` flow.
+///
+/// 1. Loud warning + confirmation (skippable with `--yes`).
+/// 2. Mnemonic prompt via `dialoguer::Password` (or whatever the
+///    `--mnemonic` flag provided, for tests).
+/// 3. Hands off to `emergency::run_emergency_bootstrap`, which
+///    verifies the seed, clears admin state, reopens the carve-out,
+///    mints a fresh install token, and persists the
+///    `EmergencyBootstrapInvoked` pending marker.
+/// 4. Prints the install URL + footer that warns the operator to
+///    restart the daemon ASAP so the audit event lands.
+#[cfg(feature = "setup")]
+async fn run_emergency_bootstrap_cli(
+    config_path: Option<std::path::PathBuf>,
+    skip_confirm: bool,
+    mnemonic: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use dialoguer::{Confirm, Password};
+
+    eprintln!();
+    eprintln!("⚠️  EMERGENCY BOOTSTRAP");
+    eprintln!(
+        "This will clear every existing admin ACL entry and admin sister record, then\n\
+         reopen the install carve-out so a new operator can claim a fresh install URL.\n\
+         The daemon's next boot will emit a loud `EmergencyBootstrapInvoked` audit event.\n"
+    );
+
+    if !skip_confirm {
+        let ok = Confirm::new()
+            .with_prompt("Proceed?")
+            .default(false)
+            .interact()?;
+        if !ok {
+            eprintln!("aborted.");
+            return Ok(());
+        }
+    }
+
+    let mnemonic = match mnemonic {
+        Some(m) => m,
+        None => Password::new()
+            .with_prompt("24-word BIP-39 master-seed mnemonic")
+            .interact()?,
+    };
+
+    let outcome = emergency::run_emergency_bootstrap(emergency::EmergencyBootstrapArgs {
+        config_path,
+        mnemonic: Some(mnemonic),
+    })
+    .await?;
+
+    eprintln!();
+    eprintln!("✅ emergency bootstrap complete");
+    eprintln!(
+        "   admin ACL entries cleared:  {}",
+        outcome.admin_entries_cleared
+    );
+    eprintln!(
+        "   admin sister records:       {}",
+        outcome.admin_records_cleared
+    );
+    eprintln!();
+    eprintln!("Install URL (one-shot, 15 min TTL):");
+    eprintln!("   {}", outcome.install_url);
+    eprintln!();
+    eprintln!(
+        "Restart the daemon (`vtc`) so the `EmergencyBootstrapInvoked` audit event lands\n\
+         and the install carve-out reopens. Then claim the install URL with a fresh passkey."
+    );
+    Ok(())
 }
 
 fn print_banner() {

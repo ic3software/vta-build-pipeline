@@ -23,7 +23,9 @@
 pub mod state_machine;
 pub mod token;
 
-pub use state_machine::{InstallTokenState, InstallTokenStore, StartClaimOutcome};
+pub use state_machine::{
+    InstallTokenState, InstallTokenStore, PendingEmergencyBootstrap, StartClaimOutcome,
+};
 pub use token::{
     INSTALL_AUDIENCE, INSTALL_SESSION_AUDIENCE, INSTALL_SESSION_DEFAULT_TTL_SECS, INSTALL_SUBJECT,
     INSTALL_TOKEN_DEFAULT_TTL_SECS, InstallSessionClaims, InstallTokenClaims, InstallTokenSigner,
