@@ -230,7 +230,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.10 — Status-list infrastructure
 
-### `[ ]` M2.10.1 — `status_lists` keyspace + reserved-index allocator
+### `[x]` M2.10.1 — `status_lists` keyspace + reserved-index allocator
 
 - **Acceptance**
   - `StatusListState { purpose, capacity, next_random_seed,

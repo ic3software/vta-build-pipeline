@@ -38,6 +38,7 @@ affinidi-crypto = "0.1"
 # admin authorization). See CLAUDE.md "Authorization claims" principle.
 affinidi-vc = "0.1"
 affinidi-data-integrity = "0.6"
+affinidi-status-list = "0.1"
 affinidi-secrets-resolver = "0.5"
 affinidi-messaging-didcomm-service = "0.3"
 
