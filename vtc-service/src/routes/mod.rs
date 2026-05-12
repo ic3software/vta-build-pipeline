@@ -9,6 +9,7 @@ pub(crate) mod install;
 pub(crate) mod join_requests;
 pub(crate) mod members;
 pub(crate) mod policies;
+pub(crate) mod status_lists;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -150,6 +151,10 @@ pub fn router() -> Router<AppState> {
         // the URL `scid` against the VTC's own DID and 404s on any
         // other request. See `tasks/vtc-mvp/vta-driven-keys.md` §10.
         .route_exempt("/v1/{scid}/did.jsonl", get(did_log::did_log))
+        // BitstringStatusList publication (M2.11). Trust-Task-
+        // exempt — external verifiers don't carry our extension
+        // header (same rationale as `did.jsonl`).
+        .route_exempt("/v1/status-lists/{purpose}", get(status_lists::show))
         // Auth routes
         .route_with_task("/v1/auth/challenge", post(auth::challenge), auth_challenge)
         .route_with_task("/v1/auth/", post(auth::authenticate), auth_authenticate)

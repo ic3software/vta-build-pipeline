@@ -58,6 +58,7 @@ async fn build() -> Fixture {
     let join_requests_ks = store.keyspace("join_requests").unwrap();
     let policies_ks = store.keyspace("policies").unwrap();
     let active_policies_ks = store.keyspace("active_policies").unwrap();
+    let status_lists_ks = store.keyspace("status_lists").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
 
@@ -88,6 +89,8 @@ async fn build() -> Fixture {
         join_requests_ks: join_requests_ks.clone(),
         policies_ks: policies_ks.clone(),
         active_policies_ks: active_policies_ks.clone(),
+        status_lists_ks: status_lists_ks.clone(),
+        credential_signer: None,
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,
         secrets_resolver: None,

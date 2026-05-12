@@ -17,6 +17,7 @@ pub mod auth;
 pub mod community;
 pub mod config;
 pub mod config_store;
+pub mod credentials;
 pub mod did_key;
 #[cfg(feature = "setup")]
 pub mod emergency;
@@ -31,6 +32,7 @@ pub mod routes;
 pub mod server;
 pub mod setup;
 pub mod status;
+pub mod status_list;
 pub mod store;
 pub mod supervisor;
 pub mod webauthn;

@@ -222,6 +222,13 @@
       "status": "Draft",
       "path": "policies/show/1.0",
       "rest": "GET /v1/policies/{id}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/status-lists/show/1.0",
+      "status": "Draft",
+      "path": "status-lists/show/1.0",
+      "rest": "GET /v1/status-lists/{purpose}",
+      "trust_task_header_exempt": true
     }
   ]
 }

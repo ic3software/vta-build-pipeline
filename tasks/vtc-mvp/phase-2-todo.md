@@ -201,7 +201,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.9 — VC builder + local signer
 
-### `[ ]` M2.9.1 — `vtc_service::credentials` module
+### `[x]` M2.9.1 — `vtc_service::credentials` module
 
 - **Acceptance**
   - `affinidi-vc` + `affinidi-data-integrity` added as
@@ -230,7 +230,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.10 — Status-list infrastructure
 
-### `[ ]` M2.10.1 — `status_lists` keyspace + reserved-index allocator
+### `[x]` M2.10.1 — `status_lists` keyspace + reserved-index allocator
 
 - **Acceptance**
   - `StatusListState { purpose, capacity, next_random_seed,
@@ -258,7 +258,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.11 — Status-list publication route
 
-### `[ ]` M2.11.1 — `GET /v1/status-lists/{purpose}`
+### `[x]` M2.11.1 — `GET /v1/status-lists/{purpose}`
 
 - **Acceptance**
   - Public, unauthenticated, Trust-Task-exempt (verifier-

@@ -57,6 +57,11 @@ pub struct AppState {
     /// row per [`crate::policy::PolicyPurpose`] variant. M2.3's
     /// activate endpoint flips this; M2.6 / M2.7 / M2.13 read it.
     pub active_policies_ks: KeyspaceHandle,
+    /// BitstringStatusList state (M2.10). One row per
+    /// [`affinidi_status_list::StatusPurpose`] variant. M2.11's
+    /// public route reads from it; M2.14's flip-on-removal path
+    /// writes.
+    pub status_lists_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub audit_key_ks: KeyspaceHandle,
     pub config: Arc<RwLock<AppConfig>>,
@@ -76,6 +81,11 @@ pub struct AppState {
     /// tokens at the end of the claim ceremony. `None` until the secret
     /// store yields key material — install routes 503 in that case.
     pub install_signer: Option<Arc<InstallTokenSigner>>,
+    /// Ed25519 signer that mints VMC, VEC, and BitstringStatusList
+    /// credentials (M2.9). Wraps the same `#key-0` secret the
+    /// `secrets_resolver` holds. `None` until the secret store
+    /// yields key material — credential routes 503 in that case.
+    pub credential_signer: Option<Arc<crate::credentials::LocalSigner>>,
     /// Wraps `install_ks` with the claim-window state machine. Cheap
     /// to clone; always present once `install_ks` is open.
     pub install_store: InstallTokenStore,
@@ -161,6 +171,7 @@ pub async fn run(
     let join_requests_ks = store.keyspace("join_requests")?;
     let policies_ks = store.keyspace("policies")?;
     let active_policies_ks = store.keyspace("active_policies")?;
+    let status_lists_ks = store.keyspace("status_lists")?;
     let audit_ks = store.keyspace("audit")?;
     let audit_key_ks = store.keyspace("audit_key")?;
 
@@ -176,10 +187,42 @@ pub async fn run(
         Err(e) => warn!("failed to install default policies: {e}"),
     }
 
+    // M2.10 + M2.11: provision the two BitstringStatusLists.
+    // Idempotent — only seeds decoys when the row is brand new.
+    // Skipped when `public_url` is unset (pre-setup deployment) —
+    // the status-list `list_credential_id` is baked into every
+    // VMC's `credentialStatus.statusListCredential`, so we can't
+    // mint the row until we know the canonical URL.
+    if let Some(public_url) = config.public_url.as_deref() {
+        for purpose in [
+            affinidi_status_list::StatusPurpose::Revocation,
+            affinidi_status_list::StatusPurpose::Suspension,
+        ] {
+            let url = format!("{public_url}/v1/status-lists/{purpose}");
+            match crate::status_list::ensure_initial(&status_lists_ks, purpose, url).await {
+                Ok(_) => debug!(?purpose, "status list initialised"),
+                Err(e) => warn!(?purpose, "failed to initialise status list: {e}"),
+            }
+        }
+    } else {
+        warn!(
+            "public_url not configured — status lists deferred; \
+             VMC issuance + GET /v1/status-lists/* return 503 until set"
+        );
+    }
+
     // Initialize auth infrastructure. Pass the audit keyspaces in so
     // `init_auth` can derive the HMAC audit key from the same secret
     // store contents it uses for the install signer.
-    let (did_resolver, secrets_resolver, jwt_keys, atm, install_signer, audit_writer) = init_auth(
+    let (
+        did_resolver,
+        secrets_resolver,
+        jwt_keys,
+        atm,
+        install_signer,
+        audit_writer,
+        credential_signer,
+    ) = init_auth(
         &config,
         &*secret_store,
         audit_ks.clone(),
@@ -247,6 +290,7 @@ pub async fn run(
         join_requests_ks,
         policies_ks,
         active_policies_ks,
+        status_lists_ks: status_lists_ks.clone(),
         audit_ks,
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),
@@ -257,6 +301,7 @@ pub async fn run(
         webauthn,
         public_url,
         install_signer,
+        credential_signer: credential_signer.clone(),
         install_store,
         audit_writer,
         shutdown_tx: shutdown_tx.clone(),
@@ -597,12 +642,13 @@ async fn init_auth(
     Option<ATM>,
     Option<Arc<InstallTokenSigner>>,
     Option<AuditWriter>,
+    Option<Arc<crate::credentials::LocalSigner>>,
 ) {
     let vtc_did = match &config.vtc_did {
         Some(did) => did.clone(),
         None => {
             warn!("vtc_did not configured — auth endpoints will not work (run setup first)");
-            return (None, None, None, None, None, None);
+            return (None, None, None, None, None, None, None);
         }
     };
 
@@ -615,11 +661,11 @@ async fn init_auth(
         Ok(Some(s)) => s,
         Ok(None) => {
             warn!("no key material found — auth endpoints will not work (run setup first)");
-            return (None, None, None, None, None, None);
+            return (None, None, None, None, None, None, None);
         }
         Err(e) => {
             warn!("failed to load key material: {e} — auth endpoints will not work");
-            return (None, None, None, None, None, None);
+            return (None, None, None, None, None, None, None);
         }
     };
 
@@ -627,9 +673,17 @@ async fn init_auth(
         Ok(pair) => pair,
         Err(msg) => {
             warn!("{msg}");
-            return (None, None, None, None, None, None);
+            return (None, None, None, None, None, None, None);
         }
     };
+
+    // M2.9 credential signer — wraps the same 32-byte Ed25519
+    // seed in a [`LocalSigner`] handle so VMC / VEC / status-list
+    // credential builders can sign without round-tripping through
+    // the secret store on every call.
+    let credential_signer = Some(Arc::new(
+        crate::credentials::LocalSigner::from_ed25519_seed(vtc_did.clone(), &ed25519_bytes),
+    ));
 
     // Derive the install-token signer from the 32-byte Ed25519
     // private. HKDF info is `vtc-install-jwt-key/v2` — bumped from
@@ -665,7 +719,15 @@ async fn init_auth(
         Ok(r) => r,
         Err(e) => {
             warn!("failed to create DID resolver: {e} — auth endpoints will not work");
-            return (None, None, None, None, install_signer, audit_writer);
+            return (
+                None,
+                None,
+                None,
+                None,
+                install_signer,
+                audit_writer,
+                credential_signer,
+            );
         }
     };
 
@@ -697,6 +759,7 @@ async fn init_auth(
                     None,
                     install_signer,
                     audit_writer,
+                    credential_signer,
                 );
             }
         },
@@ -711,6 +774,7 @@ async fn init_auth(
                 None,
                 install_signer,
                 audit_writer,
+                credential_signer,
             );
         }
     };
@@ -755,6 +819,7 @@ async fn init_auth(
         atm,
         install_signer,
         audit_writer,
+        credential_signer,
     )
 }
 

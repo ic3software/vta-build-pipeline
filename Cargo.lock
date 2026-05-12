@@ -517,6 +517,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "affinidi-status-list"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7519418d6004ad52e67a7b23fb6171bd91b5bcd9ccc26e44fefcc8ba1452fcd"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "affinidi-tdk"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9184,10 +9199,14 @@ name = "vtc-service"
 version = "0.6.0"
 dependencies = [
  "affinidi-crypto",
+ "affinidi-data-integrity",
  "affinidi-did-resolver-cache-sdk",
  "affinidi-messaging-didcomm",
  "affinidi-messaging-didcomm-service",
+ "affinidi-secrets-resolver",
+ "affinidi-status-list",
  "affinidi-tdk",
+ "affinidi-vc",
  "async-trait",
  "aws-config",
  "aws-sdk-secretsmanager",

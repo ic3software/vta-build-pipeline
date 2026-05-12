@@ -73,6 +73,7 @@ async fn build_fixture() -> Fixture {
     let join_requests_ks = store.keyspace("join_requests").unwrap();
     let policies_ks = store.keyspace("policies").unwrap();
     let active_policies_ks = store.keyspace("active_policies").unwrap();
+    let status_lists_ks = store.keyspace("status_lists").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
     let install_store = InstallTokenStore::new(install_ks.clone());
@@ -163,6 +164,8 @@ async fn build_fixture() -> Fixture {
         join_requests_ks,
         policies_ks,
         active_policies_ks,
+        status_lists_ks,
+        credential_signer: None,
         audit_ks,
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),
