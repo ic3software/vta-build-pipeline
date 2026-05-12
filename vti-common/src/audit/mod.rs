@@ -34,7 +34,8 @@ pub use event::{
     AdminPasskeyData, AdminPromotedData, AuditEvent, AuditKeyRotatedData, CommunityInstalledData,
     CommunityProfileUpdatedData, ConfigChange, ConfigChangedData, ConfigReloadedData, ConfigSource,
     EmergencyBootstrapData, JoinRequestData, JoinRequestRejectedData, MemberAddedData,
-    MemberRemovedData, MemberUpdatedData, REDACTED_MARKER, RestartRequestedData, RoleChangedData,
+    MemberRemovedData, MemberUpdatedData, PolicyActivatedData, PolicyUploadedData, REDACTED_MARKER,
+    RestartRequestedData, RoleChangedData,
 };
 pub use key_store::{AuditKey, AuditKeyStore, KeyId, RotationReason};
 pub use writer::AuditWriter;

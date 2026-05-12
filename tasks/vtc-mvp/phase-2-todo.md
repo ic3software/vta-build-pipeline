@@ -16,7 +16,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M2.1 — `regorus` policy harness
 
-### `[ ]` M2.1.1 — `vtc_service::policy` module
+### `[x]` M2.1.1 — `vtc_service::policy` module
 
 - **Acceptance**
   - `regorus` added to workspace dependencies.
@@ -46,7 +46,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M2.2 — Policy model + `policies` keyspace
 
-### `[ ]` M2.2.1 — `Policy` + storage CRUD
+### `[x]` M2.2.1 — `Policy` + storage CRUD
 
 - **Acceptance**
   - `Policy { id, purpose, rego_source, sha256, activated_at:
@@ -76,7 +76,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M2.3 — Policy admin endpoints
 
-### `[ ]` M2.3.1 — Upload + activate + test
+### `[x]` M2.3.1 — Upload + activate + test
 
 - **Acceptance**
   - `POST /v1/policies` — admin-only. Body `{ purpose,
@@ -106,7 +106,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M2.4 — Policy read endpoints
 
-### `[ ]` M2.4.1 — List + show
+### `[x]` M2.4.1 — List + show
 
 - **Acceptance**
   - `GET /v1/policies` — admin-only. Paginated; ?purpose=

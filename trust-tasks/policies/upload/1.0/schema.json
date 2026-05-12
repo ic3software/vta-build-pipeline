@@ -1,0 +1,48 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/policies/upload/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Policies — Upload",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "object",
+      "required": ["purpose", "regoSource"],
+      "properties": {
+        "purpose": { "$ref": "#/$defs/PolicyPurpose" },
+        "regoSource": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["id", "sha256", "purpose", "version"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "purpose": { "$ref": "#/$defs/PolicyPurpose" },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "PolicyPurpose": {
+      "type": "string",
+      "enum": [
+        "join",
+        "removal",
+        "personhood",
+        "registry",
+        "directory",
+        "roleDefinitions",
+        "crossCommunityRoles",
+        "crossCommunityRelationships",
+        "relationships"
+      ]
+    }
+  }
+}

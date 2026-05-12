@@ -93,6 +93,9 @@ hkdf = { workspace = true }
 x25519-dalek = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }
 multibase = { workspace = true }
+# Rego policy interpreter (Phase 2 M2.1). Hosted in `crate::policy`.
+# Spec §3-J + §7: regorus runs in-process; no external OPA sidecar.
+regorus = { workspace = true }
 url = { workspace = true, optional = true }
 # BIP-39 mnemonic parsing for `vtc admin emergency-bootstrap` (M0.10).
 # Same pin as `vta-service`.

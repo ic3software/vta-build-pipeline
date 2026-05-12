@@ -1,0 +1,60 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/policies/list/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Policies — List",
+  "type": "object",
+  "properties": {
+    "response": {
+      "type": "object",
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PolicyResponse" }
+        },
+        "nextCursor": { "type": ["string", "null"] },
+        "totalEstimate": { "type": ["integer", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "PolicyResponse": {
+      "type": "object",
+      "required": [
+        "id",
+        "purpose",
+        "regoSource",
+        "sha256",
+        "authorDid",
+        "createdAt",
+        "version",
+        "isActive"
+      ],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "purpose": { "$ref": "#/$defs/PolicyPurpose" },
+        "regoSource": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "activatedAt": { "type": ["string", "null"], "format": "date-time" },
+        "authorDid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "version": { "type": "integer", "minimum": 1 },
+        "isActive": { "type": "boolean" }
+      }
+    },
+    "PolicyPurpose": {
+      "type": "string",
+      "enum": [
+        "join",
+        "removal",
+        "personhood",
+        "registry",
+        "directory",
+        "roleDefinitions",
+        "crossCommunityRoles",
+        "crossCommunityRelationships",
+        "relationships"
+      ]
+    }
+  }
+}

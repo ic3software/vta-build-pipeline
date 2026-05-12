@@ -8,6 +8,7 @@ mod health;
 pub(crate) mod install;
 pub(crate) mod join_requests;
 pub(crate) mod members;
+pub(crate) mod policies;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -120,6 +121,26 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let join_reject = TrustTask::new("https://trusttasks.org/openvtc/vtc/join-requests/reject/1.0")
         .expect("static Trust-Task URL");
+    // Policies (Phase 2 M2.3). Three distinct Trust Tasks for the
+    // three POST endpoints — upload, activate, test — so SIEM
+    // filters + soft-gate consumers can target each precisely.
+    let policies_upload = TrustTask::new("https://trusttasks.org/openvtc/vtc/policies/upload/1.0")
+        .expect("static Trust-Task URL");
+    let policies_activate =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/policies/activate/1.0")
+            .expect("static Trust-Task URL");
+    let policies_test = TrustTask::new("https://trusttasks.org/openvtc/vtc/policies/test/1.0")
+        .expect("static Trust-Task URL");
+    // Read endpoints (M2.4). GET /v1/policies and
+    // GET /v1/policies/{id} share their mounts with the POST
+    // /v1/policies upload and POST /v1/policies/{id}/activate
+    // endpoints respectively — TrustTaskRouter doesn't yet support
+    // per-method selectors (same workaround community/profile,
+    // admin/config, members/{did}, join-requests use). The
+    // standalone `policies/list/1.0` + `policies/show/1.0` Trust
+    // Tasks exist on disk + in index.json so the soft-gate
+    // surface stays complete; the wire enforcement collapses to
+    // the POST task on the shared mount.
 
     TrustTaskRouter::<AppState>::new()
         .route_exempt("/health", get(health::health))
@@ -318,6 +339,33 @@ pub fn router() -> Router<AppState> {
             "/v1/join-requests/{id}/reject",
             post(join_requests::decide::reject),
             join_reject,
+        )
+        // Policies (Phase 2 M2.3). Three POST endpoints, three
+        // Trust Tasks. `upload` mints + persists; `activate` flips
+        // the per-purpose active pointer; `test` evaluates a stored
+        // policy without mutating state.
+        .route_with_task(
+            "/v1/policies",
+            get(policies::read::list_policies).post(policies::admin::upload),
+            policies_upload.clone(),
+        )
+        .route_with_task(
+            "/v1/policies/{id}",
+            get(policies::read::show_policy),
+            // Reuses the upload task on the shared mount; the
+            // `policies/show/1.0` Trust Task lives in index.json
+            // + on disk for the soft-gate surface (see above).
+            policies_upload.clone(),
+        )
+        .route_with_task(
+            "/v1/policies/{id}/activate",
+            post(policies::admin::activate),
+            policies_activate,
+        )
+        .route_with_task(
+            "/v1/policies/{id}/test",
+            post(policies::admin::test),
+            policies_test,
         )
         .into_router()
 }

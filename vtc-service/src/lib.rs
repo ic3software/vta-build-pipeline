@@ -26,6 +26,7 @@ pub mod join;
 pub mod keys;
 pub mod members;
 pub mod messaging;
+pub mod policy;
 pub mod routes;
 pub mod server;
 pub mod setup;
