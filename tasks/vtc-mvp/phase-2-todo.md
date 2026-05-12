@@ -280,7 +280,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.12 — VMC + VEC issuance on approve
 
-### `[ ]` M2.12.1 — Wire issuance into `decide::approve`
+### `[x]` M2.12.1 — Wire issuance into `decide::approve`
 
 - **Acceptance**
   - On approve: allocate a status-list index (revocation
