@@ -37,12 +37,12 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::acl::{VtcRole, delete_acl_entry, list_acl_entries};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
-use vti_common::acl::{Role, delete_acl_entry, list_acl_entries};
 use vti_common::config::StoreConfig;
 use vti_common::error::AppError;
 use vti_common::store::Store;
@@ -248,7 +248,7 @@ pub async fn run_emergency_bootstrap_with_store(
     // --- destructive cleanup ----------------------------------------
     let mut admin_entries_cleared = 0;
     for entry in list_acl_entries(&acl_ks).await? {
-        if entry.role == Role::Admin {
+        if entry.role == VtcRole::Admin {
             delete_acl_entry(&acl_ks, &entry.did).await?;
             admin_entries_cleared += 1;
         }

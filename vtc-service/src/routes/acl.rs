@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::acl::{
-    AclEntry, Role, delete_acl_entry, get_acl_entry, is_acl_entry_visible, list_acl_entries,
-    store_acl_entry, validate_acl_modification, validate_role_assignment,
+    VtcAclEntry, VtcRole, delete_acl_entry, get_acl_entry, is_acl_entry_visible, list_acl_entries,
+    store_acl_entry, validate_acl_modification, validate_vtc_role_assignment,
 };
 use crate::auth::{AdminAuth, ManageAuth, session::now_epoch};
 use crate::error::AppError;
@@ -23,7 +23,7 @@ pub struct AclListResponse {
 #[derive(Debug, Serialize)]
 pub struct AclEntryResponse {
     pub did: String,
-    pub role: Role,
+    pub role: VtcRole,
     pub label: Option<String>,
     pub allowed_contexts: Vec<String>,
     pub created_at: u64,
@@ -32,8 +32,8 @@ pub struct AclEntryResponse {
     pub expires_at: Option<u64>,
 }
 
-impl From<AclEntry> for AclEntryResponse {
-    fn from(e: AclEntry) -> Self {
+impl From<VtcAclEntry> for AclEntryResponse {
+    fn from(e: VtcAclEntry) -> Self {
         AclEntryResponse {
             did: e.did,
             role: e.role,
@@ -60,7 +60,7 @@ pub async fn list_acl(
     let all_entries = list_acl_entries(&acl).await?;
     let entries: Vec<AclEntryResponse> = all_entries
         .into_iter()
-        .filter(|e| is_acl_entry_visible(&auth.0, e))
+        .filter(|e| is_acl_entry_visible(&auth.0, &as_vti_acl_entry(e)))
         .filter(|e| match &query.context {
             Some(ctx) => e.allowed_contexts.contains(ctx),
             None => true,
@@ -76,7 +76,7 @@ pub async fn list_acl(
 #[derive(Debug, Deserialize)]
 pub struct CreateAclRequest {
     pub did: String,
-    pub role: Role,
+    pub role: VtcRole,
     pub label: Option<String>,
     #[serde(default)]
     pub allowed_contexts: Vec<String>,
@@ -89,9 +89,9 @@ pub async fn create_acl(
     State(state): State<AppState>,
     Json(req): Json<CreateAclRequest>,
 ) -> Result<(StatusCode, Json<AclEntryResponse>), AppError> {
-    // Block Initiators from granting Admin — role ↔ context bound checks must
-    // run before we touch storage.
-    validate_role_assignment(&auth.0, &req.role)?;
+    // Block non-admin callers from granting Admin — role + context
+    // bound checks must run before we touch storage.
+    validate_vtc_role_assignment(&auth.0, &req.role)?;
     validate_acl_modification(&auth.0, &req.allowed_contexts)?;
 
     let acl = state.acl_ks.clone();
@@ -104,7 +104,7 @@ pub async fn create_acl(
         )));
     }
 
-    let entry = AclEntry {
+    let entry = VtcAclEntry {
         did: req.did,
         role: req.role,
         label: req.label,
@@ -131,7 +131,7 @@ pub async fn get_acl(
     let entry = get_acl_entry(&acl, &did)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("ACL entry not found for DID: {did}")))?;
-    if !is_acl_entry_visible(&auth.0, &entry) {
+    if !is_acl_entry_visible(&auth.0, &as_vti_acl_entry(&entry)) {
         return Err(AppError::NotFound(format!(
             "ACL entry not found for DID: {did}"
         )));
@@ -144,14 +144,14 @@ pub async fn get_acl(
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateAclRequest {
-    pub role: Option<Role>,
+    pub role: Option<VtcRole>,
     pub label: Option<String>,
     pub allowed_contexts: Option<Vec<String>>,
 }
 
 pub async fn update_acl(
     // Modifying an ACL entry can downgrade an existing admin or shrink their
-    // `allowed_contexts`. Gate on Admin so an Initiator can't tamper with
+    // `allowed_contexts`. Gate on Admin so a non-admin can't tamper with
     // admin entries they happen to see (creation stays on `ManageAuth`).
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -164,14 +164,14 @@ pub async fn update_acl(
         .ok_or_else(|| AppError::NotFound(format!("ACL entry not found for DID: {did}")))?;
 
     // Context admins can only modify entries they can see
-    if !is_acl_entry_visible(&auth.0, &entry) {
+    if !is_acl_entry_visible(&auth.0, &as_vti_acl_entry(&entry)) {
         return Err(AppError::NotFound(format!(
             "ACL entry not found for DID: {did}"
         )));
     }
 
     if let Some(role) = req.role {
-        validate_role_assignment(&auth.0, &role)?;
+        validate_vtc_role_assignment(&auth.0, &role)?;
         entry.role = role;
     }
     if let Some(label) = req.label {
@@ -209,7 +209,7 @@ pub async fn delete_acl(
     let entry = get_acl_entry(&acl, &did)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("ACL entry not found for DID: {did}")))?;
-    if !is_acl_entry_visible(&auth.0, &entry) {
+    if !is_acl_entry_visible(&auth.0, &as_vti_acl_entry(&entry)) {
         return Err(AppError::NotFound(format!(
             "ACL entry not found for DID: {did}"
         )));
@@ -221,6 +221,29 @@ pub async fn delete_acl(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Translate a `VtcAclEntry` into the `vti_common::acl::AclEntry`
+/// shape that the role-agnostic visibility helpers
+/// (`is_acl_entry_visible`, `validate_acl_modification`) expect.
+/// They only look at `allowed_contexts`, so the role mapping is
+/// best-effort — `VtcRole::Admin` → `Role::Admin`, everything else
+/// degrades to `Role::Reader` (lowest privilege; only the contexts
+/// match), which is fine because these helpers ignore the role
+/// field entirely.
+fn as_vti_acl_entry(e: &VtcAclEntry) -> vti_common::acl::AclEntry {
+    vti_common::acl::AclEntry {
+        did: e.did.clone(),
+        role: match e.role {
+            VtcRole::Admin => vti_common::acl::Role::Admin,
+            _ => vti_common::acl::Role::Reader,
+        },
+        label: e.label.clone(),
+        allowed_contexts: e.allowed_contexts.clone(),
+        created_at: e.created_at,
+        created_by: e.created_by.clone(),
+        expires_at: e.expires_at,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Wire-shape tests for the ACL route bodies. Full route integration
@@ -230,7 +253,6 @@ mod tests {
     //! renaming a field, changing a default, or breaking backward
     //! compatibility with the CLI clients that consume these types.
     use super::*;
-    use crate::acl::Role;
     use serde_json::json;
 
     // ── CreateAclRequest ────────────────────────────────────────────
@@ -240,7 +262,7 @@ mod tests {
         let body = json!({ "did": "did:key:zABC", "role": "admin" });
         let req: CreateAclRequest = serde_json::from_value(body).expect("minimal body");
         assert_eq!(req.did, "did:key:zABC");
-        assert_eq!(req.role, Role::Admin);
+        assert_eq!(req.role, VtcRole::Admin);
         assert_eq!(req.label, None);
         assert!(req.allowed_contexts.is_empty(), "defaults to empty");
         assert_eq!(req.expires_at, None);
@@ -250,13 +272,13 @@ mod tests {
     fn create_acl_request_parses_full_body() {
         let body = json!({
             "did": "did:key:zABC",
-            "role": "initiator",
+            "role": "moderator",
             "label": "ops lead",
             "allowed_contexts": ["ctx1", "ctx2"],
             "expires_at": 1_800_000_000u64,
         });
         let req: CreateAclRequest = serde_json::from_value(body).expect("full body");
-        assert_eq!(req.role, Role::Initiator);
+        assert_eq!(req.role, VtcRole::Moderator);
         assert_eq!(req.label.as_deref(), Some("ops lead"));
         assert_eq!(req.allowed_contexts, vec!["ctx1", "ctx2"]);
         assert_eq!(req.expires_at, Some(1_800_000_000));
@@ -267,18 +289,15 @@ mod tests {
         let body = json!({ "did": "did:key:zA", "role": "godmode" });
         let err = serde_json::from_value::<CreateAclRequest>(body)
             .expect_err("unknown role must not parse");
-        // This also catches a regression where someone adds a wildcard
-        // match to Role parsing that accepts arbitrary strings.
         let msg = format!("{err}");
         assert!(
-            msg.contains("godmode") || msg.contains("variant"),
+            msg.contains("godmode") || msg.contains("unknown"),
             "got {msg}"
         );
     }
 
     #[test]
     fn create_acl_request_rejects_missing_required() {
-        // `did` is mandatory (no default). Dropping it must fail parse.
         let body = json!({ "role": "admin" });
         serde_json::from_value::<CreateAclRequest>(body)
             .expect_err("missing `did` must be rejected");
@@ -297,9 +316,9 @@ mod tests {
 
     #[test]
     fn update_acl_request_parses_role_only() {
-        let body = json!({ "role": "reader" });
+        let body = json!({ "role": "member" });
         let req: UpdateAclRequest = serde_json::from_value(body).unwrap();
-        assert_eq!(req.role, Some(Role::Reader));
+        assert_eq!(req.role, Some(VtcRole::Member));
     }
 
     // ── ListAclQuery ───────────────────────────────────────────────
@@ -317,11 +336,9 @@ mod tests {
 
     #[test]
     fn acl_entry_response_serializes_with_stable_field_names() {
-        // Caller-facing JSON shape is a compatibility contract with CLI
-        // clients. Field renames here break CLIs in the field.
-        let entry = AclEntry {
+        let entry = VtcAclEntry {
             did: "did:key:zABC".into(),
-            role: Role::Admin,
+            role: VtcRole::Admin,
             label: Some("test".into()),
             allowed_contexts: vec!["ctx1".into()],
             created_at: 1_700_000_000,
@@ -341,12 +358,9 @@ mod tests {
 
     #[test]
     fn acl_entry_response_omits_expires_at_when_permanent() {
-        // Permanent entries (no expires_at) should not include the field
-        // at all — skip_serializing_if is load-bearing for wire
-        // compatibility with older clients.
-        let entry = AclEntry {
+        let entry = VtcAclEntry {
             did: "did:key:zPerm".into(),
-            role: Role::Admin,
+            role: VtcRole::Admin,
             label: None,
             allowed_contexts: vec![],
             created_at: 1_700_000_000,
@@ -367,7 +381,7 @@ mod tests {
     fn acl_list_response_round_trips() {
         let entries = vec![AclEntryResponse {
             did: "did:key:zA".into(),
-            role: Role::Reader,
+            role: VtcRole::Member,
             label: None,
             allowed_contexts: vec![],
             created_at: 0,
@@ -376,9 +390,30 @@ mod tests {
         }];
         let resp = AclListResponse { entries };
         let json = serde_json::to_string(&resp).unwrap();
-        // Top-level key is `entries`, not `acl` or `items` — CLI clients
-        // parse this exact shape.
         assert!(json.contains(r#""entries":"#), "got {json}");
-        assert!(json.contains(r#""role":"reader""#));
+        assert!(json.contains(r#""role":"member""#));
+    }
+
+    #[test]
+    fn custom_role_round_trip_through_request_body() {
+        let body = json!({
+            "did": "did:key:zEditor",
+            "role": "custom:editor",
+        });
+        let req: CreateAclRequest = serde_json::from_value(body).expect("custom role parses");
+        assert_eq!(req.role, VtcRole::Custom("editor".into()));
+        // Round-trip via the response shape.
+        let entry = VtcAclEntry {
+            did: req.did,
+            role: req.role,
+            label: None,
+            allowed_contexts: vec![],
+            created_at: 0,
+            created_by: "did:key:zS".into(),
+            expires_at: None,
+        };
+        let resp = AclEntryResponse::from(entry);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["role"], "custom:editor");
     }
 }

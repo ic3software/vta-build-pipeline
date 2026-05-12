@@ -96,6 +96,7 @@ async fn build_fixture() -> Fixture {
     let config_ks = store.keyspace("config").unwrap();
     let passkey_ks = store.keyspace("passkey").unwrap();
     let install_ks = store.keyspace("install").unwrap();
+    let members_ks = store.keyspace("members").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
     let install_store = InstallTokenStore::new(install_ks.clone());
@@ -127,6 +128,7 @@ async fn build_fixture() -> Fixture {
         config_ks,
         passkey_ks,
         install_ks,
+        members_ks: members_ks.clone(),
         audit_ks: audit_ks.clone(),
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),

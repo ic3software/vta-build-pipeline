@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
 
-use crate::acl::{AclEntry, Role, store_acl_entry};
+use crate::acl::{VtcAclEntry, VtcRole, store_acl_entry};
 use crate::auth::credentials::generate_did_key;
 use crate::config::AppConfig;
 use crate::store::Store;
@@ -23,9 +23,9 @@ pub async fn run_create_did_key(args: CreateDidKeyArgs) -> Result<(), Box<dyn st
     // Optionally create ACL entry
     if args.admin {
         let acl_ks = store.keyspace("acl")?;
-        let entry = AclEntry {
+        let entry = VtcAclEntry {
             did: did.clone(),
-            role: Role::Admin,
+            role: VtcRole::Admin,
             label: args.label.clone(),
             allowed_contexts: vec![],
             created_at: std::time::SystemTime::now()
