@@ -170,12 +170,14 @@ pub async fn approve(
         Json(DecideResponse {
             request_id: id,
             status: req.status.to_string(),
-            vmc: Some(serde_json::to_value(&vmc).map_err(|e| {
-                AppError::Internal(format!("serialise VMC for response: {e}"))
-            })?),
-            role_vec: Some(serde_json::to_value(&role_vec).map_err(|e| {
-                AppError::Internal(format!("serialise VEC for response: {e}"))
-            })?),
+            vmc: Some(
+                serde_json::to_value(&vmc)
+                    .map_err(|e| AppError::Internal(format!("serialise VMC for response: {e}")))?,
+            ),
+            role_vec: Some(
+                serde_json::to_value(&role_vec)
+                    .map_err(|e| AppError::Internal(format!("serialise VEC for response: {e}")))?,
+            ),
         }),
     ))
 }
@@ -212,8 +214,7 @@ async fn issue_join_credentials(
         ))
     })?;
 
-    let status_ref =
-        CredentialStatusRef::revocation(row.list_credential_id.clone(), slot);
+    let status_ref = CredentialStatusRef::revocation(row.list_credential_id.clone(), slot);
 
     let vmc_id = format!("urn:uuid:{}", Uuid::new_v4());
     let vmc = build_vmc(

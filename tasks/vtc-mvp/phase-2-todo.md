@@ -301,7 +301,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.13 — Renewal
 
-### `[ ]` M2.13.1 — `POST /v1/members/me/renew`
+### `[x]` M2.13.1 — `POST /v1/members/me/renew`
 
 - **Acceptance**
   - Authenticated. Caller's DID is the renewal target.
@@ -324,7 +324,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.14 — Removal flips revocation bit
 
-### `[ ]` M2.14.1 — Status-list flip on `MemberRemoved`
+### `[x]` M2.14.1 — Status-list flip on `MemberRemoved`
 
 - **Acceptance**
   - `remove_inner` flips the member's status-list bit

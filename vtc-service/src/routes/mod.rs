@@ -132,6 +132,8 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let policies_test = TrustTask::new("https://trusttasks.org/openvtc/vtc/policies/test/1.0")
         .expect("static Trust-Task URL");
+    let members_renew = TrustTask::new("https://trusttasks.org/openvtc/vtc/members/renew/1.0")
+        .expect("static Trust-Task URL");
     // Read endpoints (M2.4). GET /v1/policies and
     // GET /v1/policies/{id} share their mounts with the POST
     // /v1/policies upload and POST /v1/policies/{id}/activate
@@ -296,6 +298,14 @@ pub fn router() -> Router<AppState> {
             "/v1/members/me",
             axum::routing::delete(members::remove::self_remove),
             members_self_remove,
+        )
+        // Renewal (M2.13). POST on its own mount so the
+        // Trust Task header check + per-method selectors are
+        // unambiguous.
+        .route_with_task(
+            "/v1/members/me/renew",
+            post(members::renew::renew),
+            members_renew,
         )
         .route_with_task(
             "/v1/members/{did}",
