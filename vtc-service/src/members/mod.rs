@@ -70,6 +70,16 @@ pub struct Member {
     /// layer.
     #[serde(default)]
     pub extensions: JsonValue,
+    /// Set when the member departs (spec §10.2). `None` for live
+    /// members; `Some(_)` distinguishes a Tombstoned or Historical
+    /// row from an active one. `Purge` deletes the Member row
+    /// outright — those rows never carry `removed_at`.
+    ///
+    /// Phase 2's renewal + VMC issuance paths consult this so they
+    /// don't mint a credential for a departed member that the
+    /// reconciler hasn't yet caught up on.
+    #[serde(default)]
+    pub removed_at: Option<DateTime<Utc>>,
 }
 
 impl Member {
@@ -91,7 +101,34 @@ impl Member {
             current_vmc_id: None,
             current_role_vec_id: None,
             extensions: JsonValue::Null,
+            removed_at: None,
         }
+    }
+
+    /// Returns `true` if this Member has been tombstoned or marked
+    /// historical. Always `false` immediately after [`Self::fresh`].
+    pub fn is_removed(&self) -> bool {
+        self.removed_at.is_some()
+    }
+
+    /// Convert the live row to a tombstone: clear every
+    /// PII-bearing / credential-bearing field, leave `did` +
+    /// `joined_at` intact, stamp `removed_at`. Tombstoned rows
+    /// retain enough metadata for "who was a member" queries
+    /// but carry no live profile data.
+    pub fn tombstone(&mut self) {
+        self.publish_consent = false;
+        self.departure_preference = Disposition::default_preference();
+        self.current_vmc_id = None;
+        self.current_role_vec_id = None;
+        self.extensions = JsonValue::Null;
+        self.removed_at = Some(Utc::now());
+    }
+
+    /// Mark the row historical — keep all fields verbatim, just
+    /// stamp `removed_at`.
+    pub fn mark_historical(&mut self) {
+        self.removed_at = Some(Utc::now());
     }
 }
 

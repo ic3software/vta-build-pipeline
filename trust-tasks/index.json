@@ -179,6 +179,19 @@
       "status": "Draft",
       "path": "join-requests/reject/1.0",
       "rest": "POST /v1/join-requests/{id}/reject"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/self-remove/1.0",
+      "status": "Draft",
+      "path": "members/self-remove/1.0",
+      "rest": "DELETE /v1/members/me",
+      "didcomm": "https://trusttasks.org/openvtc/vtc/members/self-remove/1.0"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/admin-remove/1.0",
+      "status": "Draft",
+      "path": "members/admin-remove/1.0",
+      "rest": "DELETE /v1/members/{did}"
     }
   ]
 }

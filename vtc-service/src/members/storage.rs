@@ -198,6 +198,7 @@ mod tests {
             current_vmc_id: Some("vmc-1".into()),
             current_role_vec_id: Some("vec-1".into()),
             extensions: serde_json::json!({ "team": "platform" }),
+            removed_at: None,
         };
         let json = serde_json::to_value(&m).unwrap();
         assert!(json["joinedAt"].is_string());

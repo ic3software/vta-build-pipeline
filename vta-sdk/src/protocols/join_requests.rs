@@ -40,3 +40,37 @@ pub struct JoinRequestSubmitReceiptBody {
     /// future protocol versions may add `"deferred"` etc.
     pub status: String,
 }
+
+// ---------------------------------------------------------------------------
+// Self-remove (M1.11.1 DIDComm twin)
+// ---------------------------------------------------------------------------
+
+/// DIDComm `type` for a member-side self-removal.
+pub const MEMBER_SELF_REMOVE_TYPE: &str =
+    "https://trusttasks.org/openvtc/vtc/members/self-remove/1.0";
+
+/// VTC's reply with the resolved disposition + audit hint.
+pub const MEMBER_SELF_REMOVE_RECEIPT_TYPE: &str =
+    "https://trusttasks.org/openvtc/vtc/members/self-remove-receipt/1.0";
+
+/// Body of the self-remove message. `did` comes from the DIDComm
+/// `from` field — the caller's authcrypt sender authenticates
+/// them. Disposition optional; falls back to the Member's stored
+/// `departure_preference` and then to PolicyDefault→Tombstone.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfRemoveBody {
+    #[serde(default)]
+    pub disposition: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfRemoveReceiptBody {
+    pub did: String,
+    /// Resolved disposition (`"purge"` | `"tombstone"` |
+    /// `"historical"`). `policydefault` is never returned —
+    /// the daemon resolves it before responding.
+    pub disposition: String,
+    pub removed: bool,
+}

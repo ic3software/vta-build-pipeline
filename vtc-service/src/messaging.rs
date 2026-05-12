@@ -15,12 +15,15 @@ use tracing::{info, warn};
 
 use vta_sdk::protocols::join_requests::{
     JOIN_REQUEST_SUBMIT_RECEIPT_TYPE, JOIN_REQUEST_SUBMIT_TYPE, JoinRequestSubmitBody,
-    JoinRequestSubmitReceiptBody,
+    JoinRequestSubmitReceiptBody, MEMBER_SELF_REMOVE_RECEIPT_TYPE, MEMBER_SELF_REMOVE_TYPE,
+    SelfRemoveBody, SelfRemoveReceiptBody,
 };
 
 use crate::config::AppConfig;
 use crate::join::JoinTransport;
+use crate::members::Disposition;
 use crate::routes::join_requests::submit::submit_inner;
+use crate::routes::members::remove::remove_inner;
 use crate::server::AppState;
 
 /// Start the DIDComm service and block until shutdown.
@@ -90,6 +93,12 @@ pub async fn run_didcomm_service(
             r.route(
                 JOIN_REQUEST_SUBMIT_TYPE,
                 handler_fn(join_request_submit_handler),
+            )
+        })
+        .and_then(|r| {
+            r.route(
+                MEMBER_SELF_REMOVE_TYPE,
+                handler_fn(member_self_remove_handler),
             )
         }) {
         Ok(r) => r,
@@ -203,4 +212,57 @@ async fn join_request_submit_handler(
     Ok(Some(
         DIDCommResponse::new(JOIN_REQUEST_SUBMIT_RECEIPT_TYPE, body).thid(message.id),
     ))
+}
+
+/// `members/self-remove/1.0` over DIDComm (M1.11.1 twin).
+///
+/// Caller's DID = the DIDComm `from` field. Body optionally
+/// carries the disposition; defaults match REST (Member's
+/// stored `departure_preference`, then PolicyDefault→Tombstone).
+async fn member_self_remove_handler(
+    ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<AppState>,
+) -> Result<Option<DIDCommResponse>, DIDCommServiceError> {
+    let caller_did = ctx
+        .sender_did
+        .clone()
+        .ok_or_else(|| DIDCommServiceError::Internal("self-remove has no DIDComm sender".into()))?;
+
+    let body: SelfRemoveBody = serde_json::from_value(message.body.clone())
+        .map_err(|e| DIDCommServiceError::Internal(format!("malformed self-remove body: {e}")))?;
+
+    let disposition = body
+        .disposition
+        .as_deref()
+        .map(parse_disposition)
+        .transpose()
+        .map_err(DIDCommServiceError::Internal)?;
+
+    let outcome = remove_inner(&state, &caller_did, &caller_did, disposition, String::new())
+        .await
+        .map_err(|e| DIDCommServiceError::Internal(format!("self-remove: {e}")))?;
+
+    let receipt = SelfRemoveReceiptBody {
+        did: outcome.did,
+        disposition: outcome.disposition,
+        removed: outcome.removed,
+    };
+    let body = serde_json::to_value(&receipt)
+        .map_err(|e| DIDCommServiceError::Internal(format!("receipt serialise: {e}")))?;
+    Ok(Some(
+        DIDCommResponse::new(MEMBER_SELF_REMOVE_RECEIPT_TYPE, body).thid(message.id),
+    ))
+}
+
+fn parse_disposition(s: &str) -> Result<Disposition, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "purge" => Ok(Disposition::Purge),
+        "tombstone" => Ok(Disposition::Tombstone),
+        "historical" => Ok(Disposition::Historical),
+        "policydefault" => Ok(Disposition::PolicyDefault),
+        other => Err(format!(
+            "unknown disposition '{other}' (expected purge|tombstone|historical|policydefault)"
+        )),
+    }
 }

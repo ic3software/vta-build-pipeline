@@ -1,0 +1,30 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/admin-remove/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Members — Admin Remove",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "object",
+      "properties": {
+        "disposition": {
+          "type": "string",
+          "enum": ["purge", "tombstone", "historical", "policydefault"]
+        },
+        "reason": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["did", "disposition", "removed"],
+      "properties": {
+        "did": { "type": "string" },
+        "disposition": {
+          "type": "string",
+          "enum": ["purge", "tombstone", "historical"]
+        },
+        "removed": { "type": "boolean" }
+      }
+    }
+  }
+}

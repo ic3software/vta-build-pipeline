@@ -7,7 +7,7 @@ pub(crate) mod did_log;
 mod health;
 pub(crate) mod install;
 pub(crate) mod join_requests;
-mod members;
+pub(crate) mod members;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -97,6 +97,14 @@ pub fn router() -> Router<AppState> {
     let members_promote =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/members/promote-to-admin/1.0")
             .expect("static Trust-Task URL");
+    let members_self_remove =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/members/self-remove/1.0")
+            .expect("static Trust-Task URL");
+    // `members_admin_remove` (`members/admin-remove/1.0`) shares
+    // the `members/{did}` mount with show + update for now —
+    // TrustTaskRouter doesn't support per-method Trust-Task
+    // selectors yet. The standalone task exists on disk +
+    // index.json so the soft-gate surface stays complete.
     // POST + GET share `/v1/join-requests`. The `join-requests/list/1.0`
     // Trust Task exists in index.json + on-disk spec/schema so the
     // soft-gate surface stays complete; the wire enforcement here
@@ -254,13 +262,26 @@ pub fn router() -> Router<AppState> {
             get(members::read::list_members),
             members_list,
         )
+        // `/v1/members/me` for self-remove (M1.11.1). Must be
+        // declared BEFORE the `/v1/members/{did}` mount otherwise
+        // axum's path-trie picks the parameterised route first
+        // and routes "me" as a literal DID.
+        .route_with_task(
+            "/v1/members/me",
+            axum::routing::delete(members::remove::self_remove),
+            members_self_remove,
+        )
         .route_with_task(
             "/v1/members/{did}",
-            get(members::read::show_member).patch(members::update::update_member),
-            // GET + PATCH share one Trust Task today; split into
-            // members/show/1.0 + members/update/1.0 when
-            // TrustTaskRouter gains per-method selectors (same
-            // Phase-0 pattern community/profile + admin/config use).
+            get(members::read::show_member)
+                .patch(members::update::update_member)
+                .delete(members::remove::admin_remove),
+            // GET + PATCH + DELETE share `members/show/1.0` at the
+            // router layer pending per-method selectors; the
+            // standalone `members/update/1.0` and
+            // `members/admin-remove/1.0` Trust Tasks exist on
+            // disk + in index.json so the soft-gate surface stays
+            // complete.
             members_show,
         )
         .route_with_task(
