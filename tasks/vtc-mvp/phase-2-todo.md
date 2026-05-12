@@ -380,23 +380,29 @@ ships; assert / revoke endpoints are Phase 4.
 
 ---
 
-## M2.16 — Spec-deviation note
+## M2.16 — Spec clarifications
 
 ### `[ ]` M2.16.1 — Capture D1 + status-list URL outcomes
 
 - **Acceptance** — `tasks/vtc-mvp/phase-2-plan.md` gains a
   "Phase 2 outcomes" header listing:
-  - **D1 outcome**: VTC signs its own credentials locally.
-    Spec §3-A "no key custody" amended.
+  - **D1 outcome**: VTC signs its own credentials locally
+    against a **cached** copy of the integration DID's keys
+    (mediator / webvh-service pattern). Spec §3-A amended to
+    spell out the cached-locally / VTA-controlled model —
+    "no key custody" was always meant as "no key minting /
+    rotation authority", not "no key storage".
   - **§14.2 outcome**: VTA-oracle timeout + breaker config
-    knobs retained but only apply to non-VMC remote
-    dependencies (trust-registry in Phase 3, did:webvh
-    resolver in M2.15.2).
-  - Any other deviations discovered during implementation.
+    parameters retain their names but the spec is amended
+    to clarify they apply to **non-VMC remote dependencies**
+    only (trust-registry publish in Phase 3, did:webvh
+    resolver in M2.15.2). VMC issuance is in-process.
+  - Any other clarifications discovered during
+    implementation.
 - **Files**
   - `tasks/vtc-mvp/phase-2-plan.md`
   - `docs/05-design-notes/vtc-mvp.md` (§3-A + §14.2
-    amendments)
+    clarifications)
 
 ---
 
@@ -468,8 +474,10 @@ the flip → members can rotate their DIDs. Phase 3
 Defaults in `phase-2-plan.md` §§D1–D10. Listed here so
 they're findable from the todo:
 
-- **D1**: Signing surface — local Ed25519 (proposed).
-  **Spec deviation**.
+- **D1**: Signing surface — cached-locally, VTA-controlled
+  (mediator / webvh-service pattern). **Spec clarification**
+  of §3-A "no key custody" (= no key minting / rotation
+  authority, not no key storage).
 - **D2**: regorus location — `vtc_service::policy` (proposed).
 - **D3**: Policy storage shape — `policies:<id>` rows +
   `active_policies:<purpose>` pointer (proposed).

@@ -82,30 +82,44 @@ Out of scope (deferred to Phase 3+):
 
 Load-bearing. Defaults below; flag dissent before any code lands.
 
-### D1 — Signing surface: local vs VTA oracle
+### D1 — Signing surface: cached-locally, VTA-controlled
 
-Spec §3-A says "VTC has no key custody; every signature
-delegates to the VTA signing oracle." That predates the
-VTA-driven-keys rework (PR-A of Phase 0), which **ships the
-VTC its own `#key-0` Ed25519 private** inside the secret store
-(`VtcKeyBundle`). After PR-A, the VTC **does** hold its own
-keys — the "delegate to VTA" line is obsolete.
+Spec §3-A wording — "VTC has no key custody; every signature
+delegates to the VTA signing oracle" — is overloaded.
+**Custody** could read as "no key storage at all" or as "no
+key minting / rotation authority". The working architecture
+matches the `affinidi-messaging-mediator` +
+`affinidi-webvh-services` pattern: **the VTA is the key
+controller; the VTC caches a working copy in its secret
+store and signs locally**.
 
-**Proposed default: local signing.** The VTC signs VMCs / VECs
-/ status-list credentials directly with its own `#key-0`. Cuts
-out a network hop, removes the timeout / breaker complexity,
-and matches what the keys-already-here architecture invites.
+The post-PR-A `VtcKeyBundle` shape is correct under this
+reading — the VTA mints the integration DID's keys, seals
+them to the VTC at first-boot via the `vtc-host`
+provision-integration flow, and the VTC retains the cached
+copy in its secret store for the lifetime of the deployment.
+The VTA remains the authority for **key minting** +
+**rotation**; the VTC is just a cached signer.
 
-Implication: spec §14.2's `vta.signing_timeout_seconds` +
-`vta.circuit_breaker_threshold` config knobs become **dead
-parameters** in Phase 2. The breaker pattern still has value
-elsewhere (trust-registry publish in Phase 3, did:webvh
-resolution for member-DID-rotation), so the pattern stays in
-the codebase even though VMC issuance no longer needs it.
+**Proposed default: VTC signs locally.** Every VMC / VEC /
+status-list credential / install-token JWT / DIDComm
+outbound message is signed with the cached `#key-0` Ed25519
+already in the secret store. No per-call VTA round-trip.
 
-This is a **spec deviation** worth surfacing. The user
-approved the post-PR-A architecture explicitly; this plan
-makes the consequence concrete.
+The breaker pattern still has value for **non-VMC remote
+dependencies** — trust-registry publish in Phase 3,
+did:webvh resolution during member-DID rotation in M2.15.2.
+Those truly are remote operations. The pattern stays in the
+codebase; only the wiring to VMC issuance is dropped.
+
+**Spec clarification, not deviation** (M2.16): §3-A is
+amended to spell out the cached-locally / VTA-controlled
+model — "no key custody" was always meant as "no key minting
+/ rotation authority", not "no key storage". §14.2's
+VTA-oracle timeout + breaker parameters retain their names
+but document which operations actually use them (Phase 3
+trust-registry, M2.15.2 did:webvh resolver). VMC issuance
+is not among them.
 
 ### D2 — `regorus` location
 
@@ -345,9 +359,11 @@ surface.
   (broad change), or scope role-policy evaluation to **route
   handlers only** (narrower, defer AuthClaims rewrite to
   Phase 3+). Proposed: route-handler-only Phase 2.
-- **R6: signing-oracle spec deviation (D1).** Recording it as
-  a Phase 2 outcome — the spec's "no key custody" line gets
-  amended.
+- **R6: signing-surface spec clarification (D1).** Recording it
+  as a Phase 2 outcome — §3-A's "no key custody" line gets
+  amended to spell out the cached-locally / VTA-controlled
+  model (= no key minting / rotation authority, not no key
+  storage).
 
 ## Definition of done — Phase 2
 
@@ -371,7 +387,12 @@ start after Phase 2's gate merges.
 
 Recording up front so they're not surprises mid-implementation:
 
-- **§3-A "VTC has no key custody"** — amended per D1.
+- **§3-A "VTC has no key custody"** — amended per D1 to
+  spell out the cached-locally / VTA-controlled model: VTA
+  mints + controls the keys; VTC caches a working copy in
+  its secret store and signs locally. "No custody" was
+  always meant as "no minting / rotation authority", not
+  "no key storage" (mediator / webvh-service pattern).
 - **§14.2 "VTA signing oracle dependence"** — VTA-oracle
   timeout + breaker stay in the spec but apply to other
   remote dependencies (trust-registry, did:webvh resolver),
