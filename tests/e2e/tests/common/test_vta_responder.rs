@@ -313,6 +313,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 ///   2. Wrap the inner JWE in a `routing/2.0/forward` envelope addressed
 ///      to the mediator (with `next = requester_did`), pack that
 ///      anoncrypt to the mediator, and ship it.
+///
 /// The mediator unpacks the outer envelope, sees the `next` hop, and
 /// queues the inner JWE for the requester's pickup.
 async fn run_dispatch_loop<F>(

@@ -1,0 +1,300 @@
+//! `VtcKeyBundle` — the secret-store payload that holds the VTC's
+//! VTA-provisioned DID + key material.
+//!
+//! The VTC's identity is **always** provisioned by a VTA via the
+//! `vtc-host` template. The resulting [`TemplateBootstrapPayload`]
+//! carries:
+//!
+//! - The integration's DID (becomes [`AppConfig::vtc_did`]).
+//! - One [`DidKeyMaterial`] entry with two keys: Ed25519 signing
+//!   (serves both `assertionMethod` and `authentication`) and X25519
+//!   key-agreement (`keyAgreement`).
+//!
+//! We persist exactly that subset as a `VtcKeyBundle` inside the
+//! secret store. The on-disk format is JSON (Q2 of the
+//! VTA-driven-keys design doc): forward-compat over wire-size
+//! savings, and trivially inspectable for debugging.
+//!
+//! ## Key derivations downstream
+//!
+//! `init_auth` extracts the raw Ed25519 + X25519 private bytes
+//! and feeds them to:
+//!
+//! - The DIDComm `Secret::generate_ed25519` / `generate_x25519`
+//!   constructors — they become the VTC DID's `#key-0` and
+//!   `#key-1` resolver entries.
+//! - HKDF derivations for the install-token signer and the audit
+//!   key. The Ed25519 private bytes (32) are the master IKM;
+//!   `info` strings (`vtc-install-jwt-key/v2`, `vtc-audit-key/v2`)
+//!   domain-separate them. Bumping from `/v1` is intentional —
+//!   any pre-rework keyring entry derived from a 64-byte BIP-39
+//!   seed produces different HKDF output under `/v2`, so a stale
+//!   deployment fails loud at the verification step rather than
+//!   silently accepting tokens minted under the old derivation.
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD_NO_PAD as B64;
+use multibase::Base;
+use serde::{Deserialize, Serialize};
+use vti_common::error::AppError;
+use zeroize::Zeroizing;
+
+/// The persisted shape of the VTC's VTA-provisioned identity.
+///
+/// All public material is multibase-encoded (matching the
+/// `DidKeyMaterial` wire shape from `vta-sdk`); private halves are
+/// multibase-encoded strings at rest. Use the accessor methods
+/// instead of touching the raw fields if you need a `Zeroizing`
+/// buffer for the live key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VtcKeyBundle {
+    /// The VTC's `did:webvh`. Matches [`crate::config::AppConfig::vtc_did`]
+    /// after a successful setup.
+    pub integration_did: String,
+    /// DID URL for the Ed25519 signing key (e.g. `did:webvh:…#key-0`).
+    pub ed25519_key_id: String,
+    /// Multibase-encoded Ed25519 public key.
+    pub ed25519_public_multibase: String,
+    /// Multibase-encoded Ed25519 private key. Kept as `String` so the
+    /// derived `Serialize`/`Deserialize` stays simple; access via
+    /// [`Self::ed25519_private_zeroizing`] when feeding a signer.
+    pub ed25519_private_multibase: String,
+    /// DID URL for the X25519 key-agreement key (e.g. `did:webvh:…#key-1`).
+    pub x25519_key_id: String,
+    /// Multibase-encoded X25519 public key.
+    pub x25519_public_multibase: String,
+    /// Multibase-encoded X25519 private key. Access via
+    /// [`Self::x25519_private_zeroizing`].
+    pub x25519_private_multibase: String,
+}
+
+impl VtcKeyBundle {
+    /// Take the Ed25519 private key out into a [`Zeroizing`] buffer.
+    pub fn ed25519_private_zeroizing(&self) -> Zeroizing<String> {
+        Zeroizing::new(self.ed25519_private_multibase.clone())
+    }
+
+    /// Take the X25519 private key out into a [`Zeroizing`] buffer.
+    pub fn x25519_private_zeroizing(&self) -> Zeroizing<String> {
+        Zeroizing::new(self.x25519_private_multibase.clone())
+    }
+
+    /// Decode the 32-byte Ed25519 private scalar.
+    ///
+    /// Multibase keys carry a 2-byte multicodec prefix (`0xed01`
+    /// for Ed25519 private). The Rust SDK uses
+    /// `affinidi_crypto::ed25519::decode_private_key_multibase` for
+    /// this; we duplicate the strip-and-decode inline to avoid
+    /// pulling the dep into vtc-service just for one call.
+    pub fn ed25519_private_bytes(&self) -> Result<Zeroizing<[u8; 32]>, AppError> {
+        decode_private_multibase(&self.ed25519_private_multibase, ED25519_PRIV_CODEC)
+    }
+
+    /// Decode the 32-byte X25519 private scalar.
+    pub fn x25519_private_bytes(&self) -> Result<Zeroizing<[u8; 32]>, AppError> {
+        decode_private_multibase(&self.x25519_private_multibase, X25519_PRIV_CODEC)
+    }
+
+    /// Serialize the bundle as the bytes that should land in the
+    /// secret store. JSON for forward-compat.
+    pub fn to_secret_store_bytes(&self) -> Result<Vec<u8>, AppError> {
+        serde_json::to_vec(self).map_err(|e| AppError::Internal(format!("bundle serialize: {e}")))
+    }
+
+    /// Decode the bytes that came out of the secret store.
+    pub fn from_secret_store_bytes(bytes: &[u8]) -> Result<Self, AppError> {
+        serde_json::from_slice(bytes).map_err(|e| {
+            AppError::Internal(format!(
+                "secret store does not contain a VtcKeyBundle: {e}. Has this VTC been set up \
+                 against a VTA? Run `vtc setup` to provision."
+            ))
+        })
+    }
+}
+
+// Note: the `from_did_key_material(VtaDidKeyMaterial)` constructor
+// lands together with the live wizard in the follow-up PR — it
+// requires `vta-sdk/sealed-transfer` which is only useful once the
+// wizard actually opens bundles. PR A ships the serde-only shape.
+
+const ED25519_PRIV_CODEC: [u8; 2] = [0x80, 0x26];
+const X25519_PRIV_CODEC: [u8; 2] = [0x82, 0x26];
+
+fn decode_private_multibase(
+    mb: &str,
+    expected_codec: [u8; 2],
+) -> Result<Zeroizing<[u8; 32]>, AppError> {
+    let (base, decoded) =
+        multibase::decode(mb).map_err(|e| AppError::Internal(format!("multibase decode: {e}")))?;
+    if base != Base::Base58Btc {
+        return Err(AppError::Internal(format!(
+            "expected base58btc multibase, got {base:?}"
+        )));
+    }
+    if decoded.len() != 2 + 32 {
+        return Err(AppError::Internal(format!(
+            "expected 34-byte multicodec-prefixed key, got {}",
+            decoded.len()
+        )));
+    }
+    if decoded[..2] != expected_codec {
+        return Err(AppError::Internal(format!(
+            "wrong multicodec prefix: expected {:02x}{:02x}, got {:02x}{:02x}",
+            expected_codec[0], expected_codec[1], decoded[0], decoded[1]
+        )));
+    }
+    let mut out = Zeroizing::new([0u8; 32]);
+    out.copy_from_slice(&decoded[2..]);
+    Ok(out)
+}
+
+/// Encode a 32-byte private scalar back into the multibase form
+/// the bundle stores. Only used by tests + the wizard's
+/// `from_bundle_bytes` fixture path; production bundles are built
+/// from a `DidKeyMaterial` whose multibase fields are already
+/// VTA-issued.
+#[doc(hidden)]
+pub fn encode_private_multibase(bytes: &[u8; 32], codec: [u8; 2]) -> String {
+    let mut buf = Vec::with_capacity(2 + 32);
+    buf.extend_from_slice(&codec);
+    buf.extend_from_slice(bytes);
+    multibase::encode(Base::Base58Btc, &buf)
+}
+
+#[doc(hidden)]
+pub fn ed25519_priv_codec() -> [u8; 2] {
+    ED25519_PRIV_CODEC
+}
+
+#[doc(hidden)]
+pub fn x25519_priv_codec() -> [u8; 2] {
+    X25519_PRIV_CODEC
+}
+
+/// Test-only fixture builder: produce a bundle from two raw 32-byte
+/// scalars. Production code never calls this — bundles come from
+/// the VTA via [`VtcKeyBundle::from_did_key_material`].
+#[cfg(test)]
+pub fn bundle_from_raw(
+    integration_did: &str,
+    ed25519_priv: &[u8; 32],
+    x25519_priv: &[u8; 32],
+) -> VtcKeyBundle {
+    use ed25519_dalek::SigningKey;
+
+    let signing = SigningKey::from_bytes(ed25519_priv);
+    let ed25519_public = signing.verifying_key().to_bytes();
+    let x25519_public_priv = x25519_dalek::StaticSecret::from(*x25519_priv);
+    let x25519_public = x25519_dalek::PublicKey::from(&x25519_public_priv).to_bytes();
+
+    VtcKeyBundle {
+        integration_did: integration_did.to_string(),
+        ed25519_key_id: format!("{integration_did}#key-0"),
+        ed25519_public_multibase: encode_public_multibase(&ed25519_public, [0xed, 0x01]),
+        ed25519_private_multibase: encode_private_multibase(ed25519_priv, ED25519_PRIV_CODEC),
+        x25519_key_id: format!("{integration_did}#key-1"),
+        x25519_public_multibase: encode_public_multibase(&x25519_public, [0xec, 0x01]),
+        x25519_private_multibase: encode_private_multibase(x25519_priv, X25519_PRIV_CODEC),
+    }
+}
+
+#[cfg(test)]
+fn encode_public_multibase(bytes: &[u8; 32], codec: [u8; 2]) -> String {
+    let mut buf = Vec::with_capacity(2 + 32);
+    buf.extend_from_slice(&codec);
+    buf.extend_from_slice(bytes);
+    multibase::encode(Base::Base58Btc, &buf)
+}
+
+/// Encode bytes for use as the `inline_secret` config field. The
+/// secret store may treat that field as either a hex string (legacy)
+/// or — when prefixed `b64:` — base64-no-pad. JSON bytes contain
+/// characters that aren't hex-safe, so we wrap them.
+pub fn inline_secret_for_bundle(bundle: &VtcKeyBundle) -> Result<String, AppError> {
+    let bytes = bundle.to_secret_store_bytes()?;
+    Ok(format!("b64:{}", B64.encode(&bytes)))
+}
+
+/// Inverse of [`inline_secret_for_bundle`].
+pub fn bundle_from_inline_secret(secret: &str) -> Result<VtcKeyBundle, AppError> {
+    let body = secret.strip_prefix("b64:").ok_or_else(|| {
+        AppError::Internal(
+            "inline_secret is not a VtcKeyBundle wrapper (expected 'b64:' prefix)".into(),
+        )
+    })?;
+    let bytes = B64
+        .decode(body)
+        .map_err(|e| AppError::Internal(format!("inline_secret base64 decode: {e}")))?;
+    VtcKeyBundle::from_secret_store_bytes(&bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> VtcKeyBundle {
+        bundle_from_raw("did:webvh:vtc.example.com:abc", &[0x11; 32], &[0x22; 32])
+    }
+
+    #[test]
+    fn round_trip_secret_store_bytes() {
+        let b = fixture();
+        let bytes = b.to_secret_store_bytes().unwrap();
+        let parsed = VtcKeyBundle::from_secret_store_bytes(&bytes).unwrap();
+        assert_eq!(b, parsed);
+    }
+
+    #[test]
+    fn round_trip_inline_secret() {
+        let b = fixture();
+        let s = inline_secret_for_bundle(&b).unwrap();
+        assert!(s.starts_with("b64:"));
+        let parsed = bundle_from_inline_secret(&s).unwrap();
+        assert_eq!(b, parsed);
+    }
+
+    #[test]
+    fn ed25519_private_bytes_decodes() {
+        let b = fixture();
+        let raw = b.ed25519_private_bytes().unwrap();
+        assert_eq!(&*raw, &[0x11; 32]);
+    }
+
+    #[test]
+    fn x25519_private_bytes_decodes() {
+        let b = fixture();
+        let raw = b.x25519_private_bytes().unwrap();
+        assert_eq!(&*raw, &[0x22; 32]);
+    }
+
+    #[test]
+    fn from_secret_store_bytes_clear_error_on_garbage() {
+        let err = VtcKeyBundle::from_secret_store_bytes(b"not a bundle").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Run `vtc setup`"),
+            "expected operator hint in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_secret_store_bytes_rejects_unknown_fields() {
+        let bogus = br#"{"integration_did":"did:webvh:x","extra":"sneaky","ed25519_key_id":"x#0","ed25519_public_multibase":"z","ed25519_private_multibase":"z","x25519_key_id":"x#1","x25519_public_multibase":"z","x25519_private_multibase":"z"}"#;
+        assert!(VtcKeyBundle::from_secret_store_bytes(bogus).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_multicodec_prefix() {
+        let mut b = fixture();
+        // Swap the Ed25519 private's multicodec for the X25519 one.
+        let raw = [0x11; 32];
+        b.ed25519_private_multibase = encode_private_multibase(&raw, X25519_PRIV_CODEC);
+        let err = b.ed25519_private_bytes().unwrap_err();
+        assert!(format!("{err}").contains("wrong multicodec prefix"));
+    }
+}

@@ -13,24 +13,19 @@
 //! on this crate.
 
 pub mod acl;
-pub mod acl_cli;
 pub mod auth;
 pub mod community;
 pub mod config;
 pub mod config_store;
 pub mod did_key;
 #[cfg(feature = "setup")]
-pub mod did_webvh;
-#[cfg(feature = "setup")]
 pub mod emergency;
 pub mod error;
-pub mod import_did;
 pub mod install;
 pub mod keys;
 pub mod messaging;
 pub mod routes;
 pub mod server;
-#[cfg(feature = "setup")]
 pub mod setup;
 pub mod status;
 pub mod store;

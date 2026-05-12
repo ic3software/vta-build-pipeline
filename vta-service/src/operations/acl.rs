@@ -235,6 +235,55 @@ pub async fn update_acl(
     Ok(to_result_body(&entry))
 }
 
+pub async fn delete_acl(
+    acl_ks: &KeyspaceHandle,
+    audit_ks: &KeyspaceHandle,
+    auth: &AuthClaims,
+    did: &str,
+    channel: &str,
+) -> Result<DeleteAclResultBody, AppError> {
+    auth.require_manage()?;
+
+    if auth.did == did {
+        return Err(AppError::Conflict(
+            "cannot delete your own ACL entry".into(),
+        ));
+    }
+
+    let entry = get_acl_entry(acl_ks, did)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("ACL entry not found for DID: {did}")))?;
+    if !is_acl_entry_visible(auth, &entry) {
+        return Err(AppError::NotFound(format!(
+            "ACL entry not found for DID: {did}"
+        )));
+    }
+
+    delete_acl_entry(acl_ks, did).await?;
+
+    info!(channel, caller = %auth.did, did = %did, "ACL entry deleted");
+    audit!(
+        "acl.delete",
+        actor = &auth.did,
+        resource = did,
+        outcome = "success"
+    );
+    let _ = audit::record(
+        audit_ks,
+        "acl.delete",
+        &auth.did,
+        Some(did),
+        "success",
+        Some(channel),
+        None,
+    )
+    .await;
+    Ok(DeleteAclResultBody {
+        did: did.to_string(),
+        deleted: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,53 +440,4 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, AppError::Forbidden(_)), "got {err:?}");
     }
-}
-
-pub async fn delete_acl(
-    acl_ks: &KeyspaceHandle,
-    audit_ks: &KeyspaceHandle,
-    auth: &AuthClaims,
-    did: &str,
-    channel: &str,
-) -> Result<DeleteAclResultBody, AppError> {
-    auth.require_manage()?;
-
-    if auth.did == did {
-        return Err(AppError::Conflict(
-            "cannot delete your own ACL entry".into(),
-        ));
-    }
-
-    let entry = get_acl_entry(acl_ks, did)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("ACL entry not found for DID: {did}")))?;
-    if !is_acl_entry_visible(auth, &entry) {
-        return Err(AppError::NotFound(format!(
-            "ACL entry not found for DID: {did}"
-        )));
-    }
-
-    delete_acl_entry(acl_ks, did).await?;
-
-    info!(channel, caller = %auth.did, did = %did, "ACL entry deleted");
-    audit!(
-        "acl.delete",
-        actor = &auth.did,
-        resource = did,
-        outcome = "success"
-    );
-    let _ = audit::record(
-        audit_ks,
-        "acl.delete",
-        &auth.did,
-        Some(did),
-        "success",
-        Some(channel),
-        None,
-    )
-    .await;
-    Ok(DeleteAclResultBody {
-        did: did.to_string(),
-        deleted: true,
-    })
 }

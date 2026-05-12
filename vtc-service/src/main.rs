@@ -1,9 +1,9 @@
 // Module tree is declared in lib.rs (so integration tests under
 // `tests/` can pull the same modules the binary uses). Re-import the
 // pieces this binary needs at the top level.
-use vtc_service::{acl_cli, config, did_key, import_did, keys, server, status, store};
+use vtc_service::{config, did_key, keys, server, status, store};
 #[cfg(feature = "setup")]
-use vtc_service::{did_webvh, emergency, setup};
+use vtc_service::{emergency, setup};
 
 use std::path::PathBuf;
 
@@ -38,29 +38,6 @@ enum Commands {
         #[arg(long)]
         label: Option<String>,
     },
-    /// Create a did:webvh DID (interactive wizard, no server required)
-    CreateDidWebvh {
-        /// Human-readable label prefix for key records
-        #[arg(long)]
-        label: Option<String>,
-    },
-    /// Import an external DID and create an ACL entry (offline, no server required)
-    ImportDid {
-        /// The DID to import
-        #[arg(long)]
-        did: String,
-        /// Role to assign (admin, initiator, application, reader)
-        #[arg(long)]
-        role: Option<String>,
-        /// Human-readable label for the ACL entry
-        #[arg(long)]
-        label: Option<String>,
-    },
-    /// Manage Access Control List entries (offline, no server required)
-    Acl {
-        #[command(subcommand)]
-        command: AclCommands,
-    },
     /// Operator-level recovery + administration (offline)
     Admin {
         #[command(subcommand)]
@@ -70,64 +47,26 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AdminCommands {
-    /// Reset the install carve-out using the master-seed mnemonic.
+    /// Reset the install carve-out via the VTA's recovery path.
     ///
-    /// Run on a **stopped** daemon. Clears every admin ACL entry
-    /// and sister record, then mints a fresh install URL the
-    /// operator can claim with a new passkey. The daemon's next
-    /// boot emits a loud `EmergencyBootstrapInvoked` audit event
-    /// — emergency bootstrap is destructive and intentionally
-    /// noisy in the audit log.
+    /// Run on a **stopped** daemon. Authenticates against the VTA
+    /// using a fresh ephemeral DID the operator authorizes at the
+    /// VTA, then clears every admin ACL entry and admin sister
+    /// record locally and mints a fresh install URL the operator
+    /// can claim with a new passkey. The daemon's next boot emits
+    /// a loud `EmergencyBootstrapInvoked` audit event.
+    ///
+    /// Replaces the BIP-39-mnemonic-based recovery from M0.10's
+    /// initial implementation; see `tasks/vtc-mvp/vta-driven-keys.md`
+    /// §4 for the design.
     EmergencyBootstrap {
         /// Skip the "are you sure?" confirmation prompt.
         #[arg(long)]
         yes: bool,
-        /// Provide the 24-word mnemonic non-interactively
-        /// (intended for automated tests; production use should
-        /// rely on the interactive prompt so the mnemonic doesn't
-        /// land in shell history).
-        #[arg(long, hide = true)]
-        mnemonic: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum AclCommands {
-    /// List all ACL entries
-    List {
-        /// Filter by context
+        /// VTA context the recovery DID should be authorized into.
+        /// Defaults to the value persisted in `config.toml`.
         #[arg(long)]
         context: Option<String>,
-        /// Filter by role (admin, initiator, application, reader)
-        #[arg(long)]
-        role: Option<String>,
-    },
-    /// Show details of a single ACL entry
-    Get {
-        /// The DID to look up
-        did: String,
-    },
-    /// Update an existing ACL entry
-    Update {
-        /// The DID to update
-        did: String,
-        /// New role (admin, initiator, application, reader)
-        #[arg(long)]
-        role: Option<String>,
-        /// New label (empty string to clear)
-        #[arg(long)]
-        label: Option<String>,
-        /// New context list (comma-separated; omit flag to keep unchanged)
-        #[arg(long, value_delimiter = ',')]
-        contexts: Option<Vec<String>>,
-    },
-    /// Delete an ACL entry
-    Delete {
-        /// The DID to delete
-        did: String,
-        /// Skip confirmation prompt
-        #[arg(short, long)]
-        yes: bool,
     },
 }
 
@@ -174,43 +113,12 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Commands::CreateDidWebvh { label }) => {
-            #[cfg(feature = "setup")]
-            {
-                let args = did_webvh::CreateDidWebvhArgs {
-                    config_path: cli.config,
-                    label,
-                };
-                if let Err(e) = did_webvh::run_create_did_webvh(args).await {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
-            }
-            #[cfg(not(feature = "setup"))]
-            {
-                let _ = label;
-                eprintln!("create-did-webvh is not available (compiled without 'setup' feature)");
-                std::process::exit(1);
-            }
-        }
-        Some(Commands::ImportDid { did, role, label }) => {
-            let args = import_did::ImportDidArgs {
-                config_path: cli.config,
-                did,
-                role,
-                label,
-            };
-            if let Err(e) = import_did::run_import_did(args).await {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
-        }
         Some(Commands::Admin { command }) => {
             #[cfg(feature = "setup")]
             {
                 match command {
-                    AdminCommands::EmergencyBootstrap { yes, mnemonic } => {
-                        if let Err(e) = run_emergency_bootstrap_cli(cli.config, yes, mnemonic).await
+                    AdminCommands::EmergencyBootstrap { yes, context } => {
+                        if let Err(e) = run_emergency_bootstrap_cli(cli.config, yes, context).await
                         {
                             eprintln!("Emergency bootstrap failed: {e}");
                             std::process::exit(1);
@@ -222,27 +130,6 @@ async fn main() {
             {
                 let _ = command;
                 eprintln!("admin subcommands are unavailable (compiled without 'setup')");
-                std::process::exit(1);
-            }
-        }
-        Some(Commands::Acl { command }) => {
-            let result = match command {
-                AclCommands::List { context, role } => {
-                    acl_cli::run_acl_list(cli.config, context, role).await
-                }
-                AclCommands::Get { did } => acl_cli::run_acl_get(cli.config, did).await,
-                AclCommands::Update {
-                    did,
-                    role,
-                    label,
-                    contexts,
-                } => acl_cli::run_acl_update(cli.config, did, role, label, contexts).await,
-                AclCommands::Delete { did, yes } => {
-                    acl_cli::run_acl_delete(cli.config, did, yes).await
-                }
-            };
-            if let Err(e) = result {
-                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
@@ -276,74 +163,35 @@ async fn main() {
 
 /// Interactive `vtc admin emergency-bootstrap` flow.
 ///
-/// 1. Loud warning + confirmation (skippable with `--yes`).
-/// 2. Mnemonic prompt via `dialoguer::Password` (or whatever the
-///    `--mnemonic` flag provided, for tests).
-/// 3. Hands off to `emergency::run_emergency_bootstrap`, which
-///    verifies the seed, clears admin state, reopens the carve-out,
-///    mints a fresh install token, and persists the
-///    `EmergencyBootstrapInvoked` pending marker.
-/// 4. Prints the install URL + footer that warns the operator to
-///    restart the daemon ASAP so the audit event lands.
+/// Stubbed pending the rework described in
+/// `tasks/vtc-mvp/vta-driven-keys.md` §4. The previous
+/// BIP-39-mnemonic-based recovery is incompatible with the
+/// VTA-provisioned key model; the live VTA-credential-based
+/// replacement ships in a follow-up PR.
 #[cfg(feature = "setup")]
 async fn run_emergency_bootstrap_cli(
     config_path: Option<std::path::PathBuf>,
-    skip_confirm: bool,
-    mnemonic: Option<String>,
+    _skip_confirm: bool,
+    _context: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use dialoguer::{Confirm, Password};
-
+    let _ = config_path;
     eprintln!();
-    eprintln!("⚠️  EMERGENCY BOOTSTRAP");
+    eprintln!("⚠️  EMERGENCY BOOTSTRAP — temporarily unavailable");
     eprintln!(
-        "This will clear every existing admin ACL entry and admin sister record, then\n\
-         reopen the install carve-out so a new operator can claim a fresh install URL.\n\
-         The daemon's next boot will emit a loud `EmergencyBootstrapInvoked` audit event.\n"
+        "The mnemonic-based recovery path is being replaced by a VTA-credential\n\
+         flow (see `tasks/vtc-mvp/vta-driven-keys.md` §4). Until that lands,\n\
+         this command refuses to mutate state.\n\
+         \n\
+         If you've genuinely lost admin access, recover by:\n\
+         \n\
+         1. Stopping the daemon.\n\
+         2. Using `pnm` to provision a fresh VTC integration against the\n\
+            same VTA, with the existing `vtc_did` carried over from\n\
+            `config.toml`.\n\
+         3. Replacing the secret-store contents with the new VtcKeyBundle\n\
+            from the sealed bundle the VTA returns."
     );
-
-    if !skip_confirm {
-        let ok = Confirm::new()
-            .with_prompt("Proceed?")
-            .default(false)
-            .interact()?;
-        if !ok {
-            eprintln!("aborted.");
-            return Ok(());
-        }
-    }
-
-    let mnemonic = match mnemonic {
-        Some(m) => m,
-        None => Password::new()
-            .with_prompt("24-word BIP-39 master-seed mnemonic")
-            .interact()?,
-    };
-
-    let outcome = emergency::run_emergency_bootstrap(emergency::EmergencyBootstrapArgs {
-        config_path,
-        mnemonic: Some(mnemonic),
-    })
-    .await?;
-
-    eprintln!();
-    eprintln!("✅ emergency bootstrap complete");
-    eprintln!(
-        "   admin ACL entries cleared:  {}",
-        outcome.admin_entries_cleared
-    );
-    eprintln!(
-        "   admin sister records:       {}",
-        outcome.admin_records_cleared
-    );
-    eprintln!();
-    eprintln!("Install URL (one-shot, 15 min TTL):");
-    eprintln!("   {}", outcome.install_url);
-    eprintln!();
-    eprintln!(
-        "Restart the daemon (`vtc`) so the `EmergencyBootstrapInvoked` audit event lands\n\
-         and the install carve-out reopens. Then claim the install URL with a fresh passkey."
-    );
-    Ok(())
+    Err(emergency::emergency_bootstrap_unavailable().into())
 }
 
 fn print_banner() {

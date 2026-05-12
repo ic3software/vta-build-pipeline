@@ -399,7 +399,7 @@ async fn register_succeeds_with_step_up_uv() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "finish: {body}");
-    assert!(body["credentialId"].as_str().unwrap().len() > 0);
+    assert!(!body["credentialId"].as_str().unwrap().is_empty());
 
     // verify the AdminEntry now lists 2 passkeys
     let admin_entry = get_admin_entry(&fix.state.passkey_ks, &fix.admin_did)
@@ -806,6 +806,6 @@ async fn register_returns_503_when_audit_writer_missing() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
-// base64 + webauthn-rs-proto only needed in one test
+// base64 only needed in one test; webauthn-rs-proto is pulled in via
+// `webauthn_rs::prelude` so a separate extern reference isn't required.
 use base64::Engine;
-use webauthn_rs_proto;

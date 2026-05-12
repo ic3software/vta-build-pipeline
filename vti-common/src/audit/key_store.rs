@@ -6,7 +6,7 @@
 //!
 //! - **Algorithm**: HMAC-SHA256 over UTF-8 DID bytes.
 //! - **Initial key**: deterministic
-//!   `HKDF-SHA256(master_seed, info: "vtc-audit-key/v1")` — so a
+//!   `HKDF-SHA256(master_seed, info: "vtc-audit-key/v2")` — so a
 //!   backup+restore on the same master seed reproduces it.
 //! - **Subsequent rotations**: 32 fresh random bytes via `rand::fill`
 //!   (the workspace pattern; backed by the OS RNG). Deterministic
@@ -198,9 +198,14 @@ impl AuditKeyStore {
     /// unchanged. Safe to call on every daemon start.
     ///
     /// The derivation is deterministic
-    /// (`HKDF-SHA256(master_seed, info: "vtc-audit-key/v1")`) so a
+    /// (`HKDF-SHA256(master_seed, info: "vtc-audit-key/v2")`) so a
     /// backup+restore on the same seed reproduces the initial key
     /// and pre-rotation hashes stay verifiable.
+    ///
+    /// Info string bumped from `/v1` to `/v2` alongside the
+    /// VTA-driven-keys rework (`tasks/vtc-mvp/vta-driven-keys.md`
+    /// §5.2) — the IKM is now a 32-byte Ed25519 private from the
+    /// VTA bundle, not a 64-byte BIP-39 seed.
     pub async fn ensure_initial(&self, master_seed: &[u8]) -> Result<AuditKey, AppError> {
         if let Some(existing) = self.try_active().await? {
             return Ok(existing);
@@ -208,7 +213,7 @@ impl AuditKeyStore {
 
         let mut key = [0u8; 32];
         Hkdf::<Sha256>::new(None, master_seed)
-            .expand(b"vtc-audit-key/v1", &mut key)
+            .expand(b"vtc-audit-key/v2", &mut key)
             .map_err(|e| AppError::Internal(format!("HKDF expand failed: {e}")))?;
 
         let initial = AuditKey {

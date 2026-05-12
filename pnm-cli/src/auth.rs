@@ -129,53 +129,6 @@ pub fn session_status(keyring_key: &str) -> Option<vta_sdk::session::SessionStat
     store().session_status(keyring_key)
 }
 
-#[cfg(test)]
-mod sign_challenge_tests {
-    use super::*;
-    use ed25519_dalek::Verifier;
-
-    /// Verifier mirror of the `vta unseal` chain in
-    /// `vta-service::seal::verify_challenge_signature`. Pin the
-    /// signature shape so a refactor of either side surfaces here.
-    fn verify(seed: &[u8; 32], challenge: &[u8; 32], sig_hex: &str) -> bool {
-        let sig_bytes = hex::decode(sig_hex).unwrap();
-        let signing = SigningKey::from_bytes(seed);
-        let verifying = signing.verifying_key();
-        let sig = ed25519_dalek::Signature::from_slice(&sig_bytes).unwrap();
-        verifying.verify(challenge, &sig).is_ok()
-    }
-
-    #[test]
-    fn sign_then_verify_round_trip() {
-        let seed = [0x42u8; 32];
-        let challenge = [0x55u8; 32];
-        let signing = SigningKey::from_bytes(&seed);
-        let sig = signing.sign(&challenge);
-        let sig_hex = hex::encode(sig.to_bytes());
-        assert!(verify(&seed, &challenge, &sig_hex));
-    }
-
-    #[test]
-    fn signature_is_64_bytes_hex() {
-        let seed = [0x01u8; 32];
-        let challenge = [0x02u8; 32];
-        let sig = SigningKey::from_bytes(&seed).sign(&challenge);
-        let sig_hex = hex::encode(sig.to_bytes());
-        // 64-byte Ed25519 signature → 128 hex chars.
-        assert_eq!(sig_hex.len(), 128);
-    }
-
-    #[test]
-    fn wrong_seed_fails_verify() {
-        let seed_a = [0xAAu8; 32];
-        let seed_b = [0xBBu8; 32];
-        let challenge = [0x33u8; 32];
-        let sig = SigningKey::from_bytes(&seed_a).sign(&challenge);
-        let sig_hex = hex::encode(sig.to_bytes());
-        assert!(!verify(&seed_b, &challenge, &sig_hex));
-    }
-}
-
 /// Show current authentication status.
 ///
 /// The VTA's REST URL isn't shown here — it's derived from the VTA DID
@@ -225,4 +178,51 @@ pub async fn connect(
     keyring_key: &str,
 ) -> Result<vta_sdk::client::VtaClient, Box<dyn std::error::Error>> {
     store().connect(keyring_key, url_override).await
+}
+
+#[cfg(test)]
+mod sign_challenge_tests {
+    use super::*;
+    use ed25519_dalek::Verifier;
+
+    /// Verifier mirror of the `vta unseal` chain in
+    /// `vta-service::seal::verify_challenge_signature`. Pin the
+    /// signature shape so a refactor of either side surfaces here.
+    fn verify(seed: &[u8; 32], challenge: &[u8; 32], sig_hex: &str) -> bool {
+        let sig_bytes = hex::decode(sig_hex).unwrap();
+        let signing = SigningKey::from_bytes(seed);
+        let verifying = signing.verifying_key();
+        let sig = ed25519_dalek::Signature::from_slice(&sig_bytes).unwrap();
+        verifying.verify(challenge, &sig).is_ok()
+    }
+
+    #[test]
+    fn sign_then_verify_round_trip() {
+        let seed = [0x42u8; 32];
+        let challenge = [0x55u8; 32];
+        let signing = SigningKey::from_bytes(&seed);
+        let sig = signing.sign(&challenge);
+        let sig_hex = hex::encode(sig.to_bytes());
+        assert!(verify(&seed, &challenge, &sig_hex));
+    }
+
+    #[test]
+    fn signature_is_64_bytes_hex() {
+        let seed = [0x01u8; 32];
+        let challenge = [0x02u8; 32];
+        let sig = SigningKey::from_bytes(&seed).sign(&challenge);
+        let sig_hex = hex::encode(sig.to_bytes());
+        // 64-byte Ed25519 signature → 128 hex chars.
+        assert_eq!(sig_hex.len(), 128);
+    }
+
+    #[test]
+    fn wrong_seed_fails_verify() {
+        let seed_a = [0xAAu8; 32];
+        let seed_b = [0xBBu8; 32];
+        let challenge = [0x33u8; 32];
+        let sig = SigningKey::from_bytes(&seed_a).sign(&challenge);
+        let sig_hex = hex::encode(sig.to_bytes());
+        assert!(!verify(&seed_b, &challenge, &sig_hex));
+    }
 }

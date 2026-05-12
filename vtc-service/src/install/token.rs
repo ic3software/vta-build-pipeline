@@ -3,12 +3,15 @@
 //!
 //! ## Design (plan D2)
 //!
-//! - **Signature**: EdDSA over an Ed25519 key derived from the VTC
-//!   master seed via `HKDF-SHA256` with `info = b"vtc-install-jwt-key/v1"`.
-//!   Distinct from every other seed-derived secret in the workspace
-//!   (audit_key uses `vtc-audit-key/v1`, the eventual session key
-//!   uses its own info). Same trust boundary signs + verifies, so
-//!   a symmetric MAC would also work — EdDSA is chosen to match the
+//! - **Signature**: EdDSA over an Ed25519 key derived via
+//!   `HKDF-SHA256(IKM = bundle.ed25519_priv, info = b"vtc-install-jwt-key/v2")`.
+//!   The IKM is the 32-byte Ed25519 private the VTA handed back in
+//!   the `vtc-host` template bundle — see
+//!   `tasks/vtc-mvp/vta-driven-keys.md` §5.2 for why the version
+//!   bumped (pre-rework deployments fed 64-byte BIP-39 seeds, so a
+//!   `/v1` derivation would silently mint tokens that the `/v2`
+//!   verifier rejects). Same trust boundary signs + verifies, so a
+//!   symmetric MAC would also work — EdDSA is chosen to match the
 //!   workspace JWT convention so the wire shape is identical to
 //!   the session JWTs that follow.
 //! - **Audience**: `"vtc-install"` (pinned). A session-token decoder
@@ -78,7 +81,16 @@ pub const INSTALL_SESSION_AUDIENCE: &str = "vtc-install-session";
 /// receipt expires.
 pub const INSTALL_SESSION_DEFAULT_TTL_SECS: u64 = 5 * 60;
 
-const HKDF_INFO: &[u8] = b"vtc-install-jwt-key/v1";
+/// HKDF info string for install-token signing key derivation.
+/// Bumped from `/v1` to `/v2` as part of the VTA-driven-keys
+/// rework (`tasks/vtc-mvp/vta-driven-keys.md` §5.2): the IKM is
+/// no longer a 64-byte BIP-39 seed but a 32-byte Ed25519 private
+/// scalar handed back by the VTA's `provision-integration`. Any
+/// pre-rework deployment that still feeds a 64-byte buffer will
+/// derive a different signing key and fail token verification
+/// loudly instead of silently accepting tokens minted under the
+/// old derivation.
+const HKDF_INFO: &[u8] = b"vtc-install-jwt-key/v2";
 
 // ---------------------------------------------------------------------------
 // Claims

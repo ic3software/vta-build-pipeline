@@ -249,8 +249,12 @@ consumer yet; primitives ready for the rest of Phase 0 to depend on.
   - `optionalVars`: `STATUS_LIST_PATH` (default `/v1/status-lists`),
     `ACCEPT` (default `["didcomm/v2"]`, used only if a mediator is
     added in a later phase)
-  - Document mints three keys: assertionMethod Ed25519, authentication
-    Ed25519, keyAgreement X25519
+  - Document mints two keys: `#key-0` Ed25519 (serves both
+    `assertionMethod` and `authentication`) and `#key-1` X25519
+    (`keyAgreement`). Resolved 2026-05-12 per
+    `tasks/vtc-mvp/vta-driven-keys.md` §9 Q1 — the original "three
+    keys" wording mismatched `DidKeyMaterial`'s two-key shape and
+    was never implemented.
   - Service entries: `#vtc-rest` (`type: "VTCRest"`, endpoint = `{URL}`)
     and `#vtc-status-list` (`type: "VTCStatusList"`, endpoint =
     `{URL}{STATUS_LIST_PATH}`) — the latter is a placeholder URL
@@ -819,7 +823,13 @@ not code** — produces a markdown findings doc that drives M0.9.2.
   with M0.1
 - **Pre-impl decision**: D5
 
-### `[ ]` M0.9.2 — New minimal `vtc setup` wizard
+### `[~]` M0.9.2 — New minimal `vtc setup` wizard
+
+> **In-flight across PR-A + PR-B per
+> `tasks/vtc-mvp/vta-driven-keys.md` §11.** PR-A ships the
+> `VtcKeyBundle` plumbing + `init_auth` refactor + stubs the
+> wizard. PR-B ships the live wizard + did-log route +
+> `vti-common::setup::secrets_prompt` promotion.
 
 - **Acceptance**
   - Three questions: VTC URL, admin UX URL, VTA URL
@@ -840,7 +850,11 @@ not code** — produces a markdown findings doc that drives M0.9.2.
   - `vtc-service/src/main.rs` (wire the new wizard)
 - **Deps**: M0.2.1, M0.4.2, M0.9.1, M0.6.1, M0.7.1, M0.8.1
 
-### `[ ]` M0.9.3 — Retire entire legacy `vtc-service` install/setup surface
+### `[x]` M0.9.3 — Retire entire legacy `vtc-service` install/setup surface
+
+> Shipped in PR-A. The four legacy modules
+> (`setup.rs`, `did_webvh.rs`, `import_did.rs`, `acl_cli.rs`)
+> are deleted and the corresponding CLI subcommands stripped.
 
 Per **D5**: the existing `vtc-service` predates the spec and is
 throw-away. The new install path arrives in M0.9.2; M0.9.3 deletes
@@ -872,7 +886,13 @@ everything the new path replaces.
 
 ## M0.10 — Emergency bootstrap
 
-### `[x]` M0.10.1 — `vtc admin emergency-bootstrap` subcommand
+### `[~]` M0.10.1 — `vtc admin emergency-bootstrap` subcommand
+
+> **Reworked across PR-A + PR-B per
+> `tasks/vtc-mvp/vta-driven-keys.md` §4.** Initial mnemonic-based
+> implementation (this section, below) shipped as PR #69 but is
+> incompatible with the VTA-provisioned key model. PR-A stubs
+> the command; PR-B reimplements via VTA `AdminRotated` recovery.
 
 - **Acceptance**
   - CLI subcommand `vtc admin emergency-bootstrap` (with optional
@@ -1041,7 +1061,12 @@ everything the new path replaces.
   - `vtc-service/tests/install_flow.rs` (new — ~370 lines)
 - **Deps**: M0.6.3, M0.7.2, M0.8.3, M0.11.2
 
-### `[x]` M0.12.2 — Emergency bootstrap integration test
+### `[~]` M0.12.2 — Emergency bootstrap integration test
+
+> Initial 6-test suite (mnemonic-based) shipped as PR #69, then
+> deleted in PR-A alongside M0.10.1's rework. PR-B reintroduces
+> 5 tests against the VTA `AdminRotated` recovery flow per
+> `tasks/vtc-mvp/vta-driven-keys.md` §6.1.
 
 - **Acceptance** — 6 tests in `tests/emergency_bootstrap.rs`:
   - `happy_path_clears_admin_reopens_carveout_and_audits_on_restart`

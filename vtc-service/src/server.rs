@@ -20,6 +20,7 @@ use crate::install::{InstallTokenSigner, InstallTokenStore};
 use crate::keys::seed_store::SecretStore;
 use crate::messaging;
 use crate::routes;
+use crate::setup::VtcKeyBundle;
 use crate::store::{KeyspaceHandle, Store};
 use crate::supervisor::{SupervisorKind, detect_supervisor};
 use tokio::sync::{RwLock, watch};
@@ -29,6 +30,7 @@ use tracing::{debug, error, info, warn};
 use vti_common::audit::{AuditKeyStore, AuditWriter};
 use vti_common::auth::passkey::{PasskeyState, build_webauthn};
 use webauthn_rs::Webauthn;
+use zeroize::Zeroizing;
 
 /// Default enrolment-invite TTL surfaced by `PasskeyState::enrollment_ttl`.
 /// Admin-invite enrolment lands in M0.6; until then this constant is the
@@ -542,8 +544,13 @@ fn run_didcomm_thread(
 /// Returns `None` values if the VTC DID is not configured (server still starts
 /// so the setup wizard can be run first).
 ///
-/// Loads 64 raw bytes from the secret store: first 32 = Ed25519 signing key,
-/// last 32 = X25519 key-agreement key.
+/// Loads a serialized [`crate::setup::VtcKeyBundle`] from the secret
+/// store. The bundle is what the VTA's `provision-integration` flow
+/// produced at setup time; it carries the integration DID + the
+/// Ed25519 + X25519 keys that back `vtc_did#key-0` / `#key-1`.
+/// Install-token signing key + audit key are HKDF-derived from the
+/// Ed25519 private bytes (32 B IKM) with `/v2` info strings — see
+/// `tasks/vtc-mvp/vta-driven-keys.md` §5.2.
 async fn init_auth(
     config: &AppConfig,
     secret_store: &dyn SecretStore,
@@ -565,8 +572,12 @@ async fn init_auth(
         }
     };
 
-    // Load key material from secret store (64 bytes: 32 Ed25519 + 32 X25519)
-    let key_material = match secret_store.get().await {
+    // Load the VtcKeyBundle from the secret store. Backwards-compat
+    // window: tests + the legacy bootstrap flow still feed 64 raw
+    // bytes (`[Ed25519:32 || X25519:32]`) directly; we accept that
+    // shape too and synthesize an in-memory bundle. Production
+    // setup writes the JSON shape via `inline_secret_for_bundle`.
+    let stored = match secret_store.get().await {
         Ok(Some(s)) => s,
         Ok(None) => {
             warn!("no key material found — auth endpoints will not work (run setup first)");
@@ -578,30 +589,22 @@ async fn init_auth(
         }
     };
 
-    if key_material.len() != 64 {
-        warn!(
-            "key material is {} bytes, expected 64 — auth endpoints will not work",
-            key_material.len()
-        );
-        return (None, None, None, None, None, None);
-    }
-
-    let Ok(ed25519_bytes): Result<&[u8; 32], _> = key_material[..32].try_into() else {
-        warn!("key material corrupted — auth endpoints will not work");
-        return (None, None, None, None, None, None);
-    };
-    let Ok(x25519_bytes): Result<&[u8; 32], _> = key_material[32..].try_into() else {
-        warn!("key material corrupted — auth endpoints will not work");
-        return (None, None, None, None, None, None);
+    let (ed25519_bytes, x25519_bytes) = match decode_secret_store_value(&vtc_did, &stored) {
+        Ok(pair) => pair,
+        Err(msg) => {
+            warn!("{msg}");
+            return (None, None, None, None, None, None);
+        }
     };
 
-    // Derive the install-token signer from the full 64-byte secret.
-    // HKDF's `info = "vtc-install-jwt-key/v1"` domain-separates this
-    // key from every other seed-derived secret in the daemon (audit
-    // key, future session key). Available even if downstream auth
-    // init fails, so the install routes can run before the VTC's
-    // own DIDComm transport comes up.
-    let install_signer = match InstallTokenSigner::from_master_seed(&key_material) {
+    // Derive the install-token signer from the 32-byte Ed25519
+    // private. HKDF info is `vtc-install-jwt-key/v2` — bumped from
+    // /v1 alongside the VTA-driven-keys rework so any pre-rework
+    // deployment that still feeds a BIP-39-derived 64-byte seed
+    // derives a different signing key and fails token verification
+    // loudly instead of silently accepting tokens minted under the
+    // old derivation. See `tasks/vtc-mvp/vta-driven-keys.md` §5.2.
+    let install_signer = match InstallTokenSigner::from_master_seed(&*ed25519_bytes) {
         Ok(s) => Some(Arc::new(s)),
         Err(e) => {
             warn!("failed to derive install token signer: {e} — install routes disabled");
@@ -609,13 +612,12 @@ async fn init_auth(
         }
     };
 
-    // Derive the HMAC audit key from the same master seed (different
-    // HKDF `info`) and build the writer. Idempotent across restarts;
-    // the very first boot creates an `Initial` row and the active
-    // marker, subsequent boots no-op.
+    // Derive the HMAC audit key from the same 32 bytes. The
+    // `AuditKeyStore` info string is also bumped to /v2 in
+    // vti-common — see the rework note there.
     let audit_writer = {
         let key_store = AuditKeyStore::new(audit_key_ks);
-        match key_store.ensure_initial(&key_material).await {
+        match key_store.ensure_initial(&*ed25519_bytes).await {
             Ok(_) => Some(AuditWriter::new(audit_ks, key_store)),
             Err(e) => {
                 warn!("failed to derive initial audit key: {e} — audit-emitting routes disabled");
@@ -636,11 +638,11 @@ async fn init_auth(
     // 2. Secrets resolver with VTC's Ed25519 + X25519 secrets
     let (secrets_resolver, _handle) = ThreadedSecretsResolver::new(None).await;
 
-    let mut signing_secret = Secret::generate_ed25519(None, Some(ed25519_bytes));
+    let mut signing_secret = Secret::generate_ed25519(None, Some(&*ed25519_bytes));
     signing_secret.id = format!("{vtc_did}#key-0");
     secrets_resolver.insert(signing_secret).await;
 
-    match Secret::generate_x25519(None, Some(x25519_bytes)) {
+    match Secret::generate_x25519(None, Some(&*x25519_bytes)) {
         Ok(mut ka_secret) => {
             ka_secret.id = format!("{vtc_did}#key-1");
             secrets_resolver.insert(ka_secret).await;
@@ -757,4 +759,50 @@ async fn shutdown_signal() {
         () = ctrl_c => info!("received SIGINT"),
         () = terminate => info!("received SIGTERM"),
     }
+}
+
+/// Pull the Ed25519 + X25519 private bytes out of whatever the
+/// secret store handed us.
+///
+/// Accepts two on-disk shapes:
+/// - **New** — a serialized [`VtcKeyBundle`] (JSON). Production
+///   shape after `vtc setup`. Decoded via
+///   [`VtcKeyBundle::from_secret_store_bytes`].
+/// - **Legacy** — 64 raw bytes `[Ed25519:32 || X25519:32]`. Used
+///   by integration-test fixtures and the not-yet-replaced
+///   bootstrap CLI path. Synthesizes an in-memory bundle so
+///   downstream code stays identical.
+///
+/// Returns `(ed25519_priv, x25519_priv)` on success; `Err(msg)`
+/// otherwise. Both halves come back inside `Zeroizing` so a
+/// best-effort scrub fires on drop.
+fn decode_secret_store_value(
+    vtc_did: &str,
+    stored: &[u8],
+) -> Result<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>), String> {
+    if stored.len() == 64 {
+        // Legacy raw-bytes shape — used by every integration-test
+        // fixture today. Promote into a bundle-shaped pair via a
+        // direct copy.
+        let mut ed = Zeroizing::new([0u8; 32]);
+        let mut x = Zeroizing::new([0u8; 32]);
+        ed.copy_from_slice(&stored[..32]);
+        x.copy_from_slice(&stored[32..]);
+        return Ok((ed, x));
+    }
+    let bundle = VtcKeyBundle::from_secret_store_bytes(stored)
+        .map_err(|e| format!("secret store payload not a VtcKeyBundle: {e}"))?;
+    if bundle.integration_did != vtc_did {
+        return Err(format!(
+            "VtcKeyBundle DID '{}' does not match config.vtc_did '{}' — refusing to init auth",
+            bundle.integration_did, vtc_did
+        ));
+    }
+    let ed = bundle
+        .ed25519_private_bytes()
+        .map_err(|e| format!("bundle Ed25519 decode: {e}"))?;
+    let x = bundle
+        .x25519_private_bytes()
+        .map_err(|e| format!("bundle X25519 decode: {e}"))?;
+    Ok((ed, x))
 }

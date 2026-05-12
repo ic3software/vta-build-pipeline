@@ -544,12 +544,10 @@ mod tests {
     fn extract_pre_rotation_status_walks_back_through_deltas() {
         // Latest entry omits parameters → walk back to entry 2 which
         // committed 2 next-key hashes.
-        let log = format!(
-            "{{\"versionId\":\"1-aaa\",\"parameters\":{{\"nextKeyHashes\":[\"Qm1\"]}}}}\n\
-             {{\"versionId\":\"2-bbb\",\"parameters\":{{\"nextKeyHashes\":[\"Qm2a\",\"Qm2b\"]}}}}\n\
-             {{\"versionId\":\"3-ccc\",\"parameters\":{{}}}}\n"
-        );
-        let s = extract_pre_rotation_status(&log);
+        let log = "{\"versionId\":\"1-aaa\",\"parameters\":{\"nextKeyHashes\":[\"Qm1\"]}}\n\
+                   {\"versionId\":\"2-bbb\",\"parameters\":{\"nextKeyHashes\":[\"Qm2a\",\"Qm2b\"]}}\n\
+                   {\"versionId\":\"3-ccc\",\"parameters\":{}}\n";
+        let s = extract_pre_rotation_status(log);
         assert!(s.active);
         assert_eq!(s.committed_count, 2);
         assert!(!s.never_set);
@@ -558,11 +556,9 @@ mod tests {
     #[test]
     fn extract_pre_rotation_status_recognises_explicit_disable() {
         // Entry 2 explicitly empties nextKeyHashes → pre-rotation off.
-        let log = format!(
-            "{{\"versionId\":\"1-aaa\",\"parameters\":{{\"nextKeyHashes\":[\"Qm1\"]}}}}\n\
-             {{\"versionId\":\"2-bbb\",\"parameters\":{{\"nextKeyHashes\":[]}}}}\n"
-        );
-        let s = extract_pre_rotation_status(&log);
+        let log = "{\"versionId\":\"1-aaa\",\"parameters\":{\"nextKeyHashes\":[\"Qm1\"]}}\n\
+                   {\"versionId\":\"2-bbb\",\"parameters\":{\"nextKeyHashes\":[]}}\n";
+        let s = extract_pre_rotation_status(log);
         assert!(!s.active);
         assert_eq!(s.committed_count, 0);
         assert!(!s.never_set);
