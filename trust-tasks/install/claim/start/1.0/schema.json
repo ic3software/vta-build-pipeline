@@ -1,0 +1,37 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/install/claim/start/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Install — Claim (Start)",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "object",
+      "required": ["install_token"],
+      "properties": {
+        "install_token": {
+          "type": "string",
+          "description": "EdDSA-signed install JWT (aud=vtc-install) printed by `vtc setup`."
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["registrationId", "options", "didBindingChallenge"],
+      "properties": {
+        "registrationId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Echoes the install token's jti; must be passed back to claim/finish."
+        },
+        "options": {
+          "type": "object",
+          "description": "WebAuthn PublicKeyCredentialCreationOptions, pubKeyCredParams = [{public-key, -8}]."
+        },
+        "didBindingChallenge": {
+          "type": "string",
+          "description": "Base64url-no-pad 32 random server bytes the candidate did:key must sign."
+        }
+      }
+    }
+  }
+}

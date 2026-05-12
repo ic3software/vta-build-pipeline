@@ -16,6 +16,7 @@ use crate::auth::jwt::JwtKeys;
 use crate::auth::session::cleanup_expired_sessions;
 use crate::config::{AppConfig, AuthConfig};
 use crate::error::AppError;
+use crate::install::{InstallTokenSigner, InstallTokenStore};
 use crate::keys::seed_store::SecretStore;
 use crate::messaging;
 use crate::routes;
@@ -40,6 +41,7 @@ pub struct AppState {
     pub community_ks: KeyspaceHandle,
     pub config_ks: KeyspaceHandle,
     pub passkey_ks: KeyspaceHandle,
+    pub install_ks: KeyspaceHandle,
     pub config: Arc<RwLock<AppConfig>>,
     pub did_resolver: Option<DIDCacheClient>,
     pub secrets_resolver: Option<Arc<ThreadedSecretsResolver>>,
@@ -53,6 +55,13 @@ pub struct AppState {
     /// Held alongside the `Webauthn` so the trait impl doesn't need
     /// to take an async read-lock on the config every request.
     pub public_url: Option<String>,
+    /// EdDSA signer that verifies install tokens and mints setup-session
+    /// tokens at the end of the claim ceremony. `None` until the secret
+    /// store yields key material — install routes 503 in that case.
+    pub install_signer: Option<Arc<InstallTokenSigner>>,
+    /// Wraps `install_ks` with the claim-window state machine. Cheap
+    /// to clone; always present once `install_ks` is open.
+    pub install_store: InstallTokenStore,
 }
 
 impl AuthState for AppState {
@@ -114,9 +123,12 @@ pub async fn run(
     let community_ks = store.keyspace("community")?;
     let config_ks = store.keyspace("config")?;
     let passkey_ks = store.keyspace("passkey")?;
+    let install_ks = store.keyspace("install")?;
+    let install_store = InstallTokenStore::new(install_ks.clone());
 
     // Initialize auth infrastructure
-    let (did_resolver, secrets_resolver, jwt_keys, atm) = init_auth(&config, &*secret_store).await;
+    let (did_resolver, secrets_resolver, jwt_keys, atm, install_signer) =
+        init_auth(&config, &*secret_store).await;
 
     // Build WebAuthn relying party handle from `public_url`. Optional —
     // a serverless / pre-setup deployment has no public URL yet and
@@ -173,6 +185,7 @@ pub async fn run(
         community_ks,
         config_ks,
         passkey_ks,
+        install_ks,
         config: Arc::new(RwLock::new(config)),
         did_resolver,
         secrets_resolver,
@@ -180,6 +193,8 @@ pub async fn run(
         atm,
         webauthn,
         public_url,
+        install_signer,
+        install_store,
     };
 
     // Spawn three named OS threads
@@ -400,12 +415,13 @@ async fn init_auth(
     Option<Arc<ThreadedSecretsResolver>>,
     Option<Arc<JwtKeys>>,
     Option<ATM>,
+    Option<Arc<InstallTokenSigner>>,
 ) {
     let vtc_did = match &config.vtc_did {
         Some(did) => did.clone(),
         None => {
             warn!("vtc_did not configured — auth endpoints will not work (run setup first)");
-            return (None, None, None, None);
+            return (None, None, None, None, None);
         }
     };
 
@@ -414,11 +430,11 @@ async fn init_auth(
         Ok(Some(s)) => s,
         Ok(None) => {
             warn!("no key material found — auth endpoints will not work (run setup first)");
-            return (None, None, None, None);
+            return (None, None, None, None, None);
         }
         Err(e) => {
             warn!("failed to load key material: {e} — auth endpoints will not work");
-            return (None, None, None, None);
+            return (None, None, None, None, None);
         }
     };
 
@@ -427,16 +443,30 @@ async fn init_auth(
             "key material is {} bytes, expected 64 — auth endpoints will not work",
             key_material.len()
         );
-        return (None, None, None, None);
+        return (None, None, None, None, None);
     }
 
     let Ok(ed25519_bytes): Result<&[u8; 32], _> = key_material[..32].try_into() else {
         warn!("key material corrupted — auth endpoints will not work");
-        return (None, None, None, None);
+        return (None, None, None, None, None);
     };
     let Ok(x25519_bytes): Result<&[u8; 32], _> = key_material[32..].try_into() else {
         warn!("key material corrupted — auth endpoints will not work");
-        return (None, None, None, None);
+        return (None, None, None, None, None);
+    };
+
+    // Derive the install-token signer from the full 64-byte secret.
+    // HKDF's `info = "vtc-install-jwt-key/v1"` domain-separates this
+    // key from every other seed-derived secret in the daemon (audit
+    // key, future session key). Available even if downstream auth
+    // init fails, so the install routes can run before the VTC's
+    // own DIDComm transport comes up.
+    let install_signer = match InstallTokenSigner::from_master_seed(&key_material) {
+        Ok(s) => Some(Arc::new(s)),
+        Err(e) => {
+            warn!("failed to derive install token signer: {e} — install routes disabled");
+            None
+        }
     };
 
     // 1. DID resolver (local mode)
@@ -444,7 +474,7 @@ async fn init_auth(
         Ok(r) => r,
         Err(e) => {
             warn!("failed to create DID resolver: {e} — auth endpoints will not work");
-            return (None, None, None, None);
+            return (None, None, None, None, install_signer);
         }
     };
 
@@ -474,6 +504,7 @@ async fn init_auth(
                     Some(Arc::new(secrets_resolver)),
                     None,
                     None,
+                    install_signer,
                 );
             }
         },
@@ -486,6 +517,7 @@ async fn init_auth(
                 Some(Arc::new(secrets_resolver)),
                 None,
                 None,
+                install_signer,
             );
         }
     };
@@ -528,6 +560,7 @@ async fn init_auth(
         Some(secrets_resolver),
         Some(Arc::new(jwt_keys)),
         atm,
+        install_signer,
     )
 }
 

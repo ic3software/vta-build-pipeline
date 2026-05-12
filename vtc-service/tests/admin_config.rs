@@ -52,6 +52,7 @@ async fn build() -> Fixture {
     let community_ks = store.keyspace("community").unwrap();
     let config_ks = store.keyspace("config").unwrap();
     let passkey_ks = store.keyspace("passkey").unwrap();
+    let install_ks = store.keyspace("install").unwrap();
 
     let jwt_seed = [0x42u8; 32];
     let jwt_keys = Arc::new(JwtKeys::from_ed25519_bytes(&jwt_seed, "VTC").expect("jwt keys"));
@@ -75,6 +76,7 @@ async fn build() -> Fixture {
         community_ks,
         config_ks,
         passkey_ks,
+        install_ks: install_ks.clone(),
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,
         secrets_resolver: None,
@@ -82,6 +84,8 @@ async fn build() -> Fixture {
         atm: None,
         webauthn: None,
         public_url: None,
+        install_signer: None,
+        install_store: vtc_service::install::InstallTokenStore::new(install_ks),
     };
 
     let router = routes::router().with_state(state.clone());

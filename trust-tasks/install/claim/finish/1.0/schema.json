@@ -1,0 +1,44 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/install/claim/finish/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Install — Claim (Finish)",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "object",
+      "required": [
+        "install_token",
+        "registration_id",
+        "webauthn_response",
+        "did_binding_signature"
+      ],
+      "properties": {
+        "install_token": { "type": "string" },
+        "registration_id": { "type": "string", "format": "uuid" },
+        "webauthn_response": {
+          "type": "object",
+          "description": "RegisterPublicKeyCredential from navigator.credentials.create()."
+        },
+        "did_binding_signature": {
+          "type": "string",
+          "description": "Base64url-no-pad 64-byte Ed25519 signature over the didBindingChallenge."
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["adminDid", "setupSessionToken"],
+      "properties": {
+        "adminDid": {
+          "type": "string",
+          "pattern": "^did:key:z",
+          "description": "Candidate admin DID derived from the passkey's Ed25519 public key."
+        },
+        "setupSessionToken": {
+          "type": "string",
+          "description": "EdDSA JWT (aud=vtc-install-session, TTL 5min) consumed by /v1/admin/bootstrap."
+        }
+      }
+    }
+  }
+}
