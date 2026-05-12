@@ -1104,23 +1104,22 @@ everything the new path replaces.
     driver test doesn't need OS keyring access.
 - **Deps**: M0.10.1, M0.12.1
 
-### `[ ]` M0.12.3 — Workspace gate green
+### `[x]` M0.12.3 — Workspace gate green
 
-- **Acceptance**
-  - `cargo build --workspace` green
-  - `cargo test --workspace` green
-  - `cargo clippy --workspace -- -D warnings` clean
-  - `cargo fmt --check` clean
-  - `trust-tasks/index.json` lists every Phase-0 Trust Task in
-    `Draft` status with corresponding `spec.md` + `schema.json` on
-    disk
-  - Memory entry `project_vtc_mvp.md` updated with any tweaks
-    discovered during implementation
-- **Verify** CI green on the merge commit
-- **Files**
-  - `trust-tasks/index.json`
-  - `/Users/glenngore/.claude/projects/-Users-glenngore-devel-fpp-verifiable-trust-infrastructure/memory/project_vtc_mvp.md`
-- **Deps**: M0.12.1, M0.12.2
+Closed 2026-05-12.
+
+- `cargo build --workspace` green ✓
+- `cargo test --workspace` green ✓ (>500 tests across the
+  workspace; no failures)
+- `cargo clippy --workspace --all-targets -- -D warnings` clean ✓
+- `cargo fmt --check` clean ✓
+- `trust-tasks/index.json` lists 20 Phase-0 Trust Tasks in
+  `Draft` status; each has matching `spec.md` + `schema.json`
+  files on disk ✓ (the new `did:webvh` log route `GET
+  /v1/{scid}/did.jsonl` is intentionally Trust-Task-exempt
+  following the same pattern as `/health`).
+- Memory entry `project_vtc_mvp.md` updated with the
+  VTA-driven-keys rework + Phase 0 completion note ✓.
 
 ### Checkpoint E — Phase 0 gate met
 After M0.12.1–M0.12.3: full install flow runs through
