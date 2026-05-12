@@ -185,6 +185,16 @@ pub enum AuditEvent {
     /// filters key on this to alert when the registry connection
     /// drops or recovers.
     RegistryStatusChanged(RegistryStatusChangedData),
+
+    /// A `MembershipSyncer` job completed successfully against
+    /// the registry. Spec §8.3; Phase 3 M3.4.
+    RegistrySyncSucceeded(RegistrySyncOutcomeData),
+
+    /// A `MembershipSyncer` job flipped to the `Failed` state
+    /// after exhausting its retry budget. Spec §8.3 calls these
+    /// out for operator attention — failed `Purge` jobs are
+    /// silent privacy regressions. Phase 3 M3.4.
+    RegistrySyncFailed(RegistrySyncOutcomeData),
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +482,28 @@ pub struct StatusListFlippedData {
     /// `false` = un-suspended. Revocation flips are one-way per
     /// spec §6.2; suspension flips can go either direction.
     pub revoked: bool,
+}
+
+/// Payload for [`AuditEvent::RegistrySyncSucceeded`] +
+/// [`AuditEvent::RegistrySyncFailed`]. Phase 3 M3.4. The
+/// `actor_did` on the envelope is the VTC's own DID; the
+/// `target_did` is the member being synced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrySyncOutcomeData {
+    /// UUID of the `SyncJob` row.
+    pub job_id: String,
+    /// Wire-form `SyncJobKind` — `"publishMember"`,
+    /// `"updateMember"`, `"deleteMember"`, or
+    /// `"markDeparted"`.
+    pub kind: String,
+    /// Number of attempts the job made (1 for happy-path
+    /// succeed-on-first-try, higher when retries fired).
+    pub attempts: u32,
+    /// On failure: the last error message. On success:
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// Payload for [`AuditEvent::RegistryStatusChanged`]. Phase 3
@@ -882,6 +914,40 @@ mod tests {
     }
 
     #[test]
+    fn registry_sync_succeeded_round_trip() {
+        let e = AuditEvent::RegistrySyncSucceeded(RegistrySyncOutcomeData {
+            job_id: "11111111-1111-1111-1111-111111111111".into(),
+            kind: "publishMember".into(),
+            attempts: 1,
+            last_error: None,
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "RegistrySyncSucceeded");
+        assert_eq!(v["data"]["kind"], "publishMember");
+        assert_eq!(v["data"]["attempts"], 1);
+        assert!(
+            v["data"].get("lastError").is_none(),
+            "lastError should be omitted on success: {v}"
+        );
+        round_trip(&e);
+    }
+
+    #[test]
+    fn registry_sync_failed_round_trip_carries_last_error() {
+        let e = AuditEvent::RegistrySyncFailed(RegistrySyncOutcomeData {
+            job_id: "22222222-2222-2222-2222-222222222222".into(),
+            kind: "deleteMember".into(),
+            attempts: 17,
+            last_error: Some("permanent: bad input".into()),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "RegistrySyncFailed");
+        assert_eq!(v["data"]["attempts"], 17);
+        assert_eq!(v["data"]["lastError"], "permanent: bad input");
+        round_trip(&e);
+    }
+
+    #[test]
     fn registry_status_changed_round_trip() {
         let e = AuditEvent::RegistryStatusChanged(RegistryStatusChangedData {
             from: "active".into(),
@@ -1048,6 +1114,24 @@ mod tests {
                     reason: None,
                 }),
                 "RegistryStatusChanged",
+            ),
+            (
+                AuditEvent::RegistrySyncSucceeded(RegistrySyncOutcomeData {
+                    job_id: "j".into(),
+                    kind: "publishMember".into(),
+                    attempts: 1,
+                    last_error: None,
+                }),
+                "RegistrySyncSucceeded",
+            ),
+            (
+                AuditEvent::RegistrySyncFailed(RegistrySyncOutcomeData {
+                    job_id: "j".into(),
+                    kind: "deleteMember".into(),
+                    attempts: 1,
+                    last_error: Some("x".into()),
+                }),
+                "RegistrySyncFailed",
             ),
         ];
         for (event, expected) in cases {

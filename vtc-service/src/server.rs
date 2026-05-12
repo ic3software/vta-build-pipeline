@@ -450,6 +450,36 @@ pub async fn run(
         });
     }
 
+    // M3.4: spawn the MembershipSyncer task. Drains the
+    // sync_queue against the trust-registry client with
+    // exponential backoff + boot-time InFlight recovery.
+    // Only runs when a registry is configured — without
+    // one, the queue grows visibly via /v1/health/diagnostics
+    // but no dispatch happens.
+    if let Some(client) = state.registry_client.clone() {
+        let actor_did = state
+            .config
+            .read()
+            .await
+            .vtc_did
+            .clone()
+            .unwrap_or_else(|| "did:key:vtc-unknown".into());
+        let syncer = crate::registry::MembershipSyncer::new(
+            state.audit_ks.clone(),
+            state.sync_queue_ks.clone(),
+            state.sync_cursor_ks.clone(),
+            state.registry_records_ks.clone(),
+            client,
+            state.registry_health.clone(),
+            state.audit_writer.clone(),
+            actor_did,
+        );
+        let syncer_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            syncer.run(syncer_shutdown).await;
+        });
+    }
+
     // M0.10: consume + audit any pending emergency-bootstrap marker
     // left behind by `vtc admin emergency-bootstrap`. The marker is
     // **one-shot**: `take_pending_emergency` deletes it as part of

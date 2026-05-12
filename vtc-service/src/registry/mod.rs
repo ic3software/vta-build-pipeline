@@ -50,6 +50,8 @@ pub mod client;
 pub mod health;
 pub mod model;
 pub mod storage;
+pub mod syncer;
+pub mod tail;
 pub mod upstream;
 
 pub use client::{MockRegistryClient, RegistryError, TrustRegistryClient};
@@ -63,4 +65,6 @@ pub use storage::{
     get_record, get_sync_cursor, get_sync_job, list_records, list_sync_jobs, set_sync_cursor,
     store_record, store_sync_job,
 };
+pub use syncer::MembershipSyncer;
+pub use tail::{WalkOutcome, walk as walk_audit_tail};
 pub use upstream::UpstreamRegistryClient;

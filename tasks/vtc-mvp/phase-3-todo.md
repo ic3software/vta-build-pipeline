@@ -118,7 +118,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.3 — Audit-log-tail subscription + sync_queue helpers
 
-### `[ ]` M3.3.1 — Audit-log walker
+### `[x]` M3.3.1 — Audit-log walker
 
 - **Acceptance**
   - `vtc_service::registry::tail::AuditTailWalker` walks
@@ -145,7 +145,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.4 — `MembershipSyncer` task
 
-### `[ ]` M3.4.1 — Tokio task with exponential backoff
+### `[x]` M3.4.1 — Tokio task with exponential backoff
 
 - **Acceptance**
   - `vtc_service::registry::syncer::MembershipSyncer`
