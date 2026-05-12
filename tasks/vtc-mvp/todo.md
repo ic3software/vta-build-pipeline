@@ -465,43 +465,69 @@ concurrent claims race correctly through the mutex. No WebAuthn yet.
 - **Deps**: M0.5.0 (test harness — deferred to PR B), M0.1.6
 - **Pre-impl decision**: D7, D11
 
-### `[ ]` M0.5.2 — Install claim endpoints (start + finish)
+### `[x]` M0.5.2 — Install claim endpoints (start + finish)
 
 Per **D12**: two-phase ceremony, not a single endpoint. Adopts the
-webvh-common `enroll_start` / `enroll_finish` shape but specialised
-for the install carve-out (one-shot, not an ongoing invite system).
+`webvh-common::server::passkey::routes` `enroll_*` shape but
+specialised for the install carve-out (one-shot, not an ongoing
+invite system).
 
 - **Acceptance**
-  - `POST /v1/install/claim/start`: accepts `{ install_token }`,
-    validates via `parse_install_token`, calls
-    `install::state_machine::start_claim`, then calls
-    `vti_common::auth::passkey::enroll_start` to begin the
-    WebAuthn registration ceremony. Returns
-    `{ registration_id, options: CreationChallengeResponse }`.
-    Challenge bound to the token's `cnonce`.
-  - `POST /v1/install/claim/finish`: accepts
-    `{ registration_id, webauthn_response, candidate_did_signature }`,
-    completes the ceremony via `enroll_finish`, calls
-    `install::state_machine::finish_claim`, verifies
-    `candidate_did_signature` over a server-issued nonce using the
-    candidate `did:key`. Returns a setup-session token
-    (audience `"vtc-install-session"`) + the candidate admin DID.
+  - `POST /v1/install/claim/start`: parses install token, calls
+    `InstallTokenStore::start_claim` (300 s ceremony lock), then
+    `vtc_service::webauthn::start_eddsa_passkey_registration` to
+    begin the WebAuthn registration ceremony. Returns
+    `{ registrationId, options, didBindingChallenge }`.
+  - `POST /v1/install/claim/finish`: takes the persisted
+    `PasskeyRegistration` state, runs
+    `finish_eddsa_passkey_registration`, derives the candidate
+    `did:key` from the credential's Ed25519 x coordinate, verifies
+    the DID-binding Ed25519 signature against the server-issued
+    32-byte challenge, calls
+    `InstallTokenStore::finish_claim` (Issued → Consumed), persists
+    `PasskeyUser` + `CredentialMapping`, and mints a 5-minute
+    setup-session JWT (`aud = vtc-install-session`). Carve-out
+    stays open — closed by M0.6's bootstrap.
   - Trust Task IDs: `install/claim/start/1.0`,
-    `install/claim/finish/1.0`
+    `install/claim/finish/1.0`.
 - **Verify**
-  - End-to-end test using `Router::oneshot` + the harness from M0.5.0
-  - Failure cases: bad token, expired token, replayed token after
-    consume, mismatched cnonce, wrong DID signature, non-Ed25519
-    algorithm, second concurrent `claim/start` within the 5min
-    claim window, abandoned ceremony followed by retry after
-    timeout (succeeds)
+  - 11 integration tests in `tests/install_claim.rs` driving the
+    `Router::oneshot` stack:
+    - `full_ceremony_completes_end_to_end` — happy path + replay
+      finish returns 401.
+    - `start_returns_503_when_install_signer_missing`
+    - `start_returns_503_when_webauthn_missing`
+    - `start_rejects_unsigned_token`
+    - `start_rejects_unknown_jti`
+    - `second_concurrent_start_within_window_is_conflict`
+    - `finish_rejects_mismatched_registration_id`
+    - `finish_rejects_wrong_did_binding_signature`
+    - `finish_without_start_fails`
+    - `missing_trust_task_header_returns_400`
+    - `wrong_trust_task_header_returns_415`
+  - 6 unit tests in `routes::install::tests::*` covering DID-key
+    derivation + DID-binding signature verification primitives.
+  - "Abandoned-ceremony retry after window" succeeds — covered
+    by the unit-level `install::state_machine::retry_after_window_succeeds`
+    from M0.4.2.
 - **Files**
-  - `vtc-service/src/routes/install.rs` (new)
-  - `vtc-service/src/routes/mod.rs`
+  - `vtc-service/src/routes/install.rs` (new — ~370 lines incl.
+    unit tests)
+  - `vtc-service/src/routes/mod.rs` (mount + 2 Trust Tasks)
+  - `vtc-service/src/server.rs` (`install_ks`, `install_signer`,
+    `install_store` on AppState; `init_auth` returns
+    `install_signer`)
+  - `vtc-service/src/install/{mod,token}.rs` (add
+    `InstallSessionClaims`, `INSTALL_SESSION_AUDIENCE`,
+    `mint_install_session_token`, signer
+    `encode_session`/`decode_session`)
+  - `vtc-service/tests/install_claim.rs` (new — 11 tests)
+  - `vtc-service/tests/{admin_config,auth_audience,community_profile,passkey_state}.rs`
+    (new AppState fields)
   - `trust-tasks/install/claim/start/1.0/{spec.md,schema.json}`
   - `trust-tasks/install/claim/finish/1.0/{spec.md,schema.json}`
   - `trust-tasks/index.json`
-- **Deps**: M0.4.2, M0.5.1, M0.3.1, M0.1.6
+- **Deps**: M0.4.2, M0.5.0, M0.5.1
 - **Pre-impl decision**: D2, D12
 
 ---

@@ -64,6 +64,18 @@
       "status": "Draft",
       "path": "admin/config/manage/1.0",
       "rest": "GET, PATCH /v1/admin/config"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/install/claim/start/1.0",
+      "status": "Draft",
+      "path": "install/claim/start/1.0",
+      "rest": "POST /v1/install/claim/start"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/install/claim/finish/1.0",
+      "status": "Draft",
+      "path": "install/claim/finish/1.0",
+      "rest": "POST /v1/install/claim/finish"
     }
   ]
 }

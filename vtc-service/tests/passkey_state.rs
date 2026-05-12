@@ -36,6 +36,7 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
     let community_ks = store.keyspace("community").unwrap();
     let config_ks = store.keyspace("config").unwrap();
     let passkey_ks = store.keyspace("passkey").unwrap();
+    let install_ks = store.keyspace("install").unwrap();
 
     let config: AppConfig = toml::from_str(&format!(
         r#"
@@ -55,6 +56,7 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
         community_ks,
         config_ks,
         passkey_ks,
+        install_ks: install_ks.clone(),
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,
         secrets_resolver: None,
@@ -62,6 +64,8 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
         atm: None,
         webauthn,
         public_url: public_url.map(|s| s.to_string()),
+        install_signer: None,
+        install_store: vtc_service::install::InstallTokenStore::new(install_ks),
     };
     (state, dir)
 }

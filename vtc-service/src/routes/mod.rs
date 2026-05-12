@@ -4,6 +4,7 @@ mod auth;
 mod community;
 mod config;
 mod health;
+pub(crate) mod install;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -52,6 +53,12 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let admin_config = TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/config/manage/1.0")
         .expect("static Trust-Task URL");
+    let install_claim_start =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/start/1.0")
+            .expect("static Trust-Task URL");
+    let install_claim_finish =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/finish/1.0")
+            .expect("static Trust-Task URL");
 
     TrustTaskRouter::<AppState>::new()
         .route_exempt("/health", get(health::health))
@@ -104,6 +111,19 @@ pub fn router() -> Router<AppState> {
             "/v1/admin/config",
             get(admin::config::get_config).patch(admin::config::patch_config),
             admin_config,
+        )
+        // Install claim (M0.5.2) — distinct Trust Tasks because the
+        // two phases of the WebAuthn ceremony have different
+        // semantics. Both are POST-only.
+        .route_with_task(
+            "/v1/install/claim/start",
+            post(install::claim_start),
+            install_claim_start,
+        )
+        .route_with_task(
+            "/v1/install/claim/finish",
+            post(install::claim_finish),
+            install_claim_finish,
         )
         .into_router()
 }

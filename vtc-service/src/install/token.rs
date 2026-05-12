@@ -66,6 +66,18 @@ pub const INSTALL_SUBJECT: &str = "install";
 /// URL doesn't sit redeemable for hours.
 pub const INSTALL_TOKEN_DEFAULT_TTL_SECS: u64 = 15 * 60;
 
+/// Audience claim for the setup-session token minted by
+/// `/v1/install/claim/finish`. The token bridges the install
+/// ceremony to M0.6's `/v1/admin/bootstrap`; `"VTC"` and
+/// `"vtc-install"` audience decoders both reject it by design.
+pub const INSTALL_SESSION_AUDIENCE: &str = "vtc-install-session";
+
+/// Default setup-session token lifetime in seconds. The operator
+/// has just completed the WebAuthn ceremony; they need a few
+/// minutes to round-trip to the bootstrap endpoint before the
+/// receipt expires.
+pub const INSTALL_SESSION_DEFAULT_TTL_SECS: u64 = 5 * 60;
+
 const HKDF_INFO: &[u8] = b"vtc-install-jwt-key/v1";
 
 // ---------------------------------------------------------------------------
@@ -171,6 +183,55 @@ impl InstallTokenSigner {
         }
         Ok(claims)
     }
+
+    /// Sign an [`InstallSessionClaims`] into an EdDSA JWT. Shares the
+    /// underlying signing key with [`Self::encode`]; the
+    /// `"vtc-install-session"` audience separates the two token
+    /// families at every decoder.
+    pub fn encode_session(&self, claims: &InstallSessionClaims) -> Result<String, AppError> {
+        let header = Header::new(Algorithm::EdDSA);
+        jsonwebtoken::encode(&header, claims, &self.encoding)
+            .map_err(|e| AppError::Internal(format!("install session JWT encode failed: {e}")))
+    }
+
+    /// Verify + decode an install-session token. Returns
+    /// `AppError::Unauthorized` on every failure for the same
+    /// defence-in-depth reason [`Self::decode`] does.
+    pub fn decode_session(&self, token: &str) -> Result<InstallSessionClaims, AppError> {
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_audience(&[INSTALL_SESSION_AUDIENCE]);
+        validation.set_required_spec_claims(&["exp", "sub", "aud", "iat", "iss"]);
+
+        jsonwebtoken::decode::<InstallSessionClaims>(token, &self.decoding, &validation)
+            .map(|data| data.claims)
+            .map_err(|_| AppError::Unauthorized("invalid install session token".into()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Install-session claims
+// ---------------------------------------------------------------------------
+
+/// JWT claims for the setup-session token minted at the end of the
+/// install claim ceremony. `sub` is the candidate admin DID; M0.6's
+/// `/v1/admin/bootstrap` will accept this token exactly once,
+/// matching `sub` against the ACL entry it writes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallSessionClaims {
+    /// Issuer — the VTC DID.
+    pub iss: String,
+    /// Subject — the candidate admin `did:key` derived from the
+    /// passkey's COSE public key.
+    pub sub: String,
+    /// Always [`INSTALL_SESSION_AUDIENCE`].
+    pub aud: String,
+    /// Unix-second expiry.
+    pub exp: u64,
+    /// Unix-second issued-at.
+    pub iat: u64,
+    /// Random identifier — M0.6's bootstrap endpoint can drop a
+    /// once-only marker keyed by `jti` to prevent replay.
+    pub jti: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +311,33 @@ pub fn parse_install_token(
     token: &str,
 ) -> Result<InstallTokenClaims, AppError> {
     signer.decode(token)
+}
+
+/// Mint a setup-session token for `admin_did`. Called from
+/// `POST /v1/install/claim/finish` after the WebAuthn ceremony and
+/// DID-binding signature both verify.
+pub fn mint_install_session_token(
+    signer: &InstallTokenSigner,
+    issuer_did: &str,
+    admin_did: &str,
+    ttl_seconds: u64,
+) -> Result<String, AppError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let exp = now + ttl_seconds;
+    let jti = Uuid::new_v4().to_string();
+
+    let claims = InstallSessionClaims {
+        iss: issuer_did.to_string(),
+        sub: admin_did.to_string(),
+        aud: INSTALL_SESSION_AUDIENCE.to_string(),
+        exp,
+        iat: now,
+        jti,
+    };
+    signer.encode_session(&claims)
 }
 
 // ---------------------------------------------------------------------------
