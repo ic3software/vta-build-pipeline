@@ -53,6 +53,12 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let admin_config = TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/config/manage/1.0")
         .expect("static Trust-Task URL");
+    let admin_config_reload =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/config/reload/1.0")
+            .expect("static Trust-Task URL");
+    let admin_config_restart =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/config/restart/1.0")
+            .expect("static Trust-Task URL");
     let install_claim_start =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/start/1.0")
             .expect("static Trust-Task URL");
@@ -122,6 +128,19 @@ pub fn router() -> Router<AppState> {
             "/v1/admin/config",
             get(admin::config::get_config).patch(admin::config::patch_config),
             admin_config,
+        )
+        // Reload + restart (M0.8.3). Reload applies hot-reloadable
+        // settings in-place; restart requires a supervisor (412
+        // `SupervisorRequired` otherwise).
+        .route_with_task(
+            "/v1/admin/config/reload",
+            post(admin::config::reload_config),
+            admin_config_reload,
+        )
+        .route_with_task(
+            "/v1/admin/config/restart",
+            post(admin::config::restart_config),
+            admin_config_restart,
         )
         // Install claim (M0.5.2) — distinct Trust Tasks because the
         // two phases of the WebAuthn ceremony have different

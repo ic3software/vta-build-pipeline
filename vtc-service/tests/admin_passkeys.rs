@@ -194,6 +194,8 @@ async fn build_fixture(with_audit: bool) -> Fixture {
         )),
         install_store,
         audit_writer,
+        shutdown_tx: tokio::sync::watch::channel(false).0,
+        supervisor: None,
     };
 
     let router = routes::router().with_state(state.clone());

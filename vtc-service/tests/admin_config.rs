@@ -40,6 +40,13 @@ struct Fixture {
 }
 
 async fn build() -> Fixture {
+    build_with(false, None).await
+}
+
+async fn build_with(
+    with_audit: bool,
+    supervisor: Option<vtc_service::supervisor::SupervisorKind>,
+) -> Fixture {
     init_jwt_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open(&StoreConfig {
@@ -72,6 +79,17 @@ async fn build() -> Fixture {
     ))
     .expect("parse config");
 
+    let audit_writer = if with_audit {
+        let key_store = vti_common::audit::AuditKeyStore::new(audit_key_ks.clone());
+        key_store.ensure_initial(&[0xAB; 64]).await.unwrap();
+        Some(vti_common::audit::AuditWriter::new(
+            audit_ks.clone(),
+            key_store,
+        ))
+    } else {
+        None
+    };
+
     let state = AppState {
         sessions_ks: sessions_ks.clone(),
         acl_ks,
@@ -90,7 +108,9 @@ async fn build() -> Fixture {
         install_store: vtc_service::install::InstallTokenStore::new(install_ks),
         audit_ks,
         audit_key_ks,
-        audit_writer: None,
+        audit_writer,
+        shutdown_tx: tokio::sync::watch::channel(false).0,
+        supervisor,
     };
 
     let router = routes::router().with_state(state.clone());
@@ -405,5 +425,196 @@ async fn get_with_wrong_trust_task_returns_415() {
         .unwrap();
     let resp = fix.router.clone().oneshot(req).await.unwrap();
     let (status, _body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+// ──────────────────────── Reload ────────────────────────
+
+const RELOAD_TASK: &str = "https://trusttasks.org/openvtc/vtc/admin/config/reload/1.0";
+const RESTART_TASK: &str = "https://trusttasks.org/openvtc/vtc/admin/config/restart/1.0";
+
+async fn reload(fix: &Fixture, token: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/config/reload")
+        .header("Trust-Task", RELOAD_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    body_value(resp).await
+}
+
+async fn restart(fix: &Fixture, token: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/config/restart")
+        .header("Trust-Task", RESTART_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    body_value(resp).await
+}
+
+#[tokio::test]
+async fn reload_no_diff_returns_empty_keys_reloaded() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    let (status, body) = reload(&fix, &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["keysReloaded"], json!([]));
+}
+
+#[tokio::test]
+async fn reload_applies_hot_reloadable_diff() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+
+    // Write `log.level = "debug"` via PATCH so the db-layer differs
+    // from the live in-memory `info`. reload must pick up the
+    // delta.
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header(
+            "Trust-Task",
+            "https://trusttasks.org/openvtc/vtc/admin/config/manage/1.0",
+        )
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"log.level":"debug"}"#))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, _body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = reload(&fix, &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["keysReloaded"], json!(["log.level"]));
+
+    // In-memory `AppConfig.log.level` now reflects the new value.
+    assert_eq!(fix.state.config.read().await.log.level, "debug");
+
+    // Second reload is a no-op (no diff left).
+    let (_, body) = reload(&fix, &token).await;
+    assert_eq!(body["keysReloaded"], json!([]));
+}
+
+#[tokio::test]
+async fn reload_requires_admin_role() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "reader").await;
+    let (status, _) = reload(&fix, &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn reload_503_when_audit_writer_missing() {
+    let fix = build_with(false, None).await;
+    let token = token_for(&fix, "admin").await;
+    let (status, _) = reload(&fix, &token).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ──────────────────────── Restart ────────────────────────
+
+#[tokio::test]
+async fn restart_without_supervisor_returns_412() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    let (status, body) = restart(&fix, &token).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("SupervisorRequired"),
+        "got {body}",
+    );
+}
+
+#[tokio::test]
+async fn restart_with_supervisor_triggers_shutdown() {
+    use vtc_service::supervisor::SupervisorKind;
+    let fix = build_with(true, Some(SupervisorKind::Manual)).await;
+    let token = token_for(&fix, "admin").await;
+
+    // Subscribe to the shutdown channel BEFORE the request so we
+    // can assert the flip.
+    let mut rx = fix.state.shutdown_tx.subscribe();
+    assert!(!*rx.borrow_and_update());
+
+    let (status, body) = restart(&fix, &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["supervisor"], "manual");
+    assert!(body["drainTimeoutSeconds"].as_u64().unwrap() > 0);
+
+    // Shutdown was signalled.
+    assert!(*rx.borrow_and_update());
+}
+
+#[tokio::test]
+async fn restart_emits_audit_event_before_signal() {
+    use vtc_service::supervisor::SupervisorKind;
+    let fix = build_with(true, Some(SupervisorKind::Systemd)).await;
+    let token = token_for(&fix, "admin").await;
+
+    let (status, _) = restart(&fix, &token).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Confirm exactly one RestartRequested envelope landed.
+    let raw = fix
+        .state
+        .audit_ks
+        .prefix_iter_raw(b"2".to_vec())
+        .await
+        .unwrap();
+    let envelopes: Vec<vti_common::audit::AuditEnvelope> = raw
+        .iter()
+        .map(|(_, v)| serde_json::from_slice(v).unwrap())
+        .collect();
+    let restart_events: Vec<_> = envelopes
+        .iter()
+        .filter(|e| matches!(e.event, vti_common::audit::AuditEvent::RestartRequested(_)))
+        .collect();
+    assert_eq!(restart_events.len(), 1);
+}
+
+#[tokio::test]
+async fn restart_requires_admin_role() {
+    use vtc_service::supervisor::SupervisorKind;
+    let fix = build_with(true, Some(SupervisorKind::Manual)).await;
+    let token = token_for(&fix, "reader").await;
+    let (status, _) = restart(&fix, &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn restart_503_when_audit_writer_missing() {
+    use vtc_service::supervisor::SupervisorKind;
+    let fix = build_with(false, Some(SupervisorKind::Manual)).await;
+    let token = token_for(&fix, "admin").await;
+    let (status, _) = restart(&fix, &token).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn restart_wrong_trust_task_returns_415() {
+    use vtc_service::supervisor::SupervisorKind;
+    let fix = build_with(true, Some(SupervisorKind::Manual)).await;
+    let token = token_for(&fix, "admin").await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/config/restart")
+        .header("Trust-Task", RELOAD_TASK) // wrong
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, _) = body_value(resp).await;
     assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }

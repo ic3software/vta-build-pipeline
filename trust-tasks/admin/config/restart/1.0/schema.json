@@ -1,0 +1,19 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/admin/config/restart/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Admin — Restart Daemon",
+  "type": "object",
+  "properties": {
+    "response": {
+      "type": "object",
+      "required": ["supervisor", "drainTimeoutSeconds"],
+      "properties": {
+        "supervisor": {
+          "type": "string",
+          "enum": ["manual", "systemd", "kubernetes"]
+        },
+        "drainTimeoutSeconds": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
