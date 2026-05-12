@@ -1,0 +1,38 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/admin/passkeys/revoke/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Admin — Revoke Passkey",
+  "type": "object",
+  "properties": {
+    "startRequest": {
+      "type": "object",
+      "required": ["credential_id"],
+      "properties": {
+        "credential_id": { "type": "string" }
+      }
+    },
+    "startResponse": {
+      "type": "object",
+      "required": ["revocationId", "uvOptions"],
+      "properties": {
+        "revocationId": { "type": "string", "format": "uuid" },
+        "uvOptions": { "type": "object" }
+      }
+    },
+    "finishRequest": {
+      "type": "object",
+      "required": ["revocation_id", "uv_response"],
+      "properties": {
+        "revocation_id": { "type": "string", "format": "uuid" },
+        "uv_response": { "type": "object" }
+      }
+    },
+    "finishResponse": {
+      "type": "object",
+      "required": ["credentialId"],
+      "properties": {
+        "credentialId": { "type": "string" }
+      }
+    }
+  }
+}

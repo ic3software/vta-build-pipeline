@@ -1,0 +1,28 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/admin/passkeys/list/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Admin — List Passkeys",
+  "type": "object",
+  "properties": {
+    "response": {
+      "type": "object",
+      "required": ["passkeys"],
+      "properties": {
+        "passkeys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["credentialId", "label", "registeredAt"],
+            "properties": {
+              "credentialId": { "type": "string" },
+              "label": { "type": "string" },
+              "transports": { "type": "array", "items": { "type": "string" } },
+              "registeredAt": { "type": "string", "format": "date-time" },
+              "lastUsedAt": { "type": ["string", "null"], "format": "date-time" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -61,6 +61,15 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let admin_bootstrap = TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/bootstrap/1.0")
         .expect("static Trust-Task URL");
+    let admin_passkeys_list =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/passkeys/list/1.0")
+            .expect("static Trust-Task URL");
+    let admin_passkeys_register =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/passkeys/register/1.0")
+            .expect("static Trust-Task URL");
+    let admin_passkeys_revoke =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/passkeys/revoke/1.0")
+            .expect("static Trust-Task URL");
 
     TrustTaskRouter::<AppState>::new()
         .route_exempt("/health", get(health::health))
@@ -134,6 +143,36 @@ pub fn router() -> Router<AppState> {
             "/v1/admin/bootstrap",
             post(admin::bootstrap::bootstrap),
             admin_bootstrap,
+        )
+        // Admin passkey management (M0.6.3). Step-up UV is enforced
+        // via the two-phase ceremony: `register/start` and
+        // `revoke/start` issue a UV challenge bound to an existing
+        // passkey; `register/finish` and `revoke/finish` reject if
+        // the UV assertion doesn't verify.
+        .route_with_task(
+            "/v1/admin/passkeys",
+            get(admin::passkeys::list),
+            admin_passkeys_list,
+        )
+        .route_with_task(
+            "/v1/admin/passkeys/register/start",
+            post(admin::passkeys::register_start),
+            admin_passkeys_register.clone(),
+        )
+        .route_with_task(
+            "/v1/admin/passkeys/register/finish",
+            post(admin::passkeys::register_finish),
+            admin_passkeys_register,
+        )
+        .route_with_task(
+            "/v1/admin/passkeys/revoke/start",
+            post(admin::passkeys::revoke_start),
+            admin_passkeys_revoke.clone(),
+        )
+        .route_with_task(
+            "/v1/admin/passkeys/revoke/finish",
+            post(admin::passkeys::revoke_finish),
+            admin_passkeys_revoke,
         )
         .into_router()
 }

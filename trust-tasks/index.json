@@ -82,6 +82,24 @@
       "status": "Draft",
       "path": "admin/bootstrap/1.0",
       "rest": "POST /v1/admin/bootstrap"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/admin/passkeys/list/1.0",
+      "status": "Draft",
+      "path": "admin/passkeys/list/1.0",
+      "rest": "GET /v1/admin/passkeys"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/admin/passkeys/register/1.0",
+      "status": "Draft",
+      "path": "admin/passkeys/register/1.0",
+      "rest": "POST /v1/admin/passkeys/register/{start,finish}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/admin/passkeys/revoke/1.0",
+      "status": "Draft",
+      "path": "admin/passkeys/revoke/1.0",
+      "rest": "POST /v1/admin/passkeys/revoke/{start,finish}"
     }
   ]
 }

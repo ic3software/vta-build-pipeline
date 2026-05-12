@@ -613,29 +613,53 @@ once `vti-common::acl::AclEntry` becomes generic over `Role`.
   - `trust-tasks/index.json`
 - **Deps**: M0.5.2, M0.6.1, M0.3 (audit infrastructure)
 
-### `[ ]` M0.6.3 — Multi-passkey endpoints with step-up UV reauth
+### `[x]` M0.6.3 — Multi-passkey endpoints with step-up UV reauth
 
 - **Acceptance**
-  - `POST /v1/admin/passkeys/register`: requires authenticated
-    session AND fresh WebAuthn UV in the same request
-  - `DELETE /v1/admin/passkeys/{credential_id}`: same UV requirement;
-    CAS-protected last-passkey check (refuses if it would leave
-    zero passkeys)
-  - `GET /v1/admin/passkeys`: lists with `credential_id`, `label`,
-    `transports`, `registered_at`, `last_used_at`
-  - Trust Task IDs: `admin/passkeys/{register,revoke,list}/1.0`
+  - `POST /v1/admin/passkeys/register/{start,finish}` — two-phase
+    ceremony that combines a new-device registration challenge
+    with a UV authentication challenge against an existing
+    credential. `start` returns both options; `finish` verifies
+    both responses, persists the new credential, mirrors into the
+    `AdminEntry`, emits `AdminPasskeyRegistered`.
+  - `POST /v1/admin/passkeys/revoke/{start,finish}` — pins the
+    target credential id on `start`, verifies UV on `finish`,
+    removes the credential under the
+    `ADMIN_PASSKEY_LOCK` mutex with last-passkey CAS guard, emits
+    `AdminPasskeyRevoked`.
+  - `GET /v1/admin/passkeys` — no step-up; returns the caller's
+    registered credentials (credentialId / label / transports /
+    registeredAt / lastUsedAt).
+  - Trust Task IDs: `admin/passkeys/{register,revoke,list}/1.0`.
+- **Step-up UV pattern**: explicit two-phase ceremony rather than
+  a `StepUpUvAuth` extractor. Reason: webauthn-rs challenges must
+  be issued by the server and bound to ceremony state, so a
+  single-shot extractor doesn't fit the protocol. Adopts the same
+  two-phase shape the install claim flow uses.
 - **Verify**
-  - Register-with-stale-session (no UV) → 401
-  - Revoke last passkey → 409 `LastPasskeyProtected`
-  - Concurrent revoke calls do not race past the CAS check
-  - Each operation emits the correct audit event
+  - 12 `tests/admin_passkeys.rs` integration tests:
+    - `list_returns_bootstrap_passkey`
+    - `list_requires_admin_role`
+    - `list_requires_authentication`
+    - `register_succeeds_with_step_up_uv` — happy path; AdminEntry
+      grows to 2 passkeys
+    - `register_finish_without_start_returns_401`
+    - `register_rejects_when_uv_signed_by_wrong_authenticator`
+    - `revoke_last_passkey_returns_409_last_passkey_protected`
+    - `revoke_after_register_succeeds_and_emits_audit_event` —
+      verifies both `AdminPasskeyRegistered` and
+      `AdminPasskeyRevoked` envelopes land in the audit log
+    - `revoke_rejects_unknown_credential_id`
+    - `revoke_finish_without_start_returns_401`
+    - `register_start_returns_415_with_wrong_trust_task`
+    - `register_returns_503_when_audit_writer_missing`
 - **Files**
-  - `vtc-service/src/routes/admin/passkeys.rs` (new)
-  - `vtc-service/src/auth/extractor.rs` (extend with
-    `StepUpUvAuth` extractor)
-  - `trust-tasks/admin/passkeys/register/1.0/{spec.md,schema.json}`
-  - `trust-tasks/admin/passkeys/revoke/1.0/{spec.md,schema.json}`
-  - `trust-tasks/admin/passkeys/list/1.0/{spec.md,schema.json}`
+  - `vtc-service/src/routes/admin/passkeys.rs` (new — ~440 lines)
+  - `vtc-service/src/routes/admin/mod.rs` (mount)
+  - `vtc-service/src/routes/mod.rs` (5 routes + 3 Trust Tasks)
+  - `vtc-service/tests/admin_passkeys.rs` (new — 12 tests)
+  - `trust-tasks/admin/passkeys/{list,register,revoke}/1.0/{spec.md,schema.json}`
+  - `trust-tasks/index.json`
 - **Deps**: M0.6.2, M0.5.0
 
 ### Checkpoint D — End-to-end first-admin install

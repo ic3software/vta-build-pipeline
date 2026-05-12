@@ -1,0 +1,35 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/admin/passkeys/register/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Admin — Register Passkey",
+  "type": "object",
+  "properties": {
+    "startResponse": {
+      "type": "object",
+      "required": ["registrationId", "registerOptions", "uvOptions"],
+      "properties": {
+        "registrationId": { "type": "string", "format": "uuid" },
+        "registerOptions": { "type": "object" },
+        "uvOptions": { "type": "object" }
+      }
+    },
+    "finishRequest": {
+      "type": "object",
+      "required": ["registration_id", "register_response", "uv_response", "label"],
+      "properties": {
+        "registration_id": { "type": "string", "format": "uuid" },
+        "register_response": { "type": "object" },
+        "uv_response": { "type": "object" },
+        "label": { "type": "string" },
+        "transports": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "finishResponse": {
+      "type": "object",
+      "required": ["credentialId"],
+      "properties": {
+        "credentialId": { "type": "string" }
+      }
+    }
+  }
+}
