@@ -15,6 +15,7 @@
 pub mod acl;
 pub mod acl_cli;
 pub mod auth;
+pub mod community;
 pub mod config;
 pub mod did_key;
 #[cfg(feature = "setup")]

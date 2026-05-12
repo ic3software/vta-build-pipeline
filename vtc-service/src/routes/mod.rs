@@ -1,5 +1,6 @@
 mod acl;
 mod auth;
+mod community;
 mod config;
 mod health;
 
@@ -45,6 +46,9 @@ pub fn router() -> Router<AppState> {
         .expect("static Trust-Task URL");
     let acl_entry = TrustTask::new("https://trusttasks.org/openvtc/vtc/acl/legacy/entry/1.0")
         .expect("static Trust-Task URL");
+    let community_profile =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/community/profile/manage/1.0")
+            .expect("static Trust-Task URL");
 
     TrustTaskRouter::<AppState>::new()
         .route_exempt("/health", get(health::health))
@@ -80,6 +84,15 @@ pub fn router() -> Router<AppState> {
                 .patch(acl::update_acl)
                 .delete(acl::delete_acl),
             acl_entry,
+        )
+        // Community profile (GET + PUT share one Trust Task today;
+        // a spec-aligned split into community/profile/show/1.0 +
+        // community/profile/update/1.0 lands when TrustTaskRouter
+        // gains per-method task selectors in Phase 1+).
+        .route_with_task(
+            "/v1/community/profile",
+            get(community::profile::get_profile).put(community::profile::put_profile),
+            community_profile,
         )
         .into_router()
 }

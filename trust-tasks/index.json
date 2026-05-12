@@ -52,6 +52,12 @@
       "status": "Draft",
       "path": "acl/legacy/entry/1.0",
       "rest": "GET, PATCH, DELETE /v1/acl/{did}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/community/profile/manage/1.0",
+      "status": "Draft",
+      "path": "community/profile/manage/1.0",
+      "rest": "GET, PUT /v1/community/profile"
     }
   ]
 }

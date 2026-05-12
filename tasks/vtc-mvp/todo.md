@@ -551,7 +551,7 @@ second passkey registered. Install carve-out permanently closed.
 
 ## M0.7 — Community profile (parallel track)
 
-### `[ ]` M0.7.1 — `CommunityProfile` schema + `community` keyspace
+### `[x]` M0.7.1 — `CommunityProfile` schema + `community` keyspace
 
 - **Acceptance**
   - `CommunityProfile` per spec §5.1 (community_did immutable, all
@@ -568,7 +568,7 @@ second passkey registered. Install carve-out permanently closed.
 - **Deps**: M0.1.0
 - **Pre-impl decision**: D4
 
-### `[ ]` M0.7.2 — `GET / PUT /v1/community/profile`
+### `[x]` M0.7.2 — `GET / PUT /v1/community/profile`
 
 - **Acceptance**
   - `GET` returns the singleton profile; 404 if not yet initialised
