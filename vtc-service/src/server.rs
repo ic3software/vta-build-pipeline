@@ -21,6 +21,7 @@ use crate::keys::seed_store::SecretStore;
 use crate::messaging;
 use crate::routes;
 use crate::store::{KeyspaceHandle, Store};
+use crate::supervisor::{SupervisorKind, detect_supervisor};
 use tokio::sync::{RwLock, watch};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
@@ -70,6 +71,16 @@ pub struct AppState {
     /// derived from the master seed). Endpoints that emit audit
     /// events 503 in that case.
     pub audit_writer: Option<AuditWriter>,
+    /// Sender half of the shared graceful-shutdown channel.
+    /// `POST /v1/admin/config/restart` flips this to `true` to
+    /// trigger the same drain path SIGINT/SIGTERM use.
+    pub shutdown_tx: watch::Sender<bool>,
+    /// Cached supervisor probe (M0.8.3). Computed once at startup
+    /// — process supervisors don't change during the daemon's
+    /// lifetime, and a cached value lets tests inject
+    /// `Some(Manual)` / `None` without racing other tests on the
+    /// shared `std::env`.
+    pub supervisor: Option<SupervisorKind>,
 }
 
 impl AuthState for AppState {
@@ -215,6 +226,8 @@ pub async fn run(
         install_signer,
         install_store,
         audit_writer,
+        shutdown_tx: shutdown_tx.clone(),
+        supervisor: detect_supervisor(),
     };
 
     // Spawn three named OS threads
