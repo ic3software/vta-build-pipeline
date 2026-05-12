@@ -1,4 +1,5 @@
 mod acl;
+mod admin;
 mod auth;
 mod community;
 mod config;
@@ -49,6 +50,8 @@ pub fn router() -> Router<AppState> {
     let community_profile =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/community/profile/manage/1.0")
             .expect("static Trust-Task URL");
+    let admin_config = TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/config/manage/1.0")
+        .expect("static Trust-Task URL");
 
     TrustTaskRouter::<AppState>::new()
         .route_exempt("/health", get(health::health))
@@ -93,6 +96,14 @@ pub fn router() -> Router<AppState> {
             "/v1/community/profile",
             get(community::profile::get_profile).put(community::profile::put_profile),
             community_profile,
+        )
+        // Admin config (M0.8 — GET + PATCH share one task; will
+        // split into admin/config/show/1.0 + patch/1.0 when
+        // TrustTaskRouter gains per-method selectors).
+        .route_with_task(
+            "/v1/admin/config",
+            get(admin::config::get_config).patch(admin::config::patch_config),
+            admin_config,
         )
         .into_router()
 }

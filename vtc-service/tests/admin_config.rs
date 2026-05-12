@@ -1,8 +1,8 @@
-//! Integration coverage for `/v1/community/profile`.
+//! Integration coverage for `/v1/admin/config`.
 //!
-//! Exercises the full router stack — Trust-Task header → auth
-//! extractor → handler → community keyspace — through
-//! `Router::oneshot`.
+//! Exercises the full router stack — Trust-Task header → AdminAuth
+//! extractor → handler → three-layer effective view → db-overlay
+//! persistence — via `Router::oneshot`.
 
 use std::sync::Arc;
 
@@ -18,12 +18,11 @@ use vti_common::auth::jwt::JwtKeys;
 use vti_common::config::StoreConfig;
 use vti_common::store::Store;
 
-use vtc_service::community::{CommunityProfile, store_profile};
 use vtc_service::config::AppConfig;
 use vtc_service::routes;
 use vtc_service::server::AppState;
 
-const PROFILE_TASK: &str = "https://trusttasks.org/openvtc/vtc/community/profile/manage/1.0";
+const CONFIG_TASK: &str = "https://trusttasks.org/openvtc/vtc/admin/config/manage/1.0";
 
 fn init_jwt_provider() {
     use std::sync::Once;
@@ -92,7 +91,6 @@ async fn build() -> Fixture {
 
 async fn token_for(fix: &Fixture, role: &str) -> String {
     use vti_common::auth::session::{Session, SessionState, now_epoch, store_session};
-
     let session_id = format!("sess-{}", uuid::Uuid::new_v4());
     let session = Session {
         session_id: session_id.clone(),
@@ -107,7 +105,6 @@ async fn token_for(fix: &Fixture, role: &str) -> String {
     store_session(&fix.state.sessions_ks, &session)
         .await
         .unwrap();
-
     let claims = fix.jwt_keys.new_claims(
         "did:key:z6MkAdmin".to_string(),
         session_id,
@@ -127,79 +124,51 @@ async fn body_value(resp: axum::response::Response) -> (StatusCode, Value) {
     (status, v)
 }
 
-async fn seed_profile(fix: &Fixture) -> CommunityProfile {
-    let p = CommunityProfile::new("did:webvh:vtc.example.com:abc", "Example Community");
-    store_profile(&fix.state.community_ks, &p).await.unwrap();
-    p
-}
-
 // ──────────────────────── GET ────────────────────────
 
 #[tokio::test]
-async fn get_returns_404_when_not_initialised() {
+async fn get_returns_effective_config_with_defaults() {
     let fix = build().await;
     let token = token_for(&fix, "admin").await;
     let req = Request::builder()
         .method("GET")
-        .uri("/v1/community/profile")
-        .header("Trust-Task", PROFILE_TASK)
-        .header("Authorization", format!("Bearer {token}"))
-        .body(Body::empty())
-        .unwrap();
-    let resp = fix.router.clone().oneshot(req).await.unwrap();
-    let (status, _body) = body_value(resp).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn get_returns_profile_when_initialised() {
-    let fix = build().await;
-    seed_profile(&fix).await;
-    let token = token_for(&fix, "admin").await;
-    let req = Request::builder()
-        .method("GET")
-        .uri("/v1/community/profile")
-        .header("Trust-Task", PROFILE_TASK)
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
         .header("Authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
     let resp = fix.router.clone().oneshot(req).await.unwrap();
     let (status, body) = body_value(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["name"], "Example Community");
-    assert_eq!(body["communityDid"], "did:webvh:vtc.example.com:abc");
-    assert_eq!(body["language"], "en");
+
+    let fields = body["fields"].as_array().unwrap();
+    let by_key: std::collections::HashMap<_, _> = fields
+        .iter()
+        .map(|f| (f["key"].as_str().unwrap(), f))
+        .collect();
+
+    assert_eq!(by_key["server.host"]["value"], "0.0.0.0");
+    assert_eq!(by_key["server.host"]["source"], "default");
+    assert_eq!(by_key["server.host"]["requiresRestart"], true);
+
+    assert_eq!(by_key["server.port"]["value"], 8200);
+    assert_eq!(by_key["server.port"]["source"], "default");
+
+    assert_eq!(by_key["log.level"]["value"], "info");
+    assert_eq!(by_key["log.level"]["source"], "default");
+    assert_eq!(by_key["log.level"]["requiresRestart"], false);
 }
 
 #[tokio::test]
-async fn get_requires_authentication() {
+async fn get_requires_admin_role() {
     let fix = build().await;
-    seed_profile(&fix).await;
-    let req = Request::builder()
-        .method("GET")
-        .uri("/v1/community/profile")
-        .header("Trust-Task", PROFILE_TASK)
-        .body(Body::empty())
-        .unwrap();
-    let resp = fix.router.clone().oneshot(req).await.unwrap();
-    let (status, _body) = body_value(resp).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-// ──────────────────────── PUT ────────────────────────
-
-#[tokio::test]
-async fn put_requires_admin_role() {
-    let fix = build().await;
-    seed_profile(&fix).await;
     let token = token_for(&fix, "reader").await;
     let req = Request::builder()
-        .method("PUT")
-        .uri("/v1/community/profile")
-        .header("Trust-Task", PROFILE_TASK)
+        .method("GET")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
         .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .body(Body::from(r#"{"name":"Renamed"}"#))
+        .body(Body::empty())
         .unwrap();
     let resp = fix.router.clone().oneshot(req).await.unwrap();
     let (status, _body) = body_value(resp).await;
@@ -207,130 +176,202 @@ async fn put_requires_admin_role() {
 }
 
 #[tokio::test]
-async fn put_updates_profile_and_lists_changed_fields() {
+async fn get_requires_authentication() {
     let fix = build().await;
-    seed_profile(&fix).await;
-    let token = token_for(&fix, "admin").await;
     let req = Request::builder()
-        .method("PUT")
-        .uri("/v1/community/profile")
-        .header("Trust-Task", PROFILE_TASK)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .body(Body::from(
-            r#"{"name":"Renamed","description":"new","logoUrl":"https://x/y.png"}"#,
-        ))
-        .unwrap();
-    let resp = fix.router.clone().oneshot(req).await.unwrap();
-    let (status, body) = body_value(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    let changed = body["fieldsChanged"].as_array().unwrap();
-    let names: Vec<&str> = changed.iter().map(|v| v.as_str().unwrap()).collect();
-    assert!(names.contains(&"name"));
-    assert!(names.contains(&"description"));
-    assert!(names.contains(&"logoUrl"));
-    assert_eq!(body["profile"]["name"], "Renamed");
-    assert_eq!(body["profile"]["logoUrl"], "https://x/y.png");
-}
-
-#[tokio::test]
-async fn put_idempotent_noop_returns_empty_changeset() {
-    let fix = build().await;
-    seed_profile(&fix).await;
-    let token = token_for(&fix, "admin").await;
-    let body = r#"{"name":"Example Community"}"#; // already the value
-    let req = Request::builder()
-        .method("PUT")
-        .uri("/v1/community/profile")
-        .header("Trust-Task", PROFILE_TASK)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = fix.router.clone().oneshot(req).await.unwrap();
-    let (status, body) = body_value(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body["fieldsChanged"].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn put_returns_404_when_profile_not_initialised() {
-    let fix = build().await;
-    // No seed_profile call — store is empty.
-    let token = token_for(&fix, "admin").await;
-    let req = Request::builder()
-        .method("PUT")
-        .uri("/v1/community/profile")
-        .header("Trust-Task", PROFILE_TASK)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .body(Body::from(r#"{"name":"Renamed"}"#))
+        .method("GET")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .body(Body::empty())
         .unwrap();
     let resp = fix.router.clone().oneshot(req).await.unwrap();
     let (status, _body) = body_value(resp).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn put_rejects_oversized_extensions() {
-    let fix = build().await;
-    seed_profile(&fix).await;
-    let token = token_for(&fix, "admin").await;
-
-    // Build a clearly-too-large extensions value (~32 KiB).
-    let mut huge_value = String::new();
-    huge_value.push('"');
-    huge_value.push_str(&"a".repeat(32 * 1024));
-    huge_value.push('"');
-    let body = format!(r#"{{"extensions":{{"k":{huge_value}}}}}"#);
-
-    let req = Request::builder()
-        .method("PUT")
-        .uri("/v1/community/profile")
-        .header("Trust-Task", PROFILE_TASK)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = fix.router.clone().oneshot(req).await.unwrap();
-    let (status, _body) = body_value(resp).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
+// ──────────────────────── PATCH ────────────────────────
 
 #[tokio::test]
-async fn put_does_not_accept_community_did_in_request() {
+async fn patch_applies_reloadable_key_immediately() {
     let fix = build().await;
-    seed_profile(&fix).await;
     let token = token_for(&fix, "admin").await;
-
-    // `communityDid` is not a field on the update DTO; serde_json
-    // with `additionalProperties = no` would reject it, but our
-    // CommunityProfileUpdate has no such guard at the type level
-    // (serde silently ignores extra fields by default). The
-    // important property is that it never reaches the stored
-    // profile.
     let req = Request::builder()
-        .method("PUT")
-        .uri("/v1/community/profile")
-        .header("Trust-Task", PROFILE_TASK)
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/json")
-        .body(Body::from(
-            r#"{"name":"Renamed","communityDid":"did:webvh:attacker:steal"}"#,
-        ))
+        .body(Body::from(r#"{"log.level":"debug"}"#))
         .unwrap();
     let resp = fix.router.clone().oneshot(req).await.unwrap();
     let (status, body) = body_value(resp).await;
     assert_eq!(status, StatusCode::OK);
-    // Profile's communityDid is unchanged.
-    assert_eq!(
-        body["profile"]["communityDid"],
-        "did:webvh:vtc.example.com:abc"
+    assert_eq!(body["applied"], json!(["log.level"]));
+    assert_eq!(body["pendingRestart"], json!([]));
+    assert_eq!(body["rejected"], json!([]));
+
+    // GET reflects the new value with source = db.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (_, body) = body_value(resp).await;
+    let level = body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["key"] == "log.level")
+        .unwrap();
+    assert_eq!(level["value"], "debug");
+    assert_eq!(level["source"], "db");
+}
+
+#[tokio::test]
+async fn patch_restart_required_key_is_pending() {
+    let fix = build().await;
+    let token = token_for(&fix, "admin").await;
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"server.port":9100}"#))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["applied"], json!([]));
+    assert_eq!(body["pendingRestart"], json!(["server.port"]));
+    assert_eq!(body["rejected"], json!([]));
+}
+
+#[tokio::test]
+async fn patch_unknown_key_rejected_with_reason() {
+    let fix = build().await;
+    let token = token_for(&fix, "admin").await;
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"made.up.key":"value"}"#))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let rejected = body["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["key"], "made.up.key");
+    assert!(
+        rejected[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unknown config key")
     );
-    // Only `name` made it into the changeset.
-    let changed = body["fieldsChanged"].as_array().unwrap();
-    assert_eq!(changed.len(), 1);
-    assert_eq!(changed[0], "name");
+}
+
+#[tokio::test]
+async fn patch_invalid_value_rejected_with_reason() {
+    let fix = build().await;
+    let token = token_for(&fix, "admin").await;
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"log.level":"verbose"}"#)) // not in enum
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let rejected = body["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["key"], "log.level");
+    assert!(
+        rejected[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("must be one of")
+    );
+}
+
+#[tokio::test]
+async fn patch_mixed_batch_partitions_correctly() {
+    let fix = build().await;
+    let token = token_for(&fix, "admin").await;
+    let body = json!({
+        "log.level": "debug",      // applied
+        "server.port": 9100,        // pendingRestart
+        "made.up": "x",             // rejected (unknown)
+        "log.level_v2": "debug",    // rejected (unknown)
+    });
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(body["applied"], json!(["log.level"]));
+    assert_eq!(body["pendingRestart"], json!(["server.port"]));
+    let rejected: Vec<&str> = body["rejected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(rejected.len(), 2);
+    assert!(rejected.contains(&"made.up"));
+    assert!(rejected.contains(&"log.level_v2"));
+}
+
+#[tokio::test]
+async fn patch_requires_admin_role() {
+    let fix = build().await;
+    let token = token_for(&fix, "reader").await;
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"log.level":"debug"}"#))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, _body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn patch_empty_body_returns_empty_response() {
+    let fix = build().await;
+    let token = token_for(&fix, "admin").await;
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{}"#))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["applied"], json!([]));
+    assert_eq!(body["pendingRestart"], json!([]));
+    assert_eq!(body["rejected"], json!([]));
 }
 
 // ──────────────────────── Trust-Task gate ────────────────────────
@@ -338,14 +379,13 @@ async fn put_does_not_accept_community_did_in_request() {
 #[tokio::test]
 async fn get_with_wrong_trust_task_returns_415() {
     let fix = build().await;
-    seed_profile(&fix).await;
     let token = token_for(&fix, "admin").await;
     let req = Request::builder()
         .method("GET")
-        .uri("/v1/community/profile")
+        .uri("/v1/admin/config")
         .header(
             "Trust-Task",
-            "https://trusttasks.org/openvtc/vtc/acl/legacy/manage/1.0",
+            "https://trusttasks.org/openvtc/vtc/community/profile/manage/1.0",
         )
         .header("Authorization", format!("Bearer {token}"))
         .body(Body::empty())
