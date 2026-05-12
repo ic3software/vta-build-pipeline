@@ -46,7 +46,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M2.2 — Policy model + `policies` keyspace
 
-### `[ ]` M2.2.1 — `Policy` + storage CRUD
+### `[x]` M2.2.1 — `Policy` + storage CRUD
 
 - **Acceptance**
   - `Policy { id, purpose, rego_source, sha256, activated_at:

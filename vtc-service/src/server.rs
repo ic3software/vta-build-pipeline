@@ -49,6 +49,14 @@ pub struct AppState {
     pub install_ks: KeyspaceHandle,
     pub members_ks: KeyspaceHandle,
     pub join_requests_ks: KeyspaceHandle,
+    /// Uploaded Rego policies (M2.2). Holds every revision; the
+    /// active pointer for each purpose lives in
+    /// [`Self::active_policies_ks`].
+    pub policies_ks: KeyspaceHandle,
+    /// Per-purpose pointer to the currently-active policy id. One
+    /// row per [`crate::policy::PolicyPurpose`] variant. M2.3's
+    /// activate endpoint flips this; M2.6 / M2.7 / M2.13 read it.
+    pub active_policies_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub audit_key_ks: KeyspaceHandle,
     pub config: Arc<RwLock<AppConfig>>,
@@ -151,6 +159,8 @@ pub async fn run(
     let install_store = InstallTokenStore::new(install_ks.clone());
     let members_ks = store.keyspace("members")?;
     let join_requests_ks = store.keyspace("join_requests")?;
+    let policies_ks = store.keyspace("policies")?;
+    let active_policies_ks = store.keyspace("active_policies")?;
     let audit_ks = store.keyspace("audit")?;
     let audit_key_ks = store.keyspace("audit_key")?;
 
@@ -223,6 +233,8 @@ pub async fn run(
         install_ks,
         members_ks,
         join_requests_ks,
+        policies_ks,
+        active_policies_ks,
         audit_ks,
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),

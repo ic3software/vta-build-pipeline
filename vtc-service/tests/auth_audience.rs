@@ -55,6 +55,8 @@ async fn build_test_router() -> (axum::Router, Arc<JwtKeys>, tempfile::TempDir) 
     let install_ks = store.keyspace("install").unwrap();
     let members_ks = store.keyspace("members").unwrap();
     let join_requests_ks = store.keyspace("join_requests").unwrap();
+    let policies_ks = store.keyspace("policies").unwrap();
+    let active_policies_ks = store.keyspace("active_policies").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
 
@@ -83,6 +85,8 @@ async fn build_test_router() -> (axum::Router, Arc<JwtKeys>, tempfile::TempDir) 
         install_ks: install_ks.clone(),
         members_ks: members_ks.clone(),
         join_requests_ks: join_requests_ks.clone(),
+        policies_ks: policies_ks.clone(),
+        active_policies_ks: active_policies_ks.clone(),
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,
         secrets_resolver: None,

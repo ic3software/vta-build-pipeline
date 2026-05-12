@@ -38,16 +38,6 @@ use vti_common::error::AppError;
 /// it when their upload fails to parse.
 pub const POLICY_MODULE_PATH: &str = "policy.rego";
 
-/// Persistence-layer placeholder. The full shape (storage row, ACL
-/// scope, activation pointer) lands in M2.2; for the harness this
-/// only carries the source + id so callers can round-trip the
-/// inputs to [`compile`].
-#[derive(Debug, Clone)]
-pub struct Policy {
-    pub id: Uuid,
-    pub source: String,
-}
-
 /// A Rego module that has compiled cleanly and is ready to evaluate.
 ///
 /// Constructed exclusively via [`compile`]. The compiled engine is

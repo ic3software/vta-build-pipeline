@@ -39,5 +39,12 @@
 //!    ripple through every consumer.
 
 pub mod engine;
+pub mod model;
+pub mod storage;
 
-pub use engine::{CompiledPolicy, Policy, compile, evaluate};
+pub use engine::{CompiledPolicy, compile, evaluate};
+pub use model::{POLICY_SOURCE_MAX_BYTES, Policy, PolicyPurpose};
+pub use storage::{
+    clear_active_policy_id, delete_policy, get_active_policy_id, get_policy, list_policies,
+    list_policies_paginated, max_version_for, new_policy, set_active_policy_id, store_policy,
+};
