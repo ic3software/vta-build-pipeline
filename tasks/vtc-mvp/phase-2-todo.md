@@ -176,7 +176,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M2.7 — Wire `removal.rego` into admin-remove
 
-### `[ ]` M2.7.1 — Policy step at admin-remove time
+### `[x]` M2.7.1 — Policy step at admin-remove time
 
 - **Acceptance**
   - `routes::members::remove::admin_remove` evaluates the

@@ -24,9 +24,11 @@ use std::sync::LazyLock;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 use vti_common::audit::{AuditEvent, MemberRemovedData};
 use vti_common::error::AppError;
@@ -34,6 +36,10 @@ use vti_common::error::AppError;
 use crate::acl::{VtcRole, delete_acl_entry, get_acl_entry, list_acl_entries};
 use crate::auth::{AdminAuth, AuthClaims};
 use crate::members::{Disposition, delete_member, get_member, store_member};
+use crate::policy::{
+    PolicyPurpose, compile as compile_policy, evaluate as evaluate_policy, get_active_policy_id,
+    get_policy,
+};
 use crate::server::AppState;
 
 /// Process-wide mutex that serialises every removal, self- and
@@ -84,6 +90,11 @@ pub async fn self_remove(
         // departure is the member's own decision and doesn't carry
         // an externally-meaningful justification field.
         String::new(),
+        // Self-remove is unconditional (spec §10.2) — bypasses
+        // the `removal.rego` allow gate. Disposition still
+        // routes through the policy when the member's preference
+        // is `PolicyDefault`.
+        false,
     )
     .await?;
     Ok((StatusCode::OK, Json(outcome)))
@@ -114,7 +125,15 @@ pub async fn admin_remove(
             reason.len(),
         )));
     }
-    let outcome = remove_inner(&state, &admin.0.did, &target_did, body.disposition, reason).await?;
+    let outcome = remove_inner(
+        &state,
+        &admin.0.did,
+        &target_did,
+        body.disposition,
+        reason,
+        true,
+    )
+    .await?;
     Ok((StatusCode::OK, Json(outcome)))
 }
 
@@ -127,12 +146,15 @@ pub async fn admin_remove(
 ///
 /// `actor_did` is the audit actor (self for self-remove, admin
 /// for admin-remove). `target_did` is the row being removed.
+/// `is_admin_remove` gates the `removal.rego` allow check —
+/// self-remove is unconditional per spec §10.2.
 pub async fn remove_inner(
     state: &AppState,
     actor_did: &str,
     target_did: &str,
     disposition: Option<Disposition>,
     reason: String,
+    is_admin_remove: bool,
 ) -> Result<RemoveResponse, AppError> {
     let audit_writer = state
         .audit_writer
@@ -145,14 +167,44 @@ pub async fn remove_inner(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("member not found: {target_did}")))?;
 
-    // Resolve disposition. Caller can override the member's
-    // departure_preference; if neither is set we fall through
-    // to PolicyDefault → Tombstone.
     let target_member = get_member(&state.members_ks, target_did).await?;
-    let resolved = disposition
+
+    // Phase 2 policy step (M2.7). Admin-remove evaluates the
+    // active `removal.rego` against the canonical input from
+    // spec §7.3. Self-remove bypasses (spec §10.2 makes it
+    // unconditional). The no-last-admin invariant + the route-
+    // layer AdminAuth gate run in addition to the policy check.
+    if is_admin_remove {
+        let input = json!({
+            "actor_did": actor_did,
+            "target_did": target_did,
+            "target_role": target_acl.role.to_string(),
+            "reason": reason,
+            "action": "remove",
+            "now": Utc::now().to_rfc3339(),
+        });
+        if !evaluate_removal_allow(state, &input).await? {
+            return Err(AppError::Forbidden(
+                "removal denied by policy (removal.rego.allow returned false)".into(),
+            ));
+        }
+    }
+
+    // Resolve disposition. Caller's request wins; member's
+    // departure_preference is the fallback; `PolicyDefault`
+    // consults the active `removal.rego`'s `min_disposition`
+    // output (Phase 1 plan §D6 placeholder). A non-decodable
+    // policy output falls back to `Tombstone` — the boring
+    // middle ground Phase 1 already used.
+    let initial = disposition
         .or_else(|| target_member.as_ref().map(|m| m.departure_preference))
-        .unwrap_or_default_disposition()
-        .resolve();
+        .unwrap_or(Disposition::PolicyDefault);
+    let resolved = match initial {
+        Disposition::PolicyDefault => resolve_min_disposition(state)
+            .await
+            .unwrap_or(Disposition::Tombstone),
+        other => other,
+    };
 
     // No-last-admin invariant.
     if matches!(target_acl.role, VtcRole::Admin) {
@@ -227,16 +279,67 @@ pub async fn remove_inner(
     })
 }
 
-// `Option<Disposition>::unwrap_or_default_disposition()` — small
-// extension that returns `PolicyDefault` when the option is
-// `None`. Hand-rolled so the call site reads linearly without an
-// `unwrap_or(Disposition::PolicyDefault)` literal everywhere.
-trait DispositionOption {
-    fn unwrap_or_default_disposition(self) -> Disposition;
+// ---------------------------------------------------------------------------
+// Policy helpers (M2.7)
+// ---------------------------------------------------------------------------
+
+/// Evaluate the active `removal.rego`'s `allow` rule. Fails closed
+/// on every error path — a daemon misconfiguration must not let
+/// removals through that the operator hasn't authored a policy
+/// for.
+async fn evaluate_removal_allow(state: &AppState, input: &JsonValue) -> Result<bool, AppError> {
+    let active_id = get_active_policy_id(&state.active_policies_ks, PolicyPurpose::Removal).await?;
+    let id = match active_id {
+        Some(id) => id,
+        None => {
+            warn!("no active removal policy — refusing admin-remove");
+            return Ok(false);
+        }
+    };
+    let policy = get_policy(&state.policies_ks, id)
+        .await?
+        .ok_or_else(|| AppError::Internal(format!("active removal policy {id} not found")))?;
+    let compiled = compile_policy(&policy.rego_source, policy.id)?;
+    let result = evaluate_policy(&compiled, "data.vtc.removal.allow", input.clone())?;
+    Ok(result
+        .pointer("/result/0/expressions/0/value")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
 }
 
-impl DispositionOption for Option<Disposition> {
-    fn unwrap_or_default_disposition(self) -> Disposition {
-        self.unwrap_or(Disposition::PolicyDefault)
+/// Read `data.vtc.removal.min_disposition` and convert to a
+/// concrete `Disposition`. Returns `None` when no policy is active
+/// or the policy emits a non-string / unknown value — callers
+/// fall back to `Tombstone`.
+async fn resolve_min_disposition(state: &AppState) -> Option<Disposition> {
+    let active_id = get_active_policy_id(&state.active_policies_ks, PolicyPurpose::Removal)
+        .await
+        .ok()
+        .flatten()?;
+    let policy = get_policy(&state.policies_ks, active_id)
+        .await
+        .ok()
+        .flatten()?;
+    let compiled = compile_policy(&policy.rego_source, policy.id).ok()?;
+    let result = evaluate_policy(
+        &compiled,
+        "data.vtc.removal.min_disposition",
+        JsonValue::Object(Default::default()),
+    )
+    .ok()?;
+    let s = result
+        .pointer("/result/0/expressions/0/value")
+        .and_then(|v| v.as_str())?;
+    match s {
+        "purge" => Some(Disposition::Purge),
+        "tombstone" => Some(Disposition::Tombstone),
+        "historical" => Some(Disposition::Historical),
+        other => {
+            warn!(
+                value = other,
+                "removal.rego min_disposition emitted an unknown disposition — using Tombstone"
+            );
+            None
+        }
     }
 }

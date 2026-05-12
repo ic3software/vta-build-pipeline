@@ -26,3 +26,10 @@ allow if {
 	input.action == "remove"
 	input.target_role != "admin"
 }
+
+# Phase 1 plan §D6: `Disposition::PolicyDefault` resolves to
+# whatever this policy emits. The default mirrors Phase 1's
+# hardcoded `Tombstone` so existing operator state survives the
+# Phase 1 → Phase 2 transition unchanged.
+default min_disposition := "tombstone"
+

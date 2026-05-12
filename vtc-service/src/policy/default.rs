@@ -378,6 +378,17 @@ mod tests {
     }
 
     #[test]
+    fn removal_default_min_disposition_is_tombstone() {
+        let c = compile_default(PolicyPurpose::Removal);
+        let r = evaluate(&c, "data.vtc.removal.min_disposition", json!({})).unwrap();
+        assert_eq!(
+            r.pointer("/result/0/expressions/0/value"),
+            Some(&json!("tombstone")),
+            "removal default min_disposition mirrors Phase 1's hardcoded Tombstone"
+        );
+    }
+
+    #[test]
     fn removal_default_denies_admin_removing_admin() {
         let c = compile_default(PolicyPurpose::Removal);
         let r = evaluate(
