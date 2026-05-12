@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use crate::acl::{VtcAclEntry, VtcRole, list_acl_entries, store_acl_entry};
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -22,7 +23,6 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
-use vti_common::acl::{AclEntry, Role, list_acl_entries, store_acl_entry};
 use vti_common::audit::{AuditEvent, AuditWriter, CommunityInstalledData};
 use vti_common::auth::passkey::store::get_passkey_user_by_did;
 use vti_common::error::AppError;
@@ -62,7 +62,7 @@ pub async fn bootstrap(
     // install-token claim would fail), but a misconfigured backup
     // restore could still land us here.
     for entry in list_acl_entries(&state.acl_ks).await? {
-        if entry.role == Role::Admin {
+        if entry.role == VtcRole::Admin {
             return Err(AppError::Conflict(
                 "an admin already exists; refusing to bootstrap a second one".into(),
             ));
@@ -106,9 +106,9 @@ pub async fn bootstrap(
     };
     store_admin_entry(&state.passkey_ks, &admin_entry).await?;
 
-    let acl_entry = AclEntry {
+    let acl_entry = VtcAclEntry {
         did: admin_did.clone(),
-        role: Role::Admin,
+        role: VtcRole::Admin,
         label: Some("first admin (install bootstrap)".into()),
         allowed_contexts: vec![],
         created_at: now_unix(),

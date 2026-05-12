@@ -23,6 +23,7 @@ pub mod emergency;
 pub mod error;
 pub mod install;
 pub mod keys;
+pub mod members;
 pub mod messaging;
 pub mod routes;
 pub mod server;

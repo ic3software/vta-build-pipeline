@@ -12,7 +12,7 @@ use affinidi_tdk::messaging::protocols::trust_ping::TrustPing;
 use affinidi_tdk::secrets_resolver::SecretsResolver;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 
-use crate::acl::{self, Role};
+use crate::acl::{self, VtcRole};
 use crate::auth::session::{self, SessionState};
 use crate::config::AppConfig;
 use crate::keys::seed_store::create_secret_store;
@@ -203,20 +203,35 @@ pub async fn run_status(config_path: Option<PathBuf>) -> Result<(), Box<dyn std:
 
     // --- ACL ---
     let acl_entries = acl::list_acl_entries(&acl_ks).await?;
-    let admin_count = acl_entries.iter().filter(|e| e.role == Role::Admin).count();
-    let initiator_count = acl_entries
+    let admin_count = acl_entries
         .iter()
-        .filter(|e| e.role == Role::Initiator)
+        .filter(|e| e.role == VtcRole::Admin)
         .count();
-    let application_count = acl_entries
+    let moderator_count = acl_entries
         .iter()
-        .filter(|e| e.role == Role::Application)
+        .filter(|e| e.role == VtcRole::Moderator)
+        .count();
+    let issuer_count = acl_entries
+        .iter()
+        .filter(|e| e.role == VtcRole::Issuer)
+        .count();
+    let member_count = acl_entries
+        .iter()
+        .filter(|e| e.role == VtcRole::Member)
+        .count();
+    let custom_count = acl_entries
+        .iter()
+        .filter(|e| matches!(e.role, VtcRole::Custom(_)))
         .count();
 
     section(&format!("ACL ({})", acl_entries.len()));
     eprintln!("  {CYAN}{:<13}{RESET} {admin_count}", "Admin");
-    eprintln!("  {CYAN}{:<13}{RESET} {initiator_count}", "Initiator");
-    eprintln!("  {CYAN}{:<13}{RESET} {application_count}", "Application");
+    eprintln!("  {CYAN}{:<13}{RESET} {moderator_count}", "Moderator");
+    eprintln!("  {CYAN}{:<13}{RESET} {issuer_count}", "Issuer");
+    eprintln!("  {CYAN}{:<13}{RESET} {member_count}", "Member");
+    if custom_count > 0 {
+        eprintln!("  {CYAN}{:<13}{RESET} {custom_count}", "Custom");
+    }
 
     // --- Sessions ---
     let sessions = session::list_sessions(&sessions_ks).await?;

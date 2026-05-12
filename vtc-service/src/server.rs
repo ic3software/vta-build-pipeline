@@ -47,6 +47,7 @@ pub struct AppState {
     pub config_ks: KeyspaceHandle,
     pub passkey_ks: KeyspaceHandle,
     pub install_ks: KeyspaceHandle,
+    pub members_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub audit_key_ks: KeyspaceHandle,
     pub config: Arc<RwLock<AppConfig>>,
@@ -147,6 +148,7 @@ pub async fn run(
     let passkey_ks = store.keyspace("passkey")?;
     let install_ks = store.keyspace("install")?;
     let install_store = InstallTokenStore::new(install_ks.clone());
+    let members_ks = store.keyspace("members")?;
     let audit_ks = store.keyspace("audit")?;
     let audit_key_ks = store.keyspace("audit_key")?;
 
@@ -217,6 +219,7 @@ pub async fn run(
         config_ks,
         passkey_ks,
         install_ks,
+        members_ks,
         audit_ks,
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),

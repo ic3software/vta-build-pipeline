@@ -37,6 +37,7 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
     let config_ks = store.keyspace("config").unwrap();
     let passkey_ks = store.keyspace("passkey").unwrap();
     let install_ks = store.keyspace("install").unwrap();
+    let members_ks = store.keyspace("members").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
 
@@ -59,6 +60,7 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
         config_ks,
         passkey_ks,
         install_ks: install_ks.clone(),
+        members_ks: members_ks.clone(),
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,
         secrets_resolver: None,

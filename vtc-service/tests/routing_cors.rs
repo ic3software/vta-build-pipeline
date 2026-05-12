@@ -233,6 +233,7 @@ async fn build_router_with_cors(cors: CorsConfig) -> (axum::Router, tempfile::Te
     let config_ks = store.keyspace("config").unwrap();
     let passkey_ks = store.keyspace("passkey").unwrap();
     let install_ks = store.keyspace("install").unwrap();
+    let members_ks = store.keyspace("members").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
 
@@ -250,6 +251,7 @@ async fn build_router_with_cors(cors: CorsConfig) -> (axum::Router, tempfile::Te
         config_ks,
         passkey_ks,
         install_ks: install_ks.clone(),
+        members_ks: members_ks.clone(),
         audit_ks,
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),
