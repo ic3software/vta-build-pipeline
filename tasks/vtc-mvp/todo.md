@@ -411,28 +411,44 @@ concurrent claims race correctly through the mutex. No WebAuthn yet.
   - `vtc-service/tests/webauthn_harness.rs`
 - **Deps**: M0.1.0 (just for the dep import)
 
-### `[ ]` M0.5.1 — VTC `AppState` implements `PasskeyState`
+### `[x]` M0.5.1 — VTC `AppState` implements `PasskeyState`
 
 - **Acceptance**
   - `vtc-service::server::AppState` implements
     `vti_common::auth::passkey::PasskeyState`
   - `build_webauthn` called once at startup using `public_url` from
-    the new `community.public_url` / routing config; resulting
+    the existing `AppConfig.public_url` field; resulting
     `Arc<Webauthn>` lives in `AppState`
-  - **Ed25519-only enforcement**: VTC's `PasskeyState` wraps
-    `build_webauthn`'s output to advertise only
-    `COSEAlgorithmIdentifier::EDDSA` in registration challenges;
-    rejection if the authenticator returns anything else
-    (`AppError::WebAuthnAlgorithmRejected`)
+  - **Ed25519-only enforcement**: new `vtc_service::webauthn` module
+    wraps the upstream `start_passkey_registration` so the wire
+    `pubKeyCredParams` and the persisted `RegistrationState.credential_algorithms`
+    both contain **only** EdDSA (`alg = -8`). `webauthn-rs` 0.5 has
+    no public `algorithms(…)` setter, so the rewrite uses serde
+    round-trip via `danger-allow-state-serialisation`.
+    `finish_eddsa_passkey_registration` additionally asserts the
+    returned `Passkey::cred_algorithm() == EDDSA` as defence in depth.
 - **Verify**
-  - Startup test: missing `public_url` → WebAuthn disabled,
-    `webauthn()` returns `None`, install routes return 503
-  - Ed25519 enforcement: ES256 registration attempt is rejected
+  - Startup test: missing `public_url` → `AppState.webauthn()`
+    returns `None` (`tests/passkey_state.rs::webauthn_returns_none_when_public_url_unset`).
+    Install routes returning 503 is deferred to **M0.5.2** when the
+    routes themselves land.
+  - The CCR + registration state rewrite is asserted via four unit
+    tests in `vtc-service::webauthn::tests::*` — start-time rewrite
+    + the two primitive mutators in isolation. The integration test
+    asserting "ES256 registration attempt is rejected" needs the
+    deterministic EdDSA authenticator harness from M0.5.0 and ships
+    in PR B alongside M0.5.2.
 - **Files**
-  - `vtc-service/src/server.rs` (extend `AppState`)
-  - `vtc-service/src/webauthn.rs` (thin Ed25519-restricting wrapper)
-  - `vtc-service/src/config.rs` (`public_url` field)
-- **Deps**: M0.5.0, M0.1.6
+  - `vtc-service/src/webauthn.rs` (new — Ed25519 restricting wrappers)
+  - `vtc-service/src/server.rs` (AppState +
+    `webauthn`/`passkey_ks`/`public_url`; `impl PasskeyState`)
+  - `vtc-service/src/lib.rs` (`pub mod webauthn`)
+  - `vtc-service/Cargo.toml` (enable `vti-common/passkey`, add
+    `webauthn-rs` + `webauthn-rs-proto` direct deps)
+  - `vtc-service/tests/passkey_state.rs` (new — 5 trait-impl tests)
+  - `vtc-service/tests/{admin_config,auth_audience,community_profile}.rs`
+    (new AppState fields)
+- **Deps**: M0.5.0 (test harness — deferred to PR B), M0.1.6
 - **Pre-impl decision**: D7, D11
 
 ### `[ ]` M0.5.2 — Install claim endpoints (start + finish)

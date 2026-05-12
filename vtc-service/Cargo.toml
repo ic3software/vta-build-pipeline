@@ -31,7 +31,7 @@ name = "vtc"
 path = "src/main.rs"
 
 [dependencies]
-vti-common = { path = "../vti-common", version = "0.6" }
+vti-common = { path = "../vti-common", version = "0.6", features = ["passkey"] }
 vta-sdk = { path = "../vta-sdk", version = "0.6", features = [
   "didcomm",
   "session",
@@ -78,6 +78,13 @@ x25519-dalek = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }
 multibase = { workspace = true }
 url = { workspace = true, optional = true }
+# WebAuthn — used by `crate::webauthn` for Ed25519-only registration
+# wrappers (M0.5.1). The protocol crate is a direct dep so we can
+# reference `PubKeyCredParams` and `COSEAlgorithm` without funnelling
+# them through `webauthn-rs::prelude` (which re-exports them but
+# also surfaces ~300 unrelated symbols).
+webauthn-rs = { workspace = true }
+webauthn-rs-proto = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
