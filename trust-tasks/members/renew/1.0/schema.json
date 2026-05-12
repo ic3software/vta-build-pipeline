@@ -1,0 +1,19 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/renew/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Members — Renew",
+  "type": "object",
+  "properties": {
+    "response": {
+      "type": "object",
+      "required": ["did", "vmc", "roleVec", "personhood", "personhoodChanged"],
+      "properties": {
+        "did": { "type": "string" },
+        "vmc": { "type": "object" },
+        "roleVec": { "type": "object" },
+        "personhood": { "type": "boolean" },
+        "personhoodChanged": { "type": "boolean" }
+      }
+    }
+  }
+}

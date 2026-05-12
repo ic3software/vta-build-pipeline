@@ -90,6 +90,14 @@ impl CredentialStatusRef {
 pub struct VmcParams {
     /// Subject DID — the member receiving the VMC.
     pub member_did: String,
+    /// Optional top-level `id` URI for the VC. When `Some`, the
+    /// builder splices it into the credential after construction
+    /// (the upstream typed VC doesn't expose `id` as a builder
+    /// method). M2.12's issuance flow uses
+    /// `urn:uuid:<server-allocated>` so the audit trail + the
+    /// `Member.current_vmc_id` pointer can reference the same
+    /// stable id.
+    pub id: Option<String>,
     /// Status-list reference, or `None` to omit `credentialStatus`
     /// entirely (used by tests + the M2.9-only path before
     /// M2.10/M2.11 wire in live status lists).
@@ -108,10 +116,16 @@ impl VmcParams {
     pub fn new(member_did: impl Into<String>) -> Self {
         Self {
             member_did: member_did.into(),
+            id: None,
             status_ref: None,
             validity: super::DEFAULT_VMC_VALIDITY,
             personhood: false,
         }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     pub fn with_status_ref(mut self, status_ref: CredentialStatusRef) -> Self {
@@ -154,6 +168,10 @@ pub async fn build_vmc(
         .build()
         .map_err(|e| AppError::Internal(format!("VMC build: {e}")))?;
 
+    if let Some(id) = &params.id {
+        attach_top_level_field(&mut vc, "id", JsonValue::String(id.clone()))?;
+    }
+
     if let Some(status_ref) = &params.status_ref {
         // `affinidi-vc` 0.1's typed VC doesn't expose a public
         // `credentialStatus` setter (the type carries common
@@ -174,14 +192,25 @@ fn attach_credential_status(
     vc: &mut VerifiableCredential,
     status_ref: &CredentialStatusRef,
 ) -> Result<(), AppError> {
-    let mut as_value =
-        serde_json::to_value(&*vc).map_err(|e| AppError::Internal(format!("VMC -> value: {e}")))?;
     let status = serde_json::to_value(status_ref)
         .map_err(|e| AppError::Internal(format!("credentialStatus -> value: {e}")))?;
+    attach_top_level_field(vc, "credentialStatus", status)
+}
+
+/// Splice an arbitrary top-level field onto the VC. Same
+/// JSON-round-trip trick used for `credentialStatus`; shared so
+/// the `id` setter doesn't duplicate the round-trip dance.
+fn attach_top_level_field(
+    vc: &mut VerifiableCredential,
+    key: &str,
+    value: JsonValue,
+) -> Result<(), AppError> {
+    let mut as_value =
+        serde_json::to_value(&*vc).map_err(|e| AppError::Internal(format!("VMC -> value: {e}")))?;
     as_value
         .as_object_mut()
         .ok_or_else(|| AppError::Internal("VMC not an object".into()))?
-        .insert("credentialStatus".into(), status);
+        .insert(key.to_string(), value);
     *vc = serde_json::from_value(as_value)
         .map_err(|e| AppError::Internal(format!("value -> VMC: {e}")))?;
     Ok(())

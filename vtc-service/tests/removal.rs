@@ -51,6 +51,7 @@ struct Fixture {
     acl_ks: KeyspaceHandle,
     members_ks: KeyspaceHandle,
     sessions_ks: KeyspaceHandle,
+    status_lists_ks: KeyspaceHandle,
     jwt_keys: Arc<JwtKeys>,
     _dir: tempfile::TempDir,
 }
@@ -86,6 +87,19 @@ async fn build_fixture() -> Fixture {
     vtc_service::policy::default::install_defaults(&policies_ks, &active_policies_ks)
         .await
         .expect("install default policies");
+
+    // M2.14: seed the revocation status list so the flip-on-
+    // removal path has somewhere to land. Suspension seeded
+    // for parity even though removal only touches revocation.
+    for purpose in [
+        affinidi_status_list::StatusPurpose::Revocation,
+        affinidi_status_list::StatusPurpose::Suspension,
+    ] {
+        let url = format!("{RP_ORIGIN}/v1/status-lists/{purpose}");
+        vtc_service::status_list::ensure_initial(&status_lists_ks, purpose, url)
+            .await
+            .expect("ensure_initial status list");
+    }
 
     let webauthn = Some(Arc::new(build_webauthn(RP_ORIGIN).expect("build webauthn")));
 
@@ -164,7 +178,7 @@ async fn build_fixture() -> Fixture {
         join_requests_ks,
         policies_ks,
         active_policies_ks,
-        status_lists_ks,
+        status_lists_ks: status_lists_ks.clone(),
         credential_signer: None,
         audit_ks,
         audit_key_ks,
@@ -190,6 +204,7 @@ async fn build_fixture() -> Fixture {
         acl_ks,
         members_ks,
         sessions_ks,
+        status_lists_ks,
         jwt_keys,
         _dir: dir,
     }
@@ -674,4 +689,133 @@ async fn admin_remove_uses_policy_min_disposition_for_default() {
     assert_eq!(body["disposition"], "purge");
     // ACL and member both gone (purge semantic).
     assert!(get_acl_entry(&fix.acl_ks, target).await.unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// M2.14 — status-list flip on removal
+// ---------------------------------------------------------------------------
+
+/// Removing a member whose `status_list_index` is populated
+/// flips the revocation bit. The slot remains assigned (spec
+/// §6.2's never-reallocate invariant) so subsequent
+/// allocations skip it.
+#[tokio::test]
+async fn admin_remove_flips_revocation_bit() {
+    let fix = build_fixture().await;
+    let target = "did:key:zHasSlot";
+    let _ = seed_member_with_session(&fix, target, VtcRole::Member).await;
+
+    // Pre-allocate a slot for the target by hand (the
+    // approve-path that normally does this isn't exercised
+    // here). The flip-on-removal path then has a real slot
+    // to consult.
+    let mut state = vtc_service::status_list::get_state(
+        &fix.status_lists_ks,
+        affinidi_status_list::StatusPurpose::Revocation,
+    )
+    .await
+    .unwrap()
+    .expect("revocation state seeded");
+    let slot = vtc_service::status_list::allocate(&mut state).expect("status list has capacity");
+    vtc_service::status_list::store_state(&fix.status_lists_ks, &state)
+        .await
+        .unwrap();
+
+    let mut member = vtc_service::members::get_member(&fix.members_ks, target)
+        .await
+        .unwrap()
+        .expect("member seeded");
+    member.status_list_index = Some(slot);
+    vtc_service::members::store_member(&fix.members_ks, &member)
+        .await
+        .unwrap();
+
+    // Before removal, the bit at `slot` is `0`.
+    let pre = vtc_service::status_list::get_state(
+        &fix.status_lists_ks,
+        affinidi_status_list::StatusPurpose::Revocation,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!pre.is_set(slot as usize), "bit should start cleared");
+
+    // Admin-remove.
+    let (status, _) = send(
+        &fix.router,
+        "DELETE",
+        &format!("/v1/members/{target}"),
+        SHOW_TASK,
+        Some(&fix.admin_token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Post: the bit is set + the slot remains assigned.
+    let post = vtc_service::status_list::get_state(
+        &fix.status_lists_ks,
+        affinidi_status_list::StatusPurpose::Revocation,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        post.is_set(slot as usize),
+        "bit must be flipped after remove"
+    );
+    assert!(
+        post.assigned[slot as usize],
+        "slot must stay assigned (no-reallocate invariant)"
+    );
+}
+
+/// Self-remove flips the bit too — the flip lives in
+/// `remove_inner` which both paths share.
+#[tokio::test]
+async fn self_remove_flips_revocation_bit() {
+    let fix = build_fixture().await;
+    let target = "did:key:zSelfFlip";
+    let token = seed_member_with_session(&fix, target, VtcRole::Member).await;
+
+    // Pre-allocate a slot.
+    let mut state = vtc_service::status_list::get_state(
+        &fix.status_lists_ks,
+        affinidi_status_list::StatusPurpose::Revocation,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let slot = vtc_service::status_list::allocate(&mut state).unwrap();
+    vtc_service::status_list::store_state(&fix.status_lists_ks, &state)
+        .await
+        .unwrap();
+    let mut member = vtc_service::members::get_member(&fix.members_ks, target)
+        .await
+        .unwrap()
+        .unwrap();
+    member.status_list_index = Some(slot);
+    vtc_service::members::store_member(&fix.members_ks, &member)
+        .await
+        .unwrap();
+
+    let (status, _) = send(
+        &fix.router,
+        "DELETE",
+        "/v1/members/me",
+        SELF_REMOVE_TASK,
+        Some(&token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let post = vtc_service::status_list::get_state(
+        &fix.status_lists_ks,
+        affinidi_status_list::StatusPurpose::Revocation,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(post.is_set(slot as usize));
 }

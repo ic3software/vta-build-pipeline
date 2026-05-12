@@ -97,6 +97,27 @@ async fn build_fixture() -> Fixture {
         .await
         .expect("install default policies");
 
+    // M2.10 + M2.12: seed both status lists so the approve
+    // handler can allocate a slot when issuing the VMC.
+    for purpose in [
+        affinidi_status_list::StatusPurpose::Revocation,
+        affinidi_status_list::StatusPurpose::Suspension,
+    ] {
+        let url = format!("{RP_ORIGIN}/v1/status-lists/{purpose}");
+        vtc_service::status_list::ensure_initial(&status_lists_ks, purpose, url)
+            .await
+            .expect("ensure_initial status list");
+    }
+
+    // M2.12 credential signer — deterministic seed for stable
+    // test fixtures.
+    let credential_signer = Some(Arc::new(
+        vtc_service::credentials::LocalSigner::from_ed25519_seed(
+            "did:webvh:vtc.example.com:abc".into(),
+            &[0xCC; 32],
+        ),
+    ));
+
     let webauthn = Some(Arc::new(build_webauthn(RP_ORIGIN).expect("build webauthn")));
 
     let key_store = AuditKeyStore::new(audit_key_ks.clone());
@@ -172,7 +193,7 @@ async fn build_fixture() -> Fixture {
         policies_ks: policies_ks.clone(),
         active_policies_ks: active_policies_ks.clone(),
         status_lists_ks: status_lists_ks.clone(),
-        credential_signer: None,
+        credential_signer,
         audit_ks,
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),
@@ -457,6 +478,45 @@ async fn approve_writes_acl_and_member_atomically() {
         .unwrap()
         .expect("Member row written");
     assert_eq!(member.did, applicant_did);
+
+    // M2.12: approve now mints a VMC + role VEC and stamps the
+    // pointers on the Member row.
+    assert!(
+        member.status_list_index.is_some(),
+        "approve must allocate a status-list slot"
+    );
+    let vmc_id = member.current_vmc_id.as_deref().expect("VMC id stamped");
+    let vec_id = member
+        .current_role_vec_id
+        .as_deref()
+        .expect("VEC id stamped");
+    assert!(vmc_id.starts_with("urn:uuid:"), "got {vmc_id}");
+    assert!(vec_id.starts_with("urn:uuid:"), "got {vec_id}");
+
+    // Response carries the signed VCs inline.
+    let vmc = &body["vmc"];
+    let role_vec = &body["roleVec"];
+    assert_eq!(vmc["id"], vmc_id);
+    assert_eq!(vec_id, role_vec["id"].as_str().unwrap());
+
+    // VMC carries the credentialStatus block pointing at the
+    // allocated slot.
+    let slot = member.status_list_index.unwrap();
+    let cs = &vmc["credentialStatus"];
+    assert_eq!(cs["statusPurpose"], "revocation");
+    assert_eq!(cs["statusListIndex"], slot.to_string());
+
+    // Both VCs verify against the fixture's signer.
+    let signer = vtc_service::credentials::LocalSigner::from_ed25519_seed(
+        "did:webvh:vtc.example.com:abc".into(),
+        &[0xCC; 32],
+    );
+    let vmc_vc: affinidi_vc::VerifiableCredential =
+        serde_json::from_value(vmc.clone()).expect("VMC parses");
+    signer.verify(&vmc_vc).expect("VMC proof must verify");
+    let vec_vc: affinidi_vc::VerifiableCredential =
+        serde_json::from_value(role_vec.clone()).expect("VEC parses");
+    signer.verify(&vec_vc).expect("VEC proof must verify");
 }
 
 #[tokio::test]

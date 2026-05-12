@@ -224,6 +224,12 @@
       "rest": "GET /v1/policies/{id}"
     },
     {
+      "id": "https://trusttasks.org/openvtc/vtc/members/renew/1.0",
+      "status": "Draft",
+      "path": "members/renew/1.0",
+      "rest": "POST /v1/members/me/renew"
+    },
+    {
       "id": "https://trusttasks.org/openvtc/vtc/status-lists/show/1.0",
       "status": "Draft",
       "path": "status-lists/show/1.0",

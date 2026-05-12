@@ -47,6 +47,10 @@ pub const DEFAULT_ROLE_VEC_VALIDITY: Duration = Duration::days(30);
 pub struct RoleVecParams {
     /// Subject DID — the member receiving the role grant.
     pub member_did: String,
+    /// Optional top-level `id` URI for the VC (typically
+    /// `urn:uuid:<server-allocated>`). Mirrors
+    /// [`super::vmc::VmcParams::id`].
+    pub id: Option<String>,
     /// The role being granted. Spec §5.3 names four standard
     /// roles + `Custom(String)`; all five surface here via
     /// [`VtcRole::to_string`].
@@ -59,9 +63,15 @@ impl RoleVecParams {
     pub fn new(member_did: impl Into<String>, role: VtcRole) -> Self {
         Self {
             member_did: member_did.into(),
+            id: None,
             role,
             validity: DEFAULT_ROLE_VEC_VALIDITY,
         }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     pub fn with_validity(mut self, validity: Duration) -> Self {
@@ -98,8 +108,26 @@ pub async fn build_role_vec(
         .build()
         .map_err(|e| AppError::Internal(format!("VEC build: {e}")))?;
 
+    if let Some(id) = &params.id {
+        attach_top_level_id(&mut vc, id)?;
+    }
+
     signer.sign(&mut vc).await?;
     Ok(vc)
+}
+
+/// Splice a top-level `id` onto the VC. Same JSON-round-trip
+/// trick the VMC builder uses for `credentialStatus`.
+fn attach_top_level_id(vc: &mut VerifiableCredential, id: &str) -> Result<(), AppError> {
+    let mut as_value =
+        serde_json::to_value(&*vc).map_err(|e| AppError::Internal(format!("VEC -> value: {e}")))?;
+    as_value
+        .as_object_mut()
+        .ok_or_else(|| AppError::Internal("VEC not an object".into()))?
+        .insert("id".into(), JsonValue::String(id.into()));
+    *vc = serde_json::from_value(as_value)
+        .map_err(|e| AppError::Internal(format!("value -> VEC: {e}")))?;
+    Ok(())
 }
 
 fn rfc3339(t: chrono::DateTime<Utc>) -> String {

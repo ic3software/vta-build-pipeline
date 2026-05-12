@@ -156,6 +156,23 @@ pub enum AuditEvent {
     /// audit can chain backwards through revisions without scanning
     /// the whole `policies:` keyspace. Spec §7.1; Phase 2 M2.3.
     PolicyActivated(PolicyActivatedData),
+
+    /// A new VMC was minted (join-approve or renewal). Spec §6.1.
+    VmcIssued(CredentialIssuedData),
+
+    /// A new role VEC was minted (join-approve, renewal, or role
+    /// change). Spec §6.1.
+    VecIssued(CredentialIssuedData),
+
+    /// `POST /v1/members/me/renew` re-minted the member's VMC +
+    /// role VEC. Spec §6.3. `personhood_changed` flips when the
+    /// renewal's `personhood.rego` re-eval produced a different
+    /// flag than the prior VMC.
+    MembershipRenewed(MembershipRenewedData),
+
+    /// A status-list bit was flipped (revocation / suspension).
+    /// Spec §6.2.
+    StatusListFlipped(StatusListFlippedData),
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +405,61 @@ pub struct PolicyUploadedData {
     pub sha256: String,
     /// Per-purpose monotone counter the upload landed under.
     pub version: u32,
+}
+
+/// Payload for [`AuditEvent::VmcIssued`] + [`AuditEvent::VecIssued`].
+///
+/// The audit envelope's `target_did` already carries the member;
+/// this struct adds the credential id + type + the issuance
+/// window so an investigator can correlate "who got which VC
+/// when" without cross-referencing the credential store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialIssuedData {
+    /// VC `id` URI (typically `urn:uuid:<server-allocated>`).
+    pub credential_id: String,
+    /// Wire-form credential type (`"VerifiableMembershipCredential"`
+    /// for VMC, `"VerifiableEndorsementCredential"` for VEC).
+    pub credential_type: String,
+    /// RFC3339 `validFrom` from the issued VC.
+    pub valid_from: String,
+    /// RFC3339 `validUntil` from the issued VC.
+    pub valid_until: String,
+    /// Status-list slot for VMCs (revocation list). `None` for
+    /// VECs and other credential types that don't carry a
+    /// status-list entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_list_index: Option<u32>,
+}
+
+/// Payload for [`AuditEvent::MembershipRenewed`]. Phase 2 M2.13.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MembershipRenewedData {
+    /// New VMC id.
+    pub vmc_id: String,
+    /// New role VEC id.
+    pub role_vec_id: String,
+    /// Whether the `personhood.rego` re-eval produced a different
+    /// flag than the prior VMC (spec §6.3 step 3). Phase 2 ships
+    /// the deny-all stub so this is always `false` in MVP; the
+    /// field is on the wire from day one so Phase 4's
+    /// `assert`/`revoke` endpoints don't break the audit schema.
+    pub personhood_changed: bool,
+}
+
+/// Payload for [`AuditEvent::StatusListFlipped`]. Phase 2 M2.14.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusListFlippedData {
+    /// Wire-form status purpose (`"revocation"` / `"suspension"`).
+    pub purpose: String,
+    /// Slot index that was flipped.
+    pub index: u32,
+    /// Direction of the flip — `true` = revoked/suspended,
+    /// `false` = un-suspended. Revocation flips are one-way per
+    /// spec §6.2; suspension flips can go either direction.
+    pub revoked: bool,
 }
 
 /// Payload for [`AuditEvent::PolicyActivated`].

@@ -30,7 +30,7 @@ use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use vti_common::audit::{AuditEvent, MemberRemovedData};
+use vti_common::audit::{AuditEvent, MemberRemovedData, StatusListFlippedData};
 use vti_common::error::AppError;
 
 use crate::acl::{VtcRole, delete_acl_entry, get_acl_entry, list_acl_entries};
@@ -168,6 +168,11 @@ pub async fn remove_inner(
         .ok_or_else(|| AppError::NotFound(format!("member not found: {target_did}")))?;
 
     let target_member = get_member(&state.members_ks, target_did).await?;
+    // Capture the status-list slot **before** the disposition
+    // path mutates the Member row (purge deletes it; tombstone
+    // clears extensions but leaves status_list_index intact —
+    // we still want to read it from the pre-mutation snapshot).
+    let status_list_index = target_member.as_ref().and_then(|m| m.status_list_index);
 
     // Phase 2 policy step (M2.7). Admin-remove evaluates the
     // active `removal.rego` against the canonical input from
@@ -264,6 +269,24 @@ pub async fn remove_inner(
         )
         .await?;
 
+    // M2.14: flip the revocation bit + emit StatusListFlipped.
+    // Best-effort — a failure here doesn't unwind the ACL +
+    // Member removal (those are already persisted), but it
+    // surfaces in audit + logs so an operator can re-flip
+    // manually if needed.
+    if let Some(slot) = status_list_index
+        && let Err(e) =
+            flip_revocation_for_member(state, slot, audit_writer, actor_did, target_did).await
+    {
+        warn!(
+            error = %e,
+            slot,
+            target = target_did,
+            "failed to flip revocation status-list bit on removal — \
+             ACL/Member already removed; operator must reflip manually"
+        );
+    }
+
     info!(
         actor = actor_did,
         target = target_did,
@@ -277,6 +300,56 @@ pub async fn remove_inner(
         disposition: disposition_str.into(),
         removed: true,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Status-list helpers (M2.14)
+// ---------------------------------------------------------------------------
+
+/// Flip the revocation bit at `slot` + emit `StatusListFlipped`.
+/// Used by [`remove_inner`] after the ACL + Member rows have
+/// already been mutated.
+async fn flip_revocation_for_member(
+    state: &AppState,
+    slot: u32,
+    audit_writer: &vti_common::audit::AuditWriter,
+    actor_did: &str,
+    target_did: &str,
+) -> Result<(), AppError> {
+    let mut row = crate::status_list::get_state(
+        &state.status_lists_ks,
+        affinidi_status_list::StatusPurpose::Revocation,
+    )
+    .await?
+    .ok_or_else(|| {
+        AppError::Internal(
+            "revocation status list not provisioned — set `public_url` + restart".into(),
+        )
+    })?;
+    crate::status_list::flip(&mut row, slot, true)
+        .map_err(|e| AppError::Internal(format!("flip revocation slot {slot}: {e}")))?;
+    crate::status_list::store_state(&state.status_lists_ks, &row).await?;
+    crate::status_list::maybe_emit_occupancy_warning(&row);
+
+    audit_writer
+        .write(
+            actor_did,
+            Some(target_did),
+            AuditEvent::StatusListFlipped(StatusListFlippedData {
+                purpose: affinidi_status_list::StatusPurpose::Revocation.to_string(),
+                index: slot,
+                revoked: true,
+            }),
+        )
+        .await?;
+
+    info!(
+        actor = actor_did,
+        target = target_did,
+        slot,
+        "revocation bit flipped"
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
