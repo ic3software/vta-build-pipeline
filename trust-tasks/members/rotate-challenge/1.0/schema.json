@@ -1,0 +1,18 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/rotate-challenge/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Members — DID Rotation Challenge",
+  "type": "object",
+  "properties": {
+    "response": {
+      "type": "object",
+      "required": ["rotationId", "expiresAt", "signingPayloadHex", "canonicalTemplate"],
+      "properties": {
+        "rotationId": { "type": "string", "format": "uuid" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "signingPayloadHex": { "type": "string", "pattern": "^[0-9a-f]+$" },
+        "canonicalTemplate": { "type": "object" }
+      }
+    }
+  }
+}

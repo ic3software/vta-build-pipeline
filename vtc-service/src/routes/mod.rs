@@ -134,6 +134,11 @@ pub fn router() -> Router<AppState> {
         .expect("static Trust-Task URL");
     let members_renew = TrustTask::new("https://trusttasks.org/openvtc/vtc/members/renew/1.0")
         .expect("static Trust-Task URL");
+    let members_rotate_challenge =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/members/rotate-challenge/1.0")
+            .expect("static Trust-Task URL");
+    let members_rotate = TrustTask::new("https://trusttasks.org/openvtc/vtc/members/rotate/1.0")
+        .expect("static Trust-Task URL");
     // Read endpoints (M2.4). GET /v1/policies and
     // GET /v1/policies/{id} share their mounts with the POST
     // /v1/policies upload and POST /v1/policies/{id}/activate
@@ -306,6 +311,19 @@ pub fn router() -> Router<AppState> {
             "/v1/members/me/renew",
             post(members::renew::renew),
             members_renew,
+        )
+        // DID rotation (M2.15.1). Two-step ceremony — challenge
+        // mints a single-use rotation_id, the finish endpoint
+        // applies the co-signed swap atomically.
+        .route_with_task(
+            "/v1/members/me/rotate/challenge",
+            post(members::rotate::challenge),
+            members_rotate_challenge,
+        )
+        .route_with_task(
+            "/v1/members/me/rotate",
+            post(members::rotate::rotate),
+            members_rotate,
         )
         .route_with_task(
             "/v1/members/{did}",

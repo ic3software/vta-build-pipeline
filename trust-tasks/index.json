@@ -230,6 +230,18 @@
       "rest": "POST /v1/members/me/renew"
     },
     {
+      "id": "https://trusttasks.org/openvtc/vtc/members/rotate-challenge/1.0",
+      "status": "Draft",
+      "path": "members/rotate-challenge/1.0",
+      "rest": "POST /v1/members/me/rotate/challenge"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/rotate/1.0",
+      "status": "Draft",
+      "path": "members/rotate/1.0",
+      "rest": "POST /v1/members/me/rotate"
+    },
+    {
       "id": "https://trusttasks.org/openvtc/vtc/status-lists/show/1.0",
       "status": "Draft",
       "path": "status-lists/show/1.0",

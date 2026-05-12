@@ -1,0 +1,29 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/rotate/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Members — DID Rotation",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "object",
+      "required": ["rotationId", "oldDid", "newDid", "oldSignature", "newSignature"],
+      "properties": {
+        "rotationId": { "type": "string", "format": "uuid" },
+        "oldDid": { "type": "string" },
+        "newDid": { "type": "string" },
+        "oldSignature": { "type": "string", "pattern": "^[0-9a-f]+$" },
+        "newSignature": { "type": "string", "pattern": "^[0-9a-f]+$" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["newDid", "method", "vmc", "roleVec"],
+      "properties": {
+        "newDid": { "type": "string" },
+        "method": { "type": "string", "enum": ["did:key", "did:webvh"] },
+        "vmc": { "type": "object" },
+        "roleVec": { "type": "object" }
+      }
+    }
+  }
+}

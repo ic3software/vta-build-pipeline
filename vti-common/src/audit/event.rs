@@ -173,6 +173,12 @@ pub enum AuditEvent {
     /// A status-list bit was flipped (revocation / suspension).
     /// Spec §6.2.
     StatusListFlipped(StatusListFlippedData),
+
+    /// A member rotated to a fresh DID. The audit envelope's
+    /// `actor_did` is the **new** DID (it's the principal going
+    /// forward); the prior DID lives in the data struct. Spec
+    /// §10.5; Phase 2 M2.15.
+    DidRotated(DidRotatedData),
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +466,27 @@ pub struct StatusListFlippedData {
     /// `false` = un-suspended. Revocation flips are one-way per
     /// spec §6.2; suspension flips can go either direction.
     pub revoked: bool,
+}
+
+/// Payload for [`AuditEvent::DidRotated`]. Phase 2 M2.15.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DidRotatedData {
+    pub old_did: String,
+    pub new_did: String,
+    /// DID method of the new DID — `"did:key"` /
+    /// `"did:webvh"`. Spec §10.5 keeps the two paths
+    /// cryptographically distinct so SIEM rules can target
+    /// each.
+    pub method: String,
+    /// New VMC id minted in the same transaction (status-list
+    /// slot reused). `None` if issuance was skipped (e.g.
+    /// daemon misconfiguration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vmc_id: Option<String>,
+    /// New role VEC id minted in the same transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_vec_id: Option<String>,
 }
 
 /// Payload for [`AuditEvent::PolicyActivated`].

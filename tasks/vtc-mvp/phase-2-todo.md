@@ -339,7 +339,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.15 — DID rotation
 
-### `[ ]` M2.15.1 — `did:key` rotation (challenge + finish)
+### `[x]` M2.15.1 — `did:key` rotation (challenge + finish)
 
 - **Acceptance**
   - `POST /v1/members/me/rotate/challenge` — auth: old DID's
