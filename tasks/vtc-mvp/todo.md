@@ -899,42 +899,78 @@ everything the new path replaces.
 
 ## M0.11 — Routing + CORS + cookie-scope
 
-### `[ ]` M0.11.1 — Routing config + mount logic
+### `[x]` M0.11.1 — Routing config + mount logic
 
 - **Acceptance**
-  - `RoutingConfig` per spec §9.2 supports `mount` + optional `host`
-    per surface (api, admin_ui, website — website mount accepted in
-    config but routes 404 until Phase 5)
-  - Path-prefix default: `/v1`, `/admin`, `/` (catch-all)
-  - Subdomain mode supported by `Host`-header middleware (codified
-    but not exercised by Phase-0 tests)
-  - Mount conflicts at config-load time produce a clear startup
-    error
-- **Verify**
-  - Path-prefix routing test: `/v1/community/profile` resolves;
-    `/admin/some/path` returns 404 (since admin UX not bundled yet)
-  - Subdomain config parses but does not break path-prefix tests
+  - `RoutingConfig { api, admin_ui, website: MountConfig }` per
+    spec §9.2 — each surface has a `mount: String` and optional
+    `host: Option<String>` for subdomain mode.
+  - Path-prefix defaults: `/v1`, `/admin`, `/`.
+  - Subdomain mode parses cleanly (a `host` value bypasses the
+    path-mode cookie-scope guard for that surface) but isn't
+    exercised by Phase-0 routing — the route table stays at the
+    existing `/v1/*` mounts. Mount-driven re-routing lands in
+    Phase 5 when the admin SPA + public website actually serve
+    content.
+  - **Config-load validation** (`AppConfig::validate_routing_and_cors`,
+    called by `AppConfig::load` + `AppConfig::save`) refuses:
+    - any mount that doesn't start with `/`
+    - two surfaces sharing the same path mount in path mode
+    - `admin_ui.mount = "/"` in path mode (cookie-scope guard;
+      `Path=/admin` collapses to "any path" otherwise)
+- **Verify** — 6 of the 15 `tests/routing_cors.rs` tests cover
+  the validator:
+  - `defaults_validate_clean`
+  - `rejects_admin_ui_mounted_at_root_in_path_mode`
+  - `allows_admin_ui_at_root_when_host_routed` (subdomain bypass)
+  - `rejects_duplicate_path_mounts`
+  - `rejects_mount_without_leading_slash`
 - **Files**
-  - `vtc-service/src/config.rs` (add `RoutingConfig`)
-  - `vtc-service/src/routes/mod.rs`
+  - `vtc-service/src/config.rs` (`RoutingConfig`, `MountConfig`,
+    `validate_routing`)
+  - `vtc-service/tests/routing_cors.rs` (new)
 - **Deps**: M0.3.2
 
-### `[ ]` M0.11.2 — CORS + cookie-scope invariants
+### `[x]` M0.11.2 — CORS + cookie-scope invariants
 
 - **Acceptance**
-  - `cors.allowed_origins` allowlist; wildcards refused at config-load
-  - Admin session cookie set with `Path=/admin; SameSite=Strict;
-    Secure; HttpOnly` in path mode
-  - Public-website origin auto-allow disabled (no public website yet)
-  - Config-load-time invariant: refuses to start if cookie scopes
-    would overlap (e.g., admin mounted at `/` is rejected)
-- **Verify**
-  - Bad-config startup tests fail loud
-  - CORS preflight test includes `Idempotency-Key`,
-    `Trust-Task` in `Access-Control-Allow-Headers`
+  - `CorsConfig { allowed_origins: Vec<String> }`. Wildcards
+    (`*` or partial, e.g. `https://*.example.com`), empty
+    entries, and missing schemes are refused at config-load.
+    Empty `allowed_origins` is **valid** — disables CORS
+    entirely (same-origin only).
+  - `vtc_service::server::build_cors_layer` wires `tower-http`'s
+    `CorsLayer` into the REST stack with:
+    - `allow_origin` mirroring each entry literally,
+    - `allow_methods = [GET, POST, PUT, PATCH, DELETE, OPTIONS]`,
+    - `allow_headers = [Authorization, Content-Type, Trust-Task,
+      Idempotency-Key, Access-Control-Allow-Headers]`,
+    - `allow_credentials = true` (for the future admin session
+      cookie).
+  - Cookie-scope rule encoded in the routing validator (see
+    M0.11.1): admin_ui at `/` is rejected unless host-routed.
+    The actual admin session cookie is future work — Phase 0 auth
+    uses bearer JWTs in `Authorization` — so the rule is dormant
+    until the cookie lands.
+- **Verify** — 9 of 15 `tests/routing_cors.rs` tests cover CORS:
+  - Validator: `rejects_wildcard_cors_origin`,
+    `rejects_partial_wildcard_cors_origin`,
+    `rejects_cors_origin_without_scheme`,
+    `rejects_empty_cors_origin_entry`,
+    `empty_cors_allowlist_is_valid`,
+    `accepts_https_and_http_origins`.
+  - Wire: `preflight_from_allowed_origin_returns_cors_headers`,
+    `preflight_from_disallowed_origin_omits_cors_headers`,
+    `empty_allowlist_disables_cors_headers`,
+    `actual_get_from_allowed_origin_carries_cors_response_header`.
 - **Files**
-  - `vtc-service/src/config.rs`
-  - `vtc-service/src/server.rs`
+  - `vtc-service/Cargo.toml` (enable `tower-http` `cors` feature)
+  - `vtc-service/src/config.rs` (`CorsConfig`, `validate_cors`)
+  - `vtc-service/src/server.rs` (`build_cors_layer`,
+    `run_rest_thread` accepts a `CorsConfig`)
+- **Deferred**: the `Sec-Fetch-Site` / CSRF double-submit cookie
+  layer mentioned by spec §9.3 sits on top of the admin session
+  cookie; lands when the cookie does (Phase 1+).
 - **Deps**: M0.11.1
 
 ---

@@ -23,6 +23,7 @@ use crate::routes;
 use crate::store::{KeyspaceHandle, Store};
 use crate::supervisor::{SupervisorKind, detect_supervisor};
 use tokio::sync::{RwLock, watch};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 use vti_common::audit::{AuditKeyStore, AuditWriter};
@@ -230,11 +231,17 @@ pub async fn run(
         supervisor: detect_supervisor(),
     };
 
+    // Snapshot the CORS allowlist before the AppState `move` into
+    // the REST thread. The layer is fixed at start-up; a future
+    // M0.8.x extension can swap the layer on `POST /v1/admin/config/reload`
+    // if operators demand live updates.
+    let rest_cors = state.config.read().await.cors.clone();
+
     // Spawn three named OS threads
     let mut rest_shutdown_rx = shutdown_rx.clone();
     let rest_handle = std::thread::Builder::new()
         .name("vtc-rest".into())
-        .spawn(move || run_rest_thread(std_listener, state, &mut rest_shutdown_rx))
+        .spawn(move || run_rest_thread(std_listener, state, rest_cors, &mut rest_shutdown_rx))
         .map_err(|e| AppError::Internal(format!("failed to spawn REST thread: {e}")))?;
 
     let mut didcomm_shutdown_rx = shutdown_rx.clone();
@@ -368,10 +375,69 @@ fn run_storage_thread(
     });
 }
 
+/// Build the [`CorsLayer`] applied to every REST response. Honours
+/// the spec §9.3 allowlist:
+///
+/// - Empty `allowed_origins` → CORS is disabled (no cross-origin
+///   responses set the headers); same-origin path-mode deployments
+///   never need an entry.
+/// - Each origin is reflected verbatim by the `Origin` header
+///   match; wildcards are refused at config-load (see
+///   `crate::config::validate_cors`), so by the time we get here
+///   every entry is a literal `http(s)://host[:port]`.
+///
+/// `Access-Control-Allow-Headers` is fixed at the workspace's
+/// "common" header set (Authorization, Content-Type, Trust-Task,
+/// Idempotency-Key). `Access-Control-Allow-Credentials` is `true`
+/// so the admin SPA can carry the future cookie session over the
+/// allowlist edge; an empty allowlist disables CORS entirely so
+/// `credentials: true` is harmless there.
+fn build_cors_layer(cors: &crate::config::CorsConfig) -> CorsLayer {
+    use axum::http::Method;
+    use axum::http::header::{
+        ACCESS_CONTROL_ALLOW_HEADERS, AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue,
+    };
+
+    if cors.allowed_origins.is_empty() {
+        // No origins → same-origin only.
+        return CorsLayer::new();
+    }
+
+    let allowed_origins: Vec<HeaderValue> = cors
+        .allowed_origins
+        .iter()
+        .filter_map(|o| o.parse::<HeaderValue>().ok())
+        .collect();
+
+    let allowed_methods = vec![
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+
+    let allowed_headers: Vec<HeaderName> = vec![
+        AUTHORIZATION,
+        CONTENT_TYPE,
+        ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderName::from_static("trust-task"),
+        HeaderName::from_static("idempotency-key"),
+    ];
+
+    CorsLayer::new()
+        .allow_origin(allowed_origins)
+        .allow_methods(allowed_methods)
+        .allow_headers(allowed_headers)
+        .allow_credentials(true)
+}
+
 /// REST thread: serves the Axum HTTP server.
 fn run_rest_thread(
     std_listener: std::net::TcpListener,
     state: AppState,
+    cors: crate::config::CorsConfig,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -385,8 +451,11 @@ fn run_rest_thread(
         let listener = tokio::net::TcpListener::from_std(std_listener)
             .expect("failed to convert std TcpListener to tokio TcpListener");
 
+        let cors_layer = build_cors_layer(&cors);
+
         let app = routes::router()
             .with_state(state)
+            .layer(cors_layer)
             .layer(TraceLayer::new_for_http());
 
         let shutdown_rx = shutdown_rx.clone();

@@ -364,6 +364,8 @@ pub async fn run_setup_wizard(
             messaging: None,
             auth: AuthConfig::default(),
             secrets: secrets_config.clone(),
+            routing: Default::default(),
+            cors: Default::default(),
             config_path: config_path.clone(),
         })
         .map_err(|e| format!("{e}"))?;
@@ -466,6 +468,8 @@ pub async fn run_setup_wizard(
             ..AuthConfig::default()
         },
         secrets: secrets_config,
+        routing: Default::default(),
+        cors: Default::default(),
         config_path: config_path.clone(),
     };
     config.save()?;

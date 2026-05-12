@@ -25,8 +25,97 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub secrets: SecretsConfig,
+    #[serde(default)]
+    pub routing: RoutingConfig,
+    #[serde(default)]
+    pub cors: CorsConfig,
     #[serde(skip)]
     pub config_path: PathBuf,
+}
+
+/// Per-surface mount config (spec §9.2). Phase-0 surfaces:
+///
+/// - `api` — the JSON REST + DIDComm management surface. **Always
+///   mounted**; this is the daemon's reason to exist.
+/// - `admin_ui` — the (eventual) admin SPA. Phase 0 leaves the
+///   mount declared but doesn't serve anything; the slot reserves
+///   the path so cookie scopes don't collide later.
+/// - `website` — public community site (Phase 5+). Same story —
+///   the mount is reserved, the route table is empty.
+///
+/// **Mode**: per the spec, each surface can be path-prefixed
+/// (`mount`) or host-routed (`host`). Phase 0 exercises only the
+/// path-prefix default. Subdomain mode is accepted by the config
+/// parser but not driven by any code path until later phases.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct RoutingConfig {
+    #[serde(default = "default_api_mount")]
+    pub api: MountConfig,
+    #[serde(default = "default_admin_ui_mount")]
+    pub admin_ui: MountConfig,
+    #[serde(default = "default_website_mount")]
+    pub website: MountConfig,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            api: default_api_mount(),
+            admin_ui: default_admin_ui_mount(),
+            website: default_website_mount(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct MountConfig {
+    /// Path prefix the surface attaches under (e.g. `/v1`,
+    /// `/admin`, `/`). Path mode is the Phase-0 default.
+    pub mount: String,
+    /// Optional host header for subdomain mode. Accepted by the
+    /// config parser; not exercised by Phase-0 routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+fn default_api_mount() -> MountConfig {
+    MountConfig {
+        mount: "/v1".into(),
+        host: None,
+    }
+}
+
+fn default_admin_ui_mount() -> MountConfig {
+    MountConfig {
+        mount: "/admin".into(),
+        host: None,
+    }
+}
+
+fn default_website_mount() -> MountConfig {
+    MountConfig {
+        mount: "/".into(),
+        host: None,
+    }
+}
+
+/// CORS allowlist (spec §9.3). Wildcards (`*`) are refused at
+/// config-load — the spec demands an explicit allowlist so the
+/// admin UX origin (and only that origin) can mutate the daemon.
+///
+/// When the list is empty, **CORS is disabled** — every cross-
+/// origin request gets the default browser rejection. Path-mode
+/// deployments serving the admin UX same-origin don't need any
+/// entries.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct CorsConfig {
+    /// Exact-match origin allowlist. Each entry is a full origin
+    /// (`https://host:port` — no path). Wildcards rejected.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -101,6 +190,114 @@ pub(crate) fn default_port_value() -> u16 {
 
 fn default_server_config() -> ServerConfig {
     ServerConfig::default()
+}
+
+/// Refuse a config that would break the spec's routing
+/// invariants. Phase-0 enforcement:
+///
+/// - **Path-mode mounts must be unique.** Two surfaces sharing the
+///   same prefix would race for routes; reject at load.
+/// - **`admin_ui.mount` must not be `/` in path mode.** Spec §9.3:
+///   "refuses to start if cookie scopes would overlap (e.g., admin
+///   mounted at / is rejected)". With admin at root, the future
+///   admin session cookie's `Path=/admin` constraint collapses to
+///   "any path", letting public-website JS read admin cookies.
+/// - **Path-mode mounts start with `/`.** A bare `admin` mount is
+///   almost certainly a typo; bail loud.
+/// - **`api.mount` cannot equal `admin_ui.mount`.** Same family
+///   of routes; cookie-scope rationale doesn't apply but the
+///   ambiguity does.
+fn validate_routing(routing: &RoutingConfig) -> Result<(), AppError> {
+    for (name, m) in [
+        ("api", &routing.api),
+        ("admin_ui", &routing.admin_ui),
+        ("website", &routing.website),
+    ] {
+        if !m.mount.starts_with('/') {
+            return Err(AppError::Config(format!(
+                "routing.{name}.mount must start with '/': got '{}'",
+                m.mount
+            )));
+        }
+    }
+
+    // Cookie-scope guard. Only fires in path mode for the admin_ui
+    // surface — subdomain mode (host set) carries its own scope.
+    if routing.admin_ui.host.is_none() && routing.admin_ui.mount == "/" {
+        return Err(AppError::Config(
+            "routing.admin_ui.mount = '/' would collapse the admin cookie scope; \
+             pick a non-root prefix (default: '/admin') or enable subdomain mode via \
+             routing.admin_ui.host"
+                .into(),
+        ));
+    }
+
+    // Mount uniqueness (path mode only — subdomain mode disambiguates
+    // by host). The `website` catch-all is allowed to share `/` with
+    // a non-mounted slot, but pairwise duplicates between api +
+    // admin_ui + website are rejected.
+    let path_mounts: Vec<(&str, &str)> = [
+        (
+            "api",
+            routing.api.host.as_deref(),
+            routing.api.mount.as_str(),
+        ),
+        (
+            "admin_ui",
+            routing.admin_ui.host.as_deref(),
+            routing.admin_ui.mount.as_str(),
+        ),
+        (
+            "website",
+            routing.website.host.as_deref(),
+            routing.website.mount.as_str(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, host, mount)| host.is_none().then_some((name, mount)))
+    .collect();
+
+    for i in 0..path_mounts.len() {
+        for j in (i + 1)..path_mounts.len() {
+            let (a, am) = path_mounts[i];
+            let (b, bm) = path_mounts[j];
+            if am == bm {
+                return Err(AppError::Config(format!(
+                    "routing.{a}.mount and routing.{b}.mount both = '{am}'; \
+                     path-mode mounts must be unique",
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a CORS allowlist that includes `*` or empty / whitespace
+/// entries. Spec §9.3: "wildcards refused". An empty
+/// `allowed_origins` is valid — that's "no cross-origin requests
+/// permitted" (same-origin path-mode default).
+fn validate_cors(cors: &CorsConfig) -> Result<(), AppError> {
+    for origin in &cors.allowed_origins {
+        let trimmed = origin.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::Config(
+                "cors.allowed_origins contains an empty / whitespace entry".into(),
+            ));
+        }
+        if trimmed == "*" || trimmed.contains('*') {
+            return Err(AppError::Config(format!(
+                "cors.allowed_origins entry '{trimmed}' uses a wildcard; \
+                 spec §9.3 demands an exact-match allowlist"
+            )));
+        }
+        if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+            return Err(AppError::Config(format!(
+                "cors.allowed_origins entry '{trimmed}' must be a full origin \
+                 (e.g., 'https://admin.example.com')"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn default_store_config() -> StoreConfig {
@@ -255,10 +452,22 @@ impl AppConfig {
             config.auth.jwt_signing_key = Some(key);
         }
 
+        config.validate_routing_and_cors()?;
         Ok(config)
     }
 
+    /// Validate the routing + CORS sections per spec §9.2 / §9.3.
+    /// Called at the tail of [`Self::load`]; surfaced as a
+    /// public helper so tests can drive it directly without
+    /// touching the filesystem.
+    pub fn validate_routing_and_cors(&self) -> Result<(), AppError> {
+        validate_routing(&self.routing)?;
+        validate_cors(&self.cors)?;
+        Ok(())
+    }
+
     pub fn save(&self) -> Result<(), AppError> {
+        self.validate_routing_and_cors()?;
         let contents = toml::to_string_pretty(self)
             .map_err(|e| AppError::Config(format!("failed to serialize config: {e}")))?;
         std::fs::write(&self.config_path, contents).map_err(AppError::Io)?;
