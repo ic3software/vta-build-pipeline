@@ -195,6 +195,15 @@ pub enum AuditEvent {
     /// out for operator attention — failed `Purge` jobs are
     /// silent privacy regressions. Phase 3 M3.4.
     RegistrySyncFailed(RegistrySyncOutcomeData),
+
+    /// A member-initiated `Purge` (RTBF) bypassed the active
+    /// `registry.rego.min_disposition` floor. Spec §8.2 calls
+    /// these out: RTBF always overrides the policy envelope.
+    /// The audit envelope's `actor_did_hash` is the HMAC-hashed
+    /// identifier per §11.1; the `actor_did_plain` field is
+    /// `None` for these envelopes (privacy-preserving by
+    /// construction). Phase 3 M3.6.
+    RegistryRecordPolicyOverride(RegistryRecordPolicyOverrideData),
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +491,28 @@ pub struct StatusListFlippedData {
     /// `false` = un-suspended. Revocation flips are one-way per
     /// spec §6.2; suspension flips can go either direction.
     pub revoked: bool,
+}
+
+/// Payload for [`AuditEvent::RegistryRecordPolicyOverride`].
+/// Phase 3 M3.6. Carries `reason` (always `"rtbf"` in Phase 3
+/// — future overrides could land additional reason codes),
+/// the attempted disposition the policy would have enforced,
+/// and the effective disposition the override produced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryRecordPolicyOverrideData {
+    /// Short reason code. Phase 3 only emits `"rtbf"`; the
+    /// field is shaped as a free string so Phase 4+ can
+    /// introduce additional codes (`"legal-hold"`, etc.)
+    /// without bumping the envelope version.
+    pub reason: String,
+    /// The disposition the active `registry.rego.min_disposition`
+    /// would have enforced (e.g. `"tombstone"`).
+    pub attempted_disposition: String,
+    /// The disposition the override applied (always `"purge"`
+    /// for RTBF overrides; Phase 4+ may add new effective
+    /// dispositions for legal-hold paths).
+    pub effective_disposition: String,
 }
 
 /// Payload for [`AuditEvent::RegistrySyncSucceeded`] +

@@ -1,8 +1,12 @@
 use axum::Json;
 use axum::extract::State;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::debug;
+use vti_common::error::AppError;
 
+use crate::auth::AdminAuth;
+use crate::registry::{HealthStatus, list_sync_jobs};
 use crate::server::AppState;
 
 #[derive(Serialize)]
@@ -29,4 +33,108 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         mediator_url,
         mediator_did,
     })
+}
+
+/// Phase 3 M3.8 — admin-gated diagnostics view.
+///
+/// Surfaces enough of the trust-registry reconciler's internal
+/// state to debug "is sync stuck?" without shelling onto the
+/// host. The fields are picked for *operator action*, not raw
+/// metrics dump:
+///
+/// - `registry_status` — does the daemon think the registry
+///   is reachable right now? Mirrors the same flag on
+///   `GET /v1/community/profile` (M3.2).
+/// - `queue_depth` — count of pending+InFlight rows. A
+///   monotonically rising number means the registry is
+///   refusing dispatch.
+/// - `oldest_pending_age_seconds` — staleness of the
+///   longest-waiting job. Drives the "≥1h behind →
+///   degraded" SLI per spec §8.3.
+/// - `rtbf_batched_count` — how many jobs are parked behind
+///   the RTBF window. Lets operators verify the batch
+///   protection is active without inspecting fjall.
+/// - `failed_count` — terminal-failure rows the syncer gave
+///   up on (`attempts > max_attempts` or
+///   `RegistryError::Permanent`). These need operator
+///   triage; the syncer won't retry them.
+/// - `last_success_at` / `last_failure_at` / `last_error` —
+///   replayed verbatim from the health probe state.
+///
+/// Diagnostics is **admin-gated**, not super-admin: ops staff
+/// running on-call should be able to read this without
+/// holding the super-admin role.
+#[derive(Serialize)]
+pub struct DiagnosticsResponse {
+    pub registry_status: String,
+    pub queue_depth: u64,
+    pub rtbf_batched_count: u64,
+    pub failed_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_pending_age_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+pub async fn diagnostics(
+    State(state): State<AppState>,
+    _auth: AdminAuth,
+) -> Result<Json<DiagnosticsResponse>, AppError> {
+    let jobs = list_sync_jobs(&state.sync_queue_ks).await?;
+    let now = Utc::now();
+    let queue_depth = jobs
+        .iter()
+        .filter(|j| {
+            matches!(
+                j.state,
+                crate::registry::SyncJobState::Pending | crate::registry::SyncJobState::InFlight
+            )
+        })
+        .count() as u64;
+    let rtbf_batched_count = jobs
+        .iter()
+        .filter(|j| j.rtbf_batched && j.state == crate::registry::SyncJobState::Pending)
+        .count() as u64;
+    let failed_count = jobs
+        .iter()
+        .filter(|j| j.state == crate::registry::SyncJobState::Failed)
+        .count() as u64;
+    // Oldest *dispatchable* pending job — RTBF-parked rows are
+    // intentionally future-dated so they shouldn't count
+    // against the "stuck" SLI.
+    let oldest_pending_age_seconds = jobs
+        .iter()
+        .filter(|j| j.state == crate::registry::SyncJobState::Pending && j.next_attempt_at <= now)
+        .map(|j| (now - j.created_at).num_seconds())
+        .max();
+
+    let snapshot = state.registry_health.snapshot().await;
+    let registry_status = match snapshot.status {
+        HealthStatus::Active => "active",
+        HealthStatus::Degraded => "degraded",
+    }
+    .to_string();
+
+    debug!(
+        queue_depth,
+        rtbf_batched_count,
+        failed_count,
+        registry_status = %registry_status,
+        "diagnostics queried"
+    );
+
+    Ok(Json(DiagnosticsResponse {
+        registry_status,
+        queue_depth,
+        rtbf_batched_count,
+        failed_count,
+        oldest_pending_age_seconds,
+        last_success_at: snapshot.last_success_at,
+        last_failure_at: snapshot.last_failure_at,
+        last_error: snapshot.last_error,
+    }))
 }

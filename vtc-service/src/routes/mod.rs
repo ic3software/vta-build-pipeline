@@ -139,6 +139,13 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let members_rotate = TrustTask::new("https://trusttasks.org/openvtc/vtc/members/rotate/1.0")
         .expect("static Trust-Task URL");
+    // Phase 3 M3.8 — trust-registry reconciler diagnostics.
+    // Admin-gated (not super-admin) so on-call ops can read
+    // queue depth + RTBF-batched + failed counts without the
+    // super-admin role.
+    let health_diagnostics =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/health/diagnostics/1.0")
+            .expect("static Trust-Task URL");
     // Read endpoints (M2.4). GET /v1/policies and
     // GET /v1/policies/{id} share their mounts with the POST
     // /v1/policies upload and POST /v1/policies/{id}/activate
@@ -152,6 +159,11 @@ pub fn router() -> Router<AppState> {
 
     TrustTaskRouter::<AppState>::new()
         .route_exempt("/health", get(health::health))
+        .route_with_task(
+            "/v1/health/diagnostics",
+            get(health::diagnostics),
+            health_diagnostics,
+        )
         // `did:webvh` log publication (Trust-Task-exempt — DID
         // resolvers don't carry our extension header). The VTC is
         // not a general-purpose did:webvh host: the handler matches

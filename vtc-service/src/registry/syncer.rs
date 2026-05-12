@@ -47,13 +47,16 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
-use vti_common::audit::{AuditEvent, AuditWriter, RegistrySyncOutcomeData};
+use vti_common::audit::{
+    AuditEvent, AuditWriter, RegistryRecordPolicyOverrideData, RegistrySyncOutcomeData,
+};
 use vti_common::error::AppError;
 use vti_common::store::KeyspaceHandle;
 
 use super::client::{RegistryError, TrustRegistryClient};
 use super::health::RegistryHealth;
 use super::model::{RegistryRecord, SyncJob, SyncJobKind, SyncJobState};
+use super::policy::{PublishOnJoinDecision, evaluate_publish_on_join};
 use super::storage::{
     delete_sync_job, get_sync_cursor, list_sync_jobs, set_sync_cursor, store_record, store_sync_job,
 };
@@ -71,24 +74,37 @@ pub struct MembershipSyncer {
     sync_queue_ks: KeyspaceHandle,
     sync_cursor_ks: KeyspaceHandle,
     registry_records_ks: KeyspaceHandle,
+    policies_ks: KeyspaceHandle,
+    active_policies_ks: KeyspaceHandle,
     client: Arc<dyn TrustRegistryClient>,
     health: RegistryHealth,
     audit_writer: Option<AuditWriter>,
     actor_did: String,
     tick_interval: Duration,
+    /// RTBF batch coalescing window (hours). Sourced from
+    /// [`crate::config::RegistryConfig::rtbf_batch_window_hours`]
+    /// at construction. `0` disables batching (RTBF jobs
+    /// dispatch immediately — test convenience only).
+    rtbf_batch_window_hours: u64,
 }
 
 impl MembershipSyncer {
     /// Construct a fresh syncer. `actor_did` is the VTC's
     /// own DID — used as the `actor_did` on
     /// `RegistrySyncSucceeded` / `RegistrySyncFailed` audit
-    /// envelopes.
+    /// envelopes. `policies_ks` + `active_policies_ks` are the
+    /// `vtc_service::policy` storage keyspaces — the syncer
+    /// re-resolves the active `registry.rego` on every dispatch
+    /// so a freshly-uploaded policy takes effect on the next
+    /// tick (no warm-up required, no stale cache).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         audit_ks: KeyspaceHandle,
         sync_queue_ks: KeyspaceHandle,
         sync_cursor_ks: KeyspaceHandle,
         registry_records_ks: KeyspaceHandle,
+        policies_ks: KeyspaceHandle,
+        active_policies_ks: KeyspaceHandle,
         client: Arc<dyn TrustRegistryClient>,
         health: RegistryHealth,
         audit_writer: Option<AuditWriter>,
@@ -99,11 +115,14 @@ impl MembershipSyncer {
             sync_queue_ks,
             sync_cursor_ks,
             registry_records_ks,
+            policies_ks,
+            active_policies_ks,
             client,
             health,
             audit_writer,
             actor_did: actor_did.into(),
             tick_interval: Duration::from_secs(DEFAULT_TICK_INTERVAL_SECONDS),
+            rtbf_batch_window_hours: 24,
         }
     }
 
@@ -111,6 +130,15 @@ impl MembershipSyncer {
     /// so async-driven assertions resolve quickly.
     pub fn with_tick_interval(mut self, interval: Duration) -> Self {
         self.tick_interval = interval;
+        self
+    }
+
+    /// Override the RTBF batch window (default 24h). Sourced
+    /// from [`crate::config::RegistryConfig::rtbf_batch_window_hours`]
+    /// at boot. Set to `0` in tests to disable batching so
+    /// RTBF dispatches deterministically on the next tick.
+    pub fn with_rtbf_batch_window_hours(mut self, hours: u64) -> Self {
+        self.rtbf_batch_window_hours = hours;
         self
     }
 
@@ -153,7 +181,15 @@ impl MembershipSyncer {
     /// pending job. Exposed for tests.
     pub async fn tick(&self) -> Result<(), AppError> {
         let cursor = get_sync_cursor(&self.sync_cursor_ks).await?;
-        let outcome = walk(&self.audit_ks, &self.sync_queue_ks, cursor).await?;
+        let outcome = walk(
+            &self.audit_ks,
+            &self.sync_queue_ks,
+            &self.policies_ks,
+            &self.active_policies_ks,
+            self.rtbf_batch_window_hours,
+            cursor,
+        )
+        .await?;
         if let Some(new) = outcome.new_cursor
             && Some(new) != cursor
         {
@@ -162,6 +198,18 @@ impl MembershipSyncer {
         if outcome.jobs_enqueued > 0 {
             debug!(jobs = outcome.jobs_enqueued, "tail walk enqueued jobs");
         }
+        // M3.6: emit `RegistryRecordPolicyOverride` envelopes
+        // for any RTBF override the walker resolved. The audit
+        // emission happens *after* the SyncJob is durably
+        // enqueued — if the daemon crashes between enqueue
+        // and audit-emit, the next boot's tail walk re-runs
+        // the override path on the same MemberRemoved
+        // envelope (cursor hasn't advanced past it yet) and
+        // re-emits. A duplicate override envelope is a less
+        // bad failure mode than a silent override.
+        for ov in &outcome.overrides {
+            self.emit_override(ov);
+        }
 
         let jobs = list_sync_jobs(&self.sync_queue_ks).await?;
         let now = chrono::Utc::now();
@@ -169,6 +217,32 @@ impl MembershipSyncer {
             self.dispatch_one(job).await;
         }
         Ok(())
+    }
+
+    fn emit_override(&self, ov: &super::tail::OverrideEvent) {
+        let Some(writer) = self.audit_writer.as_ref() else {
+            return;
+        };
+        let payload = RegistryRecordPolicyOverrideData {
+            reason: ov.reason.clone(),
+            attempted_disposition: ov.attempted_disposition.clone(),
+            effective_disposition: ov.effective_disposition.clone(),
+        };
+        let actor = ov.actor_did.clone();
+        let target = ov.target_did.clone();
+        let writer = writer.clone();
+        tokio::spawn(async move {
+            if let Err(e) = writer
+                .write(
+                    &actor,
+                    Some(&target),
+                    AuditEvent::RegistryRecordPolicyOverride(payload),
+                )
+                .await
+            {
+                warn!(error = %e, "failed to emit RegistryRecordPolicyOverride envelope");
+            }
+        });
     }
 
     /// Boot-time recovery: flip any `InFlight` rows back to
@@ -202,6 +276,33 @@ impl MembershipSyncer {
     /// never propagate — every error is captured on the job
     /// row + the audit envelope.
     async fn dispatch_one(&self, mut job: SyncJob) {
+        // M3.5: consult `registry.rego.publish_on_join` for
+        // PublishMember jobs *at dispatch time* — the operator
+        // may have flipped the policy between enqueue and tick.
+        // Resolving here means a fresh policy upload takes
+        // effect on the next tick without bouncing the daemon
+        // or draining the queue manually. Other job kinds
+        // (UpdateMember, MarkDeparted, DeleteMember) bypass the
+        // gate: `publish_on_join` only governs new-member
+        // publication, not lifecycle updates / departures.
+        if job.kind == SyncJobKind::PublishMember && self.policy_skips_publish().await {
+            job.record_success();
+            self.emit_outcome(&job, true);
+            if let Err(e) = delete_sync_job(&self.sync_queue_ks, job.id).await {
+                warn!(
+                    error = %e,
+                    job_id = %job.id,
+                    "failed to delete policy-skipped PublishMember job"
+                );
+            }
+            debug!(
+                job_id = %job.id,
+                did = %job.member_did,
+                "registry.rego.publish_on_join=false — skipping PublishMember"
+            );
+            return;
+        }
+
         // Flip to InFlight + persist before the network call
         // so a crash mid-flight leaves a row the recovery
         // path will see.
@@ -259,6 +360,24 @@ impl MembershipSyncer {
                         "registry rejected sync job permanently — operator intervention required"
                     );
                 }
+            }
+        }
+    }
+
+    /// Resolve `data.vtc.registry.publish_on_join` against the
+    /// currently-active `registry.rego`. Returns `true` only
+    /// when the policy explicitly emits `false`; any other
+    /// outcome (no policy, compile error, rule missing) returns
+    /// `false` so we default to publishing. See
+    /// [`super::policy::evaluate_publish_on_join`] for the
+    /// failure-mode rationale.
+    async fn policy_skips_publish(&self) -> bool {
+        match evaluate_publish_on_join(&self.policies_ks, &self.active_policies_ks).await {
+            Ok(PublishOnJoinDecision::SkipPublishOnJoin) => true,
+            Ok(PublishOnJoinDecision::PublishOnJoin) => false,
+            Err(e) => {
+                warn!(error = %e, "publish_on_join evaluation failed — defaulting to publish");
+                false
             }
         }
     }
@@ -368,6 +487,8 @@ mod tests {
         let sync_queue_ks = store.keyspace("sync_queue").unwrap();
         let sync_cursor_ks = store.keyspace("sync_cursor").unwrap();
         let registry_records_ks = store.keyspace("registry_records").unwrap();
+        let policies_ks = store.keyspace("policies").unwrap();
+        let active_policies_ks = store.keyspace("active_policies").unwrap();
         let key_store = AuditKeyStore::new(audit_key_ks);
         key_store.ensure_initial(&[0xAB; 32]).await.unwrap();
         let audit_writer = AuditWriter::new(audit_ks.clone(), key_store);
@@ -378,6 +499,8 @@ mod tests {
             sync_queue_ks,
             sync_cursor_ks,
             registry_records_ks,
+            policies_ks,
+            active_policies_ks,
             client,
             RegistryHealth::new(),
             Some(audit_writer),
@@ -481,6 +604,44 @@ mod tests {
 
         let jobs = list_sync_jobs(&syncer.sync_queue_ks).await.unwrap();
         assert_eq!(jobs[0].state, SyncJobState::Pending);
+    }
+
+    #[tokio::test]
+    async fn publish_on_join_false_skips_dispatch() {
+        use crate::policy::{Policy, PolicyPurpose, set_active_policy_id, store_policy};
+        let (syncer, mock, _dir) = fixture().await;
+        // Install a registry policy that disables publish-on-join.
+        let src = "\
+package vtc.registry
+import rego.v1
+default publish_on_join := false
+";
+        use sha2::{Digest, Sha256};
+        let sha: [u8; 32] = Sha256::digest(src.as_bytes()).into();
+        let id = uuid::Uuid::new_v4();
+        let policy = Policy {
+            id,
+            purpose: PolicyPurpose::Registry,
+            rego_source: src.into(),
+            sha256: sha,
+            activated_at: Some(chrono::Utc::now()),
+            author_did: "did:key:test".into(),
+            created_at: chrono::Utc::now(),
+            version: 1,
+        };
+        store_policy(&syncer.policies_ks, &policy).await.unwrap();
+        set_active_policy_id(&syncer.active_policies_ks, PolicyPurpose::Registry, id)
+            .await
+            .unwrap();
+
+        write_member_added(&syncer.audit_ks, "did:key:zSkip").await;
+        syncer.tick().await.unwrap();
+
+        // Registry never got called.
+        assert_eq!(mock.call_counts().await.publish, 0);
+        // Job row deleted (policy-skip is a success state).
+        let jobs = list_sync_jobs(&syncer.sync_queue_ks).await.unwrap();
+        assert!(jobs.is_empty());
     }
 
     #[tokio::test]

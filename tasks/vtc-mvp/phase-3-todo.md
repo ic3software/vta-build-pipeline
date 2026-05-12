@@ -177,7 +177,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.5 — Three-disposition reconciliation
 
-### `[ ]` M3.5.1 — Wire `registry.rego` into the syncer
+### `[x]` M3.5.1 — Wire `registry.rego` into the syncer
 
 - **Acceptance**
   - When dispatching a `DeleteMember` job, the syncer
@@ -210,7 +210,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.6 — RTBF override
 
-### `[ ]` M3.6.1 — Member-initiated Purge bypasses `min_disposition`
+### `[x]` M3.6.1 — Member-initiated Purge bypasses `min_disposition`
 
 - **Acceptance**
   - When a `MemberRemoved` audit envelope has
@@ -240,7 +240,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.7 — RTBF batching
 
-### `[ ]` M3.7.1 — Daily coalesced batch
+### `[x]` M3.7.1 — Daily coalesced batch
 
 - **Acceptance**
   - RTBF-flagged `SyncJob` rows are enqueued with
@@ -272,7 +272,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.8 — `GET /v1/health/diagnostics`
 
-### `[ ]` M3.8.1 — Admin diagnostics endpoint
+### `[x]` M3.8.1 — Admin diagnostics endpoint
 
 - **Acceptance**
   - `AdminAuth`. Response shape:
