@@ -112,6 +112,18 @@
       "status": "Draft",
       "path": "admin/config/restart/1.0",
       "rest": "POST /v1/admin/config/restart"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/admin/config/export/1.0",
+      "status": "Draft",
+      "path": "admin/config/export/1.0",
+      "rest": "POST /v1/admin/config/export"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/admin/config/import/1.0",
+      "status": "Draft",
+      "path": "admin/config/import/1.0",
+      "rest": "POST /v1/admin/config/import"
     }
   ]
 }

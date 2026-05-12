@@ -618,3 +618,377 @@ async fn restart_wrong_trust_task_returns_415() {
     let (status, _) = body_value(resp).await;
     assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
+
+// ──────────────────────── Export / Import ────────────────────────
+
+const EXPORT_TASK: &str = "https://trusttasks.org/openvtc/vtc/admin/config/export/1.0";
+const IMPORT_TASK: &str = "https://trusttasks.org/openvtc/vtc/admin/config/import/1.0";
+
+async fn export_post(fix: &Fixture, token: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/config/export")
+        .header("Trust-Task", EXPORT_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    body_value(resp).await
+}
+
+async fn import_post(
+    fix: &Fixture,
+    token: &str,
+    confirm: bool,
+    body: Value,
+) -> (StatusCode, Value) {
+    let uri = if confirm {
+        "/v1/admin/config/import?confirm=true"
+    } else {
+        "/v1/admin/config/import"
+    };
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Trust-Task", IMPORT_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    body_value(resp).await
+}
+
+async fn seed_profile(fix: &Fixture) -> vtc_service::community::CommunityProfile {
+    use vtc_service::community::CommunityProfile;
+    let mut p = CommunityProfile::new("did:webvh:vtc.example.com:abc", "Example");
+    p.description = "the original".to_string();
+    vtc_service::community::store_profile(&fix.state.community_ks, &p)
+        .await
+        .unwrap();
+    p
+}
+
+#[tokio::test]
+async fn export_empty_fresh_install_returns_v1_schema_no_profile_no_overrides() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    let (status, body) = export_post(&fix, &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schemaVersion"], 1);
+    assert!(body["communityProfile"].is_null());
+    assert_eq!(body["configOverrides"], json!({}));
+    assert!(body["exportedAt"].as_str().unwrap().contains("T"));
+}
+
+#[tokio::test]
+async fn export_includes_profile_and_db_overrides() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    seed_profile(&fix).await;
+
+    // Seed a db-layer override via PATCH so the export reflects it.
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"log.level":"debug"}"#))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (status, body) = export_post(&fix, &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["communityProfile"]["name"], "Example");
+    assert_eq!(body["communityProfile"]["description"], "the original");
+    assert_eq!(body["configOverrides"]["log.level"], "debug");
+}
+
+#[tokio::test]
+async fn export_requires_admin_role() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "reader").await;
+    let (status, _) = export_post(&fix, &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn import_dry_run_returns_diff_without_persisting() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    seed_profile(&fix).await;
+
+    let payload = json!({
+        "schemaVersion": 1,
+        "exportedAt": "2026-05-12T03:42:00Z",
+        "communityProfile": {
+            "communityDid": "did:webvh:vtc.example.com:abc",
+            "name": "Renamed",
+            "description": "the original",
+            "logoUrl": null,
+            "publicUrl": null,
+            "contactEmail": null,
+            "language": "en",
+            "createdAt": "2026-05-12T00:00:00Z",
+            "extensions": null
+        },
+        "configOverrides": { "log.level": "debug" }
+    });
+    let (status, body) = import_post(&fix, &token, false, payload).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["confirmed"], false);
+
+    // Diff lists the changed name + the new db-layer override.
+    let profile_keys: Vec<_> = body["communityProfileDiff"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["key"].as_str().unwrap().to_string())
+        .collect();
+    assert!(profile_keys.contains(&"name".to_string()));
+    let overrides_keys: Vec<_> = body["configOverridesDiff"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["key"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(overrides_keys, vec!["log.level"]);
+
+    // Nothing applied.
+    assert_eq!(body["communityProfileApplied"], json!([]));
+    assert_eq!(body["configOverridesApplied"], json!([]));
+
+    // Live profile unchanged.
+    let live = vtc_service::community::load_profile(&fix.state.community_ks)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.name, "Example");
+}
+
+#[tokio::test]
+async fn import_confirm_applies_profile_and_overrides() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    seed_profile(&fix).await;
+
+    let payload = json!({
+        "schemaVersion": 1,
+        "exportedAt": "2026-05-12T03:42:00Z",
+        "communityProfile": {
+            "communityDid": "did:webvh:vtc.example.com:abc",
+            "name": "Renamed",
+            "description": "the original",
+            "logoUrl": null,
+            "publicUrl": null,
+            "contactEmail": null,
+            "language": "fr",
+            "createdAt": "2026-05-12T00:00:00Z",
+            "extensions": null
+        },
+        "configOverrides": { "log.level": "debug" }
+    });
+    let (status, body) = import_post(&fix, &token, true, payload).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["confirmed"], true);
+
+    let applied: Vec<_> = body["communityProfileApplied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(applied.contains(&"name".to_string()));
+    assert!(applied.contains(&"language".to_string()));
+    assert_eq!(body["configOverridesApplied"], json!(["log.level"]));
+
+    // Live profile reflects the import.
+    let live = vtc_service::community::load_profile(&fix.state.community_ks)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.name, "Renamed");
+    assert_eq!(live.language, "fr");
+
+    // Both audit events landed.
+    let raw = fix
+        .state
+        .audit_ks
+        .prefix_iter_raw(b"2".to_vec())
+        .await
+        .unwrap();
+    let envelopes: Vec<vti_common::audit::AuditEnvelope> = raw
+        .iter()
+        .map(|(_, v)| serde_json::from_slice(v).unwrap())
+        .collect();
+    let mut saw_profile = false;
+    let mut saw_config = false;
+    for env in &envelopes {
+        match &env.event {
+            vti_common::audit::AuditEvent::CommunityProfileUpdated(_) => saw_profile = true,
+            vti_common::audit::AuditEvent::ConfigChanged(_) => saw_config = true,
+            _ => {}
+        }
+    }
+    assert!(saw_profile, "CommunityProfileUpdated missing");
+    assert!(saw_config, "ConfigChanged missing");
+}
+
+#[tokio::test]
+async fn import_refuses_mismatched_community_did_with_409() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    seed_profile(&fix).await;
+
+    let payload = json!({
+        "schemaVersion": 1,
+        "exportedAt": "2026-05-12T03:42:00Z",
+        "communityProfile": {
+            "communityDid": "did:webvh:OTHER.example.com:xyz",
+            "name": "Foreign",
+            "description": "",
+            "logoUrl": null,
+            "publicUrl": null,
+            "contactEmail": null,
+            "language": "en",
+            "createdAt": "2026-05-12T00:00:00Z",
+            "extensions": null
+        },
+        "configOverrides": {}
+    });
+    let (status, body) = import_post(&fix, &token, true, payload).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["error"].as_str().unwrap().contains("communityDid"));
+}
+
+#[tokio::test]
+async fn import_round_trip_export_then_import_equivalence() {
+    // Set up source VTC with profile + override, export.
+    let src = build_with(true, None).await;
+    let token = token_for(&src, "admin").await;
+    seed_profile(&src).await;
+
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/v1/admin/config")
+        .header("Trust-Task", CONFIG_TASK)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"log.level":"debug"}"#))
+        .unwrap();
+    let _ = src.router.clone().oneshot(req).await.unwrap();
+
+    let (_, exported) = export_post(&src, &token).await;
+
+    // Fresh VTC: import the export, confirm.
+    let dst = build_with(true, None).await;
+    let dst_token = token_for(&dst, "admin").await;
+    let (status, body) = import_post(&dst, &dst_token, true, exported.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Export the destination and confirm it round-trips.
+    let (_, dst_exported) = export_post(&dst, &dst_token).await;
+
+    // Compare semantically — `exportedAt` differs, but
+    // `communityProfile` (minus `createdAt`, which we accept varying
+    // across instances) and `configOverrides` must match.
+    let strip_volatile = |mut v: Value| -> Value {
+        v["exportedAt"] = json!("<stripped>");
+        if let Some(p) = v.get_mut("communityProfile")
+            && let Some(o) = p.as_object_mut()
+        {
+            o.insert("createdAt".to_string(), json!("<stripped>"));
+        }
+        v
+    };
+    assert_eq!(strip_volatile(exported), strip_volatile(dst_exported));
+}
+
+#[tokio::test]
+async fn import_rejects_unknown_config_key() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    let payload = json!({
+        "schemaVersion": 1,
+        "exportedAt": "2026-05-12T03:42:00Z",
+        "communityProfile": null,
+        "configOverrides": { "godmode.enable": true }
+    });
+    let (status, body) = import_post(&fix, &token, true, payload).await;
+    assert_eq!(status, StatusCode::OK);
+    let rejected = body["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["key"], "godmode.enable");
+}
+
+#[tokio::test]
+async fn import_rejects_invalid_value_with_reason() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    let payload = json!({
+        "schemaVersion": 1,
+        "exportedAt": "2026-05-12T03:42:00Z",
+        "communityProfile": null,
+        "configOverrides": { "log.level": "shouting" }
+    });
+    let (status, body) = import_post(&fix, &token, true, payload).await;
+    assert_eq!(status, StatusCode::OK);
+    let rejected = body["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["key"], "log.level");
+    assert!(
+        rejected[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("validation failed"),
+        "got {}",
+        rejected[0]["reason"]
+    );
+}
+
+#[tokio::test]
+async fn import_wrong_schema_version_returns_400() {
+    let fix = build_with(true, None).await;
+    let token = token_for(&fix, "admin").await;
+    let payload = json!({
+        "schemaVersion": 99,
+        "exportedAt": "2026-05-12T03:42:00Z",
+        "communityProfile": null,
+        "configOverrides": {}
+    });
+    let (status, _) = import_post(&fix, &token, false, payload).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn import_apply_503_when_audit_writer_missing() {
+    let fix = build_with(false, None).await;
+    let token = token_for(&fix, "admin").await;
+    let payload = json!({
+        "schemaVersion": 1,
+        "exportedAt": "2026-05-12T03:42:00Z",
+        "communityProfile": null,
+        "configOverrides": { "log.level": "debug" }
+    });
+    let (status, _) = import_post(&fix, &token, true, payload).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn import_dry_run_works_without_audit_writer() {
+    // Pure dry-run never emits an audit event, so 503 is the wrong
+    // answer — we should return 200 with the diff.
+    let fix = build_with(false, None).await;
+    let token = token_for(&fix, "admin").await;
+    let payload = json!({
+        "schemaVersion": 1,
+        "exportedAt": "2026-05-12T03:42:00Z",
+        "communityProfile": null,
+        "configOverrides": { "log.level": "debug" }
+    });
+    let (status, body) = import_post(&fix, &token, false, payload).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["confirmed"], false);
+}

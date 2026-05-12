@@ -18,21 +18,26 @@
 use std::collections::HashMap;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::info;
 use vti_common::auth::AdminAuth;
 use vti_common::error::AppError;
 
+use crate::community::{CommunityProfile, CommunityProfileUpdate, load_profile, store_profile};
 use crate::config_store::{
     ConfigStore, EffectiveConfig, compute_effective_config, lookup, validate_value,
 };
 use crate::server::AppState;
 #[allow(unused_imports)]
 use crate::supervisor::SupervisorKind;
-use vti_common::audit::{AuditEvent, AuditWriter, ConfigReloadedData, RestartRequestedData};
+use vti_common::audit::{
+    AuditEvent, AuditWriter, CommunityProfileUpdatedData, ConfigChange, ConfigChangedData,
+    ConfigReloadedData, ConfigSource, RestartRequestedData,
+};
 
 /// PATCH request body: arbitrary `key → value` map. Keys not in
 /// [`crate::config_store::REGISTRY`] are reported back under
@@ -340,6 +345,397 @@ fn apply_to_live(cfg: &mut crate::config::AppConfig, key: &str, value: &Value) -
         return true;
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+/// Schema version for the export/import envelope. Bumped on any
+/// breaking shape change so the import handler can refuse old
+/// exports cleanly. Phase 0 ships v1.
+pub const EXPORT_SCHEMA_VERSION: u32 = 1;
+
+/// Wire payload for `POST /v1/admin/config/{export,import}`.
+///
+/// `community_profile` is `None` when the community hasn't been
+/// initialised yet (pre-bootstrap). `config_overrides` carries
+/// *only* the db-layer keys — env-layer and toml-layer values stay
+/// per-host and aren't portable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigExport {
+    pub schema_version: u32,
+    pub exported_at: DateTime<Utc>,
+    pub community_profile: Option<CommunityProfile>,
+    pub config_overrides: HashMap<String, Value>,
+}
+
+pub async fn export_config(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+) -> Result<Json<ConfigExport>, AppError> {
+    let community_profile = load_profile(&state.community_ks).await?;
+    let store = ConfigStore::new(state.config_ks.clone());
+    let config_overrides = store.snapshot().await?;
+
+    Ok(Json(ConfigExport {
+        schema_version: EXPORT_SCHEMA_VERSION,
+        exported_at: Utc::now(),
+        community_profile,
+        config_overrides,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Import (diff-and-confirm)
+// ---------------------------------------------------------------------------
+
+/// Query string for `POST /v1/admin/config/import`. Default is
+/// `confirm=false` (dry-run / diff). The operator UX shows the diff,
+/// then re-submits with `?confirm=true` to apply.
+#[derive(Debug, Deserialize)]
+pub struct ImportQuery {
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// A single field's worth of import diff. `oldValue` is `None`
+/// when the key isn't currently set (either no profile yet, or no
+/// db-layer override). `newValue` is `None` when the import omits
+/// the field — which `import` interprets as "leave the live value
+/// alone", not "clear it".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldDiff {
+    pub key: String,
+    pub old_value: Option<Value>,
+    pub new_value: Option<Value>,
+}
+
+/// `POST /v1/admin/config/import` response. The shape is the same
+/// regardless of `confirm`: `applied` is empty on dry-run; on
+/// confirm it lists the keys that actually persisted.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResponse {
+    /// Was the request a dry-run? Mirrors the inbound `?confirm`
+    /// flag so an admin UX caching the response can render the
+    /// banner correctly.
+    pub confirmed: bool,
+    /// Profile-field-level diffs against the current profile.
+    /// Empty when import omits `communityProfile` or when no
+    /// fields differ.
+    pub community_profile_diff: Vec<FieldDiff>,
+    /// Config-override-level diffs. One entry per registry key
+    /// that the import would change.
+    pub config_overrides_diff: Vec<FieldDiff>,
+    /// On apply: the profile fields that were written. Empty on
+    /// dry-run or when no change.
+    pub community_profile_applied: Vec<String>,
+    /// On apply: the override keys that were written. Empty on
+    /// dry-run.
+    pub config_overrides_applied: Vec<String>,
+    /// Keys rejected by validation (unknown registry key, type
+    /// mismatch, value-out-of-range, oversized extensions blob).
+    pub rejected: Vec<RejectedKey>,
+}
+
+pub async fn import_config(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    Query(query): Query<ImportQuery>,
+    Json(req): Json<ConfigExport>,
+) -> Result<(StatusCode, Json<ImportResponse>), AppError> {
+    if req.schema_version != EXPORT_SCHEMA_VERSION {
+        return Err(AppError::Validation(format!(
+            "unsupported export schemaVersion: got {}, expected {EXPORT_SCHEMA_VERSION}",
+            req.schema_version
+        )));
+    }
+
+    // community_did mismatch is a 409 — refuse to clobber a
+    // different community's profile with this import. A
+    // freshly-installed VTC with no profile accepts any
+    // community_did from the import.
+    let current_profile = load_profile(&state.community_ks).await?;
+    if let (Some(current), Some(incoming)) = (&current_profile, &req.community_profile)
+        && current.community_did != incoming.community_did
+    {
+        return Err(AppError::Conflict(format!(
+            "communityDid mismatch: current is {}, import carries {}",
+            current.community_did, incoming.community_did
+        )));
+    }
+
+    let store = ConfigStore::new(state.config_ks.clone());
+    let current_overrides = store.snapshot().await?;
+
+    // --- diff ---------------------------------------------------------
+    let mut profile_diff: Vec<FieldDiff> = Vec::new();
+    let mut overrides_diff: Vec<FieldDiff> = Vec::new();
+    let mut rejected: Vec<RejectedKey> = Vec::new();
+
+    if let Some(incoming) = &req.community_profile {
+        for (key, old, new) in profile_field_pairs(current_profile.as_ref(), incoming) {
+            if old != new {
+                profile_diff.push(FieldDiff {
+                    key: key.into(),
+                    old_value: old,
+                    new_value: new,
+                });
+            }
+        }
+    }
+
+    for (key, new_value) in &req.config_overrides {
+        let Some(def) = lookup(key) else {
+            rejected.push(RejectedKey {
+                key: key.clone(),
+                reason: "unknown config key (not in registry)".into(),
+            });
+            continue;
+        };
+        if let Err(e) = validate_value(def, new_value) {
+            rejected.push(RejectedKey {
+                key: key.clone(),
+                reason: format!("validation failed: {e}"),
+            });
+            continue;
+        }
+        let old = current_overrides.get(key).cloned();
+        if old.as_ref() != Some(new_value) {
+            overrides_diff.push(FieldDiff {
+                key: key.clone(),
+                old_value: old,
+                new_value: Some(new_value.clone()),
+            });
+        }
+    }
+
+    // --- dry-run? -----------------------------------------------------
+    if !query.confirm {
+        return Ok((
+            StatusCode::OK,
+            Json(ImportResponse {
+                confirmed: false,
+                community_profile_diff: profile_diff,
+                config_overrides_diff: overrides_diff,
+                community_profile_applied: Vec::new(),
+                config_overrides_applied: Vec::new(),
+                rejected,
+            }),
+        ));
+    }
+
+    // --- apply --------------------------------------------------------
+    // Profile first so a partial failure on overrides doesn't leave
+    // half a profile applied. Overrides are persisted one key at a
+    // time, so a fjall-side error mid-loop reports back via
+    // `rejected` rather than aborting.
+    let audit_writer = require_audit_writer(&state)?;
+
+    let community_profile_applied = if let Some(incoming) = req.community_profile.clone() {
+        apply_profile_import(&state, incoming, current_profile.as_ref()).await?
+    } else {
+        Vec::new()
+    };
+
+    let mut config_overrides_applied: Vec<String> = Vec::new();
+    let mut audit_changes: Vec<ConfigChange> = Vec::new();
+    let mut requires_restart = false;
+    for FieldDiff {
+        key,
+        old_value,
+        new_value,
+    } in &overrides_diff
+    {
+        let Some(def) = lookup(key) else { continue };
+        let new_value = match new_value {
+            Some(v) => v.clone(),
+            None => continue,
+        };
+        if let Err(e) = store.put(key, &new_value).await {
+            rejected.push(RejectedKey {
+                key: key.clone(),
+                reason: format!("persistence failed: {e}"),
+            });
+            continue;
+        }
+        config_overrides_applied.push(key.clone());
+        let mut change = ConfigChange {
+            key: key.clone(),
+            old_value: old_value.clone(),
+            new_value,
+            source_before: if old_value.is_some() {
+                ConfigSource::Db
+            } else {
+                ConfigSource::Default
+            },
+        };
+        change.redact_if(|k| matches!(lookup(k), Some(d) if d.sensitive));
+        audit_changes.push(change);
+        if def.requires_restart {
+            requires_restart = true;
+        }
+    }
+
+    if !audit_changes.is_empty() {
+        audit_writer
+            .write(
+                "did:key:vtc-admin",
+                None,
+                AuditEvent::ConfigChanged(ConfigChangedData {
+                    changes: audit_changes,
+                    requires_restart,
+                }),
+            )
+            .await?;
+    }
+    if !community_profile_applied.is_empty() {
+        audit_writer
+            .write(
+                "did:key:vtc-admin",
+                None,
+                AuditEvent::CommunityProfileUpdated(CommunityProfileUpdatedData {
+                    fields_changed: community_profile_applied.clone(),
+                }),
+            )
+            .await?;
+    }
+
+    info!(
+        profile_changed = community_profile_applied.len(),
+        overrides_applied = config_overrides_applied.len(),
+        rejected = rejected.len(),
+        "config imported"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(ImportResponse {
+            confirmed: true,
+            community_profile_diff: profile_diff,
+            config_overrides_diff: overrides_diff,
+            community_profile_applied,
+            config_overrides_applied,
+            rejected,
+        }),
+    ))
+}
+
+/// Apply the incoming profile to `community_ks`. Returns the list of
+/// field names that changed (driving the
+/// `CommunityProfileUpdated.fieldsChanged` audit payload).
+///
+/// If no profile exists yet the incoming profile is stored as-is
+/// (and **all** populated fields are reported as changed, matching
+/// `CommunityProfileUpdate::apply`'s contract).
+async fn apply_profile_import(
+    state: &AppState,
+    incoming: CommunityProfile,
+    current: Option<&CommunityProfile>,
+) -> Result<Vec<String>, AppError> {
+    let Some(current) = current else {
+        // Fresh install — store the import verbatim and report every
+        // non-default-shaped field as changed.
+        let mut changed = Vec::new();
+        if !incoming.name.is_empty() {
+            changed.push("name".into());
+        }
+        if !incoming.description.is_empty() {
+            changed.push("description".into());
+        }
+        if incoming.logo_url.is_some() {
+            changed.push("logoUrl".into());
+        }
+        if incoming.public_url.is_some() {
+            changed.push("publicUrl".into());
+        }
+        if incoming.contact_email.is_some() {
+            changed.push("contactEmail".into());
+        }
+        if incoming.language != "en" {
+            changed.push("language".into());
+        }
+        if !incoming.extensions.is_null() {
+            changed.push("extensions".into());
+        }
+        store_profile(&state.community_ks, &incoming).await?;
+        return Ok(changed);
+    };
+
+    // Existing profile — build a `CommunityProfileUpdate` from the
+    // import and let it diff + apply. This reuses the existing
+    // extension-size guard.
+    let patch = CommunityProfileUpdate {
+        name: Some(incoming.name),
+        description: Some(incoming.description),
+        logo_url: Some(incoming.logo_url),
+        public_url: Some(incoming.public_url),
+        contact_email: Some(incoming.contact_email),
+        language: Some(incoming.language),
+        extensions: Some(incoming.extensions),
+    };
+    let mut updated = current.clone();
+    let changed = patch.apply(&mut updated)?;
+    if !changed.is_empty() {
+        store_profile(&state.community_ks, &updated).await?;
+    }
+    Ok(changed)
+}
+
+/// Iterate profile fields as `(key, old_value, new_value)` triples.
+/// Includes `community_did` so a mismatched-but-allowed (i.e.,
+/// fresh-install) import surfaces it in the diff for the operator's
+/// review.
+fn profile_field_pairs(
+    current: Option<&CommunityProfile>,
+    incoming: &CommunityProfile,
+) -> Vec<(&'static str, Option<Value>, Option<Value>)> {
+    let s = |v: &str| Value::String(v.to_string());
+    let opt_s = |v: &Option<String>| match v {
+        Some(s) => Value::String(s.clone()),
+        None => Value::Null,
+    };
+    vec![
+        (
+            "communityDid",
+            current.map(|p| s(&p.community_did)),
+            Some(s(&incoming.community_did)),
+        ),
+        ("name", current.map(|p| s(&p.name)), Some(s(&incoming.name))),
+        (
+            "description",
+            current.map(|p| s(&p.description)),
+            Some(s(&incoming.description)),
+        ),
+        (
+            "logoUrl",
+            current.map(|p| opt_s(&p.logo_url)),
+            Some(opt_s(&incoming.logo_url)),
+        ),
+        (
+            "publicUrl",
+            current.map(|p| opt_s(&p.public_url)),
+            Some(opt_s(&incoming.public_url)),
+        ),
+        (
+            "contactEmail",
+            current.map(|p| opt_s(&p.contact_email)),
+            Some(opt_s(&incoming.contact_email)),
+        ),
+        (
+            "language",
+            current.map(|p| s(&p.language)),
+            Some(s(&incoming.language)),
+        ),
+        (
+            "extensions",
+            current.map(|p| p.extensions.clone()),
+            Some(incoming.extensions.clone()),
+        ),
+    ]
 }
 
 // ---------------------------------------------------------------------------
