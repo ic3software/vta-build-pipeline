@@ -65,6 +65,8 @@ async fn build_fixture(public_url: Option<&str>, with_install_signer: bool) -> F
     let config_ks = store.keyspace("config").unwrap();
     let passkey_ks = store.keyspace("passkey").unwrap();
     let install_ks = store.keyspace("install").unwrap();
+    let audit_ks = store.keyspace("audit").unwrap();
+    let audit_key_ks = store.keyspace("audit_key").unwrap();
     let install_store = InstallTokenStore::new(install_ks.clone());
 
     let config: AppConfig = toml::from_str(&format!(
@@ -96,6 +98,8 @@ async fn build_fixture(public_url: Option<&str>, with_install_signer: bool) -> F
         config_ks,
         passkey_ks,
         install_ks: install_ks.clone(),
+        audit_ks,
+        audit_key_ks,
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,
         secrets_resolver: None,
@@ -105,6 +109,7 @@ async fn build_fixture(public_url: Option<&str>, with_install_signer: bool) -> F
         public_url: public_url.map(|s| s.to_string()),
         install_signer: install_signer.clone(),
         install_store: install_store.clone(),
+        audit_writer: None,
     };
 
     let router = routes::router().with_state(state);

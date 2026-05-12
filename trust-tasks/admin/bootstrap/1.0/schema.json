@@ -1,0 +1,34 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/admin/bootstrap/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Admin — Bootstrap",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "object",
+      "required": ["setup_session_token"],
+      "properties": {
+        "setup_session_token": {
+          "type": "string",
+          "description": "Setup-session JWT (aud=vtc-install-session) minted by /v1/install/claim/finish."
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["adminDid", "eventId"],
+      "properties": {
+        "adminDid": {
+          "type": "string",
+          "pattern": "^did:key:z",
+          "description": "The admin DID that was just written to the ACL."
+        },
+        "eventId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "event_id of the persisted CommunityInstalled audit envelope."
+        }
+      }
+    }
+  }
+}

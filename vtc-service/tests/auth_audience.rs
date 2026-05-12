@@ -53,6 +53,8 @@ async fn build_test_router() -> (axum::Router, Arc<JwtKeys>, tempfile::TempDir) 
     let config_ks = store.keyspace("config").unwrap();
     let passkey_ks = store.keyspace("passkey").unwrap();
     let install_ks = store.keyspace("install").unwrap();
+    let audit_ks = store.keyspace("audit").unwrap();
+    let audit_key_ks = store.keyspace("audit_key").unwrap();
 
     let jwt_seed = [0x42u8; 32];
     let jwt_keys = Arc::new(JwtKeys::from_ed25519_bytes(&jwt_seed, "VTC").expect("jwt keys"));
@@ -86,6 +88,9 @@ async fn build_test_router() -> (axum::Router, Arc<JwtKeys>, tempfile::TempDir) 
         public_url: None,
         install_signer: None,
         install_store: vtc_service::install::InstallTokenStore::new(install_ks),
+        audit_ks,
+        audit_key_ks,
+        audit_writer: None,
     };
 
     let router = routes::router().with_state(state);

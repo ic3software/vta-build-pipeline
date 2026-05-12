@@ -24,6 +24,7 @@ use crate::store::{KeyspaceHandle, Store};
 use tokio::sync::{RwLock, watch};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
+use vti_common::audit::{AuditKeyStore, AuditWriter};
 use vti_common::auth::passkey::{PasskeyState, build_webauthn};
 use webauthn_rs::Webauthn;
 
@@ -42,6 +43,8 @@ pub struct AppState {
     pub config_ks: KeyspaceHandle,
     pub passkey_ks: KeyspaceHandle,
     pub install_ks: KeyspaceHandle,
+    pub audit_ks: KeyspaceHandle,
+    pub audit_key_ks: KeyspaceHandle,
     pub config: Arc<RwLock<AppConfig>>,
     pub did_resolver: Option<DIDCacheClient>,
     pub secrets_resolver: Option<Arc<ThreadedSecretsResolver>>,
@@ -62,6 +65,11 @@ pub struct AppState {
     /// Wraps `install_ks` with the claim-window state machine. Cheap
     /// to clone; always present once `install_ks` is open.
     pub install_store: InstallTokenStore,
+    /// HMAC-actor-hashing audit envelope writer. `None` until the
+    /// secret store yields key material (the audit key is HKDF-
+    /// derived from the master seed). Endpoints that emit audit
+    /// events 503 in that case.
+    pub audit_writer: Option<AuditWriter>,
 }
 
 impl AuthState for AppState {
@@ -125,10 +133,19 @@ pub async fn run(
     let passkey_ks = store.keyspace("passkey")?;
     let install_ks = store.keyspace("install")?;
     let install_store = InstallTokenStore::new(install_ks.clone());
+    let audit_ks = store.keyspace("audit")?;
+    let audit_key_ks = store.keyspace("audit_key")?;
 
-    // Initialize auth infrastructure
-    let (did_resolver, secrets_resolver, jwt_keys, atm, install_signer) =
-        init_auth(&config, &*secret_store).await;
+    // Initialize auth infrastructure. Pass the audit keyspaces in so
+    // `init_auth` can derive the HMAC audit key from the same secret
+    // store contents it uses for the install signer.
+    let (did_resolver, secrets_resolver, jwt_keys, atm, install_signer, audit_writer) = init_auth(
+        &config,
+        &*secret_store,
+        audit_ks.clone(),
+        audit_key_ks.clone(),
+    )
+    .await;
 
     // Build WebAuthn relying party handle from `public_url`. Optional —
     // a serverless / pre-setup deployment has no public URL yet and
@@ -186,6 +203,8 @@ pub async fn run(
         config_ks,
         passkey_ks,
         install_ks,
+        audit_ks,
+        audit_key_ks,
         config: Arc::new(RwLock::new(config)),
         did_resolver,
         secrets_resolver,
@@ -195,6 +214,7 @@ pub async fn run(
         public_url,
         install_signer,
         install_store,
+        audit_writer,
     };
 
     // Spawn three named OS threads
@@ -410,18 +430,21 @@ fn run_didcomm_thread(
 async fn init_auth(
     config: &AppConfig,
     secret_store: &dyn SecretStore,
+    audit_ks: KeyspaceHandle,
+    audit_key_ks: KeyspaceHandle,
 ) -> (
     Option<DIDCacheClient>,
     Option<Arc<ThreadedSecretsResolver>>,
     Option<Arc<JwtKeys>>,
     Option<ATM>,
     Option<Arc<InstallTokenSigner>>,
+    Option<AuditWriter>,
 ) {
     let vtc_did = match &config.vtc_did {
         Some(did) => did.clone(),
         None => {
             warn!("vtc_did not configured — auth endpoints will not work (run setup first)");
-            return (None, None, None, None, None);
+            return (None, None, None, None, None, None);
         }
     };
 
@@ -430,11 +453,11 @@ async fn init_auth(
         Ok(Some(s)) => s,
         Ok(None) => {
             warn!("no key material found — auth endpoints will not work (run setup first)");
-            return (None, None, None, None, None);
+            return (None, None, None, None, None, None);
         }
         Err(e) => {
             warn!("failed to load key material: {e} — auth endpoints will not work");
-            return (None, None, None, None, None);
+            return (None, None, None, None, None, None);
         }
     };
 
@@ -443,16 +466,16 @@ async fn init_auth(
             "key material is {} bytes, expected 64 — auth endpoints will not work",
             key_material.len()
         );
-        return (None, None, None, None, None);
+        return (None, None, None, None, None, None);
     }
 
     let Ok(ed25519_bytes): Result<&[u8; 32], _> = key_material[..32].try_into() else {
         warn!("key material corrupted — auth endpoints will not work");
-        return (None, None, None, None, None);
+        return (None, None, None, None, None, None);
     };
     let Ok(x25519_bytes): Result<&[u8; 32], _> = key_material[32..].try_into() else {
         warn!("key material corrupted — auth endpoints will not work");
-        return (None, None, None, None, None);
+        return (None, None, None, None, None, None);
     };
 
     // Derive the install-token signer from the full 64-byte secret.
@@ -469,12 +492,27 @@ async fn init_auth(
         }
     };
 
+    // Derive the HMAC audit key from the same master seed (different
+    // HKDF `info`) and build the writer. Idempotent across restarts;
+    // the very first boot creates an `Initial` row and the active
+    // marker, subsequent boots no-op.
+    let audit_writer = {
+        let key_store = AuditKeyStore::new(audit_key_ks);
+        match key_store.ensure_initial(&key_material).await {
+            Ok(_) => Some(AuditWriter::new(audit_ks, key_store)),
+            Err(e) => {
+                warn!("failed to derive initial audit key: {e} — audit-emitting routes disabled");
+                None
+            }
+        }
+    };
+
     // 1. DID resolver (local mode)
     let did_resolver = match DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await {
         Ok(r) => r,
         Err(e) => {
             warn!("failed to create DID resolver: {e} — auth endpoints will not work");
-            return (None, None, None, None, install_signer);
+            return (None, None, None, None, install_signer, audit_writer);
         }
     };
 
@@ -505,6 +543,7 @@ async fn init_auth(
                     None,
                     None,
                     install_signer,
+                    audit_writer,
                 );
             }
         },
@@ -518,6 +557,7 @@ async fn init_auth(
                 None,
                 None,
                 install_signer,
+                audit_writer,
             );
         }
     };
@@ -561,6 +601,7 @@ async fn init_auth(
         Some(Arc::new(jwt_keys)),
         atm,
         install_signer,
+        audit_writer,
     )
 }
 

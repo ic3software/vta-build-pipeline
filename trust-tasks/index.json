@@ -76,6 +76,12 @@
       "status": "Draft",
       "path": "install/claim/finish/1.0",
       "rest": "POST /v1/install/claim/finish"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/admin/bootstrap/1.0",
+      "status": "Draft",
+      "path": "admin/bootstrap/1.0",
+      "rest": "POST /v1/admin/bootstrap"
     }
   ]
 }
