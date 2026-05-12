@@ -79,10 +79,23 @@ impl Default for SecretsConfig {
 }
 
 fn default_host() -> String {
-    "0.0.0.0".to_string()
+    default_host_value()
 }
 
 fn default_port() -> u16 {
+    default_port_value()
+}
+
+/// Compiled-in default for `server.host`. Exposed crate-wide so the
+/// three-layer overlay in `config_store` can attribute the layer
+/// source correctly (a TOML value equal to this is treated as
+/// `Default`, not `Toml`).
+pub(crate) fn default_host_value() -> String {
+    "0.0.0.0".to_string()
+}
+
+/// Compiled-in default for `server.port`. See [`default_host_value`].
+pub(crate) fn default_port_value() -> u16 {
     8200
 }
 

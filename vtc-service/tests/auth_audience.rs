@@ -50,6 +50,7 @@ async fn build_test_router() -> (axum::Router, Arc<JwtKeys>, tempfile::TempDir) 
     let sessions_ks = store.keyspace("sessions").unwrap();
     let acl_ks = store.keyspace("acl").unwrap();
     let community_ks = store.keyspace("community").unwrap();
+    let config_ks = store.keyspace("config").unwrap();
 
     let jwt_seed = [0x42u8; 32];
     let jwt_keys = Arc::new(JwtKeys::from_ed25519_bytes(&jwt_seed, "VTC").expect("jwt keys"));
@@ -71,6 +72,7 @@ async fn build_test_router() -> (axum::Router, Arc<JwtKeys>, tempfile::TempDir) 
         sessions_ks,
         acl_ks,
         community_ks,
+        config_ks,
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,
         secrets_resolver: None,

@@ -590,7 +590,7 @@ second passkey registered. Install carve-out permanently closed.
 
 ## M0.8 — Config plumbing (parallel track)
 
-### `[ ]` M0.8.1 — Three-layer config overlay
+### `[x]` M0.8.1 — Three-layer config overlay
 
 - **Acceptance**
   - `EffectiveConfig` struct exposes the merged view with per-field
@@ -607,7 +607,7 @@ second passkey registered. Install carve-out permanently closed.
   - `vtc-service/src/config_store.rs` (new)
 - **Deps**: M0.1.0
 
-### `[ ]` M0.8.2 — `GET / PATCH /v1/admin/config`
+### `[x]` M0.8.2 — `GET / PATCH /v1/admin/config`
 
 - **Acceptance**
   - `GET` returns `EffectiveConfig`

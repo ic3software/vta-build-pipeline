@@ -58,6 +58,12 @@
       "status": "Draft",
       "path": "community/profile/manage/1.0",
       "rest": "GET, PUT /v1/community/profile"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/admin/config/manage/1.0",
+      "status": "Draft",
+      "path": "admin/config/manage/1.0",
+      "rest": "GET, PATCH /v1/admin/config"
     }
   ]
 }
