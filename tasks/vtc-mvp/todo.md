@@ -793,7 +793,7 @@ second passkey registered. Install carve-out permanently closed.
 
 ## M0.9 — CLI setup wizard rewrite
 
-### `[ ]` M0.9.1 — Map `vta-service` setup shape onto VTC needs
+### `[x]` M0.9.1 — Map `vta-service` setup shape onto VTC needs
 
 Per **D5**: `vta-service` is the latest working reference;
 `vtc-service`'s existing code is throw-away. This task is **research,
