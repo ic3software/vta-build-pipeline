@@ -534,44 +534,84 @@ invite system).
 
 ## M0.6 — Admin bootstrap + multi-passkey schema
 
-### `[ ]` M0.6.1 — Extend ACL `Role` enum + `AdminEntry` shape
+### `[x]` M0.6.1 — Extend ACL `Role` enum + `AdminEntry` shape
+
+Scope cut: the shared `vti_common::acl::Role` enum is unchanged
+(touching it would force VTA into the VTC role taxonomy). Instead
+this milestone ships the VTC admin extension as a **sister record**
+under `admin:<did>` in the existing `passkey` keyspace, coexisting
+with the canonical `acl:<did>` → `AclEntry` row. Phase 1 will unify
+once `vti-common::acl::AclEntry` becomes generic over `Role`.
 
 - **Acceptance**
-  - `VtcRole` per spec §5.3 (`Admin`, `Moderator`, `Issuer`,
-    `Member`, `Custom(String)`)
-  - `AclEntry` extended: admin-role entries carry
-    `passkeys: Vec<RegisteredPasskey>` and `extensions: JsonValue`
-  - Migration path from existing ACL entries documented (existing
-    `Admin` rows get an empty `passkeys` vec)
+  - New `vtc_service::acl::admin::AdminEntry { did, passkeys:
+    Vec<RegisteredPasskey>, extensions: JsonValue, created_at }`
+    plus `get_admin_entry` / `store_admin_entry` /
+    `list_admin_entries` CRUD.
+  - `RegisteredPasskey { credential_id, label, transports,
+    registered_at, last_used_at }` matches spec §4.3.
+  - Backwards-compat: `passkeys` and `extensions` default-on-missing
+    so future migrations stay decoding-safe.
+  - `VtcRole` introduction (spec §5.3) deferred to Phase 1+ when
+    Moderator / Issuer / Member roles are actually exercised by
+    endpoints.
 - **Verify**
-  - Unit tests for serialization round-trip
-  - Backwards-compat test: existing ACL records deserialize cleanly
+  - `acl::admin::tests::*` × 4 — store-and-retrieve, list, legacy
+    deserialise, camelCase wire shape.
 - **Files**
-  - `vti-common/src/acl/mod.rs`
-  - `vtc-service/src/acl/mod.rs`
+  - `vtc-service/src/acl/admin.rs` (new — ~190 lines incl. tests)
+  - `vtc-service/src/acl/mod.rs` (`pub mod admin`)
 - **Deps**: M0.1.0
 
-### `[ ]` M0.6.2 — `POST /v1/admin/bootstrap`
+### `[x]` M0.6.2 — `POST /v1/admin/bootstrap`
 
 - **Acceptance**
-  - Endpoint accepts the setup-session token from M0.5.2 and the
-    candidate admin DID + first passkey
-  - Atomically: writes ACL entry with `role: Admin`, single passkey,
-    emits `CommunityInstalled` audit event, calls
-    `install::carveout::close_carveout()`
-  - Returns 409 if any admin already exists (defence-in-depth even
-    though the install carve-out should prevent this)
+  - Endpoint accepts the setup-session JWT from M0.5.2 (decoder
+    rejects other audiences; `sub` carries the candidate admin DID
+    and `install_jti` propagates the originating install token).
+  - Looks up the persisted `PasskeyUser` (written at claim/finish),
+    lifts the first credential id into a `RegisteredPasskey`, and
+    writes the `AdminEntry` under `admin:<did>` in the `passkey`
+    keyspace.
+  - Writes the `Role::Admin` `AclEntry` under `acl:<did>` in the
+    `acl` keyspace.
+  - Calls `InstallTokenStore::close_carveout` (permanent).
+  - Emits `CommunityInstalled` to the audit log carrying
+    `community_did` and `install_token_jti`.
+  - 409 if any `Role::Admin` ACL entry already exists.
   - Trust Task ID: `admin/bootstrap/1.0`
 - **Verify**
-  - End-to-end happy path test
-  - Bootstrap-after-bootstrap returns 409
-  - `CommunityInstalled` event present in audit log
+  - 9 `tests/admin_bootstrap.rs` integration tests:
+    - `full_install_to_bootstrap_succeeds` — happy path; ACL +
+      admin entry + audit envelope written; carve-out closed.
+    - `second_bootstrap_returns_409` — replay rejected.
+    - `bootstrap_rejects_unsigned_token`
+    - `bootstrap_rejects_install_token_as_setup_token` — audience
+      separation between `vtc-install` and `vtc-install-session`.
+    - `bootstrap_rejects_when_no_passkey_user_exists`
+    - `bootstrap_returns_503_when_install_signer_missing`
+    - `bootstrap_returns_503_when_audit_writer_missing`
+    - `wrong_trust_task_returns_415`
+    - `missing_trust_task_returns_400`
 - **Files**
-  - `vtc-service/src/routes/admin/bootstrap.rs` (new)
-  - `vtc-service/src/routes/admin/mod.rs` (new)
-  - `vtc-service/src/routes/mod.rs`
+  - `vtc-service/src/routes/admin/bootstrap.rs` (new — ~190 lines)
+  - `vtc-service/src/routes/admin/mod.rs` (mount)
+  - `vtc-service/src/routes/mod.rs` (Trust Task + route)
+  - `vtc-service/src/server.rs` (AppState gains `audit_ks`,
+    `audit_key_ks`, `audit_writer`; `init_auth` derives the audit
+    key via `AuditKeyStore::ensure_initial` and threads the
+    writer through)
+  - `vtc-service/src/install/token.rs` (`InstallSessionClaims`
+    gains `install_jti`; `mint_install_session_token` takes the
+    new param)
+  - `vtc-service/src/routes/install.rs` (passes the install jti
+    forward at claim/finish)
+  - `vtc-service/tests/admin_bootstrap.rs` (new — 9 tests)
+  - `vtc-service/tests/{admin_config,auth_audience,community_profile,install_claim,passkey_state}.rs`
+    (new AppState fields)
   - `trust-tasks/admin/bootstrap/1.0/{spec.md,schema.json}`
-- **Deps**: M0.5.2, M0.6.1, M0.1.2
+  - `trust-tasks/index.json`
+- **Deps**: M0.5.2, M0.6.1, M0.3 (audit infrastructure)
 
 ### `[ ]` M0.6.3 — Multi-passkey endpoints with step-up UV reauth
 

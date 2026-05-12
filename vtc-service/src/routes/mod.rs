@@ -59,6 +59,8 @@ pub fn router() -> Router<AppState> {
     let install_claim_finish =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/finish/1.0")
             .expect("static Trust-Task URL");
+    let admin_bootstrap = TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/bootstrap/1.0")
+        .expect("static Trust-Task URL");
 
     TrustTaskRouter::<AppState>::new()
         .route_exempt("/health", get(health::health))
@@ -124,6 +126,14 @@ pub fn router() -> Router<AppState> {
             "/v1/install/claim/finish",
             post(install::claim_finish),
             install_claim_finish,
+        )
+        // Admin bootstrap (M0.6.2) — closes the install carve-out
+        // and writes the first admin ACL entry. Unauthenticated
+        // because the setup-session JWT IS the auth credential.
+        .route_with_task(
+            "/v1/admin/bootstrap",
+            post(admin::bootstrap::bootstrap),
+            admin_bootstrap,
         )
         .into_router()
 }

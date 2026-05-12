@@ -37,6 +37,8 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
     let config_ks = store.keyspace("config").unwrap();
     let passkey_ks = store.keyspace("passkey").unwrap();
     let install_ks = store.keyspace("install").unwrap();
+    let audit_ks = store.keyspace("audit").unwrap();
+    let audit_key_ks = store.keyspace("audit_key").unwrap();
 
     let config: AppConfig = toml::from_str(&format!(
         r#"
@@ -66,6 +68,9 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
         public_url: public_url.map(|s| s.to_string()),
         install_signer: None,
         install_store: vtc_service::install::InstallTokenStore::new(install_ks),
+        audit_ks,
+        audit_key_ks,
+        audit_writer: None,
     };
     (state, dir)
 }

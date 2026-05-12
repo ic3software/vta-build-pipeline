@@ -232,6 +232,11 @@ pub struct InstallSessionClaims {
     /// Random identifier — M0.6's bootstrap endpoint can drop a
     /// once-only marker keyed by `jti` to prevent replay.
     pub jti: String,
+    /// The originating install token's `jti`. Lets the bootstrap
+    /// audit event (`CommunityInstalled.install_token_jti`)
+    /// correlate the carve-out close with the install URL the
+    /// operator clicked.
+    pub install_jti: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -315,11 +320,14 @@ pub fn parse_install_token(
 
 /// Mint a setup-session token for `admin_did`. Called from
 /// `POST /v1/install/claim/finish` after the WebAuthn ceremony and
-/// DID-binding signature both verify.
+/// DID-binding signature both verify. `install_jti` is the
+/// originating install token's `jti` — propagated forward so the
+/// bootstrap audit event can record it.
 pub fn mint_install_session_token(
     signer: &InstallTokenSigner,
     issuer_did: &str,
     admin_did: &str,
+    install_jti: &str,
     ttl_seconds: u64,
 ) -> Result<String, AppError> {
     let now = SystemTime::now()
@@ -336,6 +344,7 @@ pub fn mint_install_session_token(
         exp,
         iat: now,
         jti,
+        install_jti: install_jti.to_string(),
     };
     signer.encode_session(&claims)
 }

@@ -252,6 +252,7 @@ pub async fn claim_finish(
         signer,
         &issuer_did,
         &admin_did,
+        &jti.to_string(),
         INSTALL_SESSION_DEFAULT_TTL_SECS,
     )?;
 

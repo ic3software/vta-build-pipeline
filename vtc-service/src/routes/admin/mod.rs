@@ -5,4 +5,5 @@
 //! reaching a handler implies both the role gate and the task gate
 //! have passed.
 
+pub mod bootstrap;
 pub mod config;
