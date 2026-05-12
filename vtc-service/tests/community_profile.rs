@@ -96,6 +96,8 @@ async fn build() -> Fixture {
         registry_records_ks: registry_records_ks.clone(),
         sync_queue_ks: sync_queue_ks.clone(),
         sync_cursor_ks: sync_cursor_ks.clone(),
+        registry_client: None,
+        registry_health: vtc_service::registry::RegistryHealth::new(),
         credential_signer: None,
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,
@@ -201,6 +203,9 @@ async fn get_returns_profile_when_initialised() {
     assert_eq!(body["name"], "Example Community");
     assert_eq!(body["communityDid"], "did:webvh:vtc.example.com:abc");
     assert_eq!(body["language"], "en");
+    // M3.2: registryStatus surfaces on the GET response. No
+    // registry URL configured → reads `degraded`.
+    assert_eq!(body["registryStatus"], "degraded");
 }
 
 #[tokio::test]

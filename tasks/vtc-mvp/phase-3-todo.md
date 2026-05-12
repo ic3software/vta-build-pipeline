@@ -68,7 +68,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.2 — Publish-on-boot + `registry_status` surface
 
-### `[ ]` M3.2.1 — Boot-time idempotent profile publish
+### `[x]` M3.2.1 — Boot-time idempotent profile publish
 
 - **Acceptance**
   - `server::run` calls
@@ -98,7 +98,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Deps**: M3.1.1
 - **Pre-impl decision**: **D6** (failure-mode semantics).
 
-### `[ ]` M3.2.2 — `registry_status` on community profile
+### `[x]` M3.2.2 — `registry_status` on community profile
 
 - **Acceptance**
   - `CommunityProfile` response (`GET

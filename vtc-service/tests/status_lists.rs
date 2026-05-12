@@ -116,6 +116,8 @@ async fn build_fixture(with_signer: bool) -> Fixture {
         registry_records_ks,
         sync_queue_ks,
         sync_cursor_ks,
+        registry_client: None,
+        registry_health: vtc_service::registry::RegistryHealth::new(),
         audit_ks,
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),

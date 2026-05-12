@@ -29,8 +29,43 @@ pub struct AppConfig {
     pub routing: RoutingConfig,
     #[serde(default)]
     pub cors: CorsConfig,
+    /// Trust-registry settings (Phase 3 M3.2). When `url` is
+    /// unset, registry features no-op and `registry_status`
+    /// reports `"degraded"`. Otherwise the daemon health-pings
+    /// the registry at boot and on a periodic interval.
+    #[serde(default)]
+    pub registry: RegistryConfig,
     #[serde(skip)]
     pub config_path: PathBuf,
+}
+
+/// Trust-registry runtime settings.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct RegistryConfig {
+    /// Base URL of the upstream TRQP-compliant registry
+    /// (e.g. `https://registry.example.com`). When `None`,
+    /// registry features no-op — `registry_status` reads
+    /// `"degraded"`, sync is skipped.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Period (seconds) between background health probes.
+    /// `0` disables the periodic probe (only boot-time probe
+    /// runs). Default: 60s.
+    #[serde(default = "default_health_probe_interval")]
+    pub health_probe_interval_seconds: u64,
+    /// Per-call HTTP timeout for registry operations (seconds).
+    /// Default: 5s.
+    #[serde(default = "default_registry_http_timeout")]
+    pub http_timeout_seconds: u64,
+}
+
+fn default_health_probe_interval() -> u64 {
+    60
+}
+
+fn default_registry_http_timeout() -> u64 {
+    5
 }
 
 /// Per-surface mount config (spec §9.2). Phase-0 surfaces:

@@ -143,6 +143,8 @@ async fn build_fixture() -> Fixture {
         registry_records_ks: registry_records_ks.clone(),
         sync_queue_ks: sync_queue_ks.clone(),
         sync_cursor_ks: sync_cursor_ks.clone(),
+        registry_client: None,
+        registry_health: vtc_service::registry::RegistryHealth::new(),
         credential_signer: None,
         audit_ks: audit_ks.clone(),
         audit_key_ks,
