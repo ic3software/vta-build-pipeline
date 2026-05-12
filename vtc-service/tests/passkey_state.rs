@@ -42,6 +42,9 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
     let policies_ks = store.keyspace("policies").unwrap();
     let active_policies_ks = store.keyspace("active_policies").unwrap();
     let status_lists_ks = store.keyspace("status_lists").unwrap();
+    let registry_records_ks = store.keyspace("registry_records").unwrap();
+    let sync_queue_ks = store.keyspace("sync_queue").unwrap();
+    let sync_cursor_ks = store.keyspace("sync_cursor").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
 
@@ -69,6 +72,9 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
         policies_ks: policies_ks.clone(),
         active_policies_ks: active_policies_ks.clone(),
         status_lists_ks: status_lists_ks.clone(),
+        registry_records_ks: registry_records_ks.clone(),
+        sync_queue_ks: sync_queue_ks.clone(),
+        sync_cursor_ks: sync_cursor_ks.clone(),
         credential_signer: None,
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,

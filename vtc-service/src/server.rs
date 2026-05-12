@@ -62,6 +62,16 @@ pub struct AppState {
     /// public route reads from it; M2.14's flip-on-removal path
     /// writes.
     pub status_lists_ks: KeyspaceHandle,
+    /// Local mirror of trust-registry records (Phase 3 M3.1).
+    /// Updated when a `SyncJob` completes successfully so the
+    /// daemon can detect drift at boot.
+    pub registry_records_ks: KeyspaceHandle,
+    /// Pending / in-flight / failed trust-registry sync jobs
+    /// (Phase 3 M3.1). Drained by `MembershipSyncer` (M3.4).
+    pub sync_queue_ks: KeyspaceHandle,
+    /// Singleton row tracking the audit-log tail's last-seen
+    /// timestamp for boot-time replay (Phase 3 M3.3).
+    pub sync_cursor_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub audit_key_ks: KeyspaceHandle,
     pub config: Arc<RwLock<AppConfig>>,
@@ -172,6 +182,9 @@ pub async fn run(
     let policies_ks = store.keyspace("policies")?;
     let active_policies_ks = store.keyspace("active_policies")?;
     let status_lists_ks = store.keyspace("status_lists")?;
+    let registry_records_ks = store.keyspace("registry_records")?;
+    let sync_queue_ks = store.keyspace("sync_queue")?;
+    let sync_cursor_ks = store.keyspace("sync_cursor")?;
     let audit_ks = store.keyspace("audit")?;
     let audit_key_ks = store.keyspace("audit_key")?;
 
@@ -291,6 +304,9 @@ pub async fn run(
         policies_ks,
         active_policies_ks,
         status_lists_ks: status_lists_ks.clone(),
+        registry_records_ks,
+        sync_queue_ks,
+        sync_cursor_ks,
         audit_ks,
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),

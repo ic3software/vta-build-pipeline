@@ -67,6 +67,9 @@ async fn build_fixture(with_signer: bool) -> Fixture {
     let policies_ks = store.keyspace("policies").unwrap();
     let active_policies_ks = store.keyspace("active_policies").unwrap();
     let status_lists_ks = store.keyspace("status_lists").unwrap();
+    let registry_records_ks = store.keyspace("registry_records").unwrap();
+    let sync_queue_ks = store.keyspace("sync_queue").unwrap();
+    let sync_cursor_ks = store.keyspace("sync_cursor").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
     let install_store = InstallTokenStore::new(install_ks.clone());
@@ -110,6 +113,9 @@ async fn build_fixture(with_signer: bool) -> Fixture {
         policies_ks,
         active_policies_ks,
         status_lists_ks,
+        registry_records_ks,
+        sync_queue_ks,
+        sync_cursor_ks,
         audit_ks,
         audit_key_ks,
         config: Arc::new(RwLock::new(config)),

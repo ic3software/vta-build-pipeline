@@ -18,7 +18,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.1 — Trust-registry client + keyspaces
 
-### `[ ]` M3.1.1 — `vtc_service::registry` skeleton
+### `[x]` M3.1.1 — `vtc_service::registry` skeleton
 
 - **Acceptance**
   - Workspace dep added:
