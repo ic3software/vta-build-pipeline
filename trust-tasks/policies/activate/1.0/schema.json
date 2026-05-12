@@ -1,0 +1,40 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/policies/activate/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Policies — Activate",
+  "type": "object",
+  "properties": {
+    "response": {
+      "type": "object",
+      "required": ["id", "purpose", "sha256"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "purpose": { "$ref": "#/$defs/PolicyPurpose" },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "previousPolicyId": {
+          "type": ["string", "null"],
+          "format": "uuid"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "PolicyPurpose": {
+      "type": "string",
+      "enum": [
+        "join",
+        "removal",
+        "personhood",
+        "registry",
+        "directory",
+        "roleDefinitions",
+        "crossCommunityRoles",
+        "crossCommunityRelationships",
+        "relationships"
+      ]
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/policies/test/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Policies — Test",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "object",
+      "required": ["query", "input"],
+      "properties": {
+        "query": { "type": "string" },
+        "input": {}
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["id", "purpose", "sha256", "result"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "purpose": { "$ref": "#/$defs/PolicyPurpose" },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "result": {
+          "type": "object",
+          "description": "Raw regorus QueryResults — opa-eval shape."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "PolicyPurpose": {
+      "type": "string",
+      "enum": [
+        "join",
+        "removal",
+        "personhood",
+        "registry",
+        "directory",
+        "roleDefinitions",
+        "crossCommunityRoles",
+        "crossCommunityRelationships",
+        "relationships"
+      ]
+    }
+  }
+}

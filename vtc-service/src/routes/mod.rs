@@ -8,6 +8,7 @@ mod health;
 pub(crate) mod install;
 pub(crate) mod join_requests;
 pub(crate) mod members;
+pub(crate) mod policies;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -119,6 +120,16 @@ pub fn router() -> Router<AppState> {
         TrustTask::new("https://trusttasks.org/openvtc/vtc/join-requests/approve/1.0")
             .expect("static Trust-Task URL");
     let join_reject = TrustTask::new("https://trusttasks.org/openvtc/vtc/join-requests/reject/1.0")
+        .expect("static Trust-Task URL");
+    // Policies (Phase 2 M2.3). Three distinct Trust Tasks for the
+    // three POST endpoints — upload, activate, test — so SIEM
+    // filters + soft-gate consumers can target each precisely.
+    let policies_upload = TrustTask::new("https://trusttasks.org/openvtc/vtc/policies/upload/1.0")
+        .expect("static Trust-Task URL");
+    let policies_activate =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/policies/activate/1.0")
+            .expect("static Trust-Task URL");
+    let policies_test = TrustTask::new("https://trusttasks.org/openvtc/vtc/policies/test/1.0")
         .expect("static Trust-Task URL");
 
     TrustTaskRouter::<AppState>::new()
@@ -318,6 +329,25 @@ pub fn router() -> Router<AppState> {
             "/v1/join-requests/{id}/reject",
             post(join_requests::decide::reject),
             join_reject,
+        )
+        // Policies (Phase 2 M2.3). Three POST endpoints, three
+        // Trust Tasks. `upload` mints + persists; `activate` flips
+        // the per-purpose active pointer; `test` evaluates a stored
+        // policy without mutating state.
+        .route_with_task(
+            "/v1/policies",
+            post(policies::admin::upload),
+            policies_upload,
+        )
+        .route_with_task(
+            "/v1/policies/{id}/activate",
+            post(policies::admin::activate),
+            policies_activate,
+        )
+        .route_with_task(
+            "/v1/policies/{id}/test",
+            post(policies::admin::test),
+            policies_test,
         )
         .into_router()
 }

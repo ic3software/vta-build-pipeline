@@ -76,7 +76,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M2.3 — Policy admin endpoints
 
-### `[ ]` M2.3.1 — Upload + activate + test
+### `[x]` M2.3.1 — Upload + activate + test
 
 - **Acceptance**
   - `POST /v1/policies` — admin-only. Body `{ purpose,

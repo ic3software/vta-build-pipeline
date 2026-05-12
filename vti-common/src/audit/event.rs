@@ -145,6 +145,17 @@ pub enum AuditEvent {
     /// `Disposition` decides whether the row is purged outright,
     /// tombstoned with the DID retained, or kept historical.
     MemberRemoved(MemberRemovedData),
+
+    /// `POST /v1/policies` accepted an upload, compiled the source,
+    /// and persisted a new revision. The row is **not yet active** —
+    /// activation is a separate event. Spec §7.1; Phase 2 M2.3.
+    PolicyUploaded(PolicyUploadedData),
+
+    /// `POST /v1/policies/{id}/activate` flipped the active pointer
+    /// for a purpose. Carries the predecessor's id so a forensic
+    /// audit can chain backwards through revisions without scanning
+    /// the whole `policies:` keyspace. Spec §7.1; Phase 2 M2.3.
+    PolicyActivated(PolicyActivatedData),
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +370,44 @@ pub struct MemberRemovedData {
     pub reason: String,
 }
 
+/// Payload for [`AuditEvent::PolicyUploaded`].
+///
+/// Records the *immutable* outcome of compilation: the new id, what
+/// purpose this revision targets, the source hash, and the
+/// monotone per-purpose version. The actual Rego source stays in
+/// the `policies:<id>` row — the audit envelope only carries the
+/// hash so the log doesn't bloat for large policies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyUploadedData {
+    /// UUID of the new Policy row.
+    pub policy_id: String,
+    /// Wire-form camelCase purpose (`"join"`, `"removal"`, …).
+    pub purpose: String,
+    /// SHA-256 of the source, lowercase hex.
+    pub sha256: String,
+    /// Per-purpose monotone counter the upload landed under.
+    pub version: u32,
+}
+
+/// Payload for [`AuditEvent::PolicyActivated`].
+///
+/// Records the active-pointer flip for a purpose. `previous_policy_id`
+/// is `None` when the purpose had no prior active row (first
+/// activation for that purpose) — that case is itself audit-worthy
+/// and distinct from "activated a successor". Carries the new
+/// revision's hash so consumers don't have to cross-reference the
+/// `PolicyUploaded` event to know what bytecode is now live.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyActivatedData {
+    pub policy_id: String,
+    pub purpose: String,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_policy_id: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -558,6 +607,62 @@ mod tests {
     // such a change visible in review.
 
     #[test]
+    fn policy_uploaded_round_trip() {
+        let e = AuditEvent::PolicyUploaded(PolicyUploadedData {
+            policy_id: "11111111-1111-1111-1111-111111111111".into(),
+            purpose: "join".into(),
+            sha256: "abc123".into(),
+            version: 4,
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "PolicyUploaded");
+        assert_eq!(
+            v["data"]["policyId"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(v["data"]["purpose"], "join");
+        assert_eq!(v["data"]["sha256"], "abc123");
+        assert_eq!(v["data"]["version"], 4);
+        round_trip(&e);
+    }
+
+    #[test]
+    fn policy_activated_round_trip_with_predecessor() {
+        let e = AuditEvent::PolicyActivated(PolicyActivatedData {
+            policy_id: "22222222-2222-2222-2222-222222222222".into(),
+            purpose: "removal".into(),
+            sha256: "deadbeef".into(),
+            previous_policy_id: Some("11111111-1111-1111-1111-111111111111".into()),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "PolicyActivated");
+        assert_eq!(
+            v["data"]["previousPolicyId"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        round_trip(&e);
+    }
+
+    #[test]
+    fn policy_activated_omits_predecessor_when_none() {
+        // First activation for a purpose has no predecessor — verify
+        // the field is omitted on the wire (Option skip), not
+        // serialised as `null`. SIEM filters key on field presence.
+        let e = AuditEvent::PolicyActivated(PolicyActivatedData {
+            policy_id: "22222222-2222-2222-2222-222222222222".into(),
+            purpose: "personhood".into(),
+            sha256: "cafe".into(),
+            previous_policy_id: None,
+        });
+        let v = wire_value(&e);
+        assert!(
+            v["data"].get("previousPolicyId").is_none(),
+            "previousPolicyId should be omitted, got {v}"
+        );
+        round_trip(&e);
+    }
+
+    #[test]
     fn variant_discriminator_strings() {
         let cases: Vec<(AuditEvent, &str)> = vec![
             (
@@ -622,6 +727,24 @@ mod tests {
                     rotation_reason: RotationReason::Initial,
                 }),
                 "AuditKeyRotated",
+            ),
+            (
+                AuditEvent::PolicyUploaded(PolicyUploadedData {
+                    policy_id: "p".into(),
+                    purpose: "join".into(),
+                    sha256: "x".into(),
+                    version: 1,
+                }),
+                "PolicyUploaded",
+            ),
+            (
+                AuditEvent::PolicyActivated(PolicyActivatedData {
+                    policy_id: "p".into(),
+                    purpose: "join".into(),
+                    sha256: "x".into(),
+                    previous_policy_id: None,
+                }),
+                "PolicyActivated",
             ),
         ];
         for (event, expected) in cases {
