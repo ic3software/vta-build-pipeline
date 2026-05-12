@@ -325,7 +325,7 @@ bundle containing a valid VTC `did:webvh`. No VTC binary needed yet.
 
 ## M0.4 — Install token + carve-out primitive
 
-### `[ ]` M0.4.1 — `InstallToken` struct + JWT signer
+### `[x]` M0.4.1 — `InstallToken` struct + JWT signer
 
 - **Acceptance**
   - `InstallToken` claims: `iss` (VTC DID), `sub` ("install"),
@@ -349,7 +349,7 @@ bundle containing a valid VTC `did:webvh`. No VTC binary needed yet.
 - **Deps**: M0.1.0
 - **Pre-impl decision**: D2 (nonce binding mechanism)
 
-### `[ ]` M0.4.2 — Install carve-out keyspace with claim-window state machine
+### `[x]` M0.4.2 — Install carve-out keyspace with claim-window state machine
 
 Per **D12**: webvh-common's claim-window pattern, not immediate
 single-use.

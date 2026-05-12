@@ -21,6 +21,7 @@ pub mod did_key;
 pub mod did_webvh;
 pub mod error;
 pub mod import_did;
+pub mod install;
 pub mod keys;
 pub mod messaging;
 pub mod routes;

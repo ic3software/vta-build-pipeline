@@ -8911,6 +8911,7 @@ dependencies = [
  "google-cloud-auth",
  "google-cloud-secretmanager-v1",
  "hex",
+ "hkdf 0.13.0",
  "http-body-util",
  "jsonwebtoken",
  "keyring-core",
