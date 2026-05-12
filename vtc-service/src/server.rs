@@ -464,16 +464,20 @@ pub async fn run(
             .vtc_did
             .clone()
             .unwrap_or_else(|| "did:key:vtc-unknown".into());
+        let rtbf_batch_window_hours = state.config.read().await.registry.rtbf_batch_window_hours;
         let syncer = crate::registry::MembershipSyncer::new(
             state.audit_ks.clone(),
             state.sync_queue_ks.clone(),
             state.sync_cursor_ks.clone(),
             state.registry_records_ks.clone(),
+            state.policies_ks.clone(),
+            state.active_policies_ks.clone(),
             client,
             state.registry_health.clone(),
             state.audit_writer.clone(),
             actor_did,
-        );
+        )
+        .with_rtbf_batch_window_hours(rtbf_batch_window_hours);
         let syncer_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             syncer.run(syncer_shutdown).await;

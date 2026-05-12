@@ -49,6 +49,7 @@
 pub mod client;
 pub mod health;
 pub mod model;
+pub mod policy;
 pub mod storage;
 pub mod syncer;
 pub mod tail;
@@ -59,6 +60,10 @@ pub use health::{HealthStatus, RegistryHealth};
 pub use model::{
     DEFAULT_MAX_ATTEMPTS, MAX_BACKOFF_SECONDS, RegistryRecord, RegistryStatus, SyncJob,
     SyncJobKind, SyncJobState, exponential_backoff_seconds,
+};
+pub use policy::{
+    ClampOutcome, PublishOnJoinDecision, clamp_disposition, evaluate_publish_on_join,
+    is_rtbf_purge, read_min_disposition,
 };
 pub use storage::{
     REGISTRY_RECORDS_PREFIX, SYNC_QUEUE_PREFIX, clear_sync_cursor, delete_record, delete_sync_job,

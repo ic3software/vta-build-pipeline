@@ -36,8 +36,8 @@ pub use event::{
     CredentialIssuedData, DidRotatedData, EmergencyBootstrapData, JoinRequestData,
     JoinRequestRejectedData, MemberAddedData, MemberRemovedData, MemberUpdatedData,
     MembershipRenewedData, PolicyActivatedData, PolicyUploadedData, REDACTED_MARKER,
-    RegistryStatusChangedData, RegistrySyncOutcomeData, RestartRequestedData, RoleChangedData,
-    StatusListFlippedData,
+    RegistryRecordPolicyOverrideData, RegistryStatusChangedData, RegistrySyncOutcomeData,
+    RestartRequestedData, RoleChangedData, StatusListFlippedData,
 };
 pub use key_store::{AuditKey, AuditKeyStore, KeyId, RotationReason};
 pub use writer::AuditWriter;

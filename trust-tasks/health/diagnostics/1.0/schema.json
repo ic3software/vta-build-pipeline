@@ -1,0 +1,54 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/health/diagnostics/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — Trust-Registry Reconciler Diagnostics",
+  "description": "GET /v1/health/diagnostics response. Aggregate-only — no per-member DIDs. Phase 3 M3.8.",
+  "type": "object",
+  "required": [
+    "registry_status",
+    "queue_depth",
+    "rtbf_batched_count",
+    "failed_count"
+  ],
+  "properties": {
+    "registry_status": {
+      "type": "string",
+      "enum": ["active", "degraded"],
+      "description": "Trust-registry reachability. Spec §8.1."
+    },
+    "queue_depth": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Pending + InFlight SyncJob rows."
+    },
+    "rtbf_batched_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Pending jobs parked behind the RTBF batch window."
+    },
+    "failed_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Terminal-failure rows awaiting operator triage."
+    },
+    "oldest_pending_age_seconds": {
+      "type": ["integer", "null"],
+      "description": "Seconds since the oldest dispatchable pending job's creation. Excludes RTBF-parked rows. `null` when queue is empty."
+    },
+    "last_success_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "RFC3339 timestamp of the most recent successful registry probe / dispatch. `null` when none has succeeded yet."
+    },
+    "last_failure_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "RFC3339 timestamp of the most recent registry failure. `null` when none has failed."
+    },
+    "last_error": {
+      "type": ["string", "null"],
+      "description": "Error string from the last registry failure. May include upstream URLs / codes — operators should treat it as potentially sensitive."
+    }
+  },
+  "additionalProperties": false
+}

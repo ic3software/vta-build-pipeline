@@ -40,7 +40,7 @@ pub struct AppConfig {
 }
 
 /// Trust-registry runtime settings.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct RegistryConfig {
     /// Base URL of the upstream TRQP-compliant registry
@@ -58,6 +58,19 @@ pub struct RegistryConfig {
     /// Default: 5s.
     #[serde(default = "default_registry_http_timeout")]
     pub http_timeout_seconds: u64,
+    /// RTBF-batch coalescing window (hours) — spec §8.2 +
+    /// M3.7. When the syncer's walker fires an RTBF override,
+    /// the resulting `DeleteMember` job is parked for at
+    /// least this many hours before the registry call goes
+    /// out. The window de-correlates the override audit
+    /// envelope's timestamp from the registry record's
+    /// disappearance so an external observer can't time-align
+    /// the two and re-identify the RTBF requester. Set to `0`
+    /// to disable batching (RTBF jobs dispatch immediately —
+    /// useful in tests; **not recommended in production**).
+    /// Default: 24h.
+    #[serde(default = "default_rtbf_batch_window_hours")]
+    pub rtbf_batch_window_hours: u64,
 }
 
 fn default_health_probe_interval() -> u64 {
@@ -66,6 +79,26 @@ fn default_health_probe_interval() -> u64 {
 
 fn default_registry_http_timeout() -> u64 {
     5
+}
+
+fn default_rtbf_batch_window_hours() -> u64 {
+    24
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        // Production defaults — match the serde-default
+        // values. Deriving Default would zero every numeric
+        // field, silently disabling the periodic probe + the
+        // RTBF batch protection. Keep the two in sync by
+        // construction.
+        Self {
+            url: None,
+            health_probe_interval_seconds: default_health_probe_interval(),
+            http_timeout_seconds: default_registry_http_timeout(),
+            rtbf_batch_window_hours: default_rtbf_batch_window_hours(),
+        }
+    }
 }
 
 /// Per-surface mount config (spec §9.2). Phase-0 surfaces:
