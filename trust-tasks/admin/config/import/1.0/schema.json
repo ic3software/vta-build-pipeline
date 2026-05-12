@@ -1,0 +1,76 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/admin/config/import/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Admin — Import Config",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "object",
+      "required": ["schemaVersion", "exportedAt", "configOverrides"],
+      "properties": {
+        "schemaVersion": { "type": "integer", "const": 1 },
+        "exportedAt": { "type": "string", "format": "date-time" },
+        "communityProfile": { "type": ["object", "null"] },
+        "configOverrides": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "query": {
+      "type": "object",
+      "properties": {
+        "confirm": { "type": "boolean", "default": false }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": [
+        "confirmed",
+        "communityProfileDiff",
+        "configOverridesDiff",
+        "communityProfileApplied",
+        "configOverridesApplied",
+        "rejected"
+      ],
+      "properties": {
+        "confirmed": { "type": "boolean" },
+        "communityProfileDiff": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key"],
+            "properties": {
+              "key": { "type": "string" },
+              "oldValue": {},
+              "newValue": {}
+            }
+          }
+        },
+        "configOverridesDiff": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "communityProfileApplied": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "configOverridesApplied": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "rejected": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "reason"],
+            "properties": {
+              "key": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

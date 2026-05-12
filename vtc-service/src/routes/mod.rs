@@ -59,6 +59,12 @@ pub fn router() -> Router<AppState> {
     let admin_config_restart =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/config/restart/1.0")
             .expect("static Trust-Task URL");
+    let admin_config_export =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/config/export/1.0")
+            .expect("static Trust-Task URL");
+    let admin_config_import =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/config/import/1.0")
+            .expect("static Trust-Task URL");
     let install_claim_start =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/start/1.0")
             .expect("static Trust-Task URL");
@@ -141,6 +147,19 @@ pub fn router() -> Router<AppState> {
             "/v1/admin/config/restart",
             post(admin::config::restart_config),
             admin_config_restart,
+        )
+        // Export / import (M0.8.4). Export returns the portable
+        // (db-layer overrides + community profile) JSON; import runs
+        // diff-and-confirm via `?confirm=true|false`.
+        .route_with_task(
+            "/v1/admin/config/export",
+            post(admin::config::export_config),
+            admin_config_export,
+        )
+        .route_with_task(
+            "/v1/admin/config/import",
+            post(admin::config::import_config),
+            admin_config_import,
         )
         // Install claim (M0.5.2) — distinct Trust Tasks because the
         // two phases of the WebAuthn ceremony have different
