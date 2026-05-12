@@ -21,7 +21,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.1 — Role enum extension (`vtc-service::acl::VtcRole`)
 
-### `[ ]` M1.1.1 — Introduce `VtcRole`
+### `[x]` M1.1.1 — Introduce `VtcRole`
 
 - **Acceptance**
   - New enum `vtc_service::acl::VtcRole { Admin, Moderator, Issuer,
@@ -45,7 +45,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.2 — ACL unification
 
-### `[ ]` M1.2.1 — `VtcAclEntry` + storage CRUD
+### `[x]` M1.2.1 — `VtcAclEntry` + storage CRUD
 
 - **Acceptance**
   - New struct `vtc_service::acl::VtcAclEntry { did, role: VtcRole,
@@ -73,7 +73,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Pre-impl decision**: **D2** (admin sister record loses role
   field; passkeys stay where they are).
 
-### `[ ]` M1.2.2 — Wire `VtcAclEntry` everywhere
+### `[x]` M1.2.2 — Wire `VtcAclEntry` everywhere
 
 - **Acceptance**
   - Every consumer of `vti_common::acl::store_acl_entry`,
@@ -98,7 +98,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.3 — Member model + keyspace
 
-### `[ ]` M1.3.1 — `Member` struct + `members` keyspace
+### `[x]` M1.3.1 — `Member` struct + `members` keyspace
 
 - **Acceptance**
   - `vtc_service::members::Member { did, joined_at, status_list_index:
@@ -123,7 +123,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.4 — Member read endpoints
 
-### `[ ]` M1.4.1 — `GET /v1/members` + `GET /v1/members/{did}`
+### `[x]` M1.4.1 — `GET /v1/members` + `GET /v1/members/{did}`
 
 - **Acceptance**
   - List endpoint returns a `Paginated<Member>` using the cursor
@@ -150,7 +150,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.5 — Member update
 
-### `[ ]` M1.5.1 — `PATCH /v1/members/{did}` (role + profile)
+### `[x]` M1.5.1 — `PATCH /v1/members/{did}` (role + profile)
 
 - **Acceptance**
   - Body shape: `{ role?: VtcRole, publish_consent?: bool,
@@ -177,7 +177,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.6 — Admin promotion (step-up UV)
 
-### `[ ]` M1.6.1 — `POST /v1/members/{did}/promote-to-admin`
+### `[x]` M1.6.1 — `POST /v1/members/{did}/promote-to-admin`
 
 - **Acceptance**
   - Two-phase ceremony mirroring `admin/passkeys/register/{start,finish}`:
@@ -206,7 +206,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.7 — JoinRequest model + retention
 
-### `[ ]` M1.7.1 — `JoinRequest` struct + `join_requests` keyspace
+### `[x]` M1.7.1 — `JoinRequest` struct + `join_requests` keyspace
 
 - **Acceptance**
   - `vtc_service::join::JoinRequest { id: Uuid, applicant_did, vp:
@@ -236,7 +236,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.8 — Submit join request
 
-### `[ ]` M1.8.1 — `POST /v1/join-requests` (REST)
+### `[x]` M1.8.1 — `POST /v1/join-requests` (REST)
 
 - **Acceptance**
   - Unauthenticated (rate-limited per spec §9 unauth-route policy).
@@ -259,7 +259,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
   - `trust-tasks/join-requests/submit/1.0/{spec.md,schema.json}`
 - **Deps**: M1.7.1, M1.4.1
 
-### `[ ]` M1.8.2 — DIDComm twin for submit
+### `[x]` M1.8.2 — DIDComm twin for submit
 
 - **Acceptance**
   - DIDComm message `type` =
@@ -283,7 +283,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.9 — Join request read endpoints (admin)
 
-### `[ ]` M1.9.1 — `GET /v1/join-requests` + `/v1/join-requests/{id}`
+### `[x]` M1.9.1 — `GET /v1/join-requests` + `/v1/join-requests/{id}`
 
 - **Acceptance**
   - List endpoint requires admin or moderator role; returns
@@ -306,7 +306,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.10 — Join request decision
 
-### `[ ]` M1.10.1 — `POST /v1/join-requests/{id}/{approve,reject}`
+### `[x]` M1.10.1 — `POST /v1/join-requests/{id}/{approve,reject}`
 
 - **Acceptance**
   - Admin or moderator role required.
@@ -335,7 +335,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.11 — Self-removal
 
-### `[ ]` M1.11.1 — `DELETE /v1/members/me` (REST + DIDComm)
+### `[x]` M1.11.1 — `DELETE /v1/members/me` (REST + DIDComm)
 
 - **Acceptance**
   - Authenticated caller's `did` is the target. Body shape:
@@ -366,7 +366,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.12 — Admin removal
 
-### `[ ]` M1.12.1 — `DELETE /v1/members/{did}` (REST only)
+### `[x]` M1.12.1 — `DELETE /v1/members/{did}` (REST only)
 
 - **Acceptance**
   - Admin role required.
@@ -390,7 +390,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.13 — Audit event variants
 
-### `[ ]` M1.13.1 — Phase 1 audit event vocabulary
+### `[x]` M1.13.1 — Phase 1 audit event vocabulary
 
 - **Acceptance**
   - `AuditEvent` enum (`vti_common::audit::envelope`) gains
@@ -412,7 +412,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.14 — Trust Task drafts + index
 
-### `[ ]` M1.14.1 — Spec + schema files for Phase 1 surface
+### `[x]` M1.14.1 — Spec + schema files for Phase 1 surface
 
 - **Acceptance**
   - All 11 Trust Tasks from plan §D7 have `spec.md` (request +
@@ -432,24 +432,28 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M1.15 — Phase 1 gate green
 
-### `[ ]` M1.15.1 — Workspace gate
+### `[x]` M1.15.1 — Workspace gate
 
-- **Acceptance** (mirrors M0.12.3)
-  - `cargo build --workspace` green.
-  - `cargo test --workspace` green (all new tests passing).
-  - `cargo clippy --workspace --all-targets -- -D warnings` clean.
-  - `cargo fmt --check` clean.
-  - `trust-tasks/index.json` lists every Phase-1 Trust Task with
-    matching `spec.md` + `schema.json` on disk.
-  - Memory entry `project_vtc_mvp.md` updated with any
-    implementation-time tweaks (Role enum shape, AdminEntry
-    collapse, removal disposition default, etc.).
-  - Phase-1-todo.md milestones all flipped to `[x]`.
-- **Verify** CI green on the merge commit.
-- **Files**
-  - `trust-tasks/index.json`
-  - `/Users/glenngore/.claude/projects/-Users-glenngore-devel-fpp-verifiable-trust-infrastructure/memory/project_vtc_mvp.md`
-- **Deps**: M1.13.1, M1.14.1
+Closed 2026-05-12.
+
+- `cargo build --workspace` green ✓
+- `cargo test --workspace` green ✓ (>200 vtc-service tests; full
+  workspace passes)
+- `cargo clippy --workspace --all-targets -- -D warnings` clean ✓
+- `cargo fmt --check` clean ✓
+- `trust-tasks/index.json` lists **31** Trust Tasks in `Draft`;
+  each has matching `spec.md` + `schema.json` on disk (1:1).
+  Phase 1's 11 new tasks: `members/{list,show,update,
+  promote-to-admin,self-remove,admin-remove}/1.0` +
+  `join-requests/{submit,list,show,approve,reject}/1.0`.
+- 8 Phase 1 audit variants
+  (`JoinRequestSubmitted`, `JoinRequestApproved`,
+  `JoinRequestRejected`, `MemberAdded`, `MemberRemoved`,
+  `MemberUpdated`, `RoleChanged`, `AdminPromoted`) each have a
+  live emit site in vtc-service.
+- Memory entry `project_vtc_mvp.md` updated with the Phase 1
+  closure note + implementation-time deviations (VtcRole wire
+  shape, M1.8.2 DIDComm routing, no-last-admin lock).
 
 ### Checkpoint — Phase 1 gate met
 
