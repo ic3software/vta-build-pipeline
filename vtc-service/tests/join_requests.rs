@@ -43,6 +43,8 @@ const SUBMIT_TASK: &str = "https://trusttasks.org/openvtc/vtc/join-requests/subm
 const SHOW_TASK: &str = "https://trusttasks.org/openvtc/vtc/join-requests/show/1.0";
 const APPROVE_TASK: &str = "https://trusttasks.org/openvtc/vtc/join-requests/approve/1.0";
 const REJECT_TASK: &str = "https://trusttasks.org/openvtc/vtc/join-requests/reject/1.0";
+const POLICY_UPLOAD_TASK: &str = "https://trusttasks.org/openvtc/vtc/policies/upload/1.0";
+const POLICY_ACTIVATE_TASK: &str = "https://trusttasks.org/openvtc/vtc/policies/activate/1.0";
 
 const ADMIN_DID: &str = "did:key:zAdmin1";
 
@@ -85,6 +87,14 @@ async fn build_fixture() -> Fixture {
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
     let install_store = InstallTokenStore::new(install_ks.clone());
+
+    // Install workspace-shipped default policies the same way
+    // `server::run` does at boot (M2.5). The submit handler
+    // (M2.6) evaluates `join.rego` against every submission,
+    // so an empty active-policy set would fail closed.
+    vtc_service::policy::default::install_defaults(&policies_ks, &active_policies_ks)
+        .await
+        .expect("install default policies");
 
     let webauthn = Some(Arc::new(build_webauthn(RP_ORIGIN).expect("build webauthn")));
 
@@ -619,6 +629,196 @@ async fn reject_rejects_overlong_reason() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Auth gating sanity check
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// M2.6 — Policy step at submit time
+// ---------------------------------------------------------------------------
+
+/// Upload + activate a join policy that always denies. Returns
+/// nothing — the active pointer is flipped server-side and
+/// subsequent submits see the deny semantics.
+async fn activate_deny_all_join_policy(fix: &Fixture) {
+    let source = "package vtc.join\nimport rego.v1\n\ndefault allow := false\n";
+    let (status, body) = send(
+        &fix.router,
+        "POST",
+        "/v1/policies",
+        POLICY_UPLOAD_TASK,
+        Some(&fix.admin_token),
+        Some(json!({ "purpose": "join", "regoSource": source })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "upload failed: {body}");
+    let id = body["id"].as_str().unwrap();
+    let (status, body) = send(
+        &fix.router,
+        "POST",
+        &format!("/v1/policies/{id}/activate"),
+        POLICY_ACTIVATE_TASK,
+        Some(&fix.admin_token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "activate failed: {body}");
+}
+
+/// With the default `policies.open` join policy the submit
+/// handler routes through the policy step and lands the row as
+/// Pending. The `vpClaims` projection is populated from the VP
+/// on the request row.
+#[tokio::test]
+async fn rest_submit_under_default_join_policy_lands_pending_with_vp_claims() {
+    let fix = build_fixture().await;
+    let (sk, applicant_did) = applicant_pair();
+    let vp = json!({
+        "type": "VerifiablePresentation",
+        "holder": applicant_did,
+        "verifiableCredential": [
+            {
+                "issuer": "did:key:zIssuerA",
+                "type": ["VerifiableCredential", "EmailCredential"],
+                "credentialSubject": { "email": "applicant@example.com" }
+            }
+        ]
+    });
+    let signature = sign_holder_payload(&sk, &applicant_did, &vp, false, &Value::Null);
+
+    let (status, body) = send(
+        &fix.router,
+        "POST",
+        "/v1/join-requests",
+        SUBMIT_TASK,
+        None,
+        Some(json!({
+            "applicantDid": applicant_did,
+            "vp": vp,
+            "signature": signature,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got {body}");
+    assert_eq!(body["status"], "pending");
+    let id = body["requestId"].as_str().unwrap();
+
+    // Fetch via admin show — `vpClaims` is on the persisted row.
+    let (status, row) = send(
+        &fix.router,
+        "GET",
+        &format!("/v1/join-requests/{id}"),
+        SHOW_TASK,
+        Some(&fix.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row["status"], "pending");
+    assert!(
+        row["policyDecision"].is_null(),
+        "allow path must not populate policy_decision: {row}"
+    );
+    assert_eq!(row["vpClaims"]["holder"], applicant_did);
+    let creds = row["vpClaims"]["credentials"].as_array().unwrap();
+    assert_eq!(creds.len(), 1);
+    assert_eq!(creds[0]["issuer"], "did:key:zIssuerA");
+    assert_eq!(
+        creds[0]["credentialSubject"]["email"],
+        "applicant@example.com"
+    );
+}
+
+/// After activating a deny-all join policy, a fresh submission
+/// lands as Rejected and `policy_decision` carries the regorus
+/// QueryResults shape so admins can see why.
+#[tokio::test]
+async fn rest_submit_under_deny_all_policy_persists_rejected_with_decision() {
+    let fix = build_fixture().await;
+    activate_deny_all_join_policy(&fix).await;
+
+    let (sk, applicant_did) = applicant_pair();
+    let vp = json!({ "type": "VerifiablePresentation", "holder": applicant_did });
+    let signature = sign_holder_payload(&sk, &applicant_did, &vp, false, &Value::Null);
+
+    let (status, body) = send(
+        &fix.router,
+        "POST",
+        "/v1/join-requests",
+        SUBMIT_TASK,
+        None,
+        Some(json!({
+            "applicantDid": applicant_did,
+            "vp": vp,
+            "signature": signature,
+        })),
+    )
+    .await;
+    // Submission still 201 — the row persists either way; the
+    // status field is the decision channel.
+    assert_eq!(status, StatusCode::CREATED, "got {body}");
+    assert_eq!(body["status"], "rejected");
+    let id = body["requestId"].as_str().unwrap();
+
+    let (status, row) = send(
+        &fix.router,
+        "GET",
+        &format!("/v1/join-requests/{id}"),
+        SHOW_TASK,
+        Some(&fix.admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row["status"], "rejected");
+    // `policyDecision` is the regorus QueryResults shape — at
+    // minimum it carries a `result` array with the rule's value.
+    let decision = &row["policyDecision"];
+    let value = decision
+        .pointer("/result/0/expressions/0/value")
+        .expect("policy_decision should carry regorus QueryResults");
+    assert_eq!(value, &json!(false));
+}
+
+/// Trying to re-approve a policy-rejected row fails the same way
+/// admin-rejected ones do (409 already decided). Confirms the
+/// policy-deny path uses the same JoinStatus::Rejected sink.
+#[tokio::test]
+async fn policy_rejected_row_cannot_be_approved() {
+    let fix = build_fixture().await;
+    activate_deny_all_join_policy(&fix).await;
+
+    let (sk, applicant_did) = applicant_pair();
+    let vp = json!({ "type": "VerifiablePresentation", "holder": applicant_did });
+    let signature = sign_holder_payload(&sk, &applicant_did, &vp, false, &Value::Null);
+    let (status, body) = send(
+        &fix.router,
+        "POST",
+        "/v1/join-requests",
+        SUBMIT_TASK,
+        None,
+        Some(json!({
+            "applicantDid": applicant_did,
+            "vp": vp,
+            "signature": signature,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "got {body}");
+    let id = body["requestId"].as_str().unwrap();
+
+    let (status, _body) = send(
+        &fix.router,
+        "POST",
+        &format!("/v1/join-requests/{id}/approve"),
+        APPROVE_TASK,
+        Some(&fix.admin_token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
 }
 
 // ---------------------------------------------------------------------------

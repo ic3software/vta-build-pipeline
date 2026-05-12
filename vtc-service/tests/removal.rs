@@ -32,6 +32,8 @@ use vtc_service::server::AppState;
 const RP_ORIGIN: &str = "https://vtc.example.com";
 const SELF_REMOVE_TASK: &str = "https://trusttasks.org/openvtc/vtc/members/self-remove/1.0";
 const SHOW_TASK: &str = "https://trusttasks.org/openvtc/vtc/members/show/1.0";
+const POLICY_UPLOAD_TASK: &str = "https://trusttasks.org/openvtc/vtc/policies/upload/1.0";
+const POLICY_ACTIVATE_TASK: &str = "https://trusttasks.org/openvtc/vtc/policies/activate/1.0";
 
 const ADMIN_DID: &str = "did:key:zAdmin1";
 
@@ -74,6 +76,15 @@ async fn build_fixture() -> Fixture {
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
     let install_store = InstallTokenStore::new(install_ks.clone());
+
+    // Install workspace default policies the same way `server::run`
+    // does at boot (M2.5). The admin-remove handler (M2.7)
+    // consults `removal.rego.allow` and the disposition resolver
+    // reads `removal.rego.min_disposition`; an empty policy set
+    // would fail closed.
+    vtc_service::policy::default::install_defaults(&policies_ks, &active_policies_ks)
+        .await
+        .expect("install default policies");
 
     let webauthn = Some(Arc::new(build_webauthn(RP_ORIGIN).expect("build webauthn")));
 
@@ -483,25 +494,19 @@ async fn admin_remove_self_refused_with_self_remove_hint() {
 }
 
 #[tokio::test]
-async fn admin_remove_refused_for_last_admin() {
+async fn admin_remove_of_admin_target_is_denied_by_default_policy() {
     let fix = build_fixture().await;
-    // Add a second admin, then have the second admin try to
-    // remove the first via the admin path. With both removed
-    // the community would still have one admin (the caller),
-    // so this should succeed. Instead, set up a case where
-    // the target IS the last admin: caller is also admin, two
-    // admins exist, the caller removes the other — that leaves
-    // one admin (the caller). So that's the *success* case.
+    // Phase 2 M2.7 wires `removal.rego` into the admin-remove
+    // path. The default removal policy (spec §7.1) denies
+    // `target_role == "admin"` — admins should only be removed
+    // via promotion + step-up UV (spec §10.4 / §5.3), never via
+    // a casual admin-remove. This used to be a 200 in Phase 1
+    // because there was no policy step.
     //
-    // The actual failure case for admin-remove + last-admin:
-    // there's exactly one admin and a non-admin caller tries to
-    // remove them. But admin-remove requires AdminAuth, so the
-    // only caller IS the last admin — and they can't remove
-    // themselves via this endpoint. The invariant therefore
-    // can never fail via the admin-remove path with the current
-    // role taxonomy.
-    //
-    // Confirm the happy two-admin case anyway:
+    // The no-last-admin invariant is now unreachable through
+    // admin-remove for a different reason: every removable
+    // target has role != "admin", so the invariant guard never
+    // fires in this path.
     let second_admin = "did:key:zSecondAdmin";
     let _ = seed_member_with_session(&fix, second_admin, VtcRole::Admin).await;
 
@@ -514,10 +519,21 @@ async fn admin_remove_refused_for_last_admin() {
         Some(json!({ "reason": "ouster" })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "got {body}");
-    // Original admin remains.
+    assert_eq!(status, StatusCode::FORBIDDEN, "got {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("removal denied by policy"),
+        "error body should explain the policy denial: {body}"
+    );
+    // Both admins still present — the policy denied the change.
     assert!(
         get_acl_entry(&fix.acl_ks, ADMIN_DID)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        get_acl_entry(&fix.acl_ks, second_admin)
             .await
             .unwrap()
             .is_some()
@@ -555,4 +571,104 @@ async fn admin_remove_overlong_reason_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// M2.7 — policy step at admin-remove time
+// ---------------------------------------------------------------------------
+
+/// Upload + activate a removal policy via the admin endpoints.
+/// `source` is the full Rego module body.
+async fn activate_removal_policy(fix: &Fixture, source: &str) {
+    let (status, body) = send(
+        &fix.router,
+        "POST",
+        "/v1/policies",
+        POLICY_UPLOAD_TASK,
+        Some(&fix.admin_token),
+        Some(json!({ "purpose": "removal", "regoSource": source })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "upload failed: {body}");
+    let id = body["id"].as_str().unwrap();
+    let (status, body) = send(
+        &fix.router,
+        "POST",
+        &format!("/v1/policies/{id}/activate"),
+        POLICY_ACTIVATE_TASK,
+        Some(&fix.admin_token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "activate failed: {body}");
+}
+
+/// A deny-all custom removal.rego blocks admin-remove even for
+/// non-admin targets. Confirms the policy gate runs in front of
+/// the legacy disposition path.
+#[tokio::test]
+async fn admin_remove_member_blocked_by_deny_all_policy() {
+    let fix = build_fixture().await;
+    activate_removal_policy(
+        &fix,
+        "package vtc.removal\nimport rego.v1\n\ndefault allow := false\n",
+    )
+    .await;
+
+    let target = "did:key:zVictim2";
+    let _ = seed_member_with_session(&fix, target, VtcRole::Member).await;
+
+    let (status, body) = send(
+        &fix.router,
+        "DELETE",
+        &format!("/v1/members/{target}"),
+        SHOW_TASK,
+        Some(&fix.admin_token),
+        Some(json!({ "reason": "policy gate test" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "got {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("removal denied by policy"),
+        "error body should explain the policy denial: {body}"
+    );
+    // Target still present — policy denied the change.
+    assert!(get_acl_entry(&fix.acl_ks, target).await.unwrap().is_some());
+}
+
+/// `min_disposition := "purge"` on the active removal.rego
+/// resolves `PolicyDefault` → `Purge`, replacing Phase 1's
+/// hardcoded Tombstone fallback (Phase 1 plan §D6 placeholder).
+#[tokio::test]
+async fn admin_remove_uses_policy_min_disposition_for_default() {
+    let fix = build_fixture().await;
+    activate_removal_policy(
+        &fix,
+        "package vtc.removal\nimport rego.v1\n\n\
+         default allow := false\n\
+         allow if {\n  input.action == \"remove\"\n  input.target_role != \"admin\"\n}\n\
+         default min_disposition := \"purge\"\n",
+    )
+    .await;
+
+    let target = "did:key:zPurgeMe";
+    let _ = seed_member_with_session(&fix, target, VtcRole::Member).await;
+
+    // Caller does not pass `disposition`; member's preference is
+    // `PolicyDefault` (the join-time default) → resolver consults
+    // the policy → resolves to Purge → Member row is deleted.
+    let (status, body) = send(
+        &fix.router,
+        "DELETE",
+        &format!("/v1/members/{target}"),
+        SHOW_TASK,
+        Some(&fix.admin_token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got {body}");
+    assert_eq!(body["disposition"], "purge");
+    // ACL and member both gone (purge semantic).
+    assert!(get_acl_entry(&fix.acl_ks, target).await.unwrap().is_none());
 }

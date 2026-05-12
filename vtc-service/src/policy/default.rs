@@ -1,0 +1,569 @@
+//! Default policy bundle — spec §7.1 (M2.5).
+//!
+//! The workspace ships nine Rego modules — one per
+//! [`PolicyPurpose`] — under `vtc-service/policies/default/`.
+//! They are embedded at compile time via [`include_str!`] so the
+//! binary doesn't read from the filesystem at startup.
+//!
+//! [`install_defaults`] is idempotent: it walks
+//! [`PolicyPurpose::ALL`] and only installs a default for purposes
+//! that have **no active policy row** yet. This keeps operator-
+//! authored policies untouched across daemon restarts and means
+//! re-running the function on an already-installed deployment is a
+//! no-op.
+//!
+//! Defaults carry [`DEFAULTS_AUTHOR`] as their `author_did` so
+//! operators can distinguish workspace-shipped policies from their
+//! own uploads in `GET /v1/policies`. No audit envelope is emitted
+//! when defaults are installed — these are workspace state, not
+//! operator actions.
+//!
+//! ## Why no audit emission
+//!
+//! `PolicyUploaded` + `PolicyActivated` envelopes record *operator*
+//! decisions. A default-policy install happens because the daemon
+//! booted with an empty `active_policies:` keyspace, not because an
+//! operator did anything. Emitting audit envelopes here would
+//! double the audit floor's first-boot footprint without adding any
+//! observable signal — the `authorDid` field on the Policy row
+//! already tells the story.
+
+use chrono::Utc;
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+use vti_common::error::AppError;
+use vti_common::store::KeyspaceHandle;
+
+use super::engine::compile;
+use super::model::PolicyPurpose;
+use super::storage::{get_active_policy_id, new_policy, set_active_policy_id, store_policy};
+
+/// Pseudo-DID stamped on every default policy's `author_did`
+/// field. Not a resolvable DID — purely a marker so operators
+/// see "this came from the workspace, not from a human admin".
+pub const DEFAULTS_AUTHOR: &str = "did:key:vtc-defaults";
+
+/// Embedded source for each default policy, in [`PolicyPurpose::ALL`]
+/// order. Compile-time-included so the binary is self-contained.
+const DEFAULT_SOURCES: &[(PolicyPurpose, &str)] = &[
+    (
+        PolicyPurpose::Join,
+        include_str!("../../policies/default/join.rego"),
+    ),
+    (
+        PolicyPurpose::Removal,
+        include_str!("../../policies/default/removal.rego"),
+    ),
+    (
+        PolicyPurpose::Personhood,
+        include_str!("../../policies/default/personhood.rego"),
+    ),
+    (
+        PolicyPurpose::Registry,
+        include_str!("../../policies/default/registry.rego"),
+    ),
+    (
+        PolicyPurpose::Directory,
+        include_str!("../../policies/default/directory.rego"),
+    ),
+    (
+        PolicyPurpose::RoleDefinitions,
+        include_str!("../../policies/default/role_definitions.rego"),
+    ),
+    (
+        PolicyPurpose::CrossCommunityRoles,
+        include_str!("../../policies/default/cross_community_roles.rego"),
+    ),
+    (
+        PolicyPurpose::CrossCommunityRelationships,
+        include_str!("../../policies/default/cross_community_relationships.rego"),
+    ),
+    (
+        PolicyPurpose::Relationships,
+        include_str!("../../policies/default/relationships.rego"),
+    ),
+];
+
+/// Number of purposes the workspace ships defaults for. Asserted
+/// against [`PolicyPurpose::ALL`] at test time so a missed entry in
+/// `DEFAULT_SOURCES` surfaces as a build-time-ish failure rather
+/// than a silent runtime gap.
+pub const DEFAULT_COUNT: usize = 9;
+
+/// Return the embedded default source for `purpose`. Useful to the
+/// admin UX layer that wants to show "reset to default" diffs
+/// against the live policy.
+pub fn default_source(purpose: PolicyPurpose) -> &'static str {
+    DEFAULT_SOURCES
+        .iter()
+        .find(|(p, _)| *p == purpose)
+        .map(|(_, src)| *src)
+        .expect("every PolicyPurpose has a shipped default — see DEFAULT_SOURCES")
+}
+
+/// Fill gaps in the active-policy set with the workspace defaults.
+///
+/// Idempotent: only purposes with no current active pointer get a
+/// new row installed. Operator-uploaded policies are never
+/// overwritten and never touched.
+///
+/// Returns the number of policies actually installed (`0` on a
+/// warm boot where every purpose already has an active policy).
+pub async fn install_defaults(
+    policies_ks: &KeyspaceHandle,
+    active_policies_ks: &KeyspaceHandle,
+) -> Result<usize, AppError> {
+    let mut installed = 0_usize;
+    for (purpose, source) in DEFAULT_SOURCES {
+        if get_active_policy_id(active_policies_ks, *purpose)
+            .await?
+            .is_some()
+        {
+            debug!(
+                purpose = purpose.as_str(),
+                "default-policy install skipped — purpose already has an active policy"
+            );
+            continue;
+        }
+
+        let id = Uuid::new_v4();
+        let compiled = compile(source, id).map_err(|e| {
+            // A default that doesn't compile is a workspace bug,
+            // not an operator one — surface as Internal so an
+            // operator sees the actual stack instead of a 400.
+            AppError::Internal(format!(
+                "default policy for {} failed to compile: {e}",
+                purpose.as_str()
+            ))
+        })?;
+        let sha = *compiled.source_sha256();
+
+        let mut policy = new_policy(
+            *purpose,
+            (*source).to_string(),
+            sha,
+            DEFAULTS_AUTHOR.to_string(),
+            1,
+        );
+        policy.id = id;
+        policy.activated_at = Some(Utc::now());
+
+        store_policy(policies_ks, &policy).await?;
+        set_active_policy_id(active_policies_ks, *purpose, id).await?;
+
+        installed += 1;
+        info!(
+            purpose = purpose.as_str(),
+            policy_id = %id,
+            sha256 = %hex::encode(sha),
+            "default policy installed"
+        );
+    }
+
+    if installed == 0 {
+        debug!("no default policies installed — every purpose already has an active row");
+    } else if installed < DEFAULT_COUNT {
+        // Partial install — the daemon started with a mix of
+        // operator + default policies. Worth noting in logs but
+        // not an error.
+        debug!(
+            installed,
+            total = DEFAULT_COUNT,
+            "partial default-policy install — some purposes already had operator policies"
+        );
+    }
+
+    if let Err(e) = sanity_check_active_set(active_policies_ks).await {
+        // Best-effort post-condition check. We don't fail boot
+        // on it — the policies that did install are still
+        // load-bearing — but log loudly so the operator sees the
+        // gap.
+        warn!(error = %e, "default-policy install did not yield a full active set");
+    }
+
+    Ok(installed)
+}
+
+/// Verify every [`PolicyPurpose`] has an active pointer. Called
+/// after [`install_defaults`] succeeds — under normal boot every
+/// purpose should be live. A gap here means a default-install
+/// hit an error mid-loop and the boot continued.
+async fn sanity_check_active_set(active_policies_ks: &KeyspaceHandle) -> Result<(), AppError> {
+    let mut missing = Vec::new();
+    for purpose in PolicyPurpose::ALL {
+        if get_active_policy_id(active_policies_ks, purpose)
+            .await?
+            .is_none()
+        {
+            missing.push(purpose.as_str());
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Internal(format!(
+            "purposes left without an active policy after install_defaults: {}",
+            missing.join(", ")
+        )))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::engine::{compile as compile_policy, evaluate};
+    use serde_json::json;
+    use vti_common::config::StoreConfig;
+    use vti_common::store::Store;
+
+    async fn temp_keyspaces() -> (KeyspaceHandle, KeyspaceHandle, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&StoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        })
+        .expect("store");
+        let policies_ks = store.keyspace("policies").expect("policies ks");
+        let active_ks = store.keyspace("active_policies").expect("active ks");
+        (policies_ks, active_ks, dir)
+    }
+
+    /// `DEFAULT_SOURCES` must list every [`PolicyPurpose`] exactly
+    /// once — a missing entry would result in `install_defaults`
+    /// silently skipping a purpose at boot, which is the kind of
+    /// gap that only surfaces in production. Hard-fail at test
+    /// time instead.
+    #[test]
+    fn defaults_cover_every_purpose() {
+        assert_eq!(DEFAULT_SOURCES.len(), DEFAULT_COUNT);
+        for purpose in PolicyPurpose::ALL {
+            assert!(
+                DEFAULT_SOURCES.iter().any(|(p, _)| *p == purpose),
+                "no default policy shipped for {purpose:?}"
+            );
+        }
+    }
+
+    /// Every default compiles cleanly via the M2.1 harness. Catches
+    /// a malformed default before the daemon boots.
+    #[test]
+    fn every_default_compiles() {
+        for (purpose, source) in DEFAULT_SOURCES {
+            let id = Uuid::new_v4();
+            compile_policy(source, id).unwrap_or_else(|e| {
+                panic!(
+                    "default policy for {} failed to compile: {e}",
+                    purpose.as_str()
+                )
+            });
+        }
+    }
+
+    /// First boot: every purpose gets a default. Second call is a
+    /// no-op (idempotence).
+    #[tokio::test]
+    async fn install_defaults_is_idempotent() {
+        let (policies_ks, active_ks, _dir) = temp_keyspaces().await;
+        let installed = install_defaults(&policies_ks, &active_ks).await.unwrap();
+        assert_eq!(installed, DEFAULT_COUNT);
+        // Every purpose now has an active pointer.
+        for purpose in PolicyPurpose::ALL {
+            assert!(
+                get_active_policy_id(&active_ks, purpose)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "purpose {purpose:?} should have an active row"
+            );
+        }
+        // Re-run is a no-op.
+        let again = install_defaults(&policies_ks, &active_ks).await.unwrap();
+        assert_eq!(again, 0, "second install must be a no-op");
+    }
+
+    /// An operator-uploaded policy already pointed at by the active
+    /// pointer is not overwritten by `install_defaults`.
+    #[tokio::test]
+    async fn install_defaults_preserves_operator_policies() {
+        let (policies_ks, active_ks, _dir) = temp_keyspaces().await;
+
+        // Simulate an operator upload of a custom join policy.
+        let operator_source = "package vtc.join\nimport rego.v1\n\ndefault allow := false\n";
+        let operator_id = Uuid::new_v4();
+        let compiled = compile_policy(operator_source, operator_id).unwrap();
+        let sha = *compiled.source_sha256();
+        let mut operator_policy = new_policy(
+            PolicyPurpose::Join,
+            operator_source.to_string(),
+            sha,
+            "did:key:zRealOperator".into(),
+            1,
+        );
+        operator_policy.id = operator_id;
+        operator_policy.activated_at = Some(Utc::now());
+        store_policy(&policies_ks, &operator_policy).await.unwrap();
+        set_active_policy_id(&active_ks, PolicyPurpose::Join, operator_id)
+            .await
+            .unwrap();
+
+        // Install defaults — only the other 8 purposes get filled.
+        let installed = install_defaults(&policies_ks, &active_ks).await.unwrap();
+        assert_eq!(installed, DEFAULT_COUNT - 1);
+
+        // Join still points at the operator's policy.
+        assert_eq!(
+            get_active_policy_id(&active_ks, PolicyPurpose::Join)
+                .await
+                .unwrap(),
+            Some(operator_id)
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Input-contract round-trips per default. Each test compiles
+    // the default + evaluates the canonical query for that purpose
+    // against the input shape spec §7.3 documents.
+    // ──────────────────────────────────────────────────────────────
+
+    fn pluck_bool(result: &serde_json::Value) -> bool {
+        result
+            .pointer("/result/0/expressions/0/value")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| panic!("expected boolean expression value, got {result}"))
+    }
+
+    fn compile_default(purpose: PolicyPurpose) -> crate::policy::CompiledPolicy {
+        compile_policy(default_source(purpose), Uuid::new_v4()).expect("compile default")
+    }
+
+    #[test]
+    fn join_default_allows_well_formed_request() {
+        let c = compile_default(PolicyPurpose::Join);
+        let input = json!({
+            "applicant_did": "did:key:zApplicant",
+            "vp_claims": {},
+            "action": "join",
+            "now": "2026-05-12T00:00:00Z"
+        });
+        let r = evaluate(&c, "data.vtc.join.allow", input).unwrap();
+        assert!(
+            pluck_bool(&r),
+            "default join policy must allow valid submissions"
+        );
+    }
+
+    #[test]
+    fn join_default_denies_wrong_action() {
+        let c = compile_default(PolicyPurpose::Join);
+        let r = evaluate(&c, "data.vtc.join.allow", json!({ "action": "withdraw" })).unwrap();
+        assert!(!pluck_bool(&r));
+    }
+
+    #[test]
+    fn removal_default_allows_admin_removing_member() {
+        let c = compile_default(PolicyPurpose::Removal);
+        let input = json!({
+            "actor_did": "did:key:zAdmin",
+            "target_did": "did:key:zMember",
+            "target_role": "member",
+            "reason": "",
+            "action": "remove",
+            "now": "2026-05-12T00:00:00Z"
+        });
+        let r = evaluate(&c, "data.vtc.removal.allow", input).unwrap();
+        assert!(pluck_bool(&r));
+    }
+
+    #[test]
+    fn removal_default_min_disposition_is_tombstone() {
+        let c = compile_default(PolicyPurpose::Removal);
+        let r = evaluate(&c, "data.vtc.removal.min_disposition", json!({})).unwrap();
+        assert_eq!(
+            r.pointer("/result/0/expressions/0/value"),
+            Some(&json!("tombstone")),
+            "removal default min_disposition mirrors Phase 1's hardcoded Tombstone"
+        );
+    }
+
+    #[test]
+    fn removal_default_denies_admin_removing_admin() {
+        let c = compile_default(PolicyPurpose::Removal);
+        let r = evaluate(
+            &c,
+            "data.vtc.removal.allow",
+            json!({ "action": "remove", "target_role": "admin" }),
+        )
+        .unwrap();
+        assert!(!pluck_bool(&r));
+    }
+
+    #[test]
+    fn personhood_default_denies_everything() {
+        let c = compile_default(PolicyPurpose::Personhood);
+        let r = evaluate(
+            &c,
+            "data.vtc.personhood.allow",
+            json!({ "applicant_did": "did:key:zX", "vp_claims": {} }),
+        )
+        .unwrap();
+        assert!(!pluck_bool(&r), "personhood default must deny");
+        let asserted = evaluate(&c, "data.vtc.personhood.asserted", json!({})).unwrap();
+        assert!(
+            !pluck_bool(&asserted),
+            "personhood.asserted default must be false"
+        );
+    }
+
+    #[test]
+    fn registry_default_publishes_on_join_with_tombstone_default() {
+        let c = compile_default(PolicyPurpose::Registry);
+        let publish = evaluate(&c, "data.vtc.registry.publish_on_join", json!({})).unwrap();
+        assert!(pluck_bool(&publish));
+        let default = evaluate(&c, "data.vtc.registry.default_departure", json!({})).unwrap();
+        assert_eq!(
+            default.pointer("/result/0/expressions/0/value"),
+            Some(&json!("tombstone")),
+        );
+    }
+
+    #[test]
+    fn directory_default_allows_did_and_role_only() {
+        let c = compile_default(PolicyPurpose::Directory);
+        let ok = evaluate(
+            &c,
+            "data.vtc.directory.allow",
+            json!({
+                "viewer_did": "did:key:zViewer",
+                "viewer_role": "member",
+                "target_member": { "did": "did:key:zTarget" },
+                "fields_requested": ["did", "role"],
+                "action": "show"
+            }),
+        )
+        .unwrap();
+        assert!(pluck_bool(&ok));
+
+        let denied = evaluate(
+            &c,
+            "data.vtc.directory.allow",
+            json!({
+                "viewer_did": "did:key:zViewer",
+                "viewer_role": "member",
+                "target_member": { "did": "did:key:zTarget" },
+                "fields_requested": ["did", "role", "email"],
+                "action": "show"
+            }),
+        )
+        .unwrap();
+        assert!(
+            !pluck_bool(&denied),
+            "directory default must deny when extra fields are requested"
+        );
+    }
+
+    #[test]
+    fn role_definitions_default_matches_spec_matrix() {
+        let c = compile_default(PolicyPurpose::RoleDefinitions);
+
+        let cases: &[(&str, &str, bool)] = &[
+            ("admin", "edit_community_profile", true),
+            ("admin", "author_policies", true),
+            ("admin", "promote_to_admin", true),
+            ("moderator", "approve_join", true),
+            ("moderator", "remove_member", true),
+            ("moderator", "edit_community_profile", false),
+            ("moderator", "promote_to_admin", false),
+            ("issuer", "issue_community_credential", true),
+            ("issuer", "remove_member", false),
+            ("member", "self_remove", true),
+            ("member", "renew_vmc", true),
+            ("member", "remove_member", false),
+            ("member", "approve_join", false),
+            // Custom roles get nothing by default.
+            ("custom:editor", "renew_vmc", false),
+        ];
+
+        for (role, action, expected) in cases {
+            let r = evaluate(
+                &c,
+                "data.vtc.role_definitions.allow",
+                json!({ "role": role, "action": action }),
+            )
+            .unwrap();
+            assert_eq!(
+                pluck_bool(&r),
+                *expected,
+                "role={role} action={action}: expected allow={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_community_roles_default_denies_everything() {
+        let c = compile_default(PolicyPurpose::CrossCommunityRoles);
+        let r = evaluate(
+            &c,
+            "data.vtc.cross_community_roles.allow",
+            json!({
+                "foreign_vec": { "issuer": "did:webvh:peer.example", "role": "admin" },
+                "target_role": "admin",
+                "vtc_state": {}
+            }),
+        )
+        .unwrap();
+        assert!(!pluck_bool(&r));
+    }
+
+    #[test]
+    fn cross_community_relationships_default_denies_everything() {
+        let c = compile_default(PolicyPurpose::CrossCommunityRelationships);
+        let r = evaluate(
+            &c,
+            "data.vtc.cross_community_relationships.allow",
+            json!({
+                "vrc": { "issuer": "did:webvh:peer.example" },
+                "viewer_member": { "did": "did:key:zViewer" },
+                "vtc_state": {}
+            }),
+        )
+        .unwrap();
+        assert!(!pluck_bool(&r));
+    }
+
+    #[test]
+    fn relationships_default_requires_both_parties_current() {
+        let c = compile_default(PolicyPurpose::Relationships);
+
+        let both = evaluate(
+            &c,
+            "data.vtc.relationships.allow",
+            json!({
+                "vrc": {},
+                "issuer_member": { "did": "did:key:zIssuer", "is_current": true },
+                "subject_member": { "did": "did:key:zSubject", "is_current": true },
+                "action": "publish"
+            }),
+        )
+        .unwrap();
+        assert!(pluck_bool(&both));
+
+        let only_one = evaluate(
+            &c,
+            "data.vtc.relationships.allow",
+            json!({
+                "vrc": {},
+                "issuer_member": { "did": "did:key:zIssuer", "is_current": true },
+                "subject_member": { "did": "did:key:zSubject", "is_current": false },
+                "action": "publish"
+            }),
+        )
+        .unwrap();
+        assert!(
+            !pluck_bool(&only_one),
+            "relationships default must deny when one party isn't a member"
+        );
+    }
+}

@@ -164,6 +164,18 @@ pub async fn run(
     let audit_ks = store.keyspace("audit")?;
     let audit_key_ks = store.keyspace("audit_key")?;
 
+    // M2.5: install the workspace-shipped default policies for any
+    // PolicyPurpose that lacks an active row. Idempotent — operator
+    // uploads are preserved verbatim. A failure here is non-fatal:
+    // policies are only evaluated by handlers that ship in M2.6+,
+    // and those handlers default-deny when the active pointer is
+    // missing, so a partial install still produces a safe daemon.
+    match crate::policy::default::install_defaults(&policies_ks, &active_policies_ks).await {
+        Ok(0) => debug!("default policies: every purpose already has an active row"),
+        Ok(n) => info!("installed {n} default policy(ies) at boot"),
+        Err(e) => warn!("failed to install default policies: {e}"),
+    }
+
     // Initialize auth infrastructure. Pass the audit keyspaces in so
     // `init_auth` can derive the HMAC audit key from the same secret
     // store contents it uses for the install signer.

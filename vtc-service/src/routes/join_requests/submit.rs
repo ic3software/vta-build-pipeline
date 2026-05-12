@@ -38,16 +38,21 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-use tracing::info;
+use serde_json::{Value as JsonValue, json};
+use tracing::{info, warn};
 use uuid::Uuid;
 
-use vti_common::audit::{AuditEvent, JoinRequestData};
+use vti_common::audit::{AuditEvent, JoinRequestData, JoinRequestRejectedData};
 use vti_common::error::AppError;
 
-use crate::join::{JoinRequest, JoinTransport, store_join_request};
+use crate::join::{JoinRequest, JoinStatus, JoinTransport, store_join_request};
+use crate::policy::{
+    PolicyPurpose, compile as compile_policy, evaluate as evaluate_policy,
+    extract::extract_vp_claims, get_active_policy_id, get_policy,
+};
 use crate::server::AppState;
 
 pub const JOIN_REQUEST_SUBMIT_DOMAIN_TAG: &[u8] = b"vtc-join-request/v1\0";
@@ -121,31 +126,142 @@ pub async fn submit_inner(
         verify_holder_signature(&applicant_did, &vp, registry_consent, &extensions, hex_sig)?;
     }
 
-    // 2. Persist as Pending.
+    // 2. Phase 2 policy step (M2.6). Extract the canonical
+    // `vp_claims` projection per plan §D4 and feed it to the
+    // active `join.rego`. `allow` → row stays Pending; `deny`
+    // → row lands as Rejected with the policy's output stored
+    // on `policy_decision`.
+    let vp_claims = extract_vp_claims(&vp);
+    let policy_input = json!({
+        "applicant_did": applicant_did,
+        "vp_claims": vp_claims,
+        "action": "join",
+        "now": Utc::now().to_rfc3339(),
+    });
+    let decision = evaluate_join_policy(state, &policy_input).await?;
+
+    // 3. Persist. `vp_claims` is stored alongside the raw `vp`
+    // so the approve path doesn't have to re-extract.
     let mut request = JoinRequest::new(applicant_did.clone(), vp);
+    request.vp_claims = vp_claims;
     request.registry_consent = registry_consent;
     request.extensions = extensions;
+    match &decision {
+        JoinPolicyDecision::Allow => {
+            request.status = JoinStatus::Pending;
+        }
+        JoinPolicyDecision::Deny { result } => {
+            request.status = JoinStatus::Rejected;
+            request.policy_decision = Some(result.clone());
+        }
+    }
     store_join_request(&state.join_requests_ks, &request).await?;
 
-    // 3. Audit. Actor is the applicant — they're the principal.
-    audit_writer
-        .write(
-            &applicant_did,
-            None,
-            AuditEvent::JoinRequestSubmitted(JoinRequestData {
-                request_id: request.id.to_string(),
-                transport: transport.as_str().to_string(),
-            }),
-        )
-        .await?;
+    // 4. Audit. Allow → Submitted; deny → Rejected with the
+    // canonical `"policy denied"` reason marker so SIEM can
+    // distinguish admin rejections from policy rejections.
+    match &decision {
+        JoinPolicyDecision::Allow => {
+            audit_writer
+                .write(
+                    &applicant_did,
+                    None,
+                    AuditEvent::JoinRequestSubmitted(JoinRequestData {
+                        request_id: request.id.to_string(),
+                        transport: transport.as_str().to_string(),
+                    }),
+                )
+                .await?;
+        }
+        JoinPolicyDecision::Deny { .. } => {
+            audit_writer
+                .write(
+                    &applicant_did,
+                    None,
+                    AuditEvent::JoinRequestRejected(JoinRequestRejectedData {
+                        request_id: request.id.to_string(),
+                        reason: "policy denied".into(),
+                    }),
+                )
+                .await?;
+        }
+    }
 
     info!(
         request_id = %request.id,
         applicant = %applicant_did,
         transport = transport.as_str(),
+        decision = decision.kind(),
         "join request submitted"
     );
     Ok(request)
+}
+
+// ---------------------------------------------------------------------------
+// Policy step (M2.6.1)
+// ---------------------------------------------------------------------------
+
+/// Outcome of evaluating the active `join.rego` against the
+/// canonical `input` for a fresh submission. Carries the raw
+/// regorus `QueryResults` JSON so the deny path can persist it on
+/// `JoinRequest.policy_decision` for the audit trail.
+enum JoinPolicyDecision {
+    Allow,
+    Deny { result: JsonValue },
+}
+
+impl JoinPolicyDecision {
+    fn kind(&self) -> &'static str {
+        match self {
+            JoinPolicyDecision::Allow => "allow",
+            JoinPolicyDecision::Deny { .. } => "deny",
+        }
+    }
+}
+
+/// Look up the active `join` policy, compile + evaluate it, and
+/// classify the result as allow / deny. Treats every error path
+/// as deny — a daemon misconfiguration must not silently accept
+/// applicants the operator hasn't authored a policy for.
+async fn evaluate_join_policy(
+    state: &AppState,
+    input: &JsonValue,
+) -> Result<JoinPolicyDecision, AppError> {
+    let active_id = get_active_policy_id(&state.active_policies_ks, PolicyPurpose::Join).await?;
+    let id = match active_id {
+        Some(id) => id,
+        None => {
+            // M2.5's `install_defaults` should always have run by
+            // the time a request hits this path. Reaching here
+            // means the daemon is missing its default-policy
+            // bootstrap — fail closed.
+            warn!("no active join policy at submit time — refusing submission");
+            return Ok(JoinPolicyDecision::Deny {
+                result: json!({
+                    "error": "no active join policy",
+                }),
+            });
+        }
+    };
+    let policy = get_policy(&state.policies_ks, id)
+        .await?
+        .ok_or_else(|| AppError::Internal(format!("active join policy {id} not found")))?;
+
+    // Compile per call. Same trade-off as `POST
+    // /v1/policies/{id}/test` makes (M2.3.1) — regorus's parse is
+    // cheap and per-call compile keeps this path independent of
+    // M2.8's in-memory hot-swap cache, which hasn't landed yet.
+    let compiled = compile_policy(&policy.rego_source, policy.id)?;
+    let result = evaluate_policy(&compiled, "data.vtc.join.allow", input.clone())?;
+    let allow = result
+        .pointer("/result/0/expressions/0/value")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if allow {
+        Ok(JoinPolicyDecision::Allow)
+    } else {
+        Ok(JoinPolicyDecision::Deny { result })
+    }
 }
 
 /// Verify the Ed25519 signature over the canonical signing

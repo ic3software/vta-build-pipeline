@@ -74,11 +74,19 @@ impl std::fmt::Display for JoinStatus {
 pub struct JoinRequest {
     pub id: Uuid,
     pub applicant_did: String,
-    /// Opaque VP carried verbatim from the wire. Phase 2's policy
-    /// step (`join.rego`) reads this; Phase 1 never inspects it
-    /// beyond the holder-binding check the route layer ran at
-    /// submit time.
+    /// Opaque VP carried verbatim from the wire. Phase 1 never
+    /// inspects it beyond the holder-binding check the route layer
+    /// ran at submit time; Phase 2's policy step reads from
+    /// [`Self::vp_claims`] (the canonical projection extracted at
+    /// submit time), not from this field.
     pub vp: JsonValue,
+    /// Canonical projection of [`Self::vp`] computed at submit
+    /// time by [`crate::policy::extract::extract_vp_claims`] and
+    /// fed to `join.rego` as `input.vp_claims`. Stored on the row
+    /// so the approve flow doesn't have to re-extract (plan §D4).
+    /// `null` on rows persisted before Phase 2.
+    #[serde(default)]
+    pub vp_claims: JsonValue,
     pub submitted_at: DateTime<Utc>,
     pub status: JoinStatus,
     /// Set by Phase 2's policy step on approve / reject. Always
@@ -105,6 +113,7 @@ impl JoinRequest {
             id: Uuid::new_v4(),
             applicant_did: applicant_did.into(),
             vp,
+            vp_claims: JsonValue::Null,
             submitted_at: Utc::now(),
             status: JoinStatus::Pending,
             policy_decision: None,
