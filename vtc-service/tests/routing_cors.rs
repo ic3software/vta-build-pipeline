@@ -55,6 +55,7 @@ fn cfg_with(routing: RoutingConfig, cors: CorsConfig) -> AppConfig {
         secrets: Default::default(),
         routing,
         cors,
+        registry: Default::default(),
         config_path: std::path::PathBuf::new(),
     }
 }
@@ -266,6 +267,8 @@ async fn build_router_with_cors(cors: CorsConfig) -> (axum::Router, tempfile::Te
         registry_records_ks: registry_records_ks.clone(),
         sync_queue_ks: sync_queue_ks.clone(),
         sync_cursor_ks: sync_cursor_ks.clone(),
+        registry_client: None,
+        registry_health: vtc_service::registry::RegistryHealth::new(),
         credential_signer: None,
         audit_ks,
         audit_key_ks,

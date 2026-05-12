@@ -179,6 +179,12 @@ pub enum AuditEvent {
     /// forward); the prior DID lives in the data struct. Spec
     /// §10.5; Phase 2 M2.15.
     DidRotated(DidRotatedData),
+
+    /// The daemon's trust-registry reachability state flipped
+    /// (`active` ↔ `degraded`). Spec §8.1; Phase 3 M3.2. SIEM
+    /// filters key on this to alert when the registry connection
+    /// drops or recovers.
+    RegistryStatusChanged(RegistryStatusChangedData),
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +472,22 @@ pub struct StatusListFlippedData {
     /// `false` = un-suspended. Revocation flips are one-way per
     /// spec §6.2; suspension flips can go either direction.
     pub revoked: bool,
+}
+
+/// Payload for [`AuditEvent::RegistryStatusChanged`]. Phase 3
+/// M3.2.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryStatusChangedData {
+    /// Status before the flip — `"active"` or `"degraded"`.
+    pub from: String,
+    /// Status after the flip.
+    pub to: String,
+    /// Optional reason — error string from the last health
+    /// probe when flipping to `degraded`, or a short
+    /// confirmation message when flipping back to `active`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Payload for [`AuditEvent::DidRotated`]. Phase 2 M2.15.
@@ -860,6 +882,36 @@ mod tests {
     }
 
     #[test]
+    fn registry_status_changed_round_trip() {
+        let e = AuditEvent::RegistryStatusChanged(RegistryStatusChangedData {
+            from: "active".into(),
+            to: "degraded".into(),
+            reason: Some("connection refused".into()),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "RegistryStatusChanged");
+        assert_eq!(v["data"]["from"], "active");
+        assert_eq!(v["data"]["to"], "degraded");
+        assert_eq!(v["data"]["reason"], "connection refused");
+        round_trip(&e);
+    }
+
+    #[test]
+    fn registry_status_changed_omits_reason_when_none() {
+        let e = AuditEvent::RegistryStatusChanged(RegistryStatusChangedData {
+            from: "degraded".into(),
+            to: "active".into(),
+            reason: None,
+        });
+        let v = wire_value(&e);
+        assert!(
+            v["data"].get("reason").is_none(),
+            "reason should be omitted when None, got {v}"
+        );
+        round_trip(&e);
+    }
+
+    #[test]
     fn variant_discriminator_strings() {
         let cases: Vec<(AuditEvent, &str)> = vec![
             (
@@ -988,6 +1040,14 @@ mod tests {
                     role_vec_id: None,
                 }),
                 "DidRotated",
+            ),
+            (
+                AuditEvent::RegistryStatusChanged(RegistryStatusChangedData {
+                    from: "active".into(),
+                    to: "degraded".into(),
+                    reason: None,
+                }),
+                "RegistryStatusChanged",
             ),
         ];
         for (event, expected) in cases {

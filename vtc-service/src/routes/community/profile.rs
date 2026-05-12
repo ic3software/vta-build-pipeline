@@ -22,17 +22,43 @@ use vti_common::auth::{AdminAuth, AuthClaims};
 use vti_common::error::AppError;
 
 use crate::community::{CommunityProfile, CommunityProfileUpdate, load_profile, store_profile};
+use crate::registry::HealthStatus;
 use crate::server::AppState;
 
-/// GET handler. Returns the singleton profile.
+/// GET response shape.
+///
+/// Wraps the persisted [`CommunityProfile`] + adds the live
+/// `registryStatus` field surfaced by Phase 3 M3.2.
+/// `registry_status` is read from `AppState` at request time,
+/// not persisted on the profile row.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunityProfileResponse {
+    /// The persisted profile fields. Flattened on the wire so
+    /// existing consumers see no shape change.
+    #[serde(flatten)]
+    pub profile: CommunityProfile,
+    /// Trust-registry reachability — `"active"` when the last
+    /// health probe succeeded, `"degraded"` otherwise (probe
+    /// never ran, last probe failed, or `registry.url` is
+    /// unset). Spec §8.1.
+    pub registry_status: HealthStatus,
+}
+
+/// GET handler. Returns the singleton profile + the live
+/// trust-registry status.
 pub async fn get_profile(
     _auth: AuthClaims,
     State(state): State<AppState>,
-) -> Result<Json<CommunityProfile>, AppError> {
+) -> Result<Json<CommunityProfileResponse>, AppError> {
     let profile = load_profile(&state.community_ks)
         .await?
         .ok_or_else(|| AppError::NotFound("community profile not initialised".into()))?;
-    Ok(Json(profile))
+    let registry_status = state.registry_health.status().await;
+    Ok(Json(CommunityProfileResponse {
+        profile,
+        registry_status,
+    }))
 }
 
 /// PUT response shape — echoes the updated profile + the list of

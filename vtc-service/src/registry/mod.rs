@@ -47,10 +47,13 @@
 //!   exactly where the prior run left off (M3.3).
 
 pub mod client;
+pub mod health;
 pub mod model;
 pub mod storage;
+pub mod upstream;
 
 pub use client::{MockRegistryClient, RegistryError, TrustRegistryClient};
+pub use health::{HealthStatus, RegistryHealth};
 pub use model::{
     DEFAULT_MAX_ATTEMPTS, MAX_BACKOFF_SECONDS, RegistryRecord, RegistryStatus, SyncJob,
     SyncJobKind, SyncJobState, exponential_backoff_seconds,
@@ -60,3 +63,4 @@ pub use storage::{
     get_record, get_sync_cursor, get_sync_job, list_records, list_sync_jobs, set_sync_cursor,
     store_record, store_sync_job,
 };
+pub use upstream::UpstreamRegistryClient;

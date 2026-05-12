@@ -74,6 +74,16 @@ pub struct AppState {
     pub sync_cursor_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub audit_key_ks: KeyspaceHandle,
+    /// Trust-registry client (Phase 3 M3.2). `None` when
+    /// `config.registry.url` is unset — the daemon runs in
+    /// "no-registry" mode and `registry_health.status()` stays
+    /// `Degraded`.
+    pub registry_client: Option<Arc<dyn crate::registry::TrustRegistryClient>>,
+    /// Live trust-registry reachability + last-success /
+    /// last-failure surface (Phase 3 M3.2). The community-
+    /// profile + diagnostics handlers read this; the
+    /// boot/probe paths write it.
+    pub registry_health: crate::registry::RegistryHealth,
     pub config: Arc<RwLock<AppConfig>>,
     pub did_resolver: Option<DIDCacheClient>,
     pub secrets_resolver: Option<Arc<ThreadedSecretsResolver>>,
@@ -224,6 +234,39 @@ pub async fn run(
         );
     }
 
+    // M3.2: build the trust-registry client + run the boot
+    // health probe. When `registry.url` is unset, the client
+    // is `None` and `registry_health` stays Degraded. The
+    // periodic probe task is spawned later, after the audit
+    // writer is available.
+    let registry_health = crate::registry::RegistryHealth::new();
+    let registry_client: Option<Arc<dyn crate::registry::TrustRegistryClient>> = match config
+        .registry
+        .url
+        .as_deref()
+    {
+        Some(url) => {
+            let cfg = crate::registry::upstream::UpstreamConfig {
+                base_url: url.to_string(),
+                http_timeout: std::time::Duration::from_secs(config.registry.http_timeout_seconds),
+            };
+            match crate::registry::UpstreamRegistryClient::new(cfg) {
+                Ok(c) => Some(Arc::new(c) as Arc<dyn crate::registry::TrustRegistryClient>),
+                Err(e) => {
+                    warn!(error = ?e, "failed to construct trust-registry client; running with registry features disabled");
+                    None
+                }
+            }
+        }
+        None => {
+            debug!(
+                "trust-registry url not configured — registry features disabled; \
+                     registry_status reads 'degraded'"
+            );
+            None
+        }
+    };
+
     // Initialize auth infrastructure. Pass the audit keyspaces in so
     // `init_auth` can derive the HMAC audit key from the same secret
     // store contents it uses for the install signer.
@@ -309,6 +352,8 @@ pub async fn run(
         sync_cursor_ks,
         audit_ks,
         audit_key_ks,
+        registry_client: registry_client.clone(),
+        registry_health: registry_health.clone(),
         config: Arc::new(RwLock::new(config)),
         did_resolver,
         secrets_resolver,
@@ -323,6 +368,87 @@ pub async fn run(
         shutdown_tx: shutdown_tx.clone(),
         supervisor: detect_supervisor(),
     };
+
+    // M3.2: boot-time health probe. Best-effort — daemon
+    // proceeds regardless. Subsequent periodic probes track
+    // the live state.
+    if let (Some(client), Some(vtc_did)) = (
+        state.registry_client.as_ref(),
+        state.config.read().await.vtc_did.clone(),
+    ) {
+        match client.health().await {
+            Ok(()) => {
+                state
+                    .registry_health
+                    .record_success(state.audit_writer.as_ref(), &vtc_did)
+                    .await;
+                info!("trust-registry health probe passed at boot");
+            }
+            Err(e) => {
+                state
+                    .registry_health
+                    .record_failure(format!("{e}"), state.audit_writer.as_ref(), &vtc_did)
+                    .await;
+                warn!(error = %e, "trust-registry health probe failed at boot — running with registry_status=degraded");
+            }
+        }
+    }
+
+    // M3.2: periodic health probe. Each tick re-runs `health()`
+    // + updates `registry_health`. Configurable via
+    // `registry.health_probe_interval_seconds`; `0` disables.
+    let probe_interval_secs = state
+        .config
+        .read()
+        .await
+        .registry
+        .health_probe_interval_seconds;
+    if registry_client.is_some() && probe_interval_secs > 0 {
+        let probe_client = registry_client.clone().expect("checked is_some");
+        let probe_health = registry_health.clone();
+        let probe_audit = state.audit_writer.clone();
+        let probe_did = state
+            .config
+            .read()
+            .await
+            .vtc_did
+            .clone()
+            .unwrap_or_else(|| "did:key:vtc-unknown".into());
+        let mut probe_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(probe_interval_secs));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // First tick fires immediately — skip so the
+            // periodic probe doesn't overlap the boot probe.
+            timer.tick().await;
+            loop {
+                tokio::select! {
+                    _ = timer.tick() => {
+                        match probe_client.health().await {
+                            Ok(()) => {
+                                probe_health
+                                    .record_success(probe_audit.as_ref(), &probe_did)
+                                    .await;
+                            }
+                            Err(e) => {
+                                probe_health
+                                    .record_failure(
+                                        format!("{e}"),
+                                        probe_audit.as_ref(),
+                                        &probe_did,
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                    _ = probe_shutdown.changed() => {
+                        debug!("trust-registry health probe task shutting down");
+                        return;
+                    }
+                }
+            }
+        });
+    }
 
     // M0.10: consume + audit any pending emergency-bootstrap marker
     // left behind by `vtc admin emergency-bootstrap`. The marker is

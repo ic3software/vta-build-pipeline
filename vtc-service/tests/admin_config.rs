@@ -113,6 +113,8 @@ async fn build_with(
         registry_records_ks: registry_records_ks.clone(),
         sync_queue_ks: sync_queue_ks.clone(),
         sync_cursor_ks: sync_cursor_ks.clone(),
+        registry_client: None,
+        registry_health: vtc_service::registry::RegistryHealth::new(),
         credential_signer: None,
         config: Arc::new(RwLock::new(config)),
         did_resolver: None,

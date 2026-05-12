@@ -60,6 +60,14 @@ affinidi-secrets-resolver = { workspace = true }
 # Bitstring status list — privacy-preserving credential revocation
 # per W3C. Used by `crate::status_list` (Phase 2 M2.10).
 affinidi-status-list = { workspace = true }
+# Reqwest — HTTP client for the in-tree trust-registry
+# transport (Phase 3 M3.2's health probe + M3.10's TRQP
+# query path). The crate is already in our transitive tree
+# via affinidi-tdk; surfacing as a direct dep makes the
+# version pin visible to clippy + cargo-audit.
+reqwest = { workspace = true }
+# `async-trait` — already a direct dep for emergency::VtaRecoveryProver;
+# Phase 3's TrustRegistryClient trait reuses it.
 # Lower-level DIDComm message types — needed for the join-request
 # message handler in `messaging.rs` (M1.8.2). The service crate
 # accepts `Message` / `UnpackMetadata` by value but doesn't

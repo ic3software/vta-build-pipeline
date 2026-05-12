@@ -2,16 +2,21 @@
   "$id": "https://trusttasks.org/openvtc/vtc/community/profile/manage/1.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "VTC — Community Profile (Show + Update)",
-  "description": "Covers GET (no body) and PUT (partial CommunityProfileUpdate). Refined when GET/PUT split into separate Trust Tasks.",
+  "description": "Covers GET (no body) and PUT (partial CommunityProfileUpdate). Refined when GET/PUT split into separate Trust Tasks. GET response also carries the live `registryStatus` field (additive in Phase 3 M3.2).",
   "type": "object",
   "properties": {
-    "name":         { "type": "string" },
-    "description":  { "type": "string" },
-    "logoUrl":      { "type": ["string", "null"] },
-    "publicUrl":    { "type": ["string", "null"] },
-    "contactEmail": { "type": ["string", "null"] },
-    "language":     { "type": "string" },
-    "extensions":   {}
+    "name":           { "type": "string" },
+    "description":    { "type": "string" },
+    "logoUrl":        { "type": ["string", "null"] },
+    "publicUrl":      { "type": ["string", "null"] },
+    "contactEmail":   { "type": ["string", "null"] },
+    "language":       { "type": "string" },
+    "extensions":     {},
+    "registryStatus": {
+      "type": "string",
+      "enum": ["active", "degraded"],
+      "description": "Trust-registry reachability on the GET response. Spec §8.1; Phase 3 M3.2."
+    }
   },
   "additionalProperties": false
 }
