@@ -977,23 +977,38 @@ everything the new path replaces.
 
 ## M0.12 — Install-flow integration tests + Phase 0 gate
 
-### `[ ]` M0.12.1 — End-to-end install integration test
+### `[x]` M0.12.1 — End-to-end install integration test
 
-- **Acceptance**
-  - Single integration test exercises:
-    1. `vtc setup` mints seed + install token (test harness shortcut
-       — provisioning against a fake VTA is acceptable)
-    2. `POST /v1/install/claim` succeeds with mocked WebAuthn
-    3. `POST /v1/admin/bootstrap` succeeds
-    4. `POST /v1/admin/passkeys/register` adds a second passkey
-    5. `GET /v1/admin/passkeys` returns both
-    6. `GET /v1/community/profile` returns the configured profile
-    7. `PATCH /v1/admin/config` updates a setting
-    8. `POST /v1/admin/config/restart` refuses without supervisor
-    9. Second `POST /v1/install/claim` fails (carve-out closed)
-- **Verify** test green
+- **Acceptance** — single integration test
+  (`tests/install_flow.rs::end_to_end_install_flow_phase_0_gate`)
+  walks the 9-step scenario through `Router::oneshot`:
+    1. `vtc setup` shortcut — mint install token directly via
+       `mint_install_token` + `InstallTokenStore::record_issued`
+       (no real VTA, per the acceptance criteria).
+    2. `POST /v1/install/claim/start` succeeds.
+    3. `POST /v1/install/claim/finish` succeeds — harness signs
+       both ceremonies, server returns setup-session JWT.
+    4. `POST /v1/admin/bootstrap` succeeds — ACL admin entry
+       written, install carve-out closed.
+    5. `POST /v1/admin/passkeys/register/{start,finish}` adds a
+       second passkey.
+    6. `GET /v1/admin/passkeys` returns both
+       (`install` + `second device`).
+    7. `GET /v1/community/profile` returns the seeded profile.
+    8. `PATCH /v1/admin/config` applies `log.level=debug` to the
+       reloadable layer.
+    9. `POST /v1/admin/config/restart` returns 412 SupervisorRequired
+       (fixture has `supervisor: None`).
+   10. Second `POST /v1/install/claim/start` with the same token
+       returns 401 (carve-out closed by bootstrap; the install
+       token also transitioned to `Consumed`).
+  Plus audit-log sanity: `CommunityInstalled` +
+  `AdminPasskeyRegistered` envelopes present; **no
+  `RestartRequested` envelope** (the 412 path must not pollute
+  the audit log — failed requests don't get recorded).
+- **Verify** ✓ test green on first run.
 - **Files**
-  - `vtc-service/tests/install_flow.rs` (new)
+  - `vtc-service/tests/install_flow.rs` (new — ~370 lines)
 - **Deps**: M0.6.3, M0.7.2, M0.8.3, M0.11.2
 
 ### `[ ]` M0.12.2 — Emergency bootstrap integration test
