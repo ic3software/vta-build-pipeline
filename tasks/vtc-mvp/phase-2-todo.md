@@ -16,7 +16,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M2.1 — `regorus` policy harness
 
-### `[ ]` M2.1.1 — `vtc_service::policy` module
+### `[x]` M2.1.1 — `vtc_service::policy` module
 
 - **Acceptance**
   - `regorus` added to workspace dependencies.
