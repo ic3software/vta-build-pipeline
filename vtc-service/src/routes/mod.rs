@@ -6,6 +6,7 @@ mod config;
 pub(crate) mod did_log;
 mod health;
 pub(crate) mod install;
+mod members;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -82,6 +83,18 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let admin_passkeys_revoke =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/passkeys/revoke/1.0")
+            .expect("static Trust-Task URL");
+    let members_list = TrustTask::new("https://trusttasks.org/openvtc/vtc/members/list/1.0")
+        .expect("static Trust-Task URL");
+    let members_show = TrustTask::new("https://trusttasks.org/openvtc/vtc/members/show/1.0")
+        .expect("static Trust-Task URL");
+    // `members_update` (`members/update/1.0`) shares the
+    // `members/{did}` mount with `show` for now — TrustTaskRouter
+    // doesn't support per-method Trust-Task selectors yet
+    // (same Phase-0 workaround `admin/config` + `community/profile`
+    // use). When that lands, split show + update.
+    let members_promote =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/members/promote-to-admin/1.0")
             .expect("static Trust-Task URL");
 
     TrustTaskRouter::<AppState>::new()
@@ -218,6 +231,31 @@ pub fn router() -> Router<AppState> {
             "/v1/admin/passkeys/revoke/finish",
             post(admin::passkeys::revoke_finish),
             admin_passkeys_revoke,
+        )
+        // Members (Phase 1 M1.4–M1.6).
+        .route_with_task(
+            "/v1/members",
+            get(members::read::list_members),
+            members_list,
+        )
+        .route_with_task(
+            "/v1/members/{did}",
+            get(members::read::show_member).patch(members::update::update_member),
+            // GET + PATCH share one Trust Task today; split into
+            // members/show/1.0 + members/update/1.0 when
+            // TrustTaskRouter gains per-method selectors (same
+            // Phase-0 pattern community/profile + admin/config use).
+            members_show,
+        )
+        .route_with_task(
+            "/v1/members/{did}/promote-to-admin/start",
+            post(members::promote::promote_start),
+            members_promote.clone(),
+        )
+        .route_with_task(
+            "/v1/members/{did}/promote-to-admin/finish",
+            post(members::promote::promote_finish),
+            members_promote,
         )
         .into_router()
 }

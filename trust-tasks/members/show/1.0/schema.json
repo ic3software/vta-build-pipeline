@@ -1,0 +1,9 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/show/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Members — Show",
+  "type": "object",
+  "properties": {
+    "response": { "$ref": "../../list/1.0/schema.json#/$defs/MemberResponse" }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/list/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Members — List",
+  "type": "object",
+  "properties": {
+    "response": {
+      "type": "object",
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/MemberResponse" }
+        },
+        "nextCursor": { "type": ["string", "null"] },
+        "totalEstimate": { "type": ["integer", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "MemberResponse": {
+      "type": "object",
+      "required": [
+        "did",
+        "role",
+        "joinedAt",
+        "publishConsent",
+        "departurePreference",
+        "extensions"
+      ],
+      "properties": {
+        "did": { "type": "string" },
+        "role": { "type": "string" },
+        "label": { "type": ["string", "null"] },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "publishConsent": { "type": "boolean" },
+        "departurePreference": {
+          "type": "string",
+          "enum": ["purge", "tombstone", "historical", "policydefault"]
+        },
+        "statusListIndex": { "type": ["integer", "null"] },
+        "currentVmcId": { "type": ["string", "null"] },
+        "currentRoleVecId": { "type": ["string", "null"] },
+        "extensions": {}
+      }
+    }
+  }
+}

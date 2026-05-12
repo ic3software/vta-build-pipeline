@@ -97,6 +97,26 @@ pub enum AuditEvent {
     /// `audit_by_type` index without needing to walk the prior
     /// epoch.
     AuditKeyRotated(AuditKeyRotatedData),
+
+    /// `PATCH /v1/members/{did}` updated profile or non-role
+    /// metadata on a member's record. Lists the field names that
+    /// changed; values stay out of the envelope.
+    MemberUpdated(MemberUpdatedData),
+
+    /// `PATCH /v1/members/{did}` reassigned the member's role.
+    /// Distinct event from `MemberUpdated` because role changes
+    /// are security-significant — SIEM filters key on this
+    /// variant separately. Admin promotion uses
+    /// [`AdminPromoted`] instead (spec §10.4 keeps the two
+    /// paths separate).
+    RoleChanged(RoleChangedData),
+
+    /// `POST /v1/members/{did}/promote-to-admin` finished with
+    /// a successful step-up UV ceremony. Spec §10.4 makes this
+    /// its own variant (distinct from `RoleChanged`) so SIEM
+    /// rules can target it; admin elevation is the highest-
+    /// privilege grant the community emits.
+    AdminPromoted(AdminPromotedData),
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +248,41 @@ pub struct AuditKeyRotatedData {
     pub previous_key_id: String,
     pub new_key_id: String,
     pub rotation_reason: RotationReason,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberUpdatedData {
+    /// Names of the fields changed on this PATCH (e.g.
+    /// `["publishConsent", "departurePreference"]`). Field values
+    /// stay out of the audit log — operator-facing extensions data
+    /// can be arbitrarily large, and the metadata `publish_consent`
+    /// / `departure_preference` shifts are individually
+    /// non-sensitive.
+    pub fields_changed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleChangedData {
+    /// Previous role, serialised via the service's role-enum
+    /// `Display` impl (e.g. `"moderator"`, `"custom:editor"`).
+    /// String-typed so this struct stays in vti-common without
+    /// taking a dep on vtc-service's `VtcRole`.
+    pub previous_role: String,
+    pub new_role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminPromotedData {
+    /// Role the member held immediately before promotion.
+    pub previous_role: String,
+    /// Credential id of the passkey used in the step-up UV
+    /// ceremony that authorised the promotion. Spec §10.4 calls
+    /// out the UV requirement; recording the credential id makes
+    /// the chain of authority auditable.
+    pub authorising_credential_id: String,
 }
 
 // ---------------------------------------------------------------------------
