@@ -1,0 +1,32 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/promote-to-admin/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC Members — Promote to Admin",
+  "type": "object",
+  "properties": {
+    "startResponse": {
+      "type": "object",
+      "required": ["registrationId", "options"],
+      "properties": {
+        "registrationId": { "type": "string", "format": "uuid" },
+        "options": { "type": "object" }
+      }
+    },
+    "finishRequest": {
+      "type": "object",
+      "required": ["registrationId", "uvResponse"],
+      "properties": {
+        "registrationId": { "type": "string", "format": "uuid" },
+        "uvResponse": { "type": "object" }
+      }
+    },
+    "finishResponse": {
+      "type": "object",
+      "required": ["did", "eventId"],
+      "properties": {
+        "did": { "type": "string" },
+        "eventId": { "type": "string", "format": "uuid" }
+      }
+    }
+  }
+}

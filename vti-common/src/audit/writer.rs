@@ -40,6 +40,14 @@ impl AuditWriter {
         }
     }
 
+    /// Return the currently-active audit key. Callers that need to
+    /// sign a pagination cursor (or run any other HMAC operation
+    /// tied to the per-community audit epoch) use this rather than
+    /// reaching into the key store directly.
+    pub async fn active_key(&self) -> Result<crate::audit::AuditKey, AppError> {
+        self.key_store.active().await
+    }
+
     /// Write an audit event. Hashes `actor_did` (mandatory) and
     /// `target_did` (optional) under the currently-active key,
     /// returns the persisted envelope so callers can echo the

@@ -31,9 +31,10 @@ pub mod writer;
 
 pub use envelope::{AuditEnvelope, EVENT_VERSION, SCHEMA_VERSION};
 pub use event::{
-    AdminPasskeyData, AuditEvent, AuditKeyRotatedData, CommunityInstalledData,
+    AdminPasskeyData, AdminPromotedData, AuditEvent, AuditKeyRotatedData, CommunityInstalledData,
     CommunityProfileUpdatedData, ConfigChange, ConfigChangedData, ConfigReloadedData, ConfigSource,
-    EmergencyBootstrapData, REDACTED_MARKER, RestartRequestedData,
+    EmergencyBootstrapData, MemberUpdatedData, REDACTED_MARKER, RestartRequestedData,
+    RoleChangedData,
 };
 pub use key_store::{AuditKey, AuditKeyStore, KeyId, RotationReason};
 pub use writer::AuditWriter;

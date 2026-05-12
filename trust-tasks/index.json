@@ -124,6 +124,30 @@
       "status": "Draft",
       "path": "admin/config/import/1.0",
       "rest": "POST /v1/admin/config/import"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/list/1.0",
+      "status": "Draft",
+      "path": "members/list/1.0",
+      "rest": "GET /v1/members"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/show/1.0",
+      "status": "Draft",
+      "path": "members/show/1.0",
+      "rest": "GET /v1/members/{did}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/update/1.0",
+      "status": "Draft",
+      "path": "members/update/1.0",
+      "rest": "PATCH /v1/members/{did}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/promote-to-admin/1.0",
+      "status": "Draft",
+      "path": "members/promote-to-admin/1.0",
+      "rest": "POST /v1/members/{did}/promote-to-admin/{start,finish}"
     }
   ]
 }
