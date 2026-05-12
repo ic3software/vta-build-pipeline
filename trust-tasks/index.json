@@ -210,6 +210,18 @@
       "status": "Draft",
       "path": "policies/test/1.0",
       "rest": "POST /v1/policies/{id}/test"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/policies/list/1.0",
+      "status": "Draft",
+      "path": "policies/list/1.0",
+      "rest": "GET /v1/policies"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/policies/show/1.0",
+      "status": "Draft",
+      "path": "policies/show/1.0",
+      "rest": "GET /v1/policies/{id}"
     }
   ]
 }

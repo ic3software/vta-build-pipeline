@@ -11,3 +11,4 @@
 //! admin-only operation per spec §10.4.
 
 pub mod admin;
+pub mod read;

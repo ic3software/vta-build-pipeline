@@ -36,6 +36,13 @@ use vtc_service::server::AppState;
 const UPLOAD_TASK: &str = "https://trusttasks.org/openvtc/vtc/policies/upload/1.0";
 const ACTIVATE_TASK: &str = "https://trusttasks.org/openvtc/vtc/policies/activate/1.0";
 const TEST_TASK: &str = "https://trusttasks.org/openvtc/vtc/policies/test/1.0";
+/// `/v1/policies` (list) + `/v1/policies/{id}` (show) share their
+/// HTTP mounts with the upload + activate POSTs respectively —
+/// TrustTaskRouter doesn't yet support per-method selectors, so
+/// the GET requests carry the upload task header. See
+/// `vtc-service/src/routes/mod.rs` comment block.
+const LIST_TASK: &str = UPLOAD_TASK;
+const SHOW_TASK: &str = UPLOAD_TASK;
 
 const ADMIN_DID: &str = "did:key:zPolicyAdmin";
 
@@ -500,6 +507,192 @@ async fn upload_and_activate_emit_audit_envelopes() {
         "activate must emit exactly one audit envelope"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Read endpoints (M2.4)
+// ---------------------------------------------------------------------------
+
+fn auth_get(uri: &str, task: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .header("trust-task", task)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// `GET /v1/policies` returns every uploaded policy. Each item
+/// carries the full row + an `isActive` flag.
+#[tokio::test]
+async fn list_returns_all_policies() {
+    let fix = build_fixture().await;
+    let a = upload_policy(&fix, "join", JOIN_ALLOW_POLICY).await;
+    let _b = upload_policy(&fix, "removal", ALT_POLICY).await;
+    let a_id = a["id"].as_str().unwrap();
+
+    // Activate one of them so the isActive flag has signal.
+    let req = auth_request(
+        "POST",
+        &format!("/v1/policies/{a_id}/activate"),
+        ACTIVATE_TASK,
+        &fix.admin_token,
+        json!({}),
+    );
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = fix
+        .router
+        .clone()
+        .oneshot(auth_get("/v1/policies", LIST_TASK, &fix.admin_token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = body_json(resp.into_body()).await;
+    let items = body["items"].as_array().expect("items array");
+    assert_eq!(items.len(), 2);
+    let active: Vec<&Value> = items.iter().filter(|i| i["isActive"] == true).collect();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["id"], a_id);
+    // Full row visibility — Rego source is in the response.
+    assert!(items.iter().all(|i| i["regoSource"].is_string()));
+}
+
+/// `?purpose=removal` filters list to that purpose only.
+#[tokio::test]
+async fn list_filters_by_purpose() {
+    let fix = build_fixture().await;
+    upload_policy(&fix, "join", JOIN_ALLOW_POLICY).await;
+    upload_policy(&fix, "removal", ALT_POLICY).await;
+
+    let resp = fix
+        .router
+        .clone()
+        .oneshot(auth_get(
+            "/v1/policies?purpose=removal",
+            LIST_TASK,
+            &fix.admin_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["purpose"], "removal");
+}
+
+/// `?status=active` returns only rows pointed at by their
+/// per-purpose active pointer. `?status=archived` returns the
+/// complement.
+#[tokio::test]
+async fn list_filters_by_status() {
+    let fix = build_fixture().await;
+    let join = upload_policy(&fix, "join", JOIN_ALLOW_POLICY).await;
+    let removal = upload_policy(&fix, "removal", ALT_POLICY).await;
+    let join_id = join["id"].as_str().unwrap();
+    let _removal_id = removal["id"].as_str().unwrap();
+
+    // Activate only the join row.
+    let req = auth_request(
+        "POST",
+        &format!("/v1/policies/{join_id}/activate"),
+        ACTIVATE_TASK,
+        &fix.admin_token,
+        json!({}),
+    );
+    fix.router.clone().oneshot(req).await.unwrap();
+
+    // status=active → just the join row.
+    let resp = fix
+        .router
+        .clone()
+        .oneshot(auth_get(
+            "/v1/policies?status=active",
+            LIST_TASK,
+            &fix.admin_token,
+        ))
+        .await
+        .unwrap();
+    let body = body_json(resp.into_body()).await;
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], join_id);
+    assert_eq!(items[0]["isActive"], true);
+
+    // status=archived → just the removal row.
+    let resp = fix
+        .router
+        .clone()
+        .oneshot(auth_get(
+            "/v1/policies?status=archived",
+            LIST_TASK,
+            &fix.admin_token,
+        ))
+        .await
+        .unwrap();
+    let body = body_json(resp.into_body()).await;
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["purpose"], "removal");
+    assert_eq!(items[0]["isActive"], false);
+}
+
+/// `GET /v1/policies/{id}` returns the full row + isActive flag.
+#[tokio::test]
+async fn show_returns_full_row() {
+    let fix = build_fixture().await;
+    let uploaded = upload_policy(&fix, "join", JOIN_ALLOW_POLICY).await;
+    let id = uploaded["id"].as_str().unwrap();
+
+    let resp = fix
+        .router
+        .clone()
+        .oneshot(auth_get(
+            &format!("/v1/policies/{id}"),
+            SHOW_TASK,
+            &fix.admin_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(body["id"], id);
+    assert_eq!(body["purpose"], "join");
+    assert_eq!(body["version"], 1);
+    assert_eq!(body["isActive"], false);
+    assert!(
+        body["regoSource"]
+            .as_str()
+            .unwrap()
+            .contains("default allow")
+    );
+}
+
+/// `GET /v1/policies/{id}` returns 404 for unknown ids.
+#[tokio::test]
+async fn show_unknown_id_returns_404() {
+    let fix = build_fixture().await;
+    let ghost = Uuid::new_v4();
+    let resp = fix
+        .router
+        .clone()
+        .oneshot(auth_get(
+            &format!("/v1/policies/{ghost}"),
+            SHOW_TASK,
+            &fix.admin_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Misc
+// ---------------------------------------------------------------------------
 
 /// Auth gate: an unauthenticated upload returns 401. Confirms the
 /// `AdminAuth` extractor is wired through the route.

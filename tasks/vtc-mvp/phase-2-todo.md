@@ -106,7 +106,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M2.4 — Policy read endpoints
 
-### `[ ]` M2.4.1 — List + show
+### `[x]` M2.4.1 — List + show
 
 - **Acceptance**
   - `GET /v1/policies` — admin-only. Paginated; ?purpose=

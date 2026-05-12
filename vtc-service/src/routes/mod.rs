@@ -131,6 +131,16 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let policies_test = TrustTask::new("https://trusttasks.org/openvtc/vtc/policies/test/1.0")
         .expect("static Trust-Task URL");
+    // Read endpoints (M2.4). GET /v1/policies and
+    // GET /v1/policies/{id} share their mounts with the POST
+    // /v1/policies upload and POST /v1/policies/{id}/activate
+    // endpoints respectively — TrustTaskRouter doesn't yet support
+    // per-method selectors (same workaround community/profile,
+    // admin/config, members/{did}, join-requests use). The
+    // standalone `policies/list/1.0` + `policies/show/1.0` Trust
+    // Tasks exist on disk + in index.json so the soft-gate
+    // surface stays complete; the wire enforcement collapses to
+    // the POST task on the shared mount.
 
     TrustTaskRouter::<AppState>::new()
         .route_exempt("/health", get(health::health))
@@ -336,8 +346,16 @@ pub fn router() -> Router<AppState> {
         // policy without mutating state.
         .route_with_task(
             "/v1/policies",
-            post(policies::admin::upload),
-            policies_upload,
+            get(policies::read::list_policies).post(policies::admin::upload),
+            policies_upload.clone(),
+        )
+        .route_with_task(
+            "/v1/policies/{id}",
+            get(policies::read::show_policy),
+            // Reuses the upload task on the shared mount; the
+            // `policies/show/1.0` Trust Task lives in index.json
+            // + on disk for the soft-gate surface (see above).
+            policies_upload.clone(),
         )
         .route_with_task(
             "/v1/policies/{id}/activate",
