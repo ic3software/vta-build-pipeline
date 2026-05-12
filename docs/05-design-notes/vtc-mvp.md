@@ -47,7 +47,7 @@ do not restate.
 
 | | Decision | Rationale |
 |---|---|---|
-| **A** | **1 VTC ⇄ 1 VTA** | The VTC has no key custody; every signature delegates to the VTA signing oracle. |
+| **A** | **1 VTC ⇄ 1 VTA**; **VTA mints + controls keys, VTC caches + signs locally** | The VTA is the canonical issuer of the integration DID's keys: it mints them at first-boot via the existing provision-integration flow and remains the only party authorised to mint or rotate them. The VTC retains a cached working copy of those keys in its own secret store (mediator / webvh-service pattern) and signs locally — every VMC, VEC, status-list credential, install-token JWT, and DIDComm outbound message is signed in-process. "No key custody" in earlier drafts meant "no key minting / rotation authority", not "no key storage" — clarified per Phase 2 M2.16. |
 | **B** | **VTC is always authoritative for its own state** | ACL + keyspaces are truth. VMC/VEC are *projections* useful only when the member operates outside the VTC. VTC authz never reads its own issued VCs. |
 | **C** | **Credentials limited to the DTG catalog** | New credential needs go upstream into `dtg-credentials`, not local extensions. |
 | **D** | **Embedded `regorus`, no OPA sidecar** | Single artefact, lower latency. Policy activation is explicit; no hot-reload watchers. |
@@ -377,7 +377,8 @@ inside the community, ACL is truth.
 Issuance steps:
 
 1. Mint new VMC (`validFrom = now`, `validUntil = now + community.membership.validity`)
-   via the VTA signing oracle. Same status-list index.
+   via the VTC's local signer (§3-A — cached integration-DID keys).
+   Same status-list index.
 2. Re-issue role VEC (always — both for ACL/role drift and to keep
    external chains current).
 3. Re-evaluate `personhood.rego` (§6.4) and surface the resulting
@@ -730,7 +731,7 @@ VTC:
   2. Run join.rego with input.vp_claims
   3. allow:
      a. Allocate status-list index (random; flipped slots excluded)
-     b. Mint VMC + role VEC via VTA oracle (§14.2 for VTA timeout)
+     b. Mint VMC + role VEC via the VTC's local signer (§3-A; in-process)
      c. Write ACL + Member, enqueue registry.rego decision
      d. Sealed-transfer credentials to applicant_did
      e. Audit: JoinRequestApproved + MemberAdded
@@ -1033,20 +1034,27 @@ Full config taxonomy (which key reloads, which restarts, which is
 UX-settable, sensitive-flag) lives in `docs/04-reference/vtc-config.md`,
 not in this spec.
 
-**VTA oracle dependence.** Every VMC / VEC issuance blocks on the
-paired VTA's signing oracle. The VTC enforces a per-call timeout
-(`vta.signing_timeout_seconds`, default 5) and a circuit breaker
-(`vta.circuit_breaker_threshold`, default 5 consecutive failures).
-On breaker-open: join requests are queued (returned as `Deferred`
-instead of 500), renewals return 503, and `/v1/health/diagnostics`
-surfaces VTA health.
+**Remote-dependency breakers.** VMC + VEC issuance is in-process
+in Phase 2 (§3-A — cached-locally signer), so the per-call
+timeout and circuit-breaker configuration apply to **non-VMC
+remote dependencies only**: the trust-registry publish path in
+Phase 3 (`MembershipSyncer`) and the did:webvh resolver walk in
+M2.15.2's rotation slice. The configuration knobs retain their
+names (`vta.signing_timeout_seconds`, default 5;
+`vta.circuit_breaker_threshold`, default 5 consecutive failures)
+for forward compatibility — they are the workspace's canonical
+"remote-call discipline" handles. The breaker-open semantics
+(join → `Deferred`, renewal → 503,
+`/v1/health/diagnostics` surfaces remote health) apply to those
+non-VMC paths once they land. Clarified per Phase 2 M2.16.
 
 ### 14.3 Telemetry + diagnostics
 
 Reuses `vti_common::telemetry::TelemetrySink`. `/v1/health/diagnostics`
 (admin) surfaces:
 
-- VTA oracle health + last-success timestamp
+- Remote-dependency health (trust-registry publish, did:webvh
+  resolver) + last-success timestamp
 - Status-list occupancy per purpose
 - `MembershipSyncer` queue depth + last-success/failure
 - Active policy IDs + SHA-256 per purpose
@@ -1085,7 +1093,7 @@ workspace doctrine. Detailed verb list lives in
 |---|---|---|
 | **0** | `vtc-host` template, install wizard, WebAuthn install flow, multi-passkey admin DID, community profile, config plumbing | DID + auth foundation. |
 | **1** | Role enum + custom roles, ACL extension, member CRUD with manual approval, self/admin removal (no-last-admin), audit envelope + HMAC, idempotency, `/v1/` versioning, cursor pagination | Members can exist. |
-| **2** | `regorus`, policy upload + activate, `join.rego` + `removal.rego`, VMC + VEC issuance via VTA oracle (with timeout + breaker), status-list with reserved-index discipline, renewal, DID rotation (both methods, domain-tagged) | Live policy + credentials. |
+| **2** | `regorus`, policy upload + activate, `join.rego` + `removal.rego`, **in-process VMC + VEC issuance** (cached-locally signer per §3-A), status-list with reserved-index discipline, renewal, DID rotation (`did:key` + `did:webvh`, domain-tagged) | Live policy + credentials. |
 | **3** | Trust-registry publish, three departure dispositions, `registry.rego`, `MembershipSyncer` + diagnostic surfacing, RTBF override + batched timing, cross-community recognition (session-mint hardening) | Community on the wider network. |
 | **4** | VRC self-issuance + `relationships.rego`, `personhood.rego` (deny-all stub) + assert/revoke + renewal re-eval, custom endorsement issuance (issuer role) | Graph + personhood live. |
 | **5** | Public website (filesystem-backed, CSP, path safety), admin UX consumed via `build.rs` (release-key-signed tarball), path-prefix routing default + subdomain support | MVP complete. |

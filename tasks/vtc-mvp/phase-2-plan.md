@@ -408,3 +408,156 @@ Recording up front so they're not surprises mid-implementation:
 Any decision that drifts from the default during
 implementation should be recorded in `phase-2-plan.md` under a
 "Phase 2 outcome" header (mirror of Phase 1's pattern).
+
+## Phase 2 outcomes
+
+Recorded at M2.16 close-out. Each row links a pre-impl
+decision (D1–D10) or risk (R1–R6) to the as-shipped reality.
+
+### D1 — Signing surface (§3-A clarification)
+
+**As shipped**: VTC signs every credential locally against a
+cached working copy of the integration DID's keys. The VTA
+remains the canonical minter + rotator; the VTC's secret
+store carries the live signing key for the lifetime of the
+deployment. Lands as
+`vtc_service::credentials::LocalSigner` (M2.9) consumed by
+VMC + VEC builders + status-list-credential builder.
+
+Spec §3-A row A amended at M2.16: "No key custody" now reads
+as "no key minting / rotation authority", not "no key
+storage" — see the docs/05-design-notes/vtc-mvp.md change in
+this PR.
+
+### §14.2 — Remote-dependency breaker scope
+
+**As shipped**: configuration parameters
+`vta.signing_timeout_seconds` + `vta.circuit_breaker_threshold`
+retain their names but apply to **non-VMC remote dependencies
+only** (trust-registry publish in Phase 3, did:webvh resolver
+walk in M2.15.2). VMC + VEC + status-list issuance is fully
+in-process and never trips the breaker. Spec §14.2 amended at
+M2.16.
+
+### D2 — `regorus` location
+
+**As shipped as proposed**: `vtc_service::policy::engine`
+hosts the harness; `vtc_service::policy::default` ships nine
+embedded `.rego` modules; the M2.3 admin endpoints sit on top.
+
+### D3 — Policy storage shape
+
+**As shipped as proposed**: `policies:<uuid>` rows carry the
+source + SHA + author; `active_policies:<purpose>` carries
+the pointer. Split keyspaces let activation flip with a
+single put.
+
+### D4 — `vp_claims` extraction (M2.6)
+
+**As shipped as proposed**: `submit_inner` extracts the
+canonical projection at submit time via
+`policy::extract::extract_vp_claims`; stored on
+`JoinRequest.vp_claims` alongside the raw VP. Full VP
+cryptographic verification deferred to a follow-up — the
+holder-binding signature at the route layer already
+authenticates the submitter.
+
+### D5 — Status-list crypto
+
+**As shipped as proposed**: same `#key-0` Ed25519 signs the
+status-list credential as the VMCs/VECs (`LocalSigner` is
+shared). Per-purpose endpoints under `GET
+/v1/status-lists/{purpose}`. Capacity 131,072.
+
+### D6 — Removal disposition resolver
+
+**As shipped as proposed**: `Disposition::PolicyDefault`
+resolves via `removal.rego.min_disposition`. Default policy
+emits `"tombstone"` so existing operator state survives the
+Phase 1 → Phase 2 transition. Unknown / missing values fall
+back to `Tombstone`.
+
+### D7 — DID rotation path split
+
+**As shipped with deferral**: M2.15.1 lands the `did:key`
+slice; M2.15.2 (`did:webvh` resolver walk) is deferred to a
+follow-up PR per R4. Endpoint accepts non-`did:key` new-DID
+values with a clear 400 + pointer to the follow-up.
+
+**Spec deviation (documented)**: rotation `/finish` is
+authenticated by the OLD DID's session, not the new DID's.
+The new DID has no ACL row, so the standard `AuthClaims`
+extractor wouldn't accept it. The body's `newSignature`
+provides the equivalent "new key holder is in control"
+guarantee. Module-level comment in
+`routes/members/rotate.rs` documents this.
+
+### D8 — Policy hot-swap atomicity
+
+**As shipped partially**: `ACTIVATE_LOCK` process-wide async
+mutex serialises every activate-policy call so the audit
+envelope's `previousPolicyId` field can't be skewed by a
+concurrent flip. The in-memory `Arc<CompiledPolicy>` registry
+the plan describes is **deferred** — Phase 2's consumers
+(M2.6 / M2.7 / M2.13) recompile per call (same pattern as
+the M2.3 `test` endpoint). Acceptable for Phase 2 because
+regorus's parse is cheap; the registry lands when policy
+evaluation becomes hot-path enough to matter.
+
+### D9 — Personhood policy placement
+
+**As shipped as proposed**: deny-all `personhood.rego` ships
+with the M2.5 bundle. M2.13 renewal evaluates the policy
+during step 3 (§6.3); the deny-all default means every
+renewed VMC carries `personhood: false`. The
+`MembershipRenewed.personhood_changed` audit field is on
+the wire from day one — Phase 4's assert/revoke endpoints
+will flip it when the real policy lands.
+
+### D10 — Trust Task IDs
+
+**As shipped as proposed**: nine Phase-2 Trust Tasks land
+under `policies/*`, `members/*`, and `status-lists/*`.
+`status-lists/show/1.0` carries
+`trust_task_header_exempt: true` in both frontmatter and
+index.json (verifier-facing, same as `did.jsonl`).
+
+### Sealed-transfer deferral
+
+**Across M2.12 + M2.13 + M2.15**: VMC + VEC sealed-transfer
+(vta-sdk's `seal_payload` HPKE-to-applicant path) is
+**deferred** to a follow-up. For Phase 2 MVP the credentials
+ship inline in the approve / renew / rotate responses; the
+admin caller hands them off out-of-band. The wire shape for
+sealed delivery lands when the cross-VTA deliveries
+materialise in Phase 3+.
+
+### M2.15.2 — did:webvh rotation
+
+**Deferred** to a follow-up PR per R4. The
+`affinidi-did-resolver-cache-sdk` integration + `did.jsonl`
+walk is the riskier slice; M2.15.1 ships the `did:key`
+slice and the endpoint method-detection step 400s
+non-`did:key` new-DIDs with a clear pointer to the
+follow-up.
+
+### M2.16 audit pre-landing pattern
+
+**As shipped across PRs 1–5**: every audit variant
+(`PolicyUploaded`, `PolicyActivated`, `VmcIssued`, `VecIssued`,
+`MembershipRenewed`, `StatusListFlipped`, `DidRotated`)
+landed alongside its emitting endpoint, not in a single
+M2.17 batch. Reasoning in
+`vti-common/src/audit/event.rs` doc-comments: wire-shape
+decisions stay localised to the code that fills them. M2.17
+becomes a snapshot-test checkpoint that confirms the seven
+variants are present + serialise to their canonical wire
+form.
+
+### M2.18 Trust Task pre-landing
+
+**As shipped across PRs 1–5**: every Trust Task draft landed
+alongside its endpoint. M2.18 confirms the on-disk
+`spec.md` + `schema.json` + `index.json` entries match the
+endpoint surface — no separate batch of files to author at
+close-out.

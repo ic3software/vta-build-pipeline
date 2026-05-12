@@ -762,6 +762,104 @@ mod tests {
     }
 
     #[test]
+    fn vmc_issued_round_trip() {
+        let e = AuditEvent::VmcIssued(CredentialIssuedData {
+            credential_id: "urn:uuid:11111111-1111-1111-1111-111111111111".into(),
+            credential_type: "VerifiableMembershipCredential".into(),
+            valid_from: "2026-05-12T00:00:00Z".into(),
+            valid_until: "2026-06-11T00:00:00Z".into(),
+            status_list_index: Some(42),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "VmcIssued");
+        assert_eq!(
+            v["data"]["credentialType"],
+            "VerifiableMembershipCredential"
+        );
+        assert_eq!(v["data"]["statusListIndex"], 42);
+        round_trip(&e);
+    }
+
+    #[test]
+    fn vec_issued_round_trip_omits_status_list_index_when_none() {
+        let e = AuditEvent::VecIssued(CredentialIssuedData {
+            credential_id: "urn:uuid:22222222-2222-2222-2222-222222222222".into(),
+            credential_type: "VerifiableEndorsementCredential".into(),
+            valid_from: "2026-05-12T00:00:00Z".into(),
+            valid_until: "2026-06-11T00:00:00Z".into(),
+            status_list_index: None,
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "VecIssued");
+        assert!(
+            v["data"].get("statusListIndex").is_none(),
+            "statusListIndex should be omitted when None, got {v}"
+        );
+        round_trip(&e);
+    }
+
+    #[test]
+    fn membership_renewed_round_trip() {
+        let e = AuditEvent::MembershipRenewed(MembershipRenewedData {
+            vmc_id: "urn:uuid:vmc-1".into(),
+            role_vec_id: "urn:uuid:vec-1".into(),
+            personhood_changed: true,
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "MembershipRenewed");
+        assert_eq!(v["data"]["personhoodChanged"], true);
+        round_trip(&e);
+    }
+
+    #[test]
+    fn status_list_flipped_round_trip() {
+        let e = AuditEvent::StatusListFlipped(StatusListFlippedData {
+            purpose: "revocation".into(),
+            index: 7,
+            revoked: true,
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "StatusListFlipped");
+        assert_eq!(v["data"]["purpose"], "revocation");
+        assert_eq!(v["data"]["index"], 7);
+        assert_eq!(v["data"]["revoked"], true);
+        round_trip(&e);
+    }
+
+    #[test]
+    fn did_rotated_round_trip_with_credential_ids() {
+        let e = AuditEvent::DidRotated(DidRotatedData {
+            old_did: "did:key:zOld".into(),
+            new_did: "did:key:zNew".into(),
+            method: "did:key".into(),
+            vmc_id: Some("urn:uuid:vmc-2".into()),
+            role_vec_id: Some("urn:uuid:vec-2".into()),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "DidRotated");
+        assert_eq!(v["data"]["method"], "did:key");
+        assert_eq!(v["data"]["oldDid"], "did:key:zOld");
+        assert_eq!(v["data"]["newDid"], "did:key:zNew");
+        assert_eq!(v["data"]["vmcId"], "urn:uuid:vmc-2");
+        round_trip(&e);
+    }
+
+    #[test]
+    fn did_rotated_omits_credential_ids_when_none() {
+        let e = AuditEvent::DidRotated(DidRotatedData {
+            old_did: "did:key:zOld".into(),
+            new_did: "did:key:zNew".into(),
+            method: "did:key".into(),
+            vmc_id: None,
+            role_vec_id: None,
+        });
+        let v = wire_value(&e);
+        assert!(v["data"].get("vmcId").is_none());
+        assert!(v["data"].get("roleVecId").is_none());
+        round_trip(&e);
+    }
+
+    #[test]
     fn variant_discriminator_strings() {
         let cases: Vec<(AuditEvent, &str)> = vec![
             (
@@ -844,6 +942,52 @@ mod tests {
                     previous_policy_id: None,
                 }),
                 "PolicyActivated",
+            ),
+            (
+                AuditEvent::VmcIssued(CredentialIssuedData {
+                    credential_id: "id".into(),
+                    credential_type: "VerifiableMembershipCredential".into(),
+                    valid_from: "vf".into(),
+                    valid_until: "vu".into(),
+                    status_list_index: None,
+                }),
+                "VmcIssued",
+            ),
+            (
+                AuditEvent::VecIssued(CredentialIssuedData {
+                    credential_id: "id".into(),
+                    credential_type: "VerifiableEndorsementCredential".into(),
+                    valid_from: "vf".into(),
+                    valid_until: "vu".into(),
+                    status_list_index: None,
+                }),
+                "VecIssued",
+            ),
+            (
+                AuditEvent::MembershipRenewed(MembershipRenewedData {
+                    vmc_id: "v".into(),
+                    role_vec_id: "r".into(),
+                    personhood_changed: false,
+                }),
+                "MembershipRenewed",
+            ),
+            (
+                AuditEvent::StatusListFlipped(StatusListFlippedData {
+                    purpose: "revocation".into(),
+                    index: 0,
+                    revoked: true,
+                }),
+                "StatusListFlipped",
+            ),
+            (
+                AuditEvent::DidRotated(DidRotatedData {
+                    old_did: "o".into(),
+                    new_did: "n".into(),
+                    method: "did:key".into(),
+                    vmc_id: None,
+                    role_vec_id: None,
+                }),
+                "DidRotated",
             ),
         ];
         for (event, expected) in cases {

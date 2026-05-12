@@ -382,7 +382,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.16 — Spec clarifications
 
-### `[ ]` M2.16.1 — Capture D1 + status-list URL outcomes
+### `[x]` M2.16.1 — Capture D1 + status-list URL outcomes
 
 - **Acceptance** — `tasks/vtc-mvp/phase-2-plan.md` gains a
   "Phase 2 outcomes" header listing:
@@ -408,7 +408,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.17 — Audit variants
 
-### `[ ]` M2.17.1 — Phase 2 audit vocabulary
+### `[x]` M2.17.1 — Phase 2 audit vocabulary
 
 - **Acceptance**
   - `AuditEvent` enum gains variants:
@@ -425,7 +425,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.18 — Trust Task drafts + index
 
-### `[ ]` M2.18.1 — Spec + schema files for Phase 2 surface
+### `[x]` M2.18.1 — Spec + schema files for Phase 2 surface
 
 - **Acceptance**
   - All 9 Phase 2 Trust Tasks from plan §D10 have `spec.md`
@@ -440,7 +440,7 @@ ships; assert / revoke endpoints are Phase 4.
 
 ## M2.19 — Phase 2 gate
 
-### `[ ]` M2.19.1 — Workspace gate green
+### `[x]` M2.19.1 — Workspace gate green
 
 - **Acceptance** (mirrors M0.12.3 + M1.15.1)
   - `cargo build --workspace` green.
