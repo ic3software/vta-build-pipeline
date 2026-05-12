@@ -44,6 +44,7 @@ pub const ENROLLMENT_CLAIM_WINDOW_SECS: u64 = 300;
 
 const TOKEN_KEY_PREFIX: &[u8] = b"install:token:";
 const CARVEOUT_CLOSED_KEY: &[u8] = b"install:carveout:closed";
+const EMERGENCY_PENDING_KEY: &[u8] = b"install:emergency_pending";
 
 fn token_key(jti: &Uuid) -> Vec<u8> {
     let mut out = TOKEN_KEY_PREFIX.to_vec();
@@ -271,6 +272,56 @@ impl InstallTokenStore {
             .await?
             .is_some())
     }
+
+    /// **Destructive.** Clear the `install:carveout:closed` marker
+    /// so a fresh `record_issued` + `start_claim` round can take
+    /// place. Called by `vtc admin emergency-bootstrap` (M0.10)
+    /// after verifying the operator holds the master-seed mnemonic.
+    /// Never called from request-handling code paths — the carve-out
+    /// is one-shot from the daemon's perspective.
+    pub async fn reopen_carveout(&self) -> Result<(), AppError> {
+        let _guard = INSTALL_CARVEOUT_LOCK.lock().await;
+        self.ks.remove(CARVEOUT_CLOSED_KEY.to_vec()).await
+    }
+
+    /// Stamp the `install:emergency_pending` marker carrying the
+    /// operator's hostname + the wall-clock at CLI-invoke time. The
+    /// daemon reads + consumes the marker on next boot via
+    /// [`Self::take_pending_emergency`] and emits the
+    /// `EmergencyBootstrapInvoked` audit event from it.
+    pub async fn mark_emergency_pending(
+        &self,
+        pending: PendingEmergencyBootstrap,
+    ) -> Result<(), AppError> {
+        self.ks
+            .insert(EMERGENCY_PENDING_KEY.to_vec(), &pending)
+            .await
+    }
+
+    /// Read + delete the pending-emergency-bootstrap marker. The
+    /// daemon calls this once at startup; a returned `Some(...)`
+    /// fires the `EmergencyBootstrapInvoked` audit event. Subsequent
+    /// startups (after the marker is consumed) see `None`.
+    pub async fn take_pending_emergency(
+        &self,
+    ) -> Result<Option<PendingEmergencyBootstrap>, AppError> {
+        let key = EMERGENCY_PENDING_KEY.to_vec();
+        let value: Option<PendingEmergencyBootstrap> = self.ks.get(key.clone()).await?;
+        if value.is_some() {
+            self.ks.remove(key).await?;
+        }
+        Ok(value)
+    }
+}
+
+/// State persisted to `install:emergency_pending` by the
+/// `vtc admin emergency-bootstrap` CLI. The daemon consumes it on
+/// next boot and feeds it into [`crate::audit`]'s
+/// `EmergencyBootstrapInvoked` event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingEmergencyBootstrap {
+    pub operator_hostname: String,
+    pub invoked_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------

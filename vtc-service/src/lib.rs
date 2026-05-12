@@ -21,6 +21,8 @@ pub mod config_store;
 pub mod did_key;
 #[cfg(feature = "setup")]
 pub mod did_webvh;
+#[cfg(feature = "setup")]
+pub mod emergency;
 pub mod error;
 pub mod import_did;
 pub mod install;
