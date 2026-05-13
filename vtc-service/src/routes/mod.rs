@@ -9,6 +9,7 @@ pub(crate) mod install;
 pub(crate) mod join_requests;
 pub(crate) mod members;
 pub(crate) mod policies;
+pub mod recognise;
 pub(crate) mod status_lists;
 
 use axum::Router;
@@ -146,6 +147,9 @@ pub fn router() -> Router<AppState> {
     let health_diagnostics =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/health/diagnostics/1.0")
             .expect("static Trust-Task URL");
+    // Phase 3 M3.10 — cross-community session mint.
+    let auth_recognise = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/recognise/1.0")
+        .expect("static Trust-Task URL");
     // Read endpoints (M2.4). GET /v1/policies and
     // GET /v1/policies/{id} share their mounts with the POST
     // /v1/policies upload and POST /v1/policies/{id}/activate
@@ -163,6 +167,11 @@ pub fn router() -> Router<AppState> {
             "/v1/health/diagnostics",
             get(health::diagnostics),
             health_diagnostics,
+        )
+        .route_with_task(
+            "/v1/auth/recognise",
+            post(recognise::recognise),
+            auth_recognise,
         )
         // `did:webvh` log publication (Trust-Task-exempt — DID
         // resolvers don't carry our extension header). The VTC is

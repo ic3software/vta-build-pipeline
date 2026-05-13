@@ -8,11 +8,32 @@
 # explicit allowlist before any cross-community grant takes
 # effect.
 #
-# Input shape (spec §7.3):
-#   { foreign_vec, target_role, vtc_state }
+# Input shape (spec §7.3 + M3.10):
+#   {
+#     "foreign_vec": {
+#       "issuer": "<did>",
+#       "role": "<foreign role string>",
+#       "subject_did": "<did>"
+#     },
+#     "action": "mint_session"
+#   }
+#
+# Output contract:
+#   - `allow: bool`         — gate for "should we mint anything?".
+#   - `mapped_role: string` — the local role to embed in the JWT.
+#                             Only consulted when `allow` is true.
+#                             Operators uploading custom policies
+#                             can return e.g. "monitor" for any
+#                             foreign role to grant read-only
+#                             access regardless of foreign rank.
 
 package vtc.cross_community_roles
 
 import rego.v1
 
 default allow := false
+
+# `mapped_role` has no `default` rule by design: the route layer
+# treats a missing value as "deny" even when `allow` is true. An
+# operator upload that flips `allow := true` but forgets to set
+# `mapped_role` therefore still denies — fail-closed.
