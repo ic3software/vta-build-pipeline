@@ -1,0 +1,55 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/auth/recognise/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — Cross-Community Session Mint",
+  "description": "POST /v1/auth/recognise request + response. Phase 3 M3.10; spec §8.4.",
+  "oneOf": [
+    {
+      "title": "Request",
+      "type": "object",
+      "required": ["vec", "vmc"],
+      "properties": {
+        "vec": {
+          "type": "object",
+          "description": "Foreign-issued VerifiableEndorsementCredential. Carries the role grant. Must include a DataIntegrityProof eddsa-jcs-2022 signature."
+        },
+        "vmc": {
+          "type": "object",
+          "description": "Foreign-issued VerifiableMembershipCredential. Carries the membership proof + optional credentialStatus for live revocation."
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "title": "Response",
+      "type": "object",
+      "required": ["sessionId", "data"],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "pattern": "^xc-",
+          "description": "`xc-<uuid>` to distinguish cross-community sessions from local-member ones."
+        },
+        "data": {
+          "type": "object",
+          "required": ["accessToken", "accessExpiresAt", "foreignIssuerDid", "mappedRole"],
+          "properties": {
+            "accessToken": { "type": "string" },
+            "accessExpiresAt": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Unix-seconds expiry. Clamped to min(jwt_default, earliest(vec.validUntil, vmc.validUntil))."
+            },
+            "foreignIssuerDid": { "type": "string" },
+            "mappedRole": {
+              "type": "string",
+              "description": "Local role from cross_community_roles.rego — NOT the foreign role."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

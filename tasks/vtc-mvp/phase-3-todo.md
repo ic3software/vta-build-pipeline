@@ -307,7 +307,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.9 — Foreign-credential verifier
 
-### `[ ]` M3.9.1 — Verify foreign VEC + StatusList + registry membership
+### `[x]` M3.9.1 — Verify foreign VEC + StatusList + registry membership
 
 - **Acceptance**
   - `vtc_service::recognition::verify_foreign_vec(vec, vmc,
@@ -338,7 +338,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.10 — `POST /v1/auth/recognise` — cross-community session
 
-### `[ ]` M3.10.1 — Cross-community session mint
+### `[x]` M3.10.1 — Cross-community session mint
 
 - **Acceptance**
   - `POST /v1/auth/recognise` accepts a foreign VEC + VMC

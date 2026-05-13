@@ -158,6 +158,24 @@ impl TrustRegistryClient for UpstreamRegistryClient {
         ))
     }
 
+    async fn recognise(&self, _foreign_issuer_did: &str) -> Result<bool, RegistryError> {
+        // TRQP `POST /recognition` wire shape is documented by
+        // upstream as a 4-tuple query (authority_id, entity_id,
+        // action, resource). Pinning the exact payload — and
+        // the response envelope — needs a live integration
+        // test against a running upstream, which is out of
+        // scope for this milestone. The verifier (M3.9) calls
+        // through the trait and is exercised end-to-end via
+        // `MockRegistryClient` until the wire format is
+        // pinned. Production deployments using this client
+        // get a clear, retriable-classification failure rather
+        // than silently passing the recognition check.
+        warn!("UpstreamRegistryClient.recognise called before TRQP v2.0 payload shape is pinned");
+        Err(RegistryError::Permanent(
+            "recognise is not yet implemented in this build — pin the upstream TRQP v2.0 wire shape first".into(),
+        ))
+    }
+
     async fn health(&self) -> Result<(), RegistryError> {
         // `GET /.well-known/did.json` is the cheapest live
         // probe the upstream exposes. A 2xx confirms the

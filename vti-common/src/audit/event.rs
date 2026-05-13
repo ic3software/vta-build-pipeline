@@ -204,6 +204,17 @@ pub enum AuditEvent {
     /// `None` for these envelopes (privacy-preserving by
     /// construction). Phase 3 M3.6.
     RegistryRecordPolicyOverride(RegistryRecordPolicyOverrideData),
+
+    /// A cross-community session was minted (or denied). Spec
+    /// §8.4; Phase 3 M3.10. The `outcome` field discriminates
+    /// `minted` from `denied`; the `reason` is populated only
+    /// on `denied` and carries one of [`RecognitionError`]'s
+    /// stable reason codes
+    /// (`issuer-key-unresolved` / `proof-invalid` /
+    /// `status-list-failed` / `issuer-not-recognised` /
+    /// `registry-unreachable` / `validity-window` / `malformed`
+    /// / `role-mapping-denied`).
+    CrossCommunitySessionMinted(CrossCommunitySessionMintedData),
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +546,42 @@ pub struct RegistrySyncOutcomeData {
     /// `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+/// Payload for [`AuditEvent::CrossCommunitySessionMinted`].
+/// Phase 3 M3.10. The envelope's `actor_did` (HMAC-hashed per
+/// §11.1) is the bearer of the foreign credentials — i.e. the
+/// caller of `POST /v1/auth/recognise`. The envelope's
+/// `target_did` is the local subject DID the session was minted
+/// to (same value on `minted`; absent on `denied` because no
+/// local subject was established).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CrossCommunitySessionMintedData {
+    /// `"minted"` or `"denied"`. Stable wire form so SIEM
+    /// rules can key on it.
+    pub outcome: String,
+    /// Foreign community's issuer DID (e.g.
+    /// `did:webvh:peer.example.com:abc`).
+    pub foreign_issuer_did: String,
+    /// Role claim from the foreign VEC — present even on
+    /// `denied` so operators can see what was attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreign_role: Option<String>,
+    /// Local role the foreign role mapped onto. Populated on
+    /// `minted` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapped_role: Option<String>,
+    /// Clamped session TTL in seconds. `min(jwt_default,
+    /// vec.validUntil - now, vmc.validUntil - now)`. Populated
+    /// on `minted` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+    /// On `denied`: a short reason code from
+    /// [`RecognitionError::reason_code`] or
+    /// `"role-mapping-denied"` for the policy-rejection arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Payload for [`AuditEvent::RegistryStatusChanged`]. Phase 3
@@ -1009,6 +1056,51 @@ mod tests {
     }
 
     #[test]
+    fn cross_community_session_minted_round_trip() {
+        let e = AuditEvent::CrossCommunitySessionMinted(CrossCommunitySessionMintedData {
+            outcome: "minted".into(),
+            foreign_issuer_did: "did:webvh:peer.example.com:abc".into(),
+            foreign_role: Some("moderator".into()),
+            mapped_role: Some("monitor".into()),
+            ttl_seconds: Some(900),
+            reason: None,
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "CrossCommunitySessionMinted");
+        assert_eq!(v["data"]["outcome"], "minted");
+        assert_eq!(
+            v["data"]["foreignIssuerDid"],
+            "did:webvh:peer.example.com:abc"
+        );
+        assert_eq!(v["data"]["foreignRole"], "moderator");
+        assert_eq!(v["data"]["mappedRole"], "monitor");
+        assert_eq!(v["data"]["ttlSeconds"], 900);
+        assert!(
+            v["data"].get("reason").is_none(),
+            "reason should be omitted on minted: {v}"
+        );
+        round_trip(&e);
+    }
+
+    #[test]
+    fn cross_community_session_minted_denied_carries_reason() {
+        let e = AuditEvent::CrossCommunitySessionMinted(CrossCommunitySessionMintedData {
+            outcome: "denied".into(),
+            foreign_issuer_did: "did:webvh:peer.example.com:abc".into(),
+            foreign_role: Some("admin".into()),
+            mapped_role: None,
+            ttl_seconds: None,
+            reason: Some("issuer-not-recognised".into()),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["data"]["outcome"], "denied");
+        assert_eq!(v["data"]["reason"], "issuer-not-recognised");
+        assert!(v["data"].get("mappedRole").is_none());
+        assert!(v["data"].get("ttlSeconds").is_none());
+        round_trip(&e);
+    }
+
+    #[test]
     fn variant_discriminator_strings() {
         let cases: Vec<(AuditEvent, &str)> = vec![
             (
@@ -1163,6 +1255,25 @@ mod tests {
                     last_error: Some("x".into()),
                 }),
                 "RegistrySyncFailed",
+            ),
+            (
+                AuditEvent::RegistryRecordPolicyOverride(RegistryRecordPolicyOverrideData {
+                    reason: "rtbf".into(),
+                    attempted_disposition: "tombstone".into(),
+                    effective_disposition: "purge".into(),
+                }),
+                "RegistryRecordPolicyOverride",
+            ),
+            (
+                AuditEvent::CrossCommunitySessionMinted(CrossCommunitySessionMintedData {
+                    outcome: "minted".into(),
+                    foreign_issuer_did: "did:webvh:peer".into(),
+                    foreign_role: Some("moderator".into()),
+                    mapped_role: Some("monitor".into()),
+                    ttl_seconds: Some(900),
+                    reason: None,
+                }),
+                "CrossCommunitySessionMinted",
             ),
         ];
         for (event, expected) in cases {

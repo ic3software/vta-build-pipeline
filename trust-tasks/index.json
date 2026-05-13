@@ -253,6 +253,12 @@
       "status": "Draft",
       "path": "health/diagnostics/1.0",
       "rest": "GET /v1/health/diagnostics"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/auth/recognise/1.0",
+      "status": "Draft",
+      "path": "auth/recognise/1.0",
+      "rest": "POST /v1/auth/recognise"
     }
   ]
 }

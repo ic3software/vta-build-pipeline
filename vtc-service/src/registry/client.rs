@@ -88,6 +88,18 @@ pub trait TrustRegistryClient: Send + Sync {
     /// is reachable. Drives the `registry_status` flip on
     /// `GET /v1/community/profile` (M3.2).
     async fn health(&self) -> Result<(), RegistryError>;
+
+    /// TRQP `recognise` query (M3.9 + M3.10): "is this foreign
+    /// community's issuer DID present in the recognition
+    /// graph?". Returns `Ok(true)` when the registry confirms
+    /// the issuer is recognised, `Ok(false)` for a clean
+    /// not-found, and `Err` for transport / parse failures.
+    ///
+    /// **Called per-mint, never cached** (spec §8.4 + plan
+    /// D5): a peer community removed from the recognition
+    /// graph mid-session loses access on the next mint /
+    /// refresh, not when a TTL elapses.
+    async fn recognise(&self, foreign_issuer_did: &str) -> Result<bool, RegistryError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,10 +119,15 @@ pub struct MockRegistryClient {
 #[derive(Debug, Default)]
 struct MockState {
     pub records: std::collections::HashMap<String, RegistryRecord>,
+    /// Set of foreign-issuer DIDs the mock will return
+    /// `Ok(true)` for on `recognise`. Tests seed this directly
+    /// via [`MockRegistryClient::set_recognised`].
+    pub recognised_issuers: std::collections::HashSet<String>,
     pub publish_calls: usize,
     pub delete_calls: usize,
     pub read_calls: usize,
     pub health_calls: usize,
+    pub recognise_calls: usize,
     /// When set, the next call of the matching kind returns
     /// the queued error instead of succeeding. Tests inject
     /// these to exercise the failure branches.
@@ -118,6 +135,7 @@ struct MockState {
     pub next_delete_error: Option<RegistryError>,
     pub next_read_error: Option<RegistryError>,
     pub next_health_error: Option<RegistryError>,
+    pub next_recognise_error: Option<RegistryError>,
 }
 
 impl MockRegistryClient {
@@ -134,6 +152,7 @@ impl MockRegistryClient {
             delete: s.delete_calls,
             read: s.read_calls,
             health: s.health_calls,
+            recognise: s.recognise_calls,
         }
     }
 
@@ -157,6 +176,21 @@ impl MockRegistryClient {
         self.inner.lock().await.next_health_error = Some(err);
     }
 
+    /// Mark `foreign_issuer_did` as recognised — the next
+    /// `recognise` call returns `Ok(true)` for it.
+    pub async fn set_recognised(&self, foreign_issuer_did: impl Into<String>) {
+        self.inner
+            .lock()
+            .await
+            .recognised_issuers
+            .insert(foreign_issuer_did.into());
+    }
+
+    /// Queue an error for the next `recognise` call.
+    pub async fn fail_next_recognise(&self, err: RegistryError) {
+        self.inner.lock().await.next_recognise_error = Some(err);
+    }
+
     /// Read the upstream state directly. Tests assert against
     /// this to confirm a call landed.
     pub async fn snapshot(&self) -> std::collections::HashMap<String, RegistryRecord> {
@@ -171,6 +205,7 @@ pub struct MockCallCounts {
     pub delete: usize,
     pub read: usize,
     pub health: usize,
+    pub recognise: usize,
 }
 
 #[async_trait]
@@ -211,6 +246,15 @@ impl TrustRegistryClient for MockRegistryClient {
             return Err(err);
         }
         Ok(())
+    }
+
+    async fn recognise(&self, foreign_issuer_did: &str) -> Result<bool, RegistryError> {
+        let mut s = self.inner.lock().await;
+        s.recognise_calls += 1;
+        if let Some(err) = s.next_recognise_error.take() {
+            return Err(err);
+        }
+        Ok(s.recognised_issuers.contains(foreign_issuer_did))
     }
 }
 
@@ -284,6 +328,28 @@ mod tests {
         let snap = m.snapshot().await;
         assert!(snap.contains_key("did:key:zKeep"));
         assert!(!snap.contains_key("did:key:zDrop"));
+    }
+
+    #[tokio::test]
+    async fn recognise_returns_true_for_seeded_issuer() {
+        let m = MockRegistryClient::new();
+        m.set_recognised("did:webvh:peer.example.com:abc").await;
+        assert!(m.recognise("did:webvh:peer.example.com:abc").await.unwrap());
+        // Unseeded DID returns false (clean not-found).
+        assert!(!m.recognise("did:webvh:stranger.example").await.unwrap());
+        assert_eq!(m.call_counts().await.recognise, 2);
+    }
+
+    #[tokio::test]
+    async fn recognise_propagates_transport_errors() {
+        let m = MockRegistryClient::new();
+        m.fail_next_recognise(RegistryError::Unreachable("dns".into()))
+            .await;
+        let err = m
+            .recognise("did:webvh:peer.example")
+            .await
+            .expect_err("queued error must surface");
+        assert!(err.is_retriable());
     }
 
     #[test]
