@@ -519,3 +519,166 @@ Any decision that drifts from the default during
 implementation should be recorded in `phase-3-plan.md`
 under a "Phase 3 outcomes" header (mirror of Phase 1 + 2's
 pattern).
+
+## Phase 3 outcomes
+
+Recorded at M3.13 close-out. Each row links a pre-impl
+decision (D1–D10) or risk (R1–R6) to the as-shipped reality.
+
+### D1 — Trust-registry client shape
+
+**As shipped with deviation**: the proposed git-dep on
+`affinidi-trust-registry-rs` turned out to mean depending on
+the *server* crate, which pulls in an `affinidi-tdk = "0.4"`
+that conflicts with the workspace's `"0.7"`. Resolved
+mid-implementation (PR #87 planning) by writing an in-tree
+client wrapping the upstream's TRQP v2.0 HTTP surface +
+DIDComm admin protocol. The `TrustRegistryClient` trait
+keeps both transports opaque so future upstream changes
+land in one place.
+
+Spec deviation: upstream's `recognise` HTTP wire format
+isn't yet pinned — the live `UpstreamRegistryClient::recognise`
+returns `Permanent` with a clear "wire shape not yet pinned"
+message; a follow-up pins the payload against a running
+upstream. Mock-backed tests cover the full M3.9 + M3.10
+trail end-to-end.
+
+### D2 — `SyncJob` row shape
+
+**As shipped as proposed**: `SyncJob { id, kind, member_did,
+disposition?, created_at, attempts, last_attempted_at?,
+next_attempt_at, last_error?, state, rtbf_batched }` in
+`vtc_service::registry::model`. `state ∈
+{Pending, InFlight, Complete, Failed}`. Exponential backoff
+capped at 1h (M3.4); `rtbf_batched` flag drives the M3.7
+batch-window logic.
+
+### D3 — Audit-log-tail subscription
+
+**As shipped as proposed**: M3.3's `walk()` polls the
+`audit:` keyspace from a persisted `sync_cursor` row. The
+cursor advances over every envelope (including ignored
+variants) so a restart doesn't re-walk. Restart resilience
+is the load-bearing property — the audit log IS the event
+source of truth, and cursor-driven replay handles every
+"daemon crashed mid-flight" case identically.
+
+### D4 — RTBF batching trigger
+
+**As shipped with simplification**: parked-job `next_attempt_at`
+is set to `now + rtbf_batch_window_hours` (default 24h) at
+walk time. The proposed separate `RtbfBatchTimer` task is
+**not needed** — `SyncJob::is_dispatchable(now)` already
+checks the field, so the main syncer's tick naturally picks
+up parked jobs once their window expires. Configurable via
+`registry.rtbf_batch_window_hours`; `0` disables (test
+convenience).
+
+### D5 — Recognition cache stance
+
+**As shipped as proposed**: no caching anywhere. Every
+`POST /v1/auth/recognise` re-runs the full
+verifier (proof + status list + registry recognise +
+validity). Cross-community sessions intentionally **don't
+refresh** — the standard refresh path doesn't carry the
+foreign credentials, so re-issuing without re-verifying
+would defeat the "peer community removed mid-session loses
+access" invariant. Sessions just expire.
+
+### D6 — Failure-mode semantics
+
+**As shipped as proposed**: fail-closed in M3.9 (every
+check failure rejects); fail-open in M3.5's
+`publish_on_join` policy evaluation (broken policies sync
+rather than swallow membership). Registry unreachability at
+mint time maps to `503`, every other recognition failure to
+`403`. `RecognitionError::reason_code()` provides stable
+discriminators for SIEM filters.
+
+### D7 — `registry_records` keyspace shape
+
+**As shipped as proposed**: `RegistryRecord { member_did,
+status, active_from, active_to?, last_synced_at }` mirrors
+what the registry has. Updated on successful `SyncJob`
+dispatch; deleted on `DeleteMember` success.
+
+### D8 — Audit envelope names
+
+**As shipped as proposed**: five Phase 3 variants —
+`RegistryStatusChanged` (M3.2), `RegistrySyncSucceeded` +
+`RegistrySyncFailed` (M3.4), `RegistryRecordPolicyOverride`
+(M3.6), `CrossCommunitySessionMinted` (M3.10). All five
+have round-trip + discriminator-table coverage in
+`vti-common/src/audit/event.rs`.
+
+### D9 — Foreign-issuer DID resolution
+
+**As shipped as proposed**: production wires
+`DidResolverKeyResolver` over `DIDCacheClient` (reuses
+existing AppState resolver). Tests inject a stub via the
+`ForeignIssuerKeyResolver` trait — keeps the unit-test
+matrix hermetic.
+
+### D10 — Trust Task IDs
+
+**As shipped as proposed**: `health/diagnostics/1.0` (M3.8)
++ `auth/recognise/1.0` (M3.10). Both `Draft` in
+`index.json`; spec.md + schema.json on disk.
+
+### R1 — Upstream git-dep drift
+
+**Realised** — see D1. Pinned the trait abstraction;
+production HTTP wiring deferred behind a clear marker until
+the wire shape is pinned. cargo-audit on the trait is moot
+because the implementation is in-tree.
+
+### R2 — Tail-poll latency drift
+
+**Not realised yet**. Default 5s tick; the 1h
+visible-degraded threshold isn't currently surfaced via
+`oldest_pending_age_seconds`. The diagnostics endpoint
+exposes the metric; the flip-to-degraded threshold is left
+to operator alerting (their SIEM picks 1h or whatever they
+want). Phase 5 admin UX may bake it in.
+
+### R3 — RTBF / emergency-removal interaction
+
+**Not realised**. Phase 3 documents the 24h ceiling; admin
+manual-flush deferred to Phase 5 admin UX as planned.
+
+### R4 — Recognise latency
+
+**Not measured at production scale.** No live `recognise`
+HTTP call has been issued (see D1). Mock-backed
+microbenchmark unmeasured. Follow-up after wire format pins.
+
+### R5 — Registry recovery semantics
+
+**As planned**: passive reconcile via the syncer's
+restart-replay path. No active drift detection. Phase 5
+admin UX surface deferred.
+
+### R6 — DID resolution failures during recognition
+
+**As shipped**: `RecognitionError::IssuerKeyUnresolved`
+fails closed; route maps to `403` (caller's foreign issuer
+DID is the problem from the VTC's perspective, even when
+the underlying cause is network). No negative cache.
+
+### Spec amendments applied at M3.13
+
+- **§8.1**: in-tree TRQP client documented; `recognise`
+  HTTP wire-shape deferral noted.
+- **§8.4**: cross-community no-refresh path documented;
+  no caching anywhere; session TTL clamp formula spelled
+  out.
+- **§14.2**: trust-registry endpoint added to the remote-
+  dependency-breaker section (the M2.16 surface already
+  carried the abstraction; §14.2 now names registry
+  publish + recognise explicitly).
+- **§14.3**: `/v1/health/diagnostics` payload now matches
+  the as-shipped response (`registry_status`, `queue_depth`,
+  `rtbf_batched_count`, `failed_count`,
+  `oldest_pending_age_seconds`, + last-success/failure/
+  error fields).
