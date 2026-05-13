@@ -537,12 +537,15 @@ DIDComm admin protocol. The `TrustRegistryClient` trait
 keeps both transports opaque so future upstream changes
 land in one place.
 
-Spec deviation: upstream's `recognise` HTTP wire format
-isn't yet pinned — the live `UpstreamRegistryClient::recognise`
-returns `Permanent` with a clear "wire shape not yet pinned"
-message; a follow-up pins the payload against a running
-upstream. Mock-backed tests cover the full M3.9 + M3.10
-trail end-to-end.
+Follow-up landed post-closeout: `UpstreamRegistryClient::
+recognise` now sends a real `POST /recognition` 4-tuple
+(`entity_id`, `authority_id`, `action`, `resource`) and
+parses `response.recognized`. 404 maps to `Ok(false)`
+(clean not-found); 400 → `Permanent`; 5xx / connect-refused
+→ existing classify path. End-to-end tests stand up an
+in-process axum server. Mock-backed verifier tests in
+`recognition::verify::tests` still cover the M3.9 trail
+hermetically.
 
 ### D2 — `SyncJob` row shape
 

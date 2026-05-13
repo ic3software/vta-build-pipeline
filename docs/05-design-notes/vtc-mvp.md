@@ -452,15 +452,21 @@ Publish failures are non-fatal but raise a state flag in
 "active"`) and in `/v1/health/diagnostics`. Operators see the
 lag without having to grep telemetry.
 
-**Implementation note (Phase 3).** The TRQP v2.0 wire shape
-for `recognise` (used by §8.4) is not yet pinned against the
-live upstream — `UpstreamRegistryClient::recognise` returns a
-`Permanent` error with a clear deferral message until the
-payload format stabilises. The full M3.9 / M3.10 path is
-exercised end-to-end against the `MockRegistryClient` in
-integration tests; production deployments need the upstream
-HTTP wired before cross-community recognition functions
-against real peers.
+**Implementation note (Phase 3, post-closeout).** The TRQP
+v2.0 wire shape for `recognise` (used by §8.4) is pinned
+against the upstream's `POST /recognition` route at
+`affinidi/affinidi-trust-registry-rs`. The request is a
+4-tuple of snake_case strings (`entity_id`, `authority_id`,
+`action`, `resource`); the response carries a top-level
+`recognized: bool`. The VTC sends `entity_id =
+<foreign-issuer-did>`, `authority_id = <local-vtc-did>`,
+`action = "recognise"`, `resource = "trust-graph"`. A `404`
+response is mapped to `Ok(false)` (clean not-found),
+semantically equivalent to a stored record with `recognized:
+false`. End-to-end tests stand up an in-process axum server
+exercising the same wire codepath. Production deployments
+need only the upstream's `registry.url` set + the VTC's
+`vtc_did` populated.
 
 **PII boundary.** Only `member_did`, `status`, `active_from`,
 `active_to`, and `record_id` are written to the registry. The VTC

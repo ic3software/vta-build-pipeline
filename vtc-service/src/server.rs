@@ -249,6 +249,7 @@ pub async fn run(
             let cfg = crate::registry::upstream::UpstreamConfig {
                 base_url: url.to_string(),
                 http_timeout: std::time::Duration::from_secs(config.registry.http_timeout_seconds),
+                authority_did: config.vtc_did.clone(),
             };
             match crate::registry::UpstreamRegistryClient::new(cfg) {
                 Ok(c) => Some(Arc::new(c) as Arc<dyn crate::registry::TrustRegistryClient>),
