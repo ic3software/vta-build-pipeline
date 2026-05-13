@@ -442,11 +442,25 @@ file-watching, no auto-reload.
 
 ### 8.1 Startup
 
-VTC publishes its issuer profile via `affinidi-trust-registry-rs` on
-boot. Idempotent. Publish failures are non-fatal but raise a state
-flag in `GET /v1/community/profile` (`registry_status:
-"degraded" | "active"`) and in `/v1/health/diagnostics`. Operators
-see the lag without having to grep telemetry.
+VTC publishes its issuer profile via an in-tree
+`TrustRegistryClient` wrapping the upstream
+`affinidi-trust-registry-rs` server's two transports (HTTP for
+reads, DIDComm for admin writes; see workspace
+`vtc_service::registry::client` + `upstream`). Idempotent.
+Publish failures are non-fatal but raise a state flag in
+`GET /v1/community/profile` (`registry_status: "degraded" |
+"active"`) and in `/v1/health/diagnostics`. Operators see the
+lag without having to grep telemetry.
+
+**Implementation note (Phase 3).** The TRQP v2.0 wire shape
+for `recognise` (used by §8.4) is not yet pinned against the
+live upstream — `UpstreamRegistryClient::recognise` returns a
+`Permanent` error with a clear deferral message until the
+payload format stabilises. The full M3.9 / M3.10 path is
+exercised end-to-end against the `MockRegistryClient` in
+integration tests; production deployments need the upstream
+HTTP wired before cross-community recognition functions
+against real peers.
 
 **PII boundary.** Only `member_did`, `status`, `active_from`,
 `active_to`, and `record_id` are written to the registry. The VTC
@@ -506,9 +520,20 @@ claim maps to a local ACL role. Default deny-all.
   audience default, the foreign VEC's `validUntil`, the foreign
   VMC's `validUntil`.
 - Recognition is **not cached**; every session mint re-runs the
-  full policy + StatusList + trust-registry check. A peer community
-  removed from the registry mid-session does not retain access on
-  refresh.
+  full policy + StatusList + trust-registry check.
+- **Cross-community sessions do not refresh.** The standard
+  `POST /v1/auth/refresh` route doesn't carry the foreign
+  credentials, so re-issuing a token without re-verifying
+  would defeat the "peer community removed mid-session loses
+  access" invariant. Cross-community sessions expire on their
+  clamped TTL; the caller mints a fresh one with the latest
+  credentials. Session IDs are prefixed `xc-` to distinguish
+  them from local-member sessions.
+- The verifier runs four checks in order (proof verify →
+  validity window → StatusList revocation → registry
+  recognise) and short-circuits on the first failure. Stable
+  reason codes for SIEM filtering live in
+  `vtc_service::recognition::RecognitionError::reason_code`.
 
 ## 9. Wire protocols
 
@@ -1038,7 +1063,8 @@ not in this spec.
 in Phase 2 (§3-A — cached-locally signer), so the per-call
 timeout and circuit-breaker configuration apply to **non-VMC
 remote dependencies only**: the trust-registry publish path in
-Phase 3 (`MembershipSyncer`) and the did:webvh resolver walk in
+Phase 3 (`MembershipSyncer`), the cross-community
+`recognise` query (§8.4), and the did:webvh resolver walk in
 M2.15.2's rotation slice. The configuration knobs retain their
 names (`vta.signing_timeout_seconds`, default 5;
 `vta.circuit_breaker_threshold`, default 5 consecutive failures)
@@ -1046,20 +1072,47 @@ for forward compatibility — they are the workspace's canonical
 "remote-call discipline" handles. The breaker-open semantics
 (join → `Deferred`, renewal → 503,
 `/v1/health/diagnostics` surfaces remote health) apply to those
-non-VMC paths once they land. Clarified per Phase 2 M2.16.
+non-VMC paths once they land. Clarified per Phase 2 M2.16 +
+Phase 3 M3.13.
+
+**Trust-registry-specific settings (Phase 3 M3.2 + M3.7).** The
+`registry` config block adds three knobs:
+
+- `registry.url` — base URL of the upstream TRQP registry.
+  When unset, the registry features no-op and
+  `registry_status` reports `"degraded"`.
+- `registry.health_probe_interval_seconds` — periodic probe
+  cadence (default 60s; `0` disables).
+- `registry.http_timeout_seconds` — per-call HTTP timeout
+  (default 5s).
+- `registry.rtbf_batch_window_hours` — RTBF coalescing
+  window (default 24h; `0` disables — test convenience
+  only).
 
 ### 14.3 Telemetry + diagnostics
 
-Reuses `vti_common::telemetry::TelemetrySink`. `/v1/health/diagnostics`
-(admin) surfaces:
+Reuses `vti_common::telemetry::TelemetrySink`.
+`/v1/health/diagnostics` (admin) surfaces the trust-registry
+reconciler state. As-shipped Phase 3 M3.8 response shape:
 
-- Remote-dependency health (trust-registry publish, did:webvh
-  resolver) + last-success timestamp
-- Status-list occupancy per purpose
-- `MembershipSyncer` queue depth + last-success/failure
-- Active policy IDs + SHA-256 per purpose
-- Trust-registry sync status
-- Telemetry ring-buffer snapshot
+```
+{
+  "registry_status": "active" | "degraded",
+  "queue_depth": <integer>,              // Pending + InFlight
+  "rtbf_batched_count": <integer>,       // Parked behind window
+  "failed_count": <integer>,             // Terminal failures
+  "oldest_pending_age_seconds": <int|null>,  // excludes RTBF-parked
+  "last_success_at": "<rfc3339>" | null,
+  "last_failure_at": "<rfc3339>" | null,
+  "last_error": "<string>" | null
+}
+```
+
+Aggregate-only — individual member DIDs are not surfaced; the
+`rtbf_batched_count` field discloses how many RTBF jobs are
+in flight but not which members. Phase 5 admin UX may add
+the status-list occupancy + active-policy snapshots + ring
+buffer named in earlier drafts.
 
 `/health` (unauthenticated, Trust-Task-exempt §9.4) returns 200 when
 the daemon is responsive and storage is reachable.

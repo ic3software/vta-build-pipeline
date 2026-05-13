@@ -377,7 +377,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.11 — Audit variants snapshot tests
 
-### `[ ]` M3.11.1 — Round-trip + discriminator coverage
+### `[x]` M3.11.1 — Round-trip + discriminator coverage
 
 - **Acceptance**
   - The five Phase 3 audit variants
@@ -395,7 +395,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.12 — Trust Task drafts + index
 
-### `[ ]` M3.12.1 — On-disk + index entries
+### `[x]` M3.12.1 — On-disk + index entries
 
 - **Acceptance**
   - `trust-tasks/health/diagnostics/1.0/{spec.md,schema.json}`
@@ -417,7 +417,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.13 — Phase 3 outcomes + spec amendments
 
-### `[ ]` M3.13.1 — Document the as-shipped reality
+### `[x]` M3.13.1 — Document the as-shipped reality
 
 - **Acceptance**
   - `tasks/vtc-mvp/phase-3-plan.md` gains a "Phase 3
@@ -437,7 +437,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M3.14 — Phase 3 gate
 
-### `[ ]` M3.14.1 — Workspace gate green
+### `[x]` M3.14.1 — Workspace gate green
 
 - **Acceptance** (mirrors M2.19.1)
   - `cargo build --workspace` green.

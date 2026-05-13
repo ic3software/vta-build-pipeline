@@ -1056,6 +1056,21 @@ mod tests {
     }
 
     #[test]
+    fn registry_record_policy_override_round_trip() {
+        let e = AuditEvent::RegistryRecordPolicyOverride(RegistryRecordPolicyOverrideData {
+            reason: "rtbf".into(),
+            attempted_disposition: "tombstone".into(),
+            effective_disposition: "purge".into(),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "RegistryRecordPolicyOverride");
+        assert_eq!(v["data"]["reason"], "rtbf");
+        assert_eq!(v["data"]["attemptedDisposition"], "tombstone");
+        assert_eq!(v["data"]["effectiveDisposition"], "purge");
+        round_trip(&e);
+    }
+
+    #[test]
     fn cross_community_session_minted_round_trip() {
         let e = AuditEvent::CrossCommunitySessionMinted(CrossCommunitySessionMintedData {
             outcome: "minted".into(),
