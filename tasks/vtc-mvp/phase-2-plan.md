@@ -479,10 +479,17 @@ back to `Tombstone`.
 
 ### D7 — DID rotation path split
 
-**As shipped with deferral**: M2.15.1 lands the `did:key`
-slice; M2.15.2 (`did:webvh` resolver walk) is deferred to a
-follow-up PR per R4. Endpoint accepts non-`did:key` new-DID
-values with a clear 400 + pointer to the follow-up.
+**As shipped (both slices)**: M2.15.1 landed the `did:key`
+slice in the Phase 2 closeout PR; M2.15.2 (`did:webvh`
+resolver walk) landed as a follow-up PR after the Phase 3
+closeout. Method-dispatch in `rotate()` picks
+`verify_did_key_signature` for `did:key` new-DID values
+and `verify_did_webvh_signature` (resolver walk →
+`{did}#key-0` extraction → Ed25519 verify) for `did:webvh`.
+Unknown DID methods 400 cleanly before any signature check.
+`did:webvh` rotation requires a configured DID resolver
+(returns 500 when unwired — matches the daemon-misconfigured
+class).
 
 **Spec deviation (documented)**: rotation `/finish` is
 authenticated by the OLD DID's session, not the new DID's.

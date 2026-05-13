@@ -355,11 +355,57 @@ async fn rotation_happy_path_swaps_acl_and_member() {
     fix.signer.verify(&role_vec).expect("VEC verifies");
 }
 
+/// M2.15.2: did:webvh rotation works, but only when the
+/// daemon was booted with a DID resolver wired into
+/// `AppState`. The rotation-test fixture leaves
+/// `did_resolver: None` (no internet at test time), so a
+/// did:webvh new-DID hits the "resolver not configured" 500
+/// path. That's the realistic failure mode for daemons
+/// running offline / in CI; the actual resolver walk is
+/// exercised end-to-end by the recognition unit tests
+/// (`recognition::verify::tests`), which share the same
+/// `VerificationMethod::get_public_key_bytes()` upstream
+/// helper.
 #[tokio::test]
-async fn rotation_rejects_did_webvh_for_now() {
+async fn rotation_did_webvh_requires_did_resolver() {
     let fix = build_fixture().await;
     let (rotation_id, expires_at) = mint_challenge(&fix).await;
     let new_did = "did:webvh:peer.example.com:abc";
+    let payload = signing_bytes(&rotation_id, &fix.member_did, new_did, expires_at);
+    let old_sig = hex::encode(fix.member_signing.sign(&payload).to_bytes());
+    let new_signing = SigningKey::from_bytes(&[0xBB; 32]);
+    let new_sig = hex::encode(new_signing.sign(&payload).to_bytes());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/members/me/rotate")
+        .header("authorization", format!("Bearer {}", fix.member_token))
+        .header("trust-task", ROTATE_TASK)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "rotationId": rotation_id,
+                "oldDid": fix.member_did,
+                "newDid": new_did,
+                "oldSignature": old_sig,
+                "newSignature": new_sig,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    // 500 (Internal) because the daemon is misconfigured —
+    // not 400 (caller's fault).
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn rotation_rejects_unknown_did_method() {
+    let fix = build_fixture().await;
+    let (rotation_id, expires_at) = mint_challenge(&fix).await;
+    // did:example isn't a method the rotation route knows
+    // about — should 400 cleanly before any signature check.
+    let new_did = "did:example:abc";
     let payload = signing_bytes(&rotation_id, &fix.member_did, new_did, expires_at);
     let old_sig = hex::encode(fix.member_signing.sign(&payload).to_bytes());
     let new_signing = SigningKey::from_bytes(&[0xBB; 32]);
