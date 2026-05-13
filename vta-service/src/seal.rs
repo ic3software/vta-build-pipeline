@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::acl::{self, Role};
+use crate::config::StoreConfig;
 use crate::error::AppError;
 use crate::store::{KeyspaceHandle, Store};
 
@@ -100,26 +101,34 @@ pub async fn seal(acl_ks: &KeyspaceHandle, admin_did: &str) -> Result<SealRecord
     Ok(record)
 }
 
-/// Run the interactive unseal challenge-response protocol.
-///
-/// 1. Finds super admin DIDs in the ACL
-/// 2. Generates a random 32-byte challenge
-/// 3. Displays the challenge for the admin to sign
-/// 4. Reads back the signature
-/// 5. Verifies the Ed25519 signature against the admin's public key
-/// 6. If valid, removes the seal
-pub async fn run_unseal_challenge(store: &Store) -> Result<(), AppError> {
+/// Snapshot of what `read_unseal_state` pulls from the sealed store
+/// before releasing the fjall lock.
+#[derive(Debug)]
+pub(crate) struct UnsealChallenge {
+    pub seal: SealRecord,
+    pub super_admins: Vec<acl::AclEntry>,
+    pub challenge_bytes: [u8; 32],
+}
+
+/// Phase 1 of the unseal flow: open the store, read the seal record
+/// and the super-admin list, mint a fresh 32-byte challenge, and
+/// **drop the store before returning**. After this call the fjall
+/// directory lock is released — a sibling `vta auth sign-challenge` (or
+/// any other process) can open the same data dir while the operator is
+/// pasting their signature.
+pub(crate) async fn read_unseal_state(
+    store_config: &StoreConfig,
+) -> Result<UnsealChallenge, AppError> {
+    let store = Store::open(store_config)?;
     let acl_ks = store.keyspace("acl")?;
 
-    // Verify the VTA is actually sealed
     let seal = get_seal(&acl_ks)
         .await?
         .ok_or_else(|| AppError::Config("VTA is not sealed — nothing to unseal".into()))?;
 
-    // Find super admin DIDs
     let entries = acl::list_acl_entries(&acl_ks).await?;
-    let super_admins: Vec<_> = entries
-        .iter()
+    let super_admins: Vec<acl::AclEntry> = entries
+        .into_iter()
         .filter(|e| e.role == Role::Admin && e.allowed_contexts.is_empty())
         .collect();
 
@@ -129,9 +138,50 @@ pub async fn run_unseal_challenge(store: &Store) -> Result<(), AppError> {
         ));
     }
 
-    // Generate random challenge
     let mut challenge_bytes = [0u8; 32];
     rand::fill(&mut challenge_bytes);
+
+    Ok(UnsealChallenge {
+        seal,
+        super_admins,
+        challenge_bytes,
+    })
+    // `store` and `acl_ks` drop here — fjall lock released.
+}
+
+/// Phase 3 of the unseal flow: reopen the store, remove the seal
+/// marker if it's still there, persist. Returns `Ok(true)` if the
+/// seal was removed in this call, `Ok(false)` if it had already been
+/// removed (e.g. by a concurrent process while the operator was
+/// blocked on stdin).
+pub(crate) async fn remove_seal_marker(store_config: &StoreConfig) -> Result<bool, AppError> {
+    let store = Store::open(store_config)?;
+    let acl_ks = store.keyspace("acl")?;
+    if get_seal(&acl_ks).await?.is_none() {
+        return Ok(false);
+    }
+    acl_ks.remove(SEAL_KEY).await?;
+    store.persist().await?;
+    Ok(true)
+}
+
+/// Run the interactive unseal challenge-response protocol.
+///
+/// 1. [`read_unseal_state`] — open store, read seal + super-admins,
+///    generate a 32-byte challenge, drop store.
+/// 2. Print the challenge and read the admin DID + signature on stdin.
+///    **No fjall lock is held during this phase**, so a sibling
+///    `vta auth sign-challenge` or `pnm auth sign-challenge` invocation
+///    can open the same data dir to produce the signature.
+/// 3. Verify the Ed25519 signature; [`remove_seal_marker`] then
+///    reopens the store, removes the seal, and persists.
+pub async fn run_unseal_challenge(store_config: &StoreConfig) -> Result<(), AppError> {
+    let UnsealChallenge {
+        seal,
+        super_admins,
+        challenge_bytes,
+    } = read_unseal_state(store_config).await?;
+
     let challenge_hex = hex::encode(challenge_bytes);
 
     eprintln!();
@@ -160,7 +210,7 @@ pub async fn run_unseal_challenge(store: &Store) -> Result<(), AppError> {
     );
     eprintln!(
         "    vta auth sign-challenge --did <admin-did> --challenge {challenge_hex}   \
-         # offline: signs from this VTA's local keystore (daemon stopped)"
+         # offline: signs from this VTA's local keystore"
     );
     eprintln!();
     eprintln!("  Then paste the signature (hex) and your DID below.");
@@ -181,7 +231,7 @@ pub async fn run_unseal_challenge(store: &Store) -> Result<(), AppError> {
         .map_err(|e| AppError::Internal(format!("failed to read input: {e}")))?;
     let admin_did = did_input.trim();
 
-    // Verify the DID is a super admin
+    // Verify the DID is a super admin (against the snapshot we read in phase 1).
     let admin_entry = super_admins
         .iter()
         .find(|e| e.did == admin_did)
@@ -195,12 +245,16 @@ pub async fn run_unseal_challenge(store: &Store) -> Result<(), AppError> {
         .map_err(|e| AppError::Internal(format!("failed to read input: {e}")))?;
     let sig_hex = sig_input.trim();
 
-    // Verify the signature
+    // Verify the signature before we reacquire the lock.
     verify_challenge_signature(admin_did, &challenge_bytes, sig_hex)?;
 
-    // Signature valid — unseal
-    acl_ks.remove(SEAL_KEY).await?;
-    store.persist().await?;
+    let removed = remove_seal_marker(store_config).await?;
+    if !removed {
+        eprintln!();
+        eprintln!("  VTA was unsealed concurrently — nothing to do.");
+        eprintln!();
+        return Ok(());
+    }
 
     info!(admin = %admin_did, "VTA unsealed via challenge-response");
 
@@ -280,4 +334,139 @@ fn verify_challenge_signature(
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::acl::AclEntry;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Seal a fresh store under `data_dir` with a single super-admin
+    /// ACL entry. The store is opened, populated, and dropped — the
+    /// fjall lock is released before this helper returns.
+    async fn seal_fresh_store(data_dir: &std::path::Path, admin_did: &str) {
+        let config = StoreConfig {
+            data_dir: data_dir.to_path_buf(),
+        };
+        let store = Store::open(&config).expect("open store");
+        let acl_ks = store.keyspace("acl").expect("acl keyspace");
+
+        let entry = AclEntry {
+            did: admin_did.to_string(),
+            role: Role::Admin,
+            label: Some("test-super-admin".into()),
+            allowed_contexts: vec![],
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            created_by: "test".into(),
+            expires_at: None,
+        };
+        acl::store_acl_entry(&acl_ks, &entry).await.expect("acl");
+        seal(&acl_ks, admin_did).await.expect("seal");
+        store.persist().await.expect("persist");
+    }
+
+    /// Regression: `read_unseal_state` MUST drop the fjall handle
+    /// before returning. The bug it fixes was that
+    /// `run_unseal_challenge` kept the store open across the stdin
+    /// wait, so `vta auth sign-challenge` (which opens the same data
+    /// dir to sign the challenge) failed with `FjallError: Locked`.
+    ///
+    /// If this test ever starts failing with a fjall lock error on
+    /// the second `Store::open`, someone has reintroduced the bug.
+    #[tokio::test]
+    async fn read_unseal_state_releases_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seal_fresh_store(dir.path(), "did:key:zTestAdmin").await;
+
+        let config = StoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        };
+
+        // Phase 1: must return without holding the lock.
+        let challenge = read_unseal_state(&config).await.expect("read_unseal_state");
+
+        assert_eq!(challenge.seal.sealed_by, "did:key:zTestAdmin");
+        assert_eq!(challenge.super_admins.len(), 1);
+        assert_eq!(challenge.challenge_bytes.len(), 32);
+
+        // A sibling opener — mimicking `vta auth sign-challenge` — must
+        // be able to acquire the lock now. If `read_unseal_state` ever
+        // regresses to holding the store across the stdin wait, this
+        // open fails with `FjallError: Locked`.
+        let _sibling = Store::open(&config).expect(
+            "sibling Store::open after read_unseal_state must succeed — \
+             the fjall lock from phase 1 should have been released on drop",
+        );
+    }
+
+    /// `remove_seal_marker` removes the seal on first call, then is
+    /// idempotent (returns Ok(false) — useful for the "concurrent
+    /// unseal" race in the interactive flow).
+    #[tokio::test]
+    async fn remove_seal_marker_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seal_fresh_store(dir.path(), "did:key:zTestAdmin").await;
+
+        let config = StoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        };
+
+        let first = remove_seal_marker(&config).await.expect("first call");
+        assert!(first, "first call should report seal removed");
+
+        let second = remove_seal_marker(&config).await.expect("second call");
+        assert!(
+            !second,
+            "second call should report no-op (seal already gone)"
+        );
+
+        // Store reopens fine afterwards — lock released.
+        let _after = Store::open(&config).expect("reopen after remove");
+    }
+
+    /// Phase 1 fails cleanly when the VTA isn't sealed (no marker row).
+    #[tokio::test]
+    async fn read_unseal_state_rejects_unsealed_vta() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        };
+        // Open + drop to create the data dir but don't seal.
+        {
+            let store = Store::open(&config).expect("open");
+            store.persist().await.expect("persist");
+        }
+
+        let err = read_unseal_state(&config)
+            .await
+            .expect_err("must reject unsealed VTA");
+        assert!(matches!(err, AppError::Config(_)), "got {err:?}");
+    }
+
+    /// Phase 1 fails cleanly when sealed but no super-admin exists
+    /// (should not happen in practice — seal always follows admin
+    /// seeding — but the guard is worth keeping fenced).
+    #[tokio::test]
+    async fn read_unseal_state_rejects_missing_super_admin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        };
+        {
+            let store = Store::open(&config).expect("open");
+            let acl_ks = store.keyspace("acl").expect("acl");
+            // Seal directly without seeding a super-admin.
+            seal(&acl_ks, "did:key:zPhantom").await.expect("seal");
+            store.persist().await.expect("persist");
+        }
+
+        let err = read_unseal_state(&config)
+            .await
+            .expect_err("must reject missing super-admin");
+        assert!(matches!(err, AppError::Config(_)), "got {err:?}");
+    }
 }

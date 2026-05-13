@@ -226,7 +226,11 @@ vta import-did --did did:key:z6Mk... --role admin
 ```
 
 This writes a single `AclEntry` directly to the fjall store. No
-network call, no server required.
+network call, no server required. The VTA stays unsealed — the
+offline CLI remains usable for any further provisioning work
+(mediator, webvh-daemon, etc.) before you start the daemon. See
+[`seal-and-unseal.md`](seal-and-unseal.md) for when (and whether) to
+seal explicitly with `vta bootstrap-admin`.
 
 ## Phase 5: Start the VTA
 

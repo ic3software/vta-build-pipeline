@@ -921,8 +921,11 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            let store = store::Store::open(&config.store).expect("failed to open store");
-            if let Err(e) = seal::run_unseal_challenge(&store).await {
+            // run_unseal_challenge opens and drops the store twice on
+            // purpose so the fjall lock is not held while the operator
+            // is pasting a signature — see the doc comment on that
+            // function. Pass the config, not an already-opened Store.
+            if let Err(e) = seal::run_unseal_challenge(&config.store).await {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }

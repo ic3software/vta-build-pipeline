@@ -41,6 +41,9 @@ how to integrate with it, and where the design decisions live.
 - **[Non-interactive setup](02-operating/non-interactive-setup.md)** —
   scripted VTA provisioning via `vta setup --from <file>` for CI,
   sealed images, and unattended bootstrap.
+- **[Sealing and unsealing the VTA](02-operating/seal-and-unseal.md)** —
+  what the seal is, when it's set, how `vta unseal` works, and the
+  bootstrap-then-seal-last pattern that sidesteps it entirely.
 - **[Secret-storage backends](02-operating/secret-backends.md)** —
   AWS Secrets Manager, GCP Secret Manager, Azure Key Vault,
   HashiCorp Vault (with Kubernetes / token / AppRole auth),

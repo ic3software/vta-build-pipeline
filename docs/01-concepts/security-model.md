@@ -58,6 +58,11 @@ config changes), see [TEE Enclave Security Design](tee-architecture.md).
 - Unsealing requires challenge-response proof of admin key ownership
 - In TEE mode, seal marker is AES-256-GCM encrypted in storage
 
+Operator-facing detail (when the seal is set, when it gets in the way,
+how to unseal, and the bootstrap-then-seal-last pattern that avoids
+the unseal dance) lives in
+[`02-operating/seal-and-unseal.md`](../02-operating/seal-and-unseal.md).
+
 ### Layer 7: Network Controls
 - Three vsock channels with strict purpose separation:
   - Inbound REST (port 5100): client requests to VTA

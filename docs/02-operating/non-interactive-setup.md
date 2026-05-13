@@ -101,7 +101,7 @@ summary.
 | `vta_name` | no | `null` | Human-readable name. |
 | `public_url` | no | `null` | Used as the `VTARest` service endpoint when minting a DID. |
 | `data_dir_exists` | no | `"error"` | What to do if `data_dir` already exists. `"delete"` for CI re-runs. |
-| `admin_did` | no | `null` | If set, seeds a super-admin and seals the VTA atomically. Must start with `did:`. |
+| `admin_did` | no | `null` | If set, seeds a super-admin and seals the VTA atomically. Must start with `did:`. See [`seal-and-unseal.md`](seal-and-unseal.md) for the consequences of sealing at setup time and the recommended seal-last alternative. |
 | `admin_label` | no | `null` | Label on the seeded admin's ACL row. |
 
 ### Sections
