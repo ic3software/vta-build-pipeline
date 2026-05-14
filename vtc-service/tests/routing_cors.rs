@@ -56,6 +56,7 @@ fn cfg_with(routing: RoutingConfig, cors: CorsConfig) -> AppConfig {
         routing,
         cors,
         registry: Default::default(),
+        renewal: Default::default(),
         config_path: std::path::PathBuf::new(),
     }
 }

@@ -129,10 +129,33 @@ pub async fn renew(
     let status_ref =
         CredentialStatusRef::revocation(status_list_state.list_credential_id.clone(), slot);
 
-    // 3. Re-evaluate `personhood.rego`.
-    let personhood = evaluate_personhood(&state, &caller_did, &member.extensions).await?;
+    // 3. Re-evaluate `personhood.rego` against the Member's
+    //    persisted state (Phase 4 M4.2.2).
+    let prior_personhood = member.personhood;
+    let policy_allow = evaluate_personhood(&state, &member).await?;
 
-    let prior_personhood = prior_personhood_from_member(&member);
+    // M4.2.2: when the policy flips a previously-asserted
+    // member's flag to `false`, branch on the operator's
+    // configured `on_personhood_fail` mode.
+    let fail_mode = state.config.read().await.renewal.on_personhood_fail;
+    let (personhood, downgrade_audit) = if prior_personhood && !policy_allow {
+        match fail_mode {
+            crate::config::PersonhoodFailMode::Refuse => {
+                // No state change, no audit, no VMC re-mint.
+                return Err(AppError::Validation(
+                    "personhood-renewal-refused: active personhood.rego \
+                         no longer permits this member; re-assert via \
+                         POST /v1/members/{did}/personhood/assert before \
+                         retrying renewal"
+                        .into(),
+                ));
+            }
+            crate::config::PersonhoodFailMode::Downgrade => (false, true),
+        }
+    } else {
+        (policy_allow, false)
+    };
+
     let personhood_changed = prior_personhood != personhood;
 
     // 4. Build VMC + role VEC.
@@ -160,9 +183,18 @@ pub async fn renew(
     member.status_list_index = Some(slot);
     member.current_vmc_id = Some(vmc_id.clone());
     member.current_role_vec_id = Some(vec_id.clone());
+    if downgrade_audit {
+        // Renewal-policy downgrade clears the asserted-at
+        // timestamp alongside the flag. The member must
+        // re-assert (M4.3) to reinstate.
+        member.personhood = false;
+        member.personhood_asserted_at = None;
+    }
     store_member(&state.members_ks, &member).await?;
 
-    // 6. Audit.
+    // 6. Audit. `MembershipRenewed` always fires; paired
+    //    `PersonhoodRevoked { reason: "renewal-policy" }` only
+    //    on the downgrade arm.
     audit_writer
         .write(
             &caller_did,
@@ -174,6 +206,25 @@ pub async fn renew(
             }),
         )
         .await?;
+    if downgrade_audit {
+        let vtc_did = state
+            .config
+            .read()
+            .await
+            .vtc_did
+            .clone()
+            .unwrap_or_else(|| "did:key:vtc-unknown".into());
+        audit_writer
+            .write(
+                &vtc_did,
+                Some(&caller_did),
+                AuditEvent::PersonhoodRevoked(vti_common::audit::PersonhoodRevokedData {
+                    vmc_id: Some(vmc_id.clone()),
+                    reason: "renewal-policy".into(),
+                }),
+            )
+            .await?;
+    }
 
     info!(
         did = %caller_did,
@@ -197,16 +248,28 @@ pub async fn renew(
     ))
 }
 
-/// Run the active `personhood.rego` against the canonical
-/// input (spec §6.4): `{ applicant_did, vp_claims }`. The
-/// Member row's `extensions` slot is the closest stand-in for
-/// `vp_claims` in Phase 2 — Phase 4's assert/revoke endpoints
-/// will populate a richer claim. Fail-closed: any error path
-/// yields `false`.
+/// Run the active `personhood.rego` against the renewal-time
+/// canonical input (Phase 4 M4.2.2):
+///
+/// ```json
+/// {
+///   "applicant_did": "<did>",
+///   "current_personhood": <bool>,
+///   "asserted_at_seconds_ago": <int | null>,
+///   "vp_claims": { "holder": "<did>", "credentials": [] }
+/// }
+/// ```
+///
+/// Evidence (the VP) is **not persisted** on the Member row
+/// per planning-review D2 — the policy sees the current
+/// flag + the assert age, not the original evidence. Operators
+/// wanting richer renewal-time eval upload a custom rego that
+/// consults additional inputs (e.g. live trust-registry).
+///
+/// Fail-closed: any error path yields `false`.
 async fn evaluate_personhood(
     state: &AppState,
-    applicant_did: &str,
-    vp_claims: &JsonValue,
+    member: &crate::members::Member,
 ) -> Result<bool, AppError> {
     let active = get_active_policy_id(&state.active_policies_ks, PolicyPurpose::Personhood).await?;
     let Some(id) = active else {
@@ -216,25 +279,19 @@ async fn evaluate_personhood(
         .await?
         .ok_or_else(|| AppError::Internal(format!("active personhood policy {id} not found")))?;
     let compiled = compile_policy(&policy.rego_source, policy.id)?;
+    let asserted_at_seconds_ago: JsonValue = match member.personhood_asserted_at {
+        Some(t) => json!((chrono::Utc::now() - t).num_seconds().max(0)),
+        None => JsonValue::Null,
+    };
     let input = json!({
-        "applicant_did": applicant_did,
-        "vp_claims": vp_claims,
+        "applicant_did": member.did,
+        "current_personhood": member.personhood,
+        "asserted_at_seconds_ago": asserted_at_seconds_ago,
+        "vp_claims": { "holder": member.did, "credentials": [] },
     });
     let result = evaluate_policy(&compiled, "data.vtc.personhood.allow", input)?;
     Ok(result
         .pointer("/result/0/expressions/0/value")
         .and_then(|v| v.as_bool())
         .unwrap_or(false))
-}
-
-/// Best-effort recovery of the prior VMC's `personhood` flag.
-/// Phase 2 doesn't persist VMC bodies server-side, so we
-/// can't read it back directly. We default to `false` (the
-/// deny-all stub's output) — meaning `personhood_changed` is
-/// always `false` in MVP unless the operator uploads a
-/// custom personhood policy that flips between renewals. The
-/// field is on the wire from day one; Phase 4 can persist the
-/// flag on the Member row to make this comparison precise.
-fn prior_personhood_from_member(_member: &crate::members::Member) -> bool {
-    false
 }

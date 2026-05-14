@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn personhood_default_denies_everything() {
+    fn personhood_default_denies_empty_input() {
         let c = compile_default(PolicyPurpose::Personhood);
         let r = evaluate(
             &c,
@@ -409,11 +409,126 @@ mod tests {
             json!({ "applicant_did": "did:key:zX", "vp_claims": {} }),
         )
         .unwrap();
-        assert!(!pluck_bool(&r), "personhood default must deny");
-        let asserted = evaluate(&c, "data.vtc.personhood.asserted", json!({})).unwrap();
         assert!(
-            !pluck_bool(&asserted),
-            "personhood.asserted default must be false"
+            !pluck_bool(&r),
+            "empty input must deny — no WitnessCredential present"
+        );
+    }
+
+    #[test]
+    fn personhood_default_denies_vp_without_witness_credential() {
+        let c = compile_default(PolicyPurpose::Personhood);
+        let r = evaluate(
+            &c,
+            "data.vtc.personhood.allow",
+            json!({
+                "applicant_did": "did:key:zX",
+                "vp_claims": {
+                    "holder": "did:key:zX",
+                    "credentials": [
+                        { "type": ["VerifiableCredential"], "issuer": "did:key:zIss" }
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+        assert!(
+            !pluck_bool(&r),
+            "VC without WitnessCredential type must deny"
+        );
+    }
+
+    #[test]
+    fn personhood_default_denies_witness_credential_with_empty_issuer() {
+        let c = compile_default(PolicyPurpose::Personhood);
+        let r = evaluate(
+            &c,
+            "data.vtc.personhood.allow",
+            json!({
+                "applicant_did": "did:key:zX",
+                "vp_claims": {
+                    "holder": "did:key:zX",
+                    "credentials": [
+                        { "type": ["VerifiableCredential", "WitnessCredential"], "issuer": "" }
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+        assert!(
+            !pluck_bool(&r),
+            "WitnessCredential with empty issuer must deny"
+        );
+    }
+
+    #[test]
+    fn personhood_default_allows_witness_credential_with_issuer() {
+        let c = compile_default(PolicyPurpose::Personhood);
+        let r = evaluate(
+            &c,
+            "data.vtc.personhood.allow",
+            json!({
+                "applicant_did": "did:key:zX",
+                "vp_claims": {
+                    "holder": "did:key:zX",
+                    "credentials": [
+                        {
+                            "type": ["VerifiableCredential", "WitnessCredential"],
+                            "issuer": "did:key:zWitness"
+                        }
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+        assert!(
+            pluck_bool(&r),
+            "WitnessCredential with non-empty issuer must allow"
+        );
+    }
+
+    #[test]
+    fn personhood_default_preserves_current_true_on_renewal() {
+        // Renewal-time re-eval: when current_personhood is
+        // already true, the default policy preserves it
+        // even with empty vp_claims.
+        let c = compile_default(PolicyPurpose::Personhood);
+        let r = evaluate(
+            &c,
+            "data.vtc.personhood.allow",
+            json!({
+                "applicant_did": "did:key:zX",
+                "current_personhood": true,
+                "asserted_at_seconds_ago": 3600,
+                "vp_claims": { "holder": "did:key:zX", "credentials": [] }
+            }),
+        )
+        .unwrap();
+        assert!(
+            pluck_bool(&r),
+            "renewal must preserve current_personhood=true under default policy"
+        );
+    }
+
+    #[test]
+    fn personhood_default_renewal_denies_when_current_false_no_evidence() {
+        // Renewal-time re-eval: current=false + no witness
+        // credentials → still deny. Operators wanting allow-
+        // by-stale-state upload their own rego.
+        let c = compile_default(PolicyPurpose::Personhood);
+        let r = evaluate(
+            &c,
+            "data.vtc.personhood.allow",
+            json!({
+                "applicant_did": "did:key:zX",
+                "current_personhood": false,
+                "vp_claims": { "holder": "did:key:zX", "credentials": [] }
+            }),
+        )
+        .unwrap();
+        assert!(
+            !pluck_bool(&r),
+            "renewal with no evidence + current=false must deny"
         );
     }
 

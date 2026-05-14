@@ -35,8 +35,49 @@ pub struct AppConfig {
     /// the registry at boot and on a periodic interval.
     #[serde(default)]
     pub registry: RegistryConfig,
+    /// Renewal-path settings (Phase 4 M4.2.2). Currently
+    /// gates the renewal-time behaviour when `personhood.rego`
+    /// flips a previously-asserted member's flag to `false`.
+    #[serde(default)]
+    pub renewal: RenewalConfig,
     #[serde(skip)]
     pub config_path: PathBuf,
+}
+
+/// Renewal-path settings. Phase 4 M4.2.2.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct RenewalConfig {
+    /// What to do when the active `personhood.rego` returns
+    /// `false` for a member whose current `personhood` flag
+    /// is `true` (spec §6.3 step 3 + Phase 4 plan D5 review).
+    ///
+    /// - [`PersonhoodFailMode::Downgrade`] (default): flip the
+    ///   Member row's flag to `false`, re-mint the VMC with
+    ///   `personhood: false`, audit a `PersonhoodRevoked
+    ///   { reason: "renewal-policy" }` envelope, **succeed**.
+    ///   Preserves §3-B "ACL is authoritative" — membership
+    ///   lifecycle is decoupled from personhood lifecycle.
+    /// - [`PersonhoodFailMode::Refuse`]: return `422
+    ///   Unprocessable Entity` with stable reason
+    ///   `personhood-renewal-refused`. Member row stays
+    ///   `true`; no VMC re-mint; no audit envelope. Caller
+    ///   re-asserts via the assert endpoint before retrying.
+    #[serde(default)]
+    pub on_personhood_fail: PersonhoodFailMode,
+}
+
+/// What renewal does when `personhood.rego` drops a previously-
+/// asserted member's flag to `false`. See [`RenewalConfig`].
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonhoodFailMode {
+    /// Re-mint with `personhood: false`. Default. Recommended
+    /// for most deployments.
+    #[default]
+    Downgrade,
+    /// Return `422`. Stricter privacy posture.
+    Refuse,
 }
 
 /// Trust-registry runtime settings.
