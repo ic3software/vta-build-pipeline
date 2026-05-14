@@ -2,7 +2,7 @@
 //! authorization for standing up VTA-managed integrations (mediators,
 //! webvh-host servers, future kinds).
 //!
-//! See `docs/03-integrating/provision-integration.md` for the design brief.
+//! See `docs/02-vta/provision-integration.md` for the design brief.
 //!
 //! Layering:
 //! - Request: W3C VerifiablePresentation (see [`request`]) signed by the

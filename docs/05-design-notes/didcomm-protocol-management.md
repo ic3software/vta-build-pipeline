@@ -14,12 +14,12 @@
 > See:
 > - `docs/05-design-notes/runtime-service-management.md` (the
 >   active spec)
-> - `docs/03-integrating/runtime-service-management.md` (the
+> - `docs/02-vta/runtime-service-management.md` (the
 >   active operator guide)
 
 Status: ~~Draft — awaiting human review before implementation~~ — Superseded
 Owner: Glenn Gore
-Related: `docs/03-integrating/did-webvh-update.md`, `docs/05-design-notes/pnm-setup-deferred-vta-did.md`
+Related: `docs/02-vta/did-webvh-update.md`, `docs/05-design-notes/pnm-setup-deferred-vta-did.md`
 
 ## Objective
 

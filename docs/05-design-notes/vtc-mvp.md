@@ -1356,7 +1356,7 @@ validate at implementation:
   registry (§9.4).
 - `docs/05-design-notes/runtime-service-management.md` — service-
   advertisement primitives the VTC inherits via `vta-sdk`.
-- `docs/03-integrating/provision-integration.md` — how the VTC's own
+- `docs/02-vta/provision-integration.md` — how the VTC's own
   DID is minted from its VTA.
 - `docs/05-design-notes/pnm-setup-deferred-vta-did.md` — deferred-
   DID pattern, useful reference for the VTC install flow.

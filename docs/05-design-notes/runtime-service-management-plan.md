@@ -201,10 +201,10 @@ or split into a separate CI job.
 ## P7. Documentation
 
 * **P7.1 — New operator guide:**
-  `docs/03-integrating/runtime-service-management.md`. Walks
+  `docs/02-vta/runtime-service-management.md`. Walks
   through every command with an example transcript.
 * **P7.2 — Retire/redirect:**
-  `docs/03-integrating/didcomm-protocol-management.md` and
+  `docs/02-vta/didcomm-protocol-management.md` and
   `docs/05-design-notes/didcomm-protocol-management.md`. Either
   fold their content into the new doc and leave a stub redirect,
   or update them to scope-only-DIDComm-specifics. Pick one in P7

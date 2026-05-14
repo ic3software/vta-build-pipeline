@@ -620,8 +620,8 @@ are short. The matrix is the gate for shipping.
   signed-envelope work — no hand-rolled JSON signing
 * Apply `Verified*` typestate pattern to any new wire form that
   carries a signature (per CLAUDE.md)
-* Update `docs/03-integrating/didcomm-protocol-management.md` and
-  add a new `docs/03-integrating/runtime-service-management.md`
+* Update `docs/02-vta/didcomm-protocol-management.md` and
+  add a new `docs/02-vta/runtime-service-management.md`
   operator guide
 
 **Ask first:**

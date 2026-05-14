@@ -11,7 +11,7 @@
 //!   (preserving role/type, bumping fragment IDs to fresh unique
 //!   values), and feeds the rebuilt document through `update_did_webvh`.
 //!
-//! See `docs/03-integrating/did-webvh-update.md` for the operator-
+//! See `docs/02-vta/did-webvh-update.md` for the operator-
 //! facing flow + wire format.
 //!
 //! Internal layout:

@@ -73,7 +73,7 @@ pnm bootstrap connect --vta-url https://vta.example.com
 
 Cold-start operators (running `vta` themselves) pair this with
 `vta import-did --did <pnm-did> --role admin` on the VTA host before
-phase 2. See `docs/02-operating/cold-start.md` for the full script.
+phase 2. See `docs/02-vta/cold-start.md` for the full script.
 
 For a TEE-attested first-boot against a fresh Nitro Enclave VTA, the
 single-step path is:

@@ -60,4 +60,4 @@ src/
 Both variants support `.with_encryption()` for transparent AES-256-GCM
 encryption of values (keys remain plaintext for prefix scans).
 
-See `docs/02-operating/feature-flags.md` for the `vsock-store` feature chain.
+See `docs/02-vta/feature-flags.md` for the `vsock-store` feature chain.

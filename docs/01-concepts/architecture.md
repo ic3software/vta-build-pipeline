@@ -273,13 +273,13 @@ For PNM and CNM CLI references, see
 Running `vta setup` launches the wizard. Interactive by default;
 `vta setup --from <file>` reads a TOML inputs file and runs end-to-end
 without prompts (CI / sealed images / unattended bootstrap — see
-[`02-operating/non-interactive-setup.md`](../02-operating/non-interactive-setup.md)).
+[`02-vta/non-interactive-setup.md`](../02-vta/non-interactive-setup.md)).
 
 1. Collect server, logging, and storage configuration.
 2. Create the `vta` seed context (and `mediator` if DIDComm is enabled).
 3. Generate a fresh BIP-39 mnemonic; store seed in the chosen backend
    (OS keyring by default — see
-   [`02-operating/secret-backends.md`](../02-operating/secret-backends.md)).
+   [`02-vta/secret-backends.md`](../02-vta/secret-backends.md)).
    The wizard does not accept an operator-supplied mnemonic — pasting
    one into a terminal exposes it to history, scrollback, and clipboard.
    Use `vta keys rotate-seed --mnemonic "<phrase>"` post-setup if a
@@ -391,7 +391,7 @@ The entry point `server::run()` accepts five parameters:
 |-----------|------|---------|
 | `config` | `AppConfig` | Loaded from TOML + env var overrides |
 | `store` | `Store` | `Store::Local(...)` for fjall, `Store::Vsock(...)` for vsock proxy |
-| `seed_store` | `Arc<dyn SeedStore>` | Where the master seed lives — see [`secret-backends.md`](../02-operating/secret-backends.md) |
+| `seed_store` | `Arc<dyn SeedStore>` | Where the master seed lives — see [`secret-backends.md`](../02-vta/secret-backends.md) |
 | `storage_encryption_key` | `Option<[u8; 32]>` | AES-256-GCM key for at-rest encryption (None = unencrypted) |
 | `tee_context` | `Option<TeeContext>` | TEE attestation provider + mnemonic guard (None = no TEE) |
 

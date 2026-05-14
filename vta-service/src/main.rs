@@ -301,7 +301,7 @@ enum BootstrapCommands {
     /// Used by integration operators (mediator, webvh-control, webvh-daemon,
     /// webvh-server, etc.) to request enrollment from a VTA that may not
     /// yet be network-reachable. See
-    /// `docs/03-integrating/provision-integration.md` for the end-to-end
+    /// `docs/02-vta/provision-integration.md` for the end-to-end
     /// flow.
     ProvisionRequest {
         /// DID template name the VTA should render (e.g.
@@ -352,7 +352,7 @@ enum BootstrapCommands {
     /// issues a VTA-signed authorization VC, and seals everything to
     /// the consumer's X25519 pubkey (derived from `client_did`).
     ///
-    /// See `docs/03-integrating/provision-integration.md` for the full flow.
+    /// See `docs/02-vta/provision-integration.md` for the full flow.
     #[cfg(feature = "webvh")]
     ProvisionIntegration {
         /// Path to the consumer's VP-framed BootstrapRequest JSON

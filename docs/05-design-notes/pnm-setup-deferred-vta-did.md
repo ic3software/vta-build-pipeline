@@ -141,8 +141,8 @@ vta-cli-common/src/local_keygen.rs
     private_key_multibase) — no CredentialBundle (which requires vta_did).
     Sibling of the existing generate_admin_did_key(), not a replacement.
 
-docs/02-operating/cold-start.md   → add §on deferred-VTA-DID flow
-docs/02-operating/non-interactive-setup.md → document the non-interactive variants
+docs/02-vta/cold-start.md   → add §on deferred-VTA-DID flow
+docs/02-vta/non-interactive-setup.md → document the non-interactive variants
 CHANGELOG.md (0.5.0 entry, unreleased) → note the feature + breaking change
 ```
 
@@ -414,7 +414,7 @@ Acceptable because 0.5.0 is unreleased and unmerged.
 - [ ] `pnm health` against a pending slug emits the targeted hint.
 - [ ] `cnm-cli` still compiles and passes its existing test suite.
 - [ ] `cargo test --workspace` green.
-- [ ] `docs/02-operating/cold-start.md` and `docs/02-operating/non-interactive-setup.md`
+- [ ] `docs/02-vta/cold-start.md` and `docs/02-vta/non-interactive-setup.md`
       updated.
 
 ## Open questions (resolved)

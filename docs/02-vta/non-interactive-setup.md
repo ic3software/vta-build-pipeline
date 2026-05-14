@@ -46,7 +46,7 @@ vta bootstrap-admin --did did:key:z6Mk... --label ops
 
 To add an integration (mediator, webvh hosting server, etc.) **after**
 setup — offline, file-based, no running VTA required — see
-[`../03-integrating/provision-integration.md`](../03-integrating/provision-integration.md).
+[`../02-vta/provision-integration.md`](../02-vta/provision-integration.md).
 The integration emits a signed VP, the VTA runs
 `vta bootstrap provision-integration` locally, the integration opens
 the returned sealed bundle. Same three-phase flow for every template-
