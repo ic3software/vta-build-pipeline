@@ -19,6 +19,7 @@
 pub mod personhood;
 pub mod promote;
 pub mod read;
+pub mod relationships;
 pub mod remove;
 pub mod renew;
 pub mod rotate;

@@ -1,0 +1,12 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/relationships/revoke/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — VRC Revoke",
+  "description": "DELETE /v1/relationships/{id} response. No request body. Phase 4 M4.6.3.",
+  "type": "object",
+  "required": ["id"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" }
+  },
+  "additionalProperties": false
+}

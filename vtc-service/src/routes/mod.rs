@@ -10,6 +10,7 @@ pub(crate) mod join_requests;
 pub(crate) mod members;
 pub(crate) mod policies;
 pub mod recognise;
+mod relationships;
 pub(crate) mod status_lists;
 
 use axum::Router;
@@ -155,6 +156,16 @@ pub fn router() -> Router<AppState> {
     // `members/{did}` show + update + admin-remove.
     let _members_personhood_revoke =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/members/personhood/revoke/1.0")
+            .expect("static Trust-Task URL");
+    // Phase 4 M4.6 — VRC trust-graph endpoints.
+    let relationships_publish =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/relationships/publish/1.0")
+            .expect("static Trust-Task URL");
+    let relationships_list =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/relationships/list/1.0")
+            .expect("static Trust-Task URL");
+    let relationships_revoke =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/relationships/revoke/1.0")
             .expect("static Trust-Task URL");
     // Phase 3 M3.8 — trust-registry reconciler diagnostics.
     // Admin-gated (not super-admin) so on-call ops can read
@@ -382,6 +393,25 @@ pub fn router() -> Router<AppState> {
             // surface stays complete. (Same workaround as
             // members/{did}'s show + update + admin-remove.)
             members_personhood_assert,
+        )
+        // Phase 4 M4.6 — VRC trust-graph endpoints. The
+        // per-member list mounts under /v1/members/{did}/
+        // and must precede the catchall `/v1/members/{did}`
+        // (same path-trie precedence as personhood).
+        .route_with_task(
+            "/v1/members/{did}/relationships",
+            get(members::relationships::list),
+            relationships_list,
+        )
+        .route_with_task(
+            "/v1/relationships",
+            post(relationships::publish),
+            relationships_publish,
+        )
+        .route_with_task(
+            "/v1/relationships/{id}",
+            delete(relationships::revoke),
+            relationships_revoke,
         )
         .route_with_task(
             "/v1/members/{did}",

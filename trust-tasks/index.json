@@ -277,6 +277,24 @@
       "status": "Draft",
       "path": "members/personhood/revoke/1.0",
       "rest": "DELETE /v1/members/{did}/personhood"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/relationships/publish/1.0",
+      "status": "Draft",
+      "path": "relationships/publish/1.0",
+      "rest": "POST /v1/relationships"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/relationships/list/1.0",
+      "status": "Draft",
+      "path": "relationships/list/1.0",
+      "rest": "GET /v1/members/{did}/relationships"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/relationships/revoke/1.0",
+      "status": "Draft",
+      "path": "relationships/revoke/1.0",
+      "rest": "DELETE /v1/relationships/{id}"
     }
   ]
 }

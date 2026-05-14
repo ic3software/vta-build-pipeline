@@ -279,7 +279,7 @@ work; assert flips the flag + re-mints; renewal downgrades.
 
 ## M4.5 — `relationships:` keyspace + storage helpers
 
-### `[ ]` M4.5.1 — Relationships keyspace + Relationship model
+### `[x]` M4.5.1 — Relationships keyspace + Relationship model
 
 - **Acceptance**
   - New keyspace `relationships` registered in
@@ -309,7 +309,7 @@ work; assert flips the flag + re-mints; renewal downgrades.
 
 ## M4.6 — VRC publish + list + revoke endpoints
 
-### `[ ]` M4.6.1 — `POST /v1/relationships`
+### `[x]` M4.6.1 — `POST /v1/relationships`
 
 - **Acceptance**
   - Handler in `vtc-service/src/routes/relationships.rs` (new).
@@ -351,7 +351,7 @@ work; assert flips the flag + re-mints; renewal downgrades.
 - **Deps**: M4.5.1, M4.1.2
 - **Pre-impl decision**: **D1** (member-as-issuer).
 
-### `[ ]` M4.6.2 — `GET /v1/members/{did}/relationships`
+### `[x]` M4.6.2 — `GET /v1/members/{did}/relationships`
 
 - **Acceptance**
   - Handler in `routes/members/relationships.rs` (new).
@@ -381,7 +381,7 @@ work; assert flips the flag + re-mints; renewal downgrades.
 - **Deps**: M4.6.1
 - **Pre-impl decision**: **D1**.
 
-### `[ ]` M4.6.3 — `DELETE /v1/relationships/{id}`
+### `[x]` M4.6.3 — `DELETE /v1/relationships/{id}`
 
 - **Acceptance**
   - Handler in `routes/relationships.rs`.
