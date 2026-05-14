@@ -68,6 +68,18 @@ pub async fn authenticate(
     State(state): State<AppState>,
     body: String,
 ) -> Result<Json<AuthenticateResponse>, AppError> {
+    Ok(Json(authenticate_and_mint(&state, &body).await?))
+}
+
+/// Core authenticate + mint logic shared by `POST /v1/auth/` and
+/// `POST /v1/auth/admin-login`. Both endpoints accept the same
+/// DIDComm-packed authentication message; `admin-login`
+/// additionally returns `Set-Cookie` headers so the admin SPA can
+/// carry a cookie session beside the bearer token.
+async fn authenticate_and_mint(
+    state: &AppState,
+    body: &str,
+) -> Result<AuthenticateResponse, AppError> {
     let atm = state
         .atm
         .as_ref()
@@ -79,7 +91,7 @@ pub async fn authenticate(
 
     // Unpack the DIDComm message
     let (msg, _metadata) = atm
-        .unpack(&body)
+        .unpack(body)
         .await
         .map_err(|e| AppError::Authentication(format!("failed to unpack message: {e}")))?;
 
@@ -174,7 +186,7 @@ pub async fn authenticate(
 
     info!(did = %session.did, session_id = %session.session_id, "authentication successful");
 
-    Ok(Json(AuthenticateResponse {
+    Ok(AuthenticateResponse {
         session_id: Some(session.session_id),
         data: AuthenticateData {
             access_token,
@@ -182,7 +194,137 @@ pub async fn authenticate(
             refresh_token: Some(refresh_token),
             refresh_expires_at: Some(refresh_expires_at),
         },
-    }))
+    })
+}
+
+// ---------- POST /auth/admin-login ----------
+
+/// `POST /v1/auth/admin-login` (Phase 5 M5.2.3).
+///
+/// Same DIDComm-packed authentication flow as `POST /v1/auth/`,
+/// but the response additionally carries `Set-Cookie` headers so
+/// the admin SPA can drive subsequent requests via the cookie
+/// session:
+///
+/// - `vtc_admin_session=<jwt>; Path=/admin; SameSite=Strict;
+///   Secure; HttpOnly` — the access token JWT, scoped to the
+///   admin UX path so public-website JS on the same origin can't
+///   read it.
+/// - `csrf=<random>; Path=/; SameSite=Strict; Secure` (HttpOnly:
+///   **false** so SPA JS can mirror the value to the
+///   `X-CSRF-Token` header for the double-submit check in
+///   `routing::csrf`).
+///
+/// Programmatic clients (cnm-cli, DIDComm bridges) keep using
+/// `POST /v1/auth/` — same JWT shape, no cookie side effects.
+pub async fn admin_login(
+    State(state): State<AppState>,
+    body: String,
+) -> Result<axum::response::Response, AppError> {
+    use axum::http::HeaderValue;
+    use axum::http::header::SET_COOKIE;
+    use axum::response::IntoResponse;
+
+    let resp = authenticate_and_mint(&state, &body).await?;
+
+    let max_age = resp
+        .data
+        .access_expires_at
+        .saturating_sub(now_epoch())
+        .max(1);
+
+    // Generate a 32-byte CSRF token, hex-encoded. The cookie is
+    // JS-readable (HttpOnly off) so the SPA can echo it back via
+    // the `X-CSRF-Token` header on mutating requests.
+    use rand::RngExt;
+    let mut csrf_bytes = [0u8; 32];
+    rand::rng().fill(&mut csrf_bytes);
+    let csrf = hex::encode(csrf_bytes);
+
+    let session_cookie = build_session_cookie(&resp.data.access_token, max_age);
+    let csrf_cookie = build_csrf_cookie(&csrf, max_age);
+
+    let session_cookie_hv = HeaderValue::try_from(session_cookie)
+        .map_err(|e| AppError::Internal(format!("invalid session cookie value: {e}")))?;
+    let csrf_cookie_hv = HeaderValue::try_from(csrf_cookie)
+        .map_err(|e| AppError::Internal(format!("invalid csrf cookie value: {e}")))?;
+
+    let mut response = Json(resp).into_response();
+    let headers = response.headers_mut();
+    headers.append(SET_COOKIE, session_cookie_hv);
+    headers.append(SET_COOKIE, csrf_cookie_hv);
+
+    Ok(response)
+}
+
+/// Build the `vtc_admin_session` cookie value. Exposed as a pure
+/// helper so cookie-isolation invariants (Path=/admin,
+/// SameSite=Strict, Secure, HttpOnly) can be unit-tested
+/// without standing up the full DIDComm authenticate flow.
+fn build_session_cookie(access_token: &str, max_age: u64) -> String {
+    format!(
+        "{name}={access_token}; Path=/admin; Max-Age={max_age}; SameSite=Strict; Secure; HttpOnly",
+        name = vti_common::auth::extractor::ADMIN_SESSION_COOKIE,
+    )
+}
+
+/// Build the companion CSRF cookie. `HttpOnly` is intentionally
+/// **not** set — the SPA needs to read this from
+/// `document.cookie` and mirror its value into the
+/// `X-CSRF-Token` header on every mutating request.
+fn build_csrf_cookie(csrf: &str, max_age: u64) -> String {
+    format!("csrf={csrf}; Path=/; Max-Age={max_age}; SameSite=Strict; Secure")
+}
+
+#[cfg(test)]
+mod cookie_format_tests {
+    use super::*;
+
+    /// Phase 5 M5.3.1 cookie-scope isolation invariant — the
+    /// admin session cookie MUST carry `Path=/admin` so public-
+    /// website JS on the same origin cannot read it.
+    #[test]
+    fn session_cookie_path_is_admin() {
+        let c = build_session_cookie("jwt.token.value", 900);
+        assert!(c.contains("Path=/admin"), "got {c}");
+        assert!(!c.contains("Path=/;"), "must not be root-scoped: {c}");
+    }
+
+    #[test]
+    fn session_cookie_has_security_flags() {
+        let c = build_session_cookie("jwt.token.value", 900);
+        // All three flags are load-bearing — losing any one is
+        // a CSRF / cookie-theft / TLS-stripping regression.
+        assert!(c.contains("HttpOnly"), "got {c}");
+        assert!(c.contains("Secure"), "got {c}");
+        assert!(c.contains("SameSite=Strict"), "got {c}");
+    }
+
+    #[test]
+    fn csrf_cookie_is_root_scoped_but_not_httponly() {
+        let c = build_csrf_cookie("abc123", 900);
+        // CSRF cookie is intentionally readable by JS so the
+        // SPA can mirror it into `X-CSRF-Token`.
+        assert!(c.contains("Path=/"), "got {c}");
+        assert!(
+            !c.contains("HttpOnly"),
+            "CSRF cookie must be JS-readable: {c}"
+        );
+        assert!(c.contains("Secure"), "got {c}");
+        assert!(c.contains("SameSite=Strict"), "got {c}");
+    }
+
+    #[test]
+    fn session_cookie_uses_canonical_name() {
+        let c = build_session_cookie("t", 1);
+        assert!(
+            c.starts_with(&format!(
+                "{}=",
+                vti_common::auth::extractor::ADMIN_SESSION_COOKIE
+            )),
+            "got {c}"
+        );
+    }
 }
 
 // ---------- POST /auth/refresh ----------

@@ -605,6 +605,12 @@ fn build_unauth_routes() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let auth_refresh = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/refresh/1.0")
         .expect("static Trust-Task URL");
+    // Phase 5 M5.2.3 — admin SPA cookie-session mint endpoint.
+    // Same DIDComm auth flow as `/auth/`; response additionally
+    // carries `Set-Cookie` headers (vtc_admin_session + csrf).
+    let auth_admin_login =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/admin-login/1.0")
+            .expect("static Trust-Task URL");
     let install_claim_start =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/start/1.0")
             .expect("static Trust-Task URL");
@@ -639,6 +645,11 @@ fn build_unauth_routes() -> Router<AppState> {
         .route_with_task("/auth/challenge", post(auth::challenge), auth_challenge)
         .route_with_task("/auth/", post(auth::authenticate), auth_authenticate)
         .route_with_task("/auth/refresh", post(auth::refresh), auth_refresh)
+        .route_with_task(
+            "/auth/admin-login",
+            post(auth::admin_login),
+            auth_admin_login,
+        )
         .route_with_task(
             "/install/claim/start",
             post(install::claim_start),

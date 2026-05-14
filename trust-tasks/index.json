@@ -24,6 +24,12 @@
       "rest": "POST /v1/auth/refresh"
     },
     {
+      "id": "https://trusttasks.org/openvtc/vtc/auth/admin-login/1.0",
+      "status": "Draft",
+      "path": "auth/admin-login/1.0",
+      "rest": "POST /v1/auth/admin-login"
+    },
+    {
       "id": "https://trusttasks.org/openvtc/vtc/auth/legacy/sessions/manage/1.0",
       "status": "Draft",
       "path": "auth/legacy/sessions/manage/1.0",

@@ -33,20 +33,44 @@ pub struct AuthClaims {
     pub allowed_contexts: Vec<String>,
 }
 
+/// Name of the admin UX session cookie set by the VTC's
+/// `POST /v1/auth/admin-login` flow (Phase 5 M5.2.3). When the
+/// `Authorization: Bearer` header is absent, [`AuthClaims`]
+/// falls back to reading a JWT out of this cookie. The cookie
+/// is set with `Path=/admin; SameSite=Strict; Secure; HttpOnly`
+/// so the public-website origin can't read it.
+pub const ADMIN_SESSION_COOKIE: &str = "vtc_admin_session";
+
 impl<S: AuthState> FromRequestParts<S> for AuthClaims {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // Extract Bearer token from Authorization header
-        let TypedHeader(auth) =
-            TypedHeader::<Authorization<Bearer>>::from_request_parts(parts, state)
-                .await
-                .map_err(|_| {
-                    warn!("auth rejected: missing or invalid Authorization header");
-                    AppError::Unauthorized("missing or invalid Authorization header".into())
-                })?;
+        // Try `Authorization: Bearer <jwt>` first. Programmatic
+        // clients (cnm-cli, DIDComm bridges, the existing
+        // `/v1/auth/` flow) all use this path.
+        let bearer_token = TypedHeader::<Authorization<Bearer>>::from_request_parts(parts, state)
+            .await
+            .ok()
+            .map(|TypedHeader(auth)| auth.token().to_string());
 
-        let token = auth.token();
+        // Fall back to the admin session cookie (Phase 5 M5.2.3).
+        // Set by `POST /v1/auth/admin-login`; carries the same JWT
+        // as the bearer path.
+        let token: String = match bearer_token {
+            Some(t) => t,
+            None => match cookie_token(parts, ADMIN_SESSION_COOKIE) {
+                Some(t) => t,
+                None => {
+                    warn!(
+                        "auth rejected: no Authorization header and no {ADMIN_SESSION_COOKIE} cookie"
+                    );
+                    return Err(AppError::Unauthorized(
+                        "missing or invalid Authorization header".into(),
+                    ));
+                }
+            },
+        };
+        let token = token.as_str();
 
         // Decode and validate JWT
         let jwt_keys = state
@@ -306,6 +330,24 @@ impl<S: AuthState> FromRequestParts<S> for WriteAuth {
             }
         }
     }
+}
+
+/// Pull a named cookie value off the request `Cookie` headers.
+/// Returns `None` when the cookie isn't present. Does **not**
+/// percent-decode — cookie values minted by the VTC's admin-login
+/// flow are JWTs (base64url + dots), which are ASCII-safe.
+fn cookie_token(parts: &Parts, name: &str) -> Option<String> {
+    parts
+        .headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(';'))
+        .map(|s| s.trim())
+        .find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == name).then(|| v.to_string())
+        })
 }
 
 #[cfg(test)]

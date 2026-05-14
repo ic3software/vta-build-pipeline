@@ -1,0 +1,7 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/auth/admin-login/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — Admin SPA cookie session mint",
+  "description": "DIDComm-packed authenticate request body. Wire shape identical to auth/legacy/authenticate/1.0; the cookie side-effect is server-side only.",
+  "type": "object"
+}

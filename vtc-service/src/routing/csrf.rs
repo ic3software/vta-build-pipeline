@@ -50,6 +50,7 @@ const CSRF_EXEMPT_PATHS: &[&str] = &[
     "/v1/auth/challenge",
     "/v1/auth/",
     "/v1/auth/refresh",
+    "/v1/auth/admin-login",
     "/v1/install/claim/start",
     "/v1/install/claim/finish",
 ];
