@@ -70,6 +70,8 @@ async fn build_fixture(with_signer: bool) -> Fixture {
     let registry_records_ks = store.keyspace("registry_records").unwrap();
     let sync_queue_ks = store.keyspace("sync_queue").unwrap();
     let sync_cursor_ks = store.keyspace("sync_cursor").unwrap();
+    let relationships_ks = store.keyspace("relationships").unwrap();
+    let relationships_by_did_ks = store.keyspace("relationships_by_did").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
     let install_store = InstallTokenStore::new(install_ks.clone());
@@ -116,6 +118,8 @@ async fn build_fixture(with_signer: bool) -> Fixture {
         registry_records_ks,
         sync_queue_ks,
         sync_cursor_ks,
+        relationships_ks,
+        relationships_by_did_ks,
         registry_client: None,
         registry_health: vtc_service::registry::RegistryHealth::new(),
         audit_ks,

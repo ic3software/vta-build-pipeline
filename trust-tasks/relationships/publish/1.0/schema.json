@@ -1,0 +1,32 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/relationships/publish/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — VRC Publish",
+  "description": "POST /v1/relationships request + response. Phase 4 M4.6.1.",
+  "oneOf": [
+    {
+      "title": "Request",
+      "type": "object",
+      "required": ["vrc"],
+      "properties": {
+        "vrc": {
+          "type": "object",
+          "description": "Signed W3C VC body. issuer must match the caller's session DID; credentialSubject.id names the subject member; proof must be a DataIntegrityProof over the issuer's #key-0."
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "title": "Response",
+      "type": "object",
+      "required": ["id", "issuerDid", "subjectDid", "vrcSha256"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "issuerDid": { "type": "string" },
+        "subjectDid": { "type": "string" },
+        "vrcSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

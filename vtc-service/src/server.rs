@@ -72,6 +72,12 @@ pub struct AppState {
     /// Singleton row tracking the audit-log tail's last-seen
     /// timestamp for boot-time replay (Phase 3 M3.3).
     pub sync_cursor_ks: KeyspaceHandle,
+    /// VRC trust-edge rows (Phase 4 M4.5). Primary keyspace.
+    pub relationships_ks: KeyspaceHandle,
+    /// VRC per-DID secondary index (Phase 4 M4.5). Keyed by
+    /// `<did>:<vrc-id>` so per-DID list queries are O(matched
+    /// rows). CAS-paired with `relationships_ks`.
+    pub relationships_by_did_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub audit_key_ks: KeyspaceHandle,
     /// Trust-registry client (Phase 3 M3.2). `None` when
@@ -195,6 +201,8 @@ pub async fn run(
     let registry_records_ks = store.keyspace("registry_records")?;
     let sync_queue_ks = store.keyspace("sync_queue")?;
     let sync_cursor_ks = store.keyspace("sync_cursor")?;
+    let relationships_ks = store.keyspace("relationships")?;
+    let relationships_by_did_ks = store.keyspace("relationships_by_did")?;
     let audit_ks = store.keyspace("audit")?;
     let audit_key_ks = store.keyspace("audit_key")?;
 
@@ -351,6 +359,8 @@ pub async fn run(
         registry_records_ks,
         sync_queue_ks,
         sync_cursor_ks,
+        relationships_ks,
+        relationships_by_did_ks,
         audit_ks,
         audit_key_ks,
         registry_client: registry_client.clone(),

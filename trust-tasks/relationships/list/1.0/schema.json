@@ -1,0 +1,28 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/relationships/list/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — VRC List per Member",
+  "description": "GET /v1/members/{did}/relationships response. Phase 4 M4.6.2.",
+  "type": "object",
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "issuerDid", "subjectDid", "vrcJsonld", "vrcSha256", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "issuerDid": { "type": "string" },
+          "subjectDid": { "type": "string" },
+          "vrcJsonld": { "type": "object" },
+          "vrcSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "nextCursor": { "type": ["string", "null"] },
+    "totalEstimate": { "type": ["integer", "null"] }
+  },
+  "additionalProperties": false
+}
