@@ -78,6 +78,13 @@ pub struct AppState {
     /// `<did>:<vrc-id>` so per-DID list queries are O(matched
     /// rows). CAS-paired with `relationships_ks`.
     pub relationships_by_did_ks: KeyspaceHandle,
+    /// Operator-uploaded endorsement type registry (Phase 4
+    /// M4.8.0). Only registered types are issuable.
+    pub endorsement_types_ks: KeyspaceHandle,
+    /// Issued custom endorsement rows (Phase 4 M4.7).
+    /// Tracked here for list + revoke surfaces; the VEC body
+    /// itself is signed + returned at issuance time.
+    pub endorsements_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub audit_key_ks: KeyspaceHandle,
     /// Trust-registry client (Phase 3 M3.2). `None` when
@@ -203,6 +210,8 @@ pub async fn run(
     let sync_cursor_ks = store.keyspace("sync_cursor")?;
     let relationships_ks = store.keyspace("relationships")?;
     let relationships_by_did_ks = store.keyspace("relationships_by_did")?;
+    let endorsement_types_ks = store.keyspace("endorsement_types")?;
+    let endorsements_ks = store.keyspace("endorsements")?;
     let audit_ks = store.keyspace("audit")?;
     let audit_key_ks = store.keyspace("audit_key")?;
 
@@ -361,6 +370,8 @@ pub async fn run(
         sync_cursor_ks,
         relationships_ks,
         relationships_by_did_ks,
+        endorsement_types_ks,
+        endorsements_ks,
         audit_ks,
         audit_key_ks,
         registry_client: registry_client.clone(),

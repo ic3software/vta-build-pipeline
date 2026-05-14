@@ -413,7 +413,7 @@ default policy + departure-strip both work.
 
 ## M4.7 — `endorsements:` keyspace + custom-endorsement builder
 
-### `[ ]` M4.7.1 — Endorsements keyspace + Endorsement model
+### `[x]` M4.7.1 — Endorsements keyspace + Endorsement model
 
 - **Acceptance**
   - New keyspace `endorsements` registered in `server::run`.
@@ -436,7 +436,7 @@ default policy + departure-strip both work.
 - **Pre-impl decision**: **D4** review (operator-uploaded
   type registry), **D8** review (shared revocation list).
 
-### `[ ]` M4.7.2 — Custom endorsement VC builder
+### `[x]` M4.7.2 — Custom endorsement VC builder
 
 - **Acceptance**
   - `vtc_service::credentials` extends with
@@ -477,7 +477,7 @@ default policy + departure-strip both work.
 > issuance endpoint consults the registry. ~800-1000 LoC total,
 > reviewed atomically.
 
-### `[ ]` M4.8.0 — `endorsement_types:` keyspace + storage
+### `[x]` M4.8.0 — `endorsement_types:` keyspace + storage
 
 - **Acceptance**
   - New keyspace `endorsement_types` registered in `server::run`.
@@ -499,7 +499,7 @@ default policy + departure-strip both work.
 - **Deps**: none (parallel with other tracks)
 - **Pre-impl decision**: **D4** review.
 
-### `[ ]` M4.8.1 — Endorsement type registry endpoints
+### `[x]` M4.8.1 — Endorsement type registry endpoints
 
 - **Acceptance** — three endpoints under
   `/v1/endorsement-types`:
@@ -535,7 +535,7 @@ default policy + departure-strip both work.
 - **Deps**: M4.7.1, M4.8.0, M4.1.2
 - **Pre-impl decision**: **D4** review.
 
-### `[ ]` M4.8.2 — `POST /v1/credentials/endorsements`
+### `[x]` M4.8.2 — `POST /v1/credentials/endorsements`
 
 - **Acceptance**
   - Handler in `routes/credentials/endorsements.rs` (new).
@@ -584,7 +584,7 @@ default policy + departure-strip both work.
 - **Deps**: M4.7.2, M4.8.1
 - **Pre-impl decision**: **D4** review, **D8** review.
 
-### `[ ]` M4.8.3 — `GET /v1/credentials/endorsements` + `GET /{id}`
+### `[x]` M4.8.3 — `GET /v1/credentials/endorsements` + `GET /{id}`
 
 - **Acceptance**
   - List handler: `AdminAuth` OR `IssuerAuth`. Cursor
@@ -605,7 +605,7 @@ default policy + departure-strip both work.
   - `trust-tasks/credentials/endorsements/show/1.0/{spec.md,schema.json}`
 - **Deps**: M4.8.2
 
-### `[ ]` M4.8.4 — `DELETE /v1/credentials/endorsements/{id}`
+### `[x]` M4.8.4 — `DELETE /v1/credentials/endorsements/{id}`
 
 - **Acceptance**
   - **Auth**: `AdminAuth` OR the original issuer's DID

@@ -295,6 +295,48 @@
       "status": "Draft",
       "path": "relationships/revoke/1.0",
       "rest": "DELETE /v1/relationships/{id}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/endorsement-types/register/1.0",
+      "status": "Draft",
+      "path": "endorsement-types/register/1.0",
+      "rest": "POST /v1/endorsement-types"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/endorsement-types/list/1.0",
+      "status": "Draft",
+      "path": "endorsement-types/list/1.0",
+      "rest": "GET /v1/endorsement-types"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/endorsement-types/delete/1.0",
+      "status": "Draft",
+      "path": "endorsement-types/delete/1.0",
+      "rest": "DELETE /v1/endorsement-types/{type_uri}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/credentials/endorsements/issue/1.0",
+      "status": "Draft",
+      "path": "credentials/endorsements/issue/1.0",
+      "rest": "POST /v1/credentials/endorsements"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/credentials/endorsements/list/1.0",
+      "status": "Draft",
+      "path": "credentials/endorsements/list/1.0",
+      "rest": "GET /v1/credentials/endorsements"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/credentials/endorsements/show/1.0",
+      "status": "Draft",
+      "path": "credentials/endorsements/show/1.0",
+      "rest": "GET /v1/credentials/endorsements/{id}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/credentials/endorsements/revoke/1.0",
+      "status": "Draft",
+      "path": "credentials/endorsements/revoke/1.0",
+      "rest": "DELETE /v1/credentials/endorsements/{id}"
     }
   ]
 }

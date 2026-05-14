@@ -47,6 +47,8 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
     let sync_cursor_ks = store.keyspace("sync_cursor").unwrap();
     let relationships_ks = store.keyspace("relationships").unwrap();
     let relationships_by_did_ks = store.keyspace("relationships_by_did").unwrap();
+    let endorsement_types_ks = store.keyspace("endorsement_types").unwrap();
+    let endorsements_ks = store.keyspace("endorsements").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
 
@@ -79,6 +81,8 @@ fn build_state(public_url: Option<&str>) -> (AppState, tempfile::TempDir) {
         sync_cursor_ks: sync_cursor_ks.clone(),
         relationships_ks: relationships_ks.clone(),
         relationships_by_did_ks: relationships_by_did_ks.clone(),
+        endorsement_types_ks: endorsement_types_ks.clone(),
+        endorsements_ks: endorsements_ks.clone(),
         registry_client: None,
         registry_health: vtc_service::registry::RegistryHealth::new(),
         credential_signer: None,

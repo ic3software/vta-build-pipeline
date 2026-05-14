@@ -4,6 +4,8 @@ mod auth;
 mod community;
 mod config;
 pub(crate) mod did_log;
+mod endorsement_types;
+mod endorsements;
 mod health;
 pub(crate) mod install;
 pub(crate) mod join_requests;
@@ -166,6 +168,40 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let relationships_revoke =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/relationships/revoke/1.0")
+            .expect("static Trust-Task URL");
+    // Phase 4 M4.8 — endorsement type registry + custom
+    // endorsement CRUD. Seven Trust Tasks total — list / show
+    // / delete share their mount where TrustTaskRouter
+    // doesn't yet support per-method selectors (standalone
+    // tasks ship on disk + in index.json).
+    let endorsement_types_register =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/endorsement-types/register/1.0")
+            .expect("static Trust-Task URL");
+    let _endorsement_types_list =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/endorsement-types/list/1.0")
+            .expect("static Trust-Task URL");
+    let endorsement_types_delete =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/endorsement-types/delete/1.0")
+            .expect("static Trust-Task URL");
+    let endorsements_issue =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/credentials/endorsements/issue/1.0")
+            .expect("static Trust-Task URL");
+    let _endorsements_list =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/credentials/endorsements/list/1.0")
+            .expect("static Trust-Task URL");
+    // `endorsements_show` + `endorsements_revoke` share the
+    // `endorsements/{id}` mount with the Trust Task header
+    // pinned to the `show` variant. Standalone tasks ship on
+    // disk + in index.json so the soft-gate surface stays
+    // complete (same workaround as members/{did}, etc.).
+    let _endorsements_show =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/credentials/endorsements/show/1.0")
+            .expect("static Trust-Task URL");
+    let _endorsements_revoke =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/credentials/endorsements/revoke/1.0")
+            .expect("static Trust-Task URL");
+    let endorsements_show_revoke =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/credentials/endorsements/show/1.0")
             .expect("static Trust-Task URL");
     // Phase 3 M3.8 — trust-registry reconciler diagnostics.
     // Admin-gated (not super-admin) so on-call ops can read
@@ -412,6 +448,39 @@ pub fn router() -> Router<AppState> {
             "/v1/relationships/{id}",
             delete(relationships::revoke),
             relationships_revoke,
+        )
+        // Phase 4 M4.8.1 — operator-uploaded endorsement type
+        // registry. Admin-gated CRUD.
+        .route_with_task(
+            "/v1/endorsement-types",
+            post(endorsement_types::register).get(endorsement_types::list),
+            // POST + GET share `register/1.0` at the router
+            // layer pending per-method selectors; standalone
+            // `list/1.0` exists on disk + in index.json.
+            endorsement_types_register,
+        )
+        .route_with_task(
+            "/v1/endorsement-types/{type_uri}",
+            delete(endorsement_types::delete),
+            endorsement_types_delete,
+        )
+        // Phase 4 M4.8.2-4 — custom endorsement issuance +
+        // retrieval + revocation. Admin OR Issuer-role member.
+        .route_with_task(
+            "/v1/credentials/endorsements",
+            post(endorsements::issue).get(endorsements::list),
+            // POST + GET share `issue/1.0` at the router
+            // layer pending per-method selectors; standalone
+            // `list/1.0` exists on disk + in index.json.
+            endorsements_issue,
+        )
+        .route_with_task(
+            "/v1/credentials/endorsements/{id}",
+            axum::routing::get(endorsements::show).delete(endorsements::revoke),
+            // GET + DELETE share `show/1.0` at the router
+            // layer pending per-method selectors; standalone
+            // `revoke/1.0` exists on disk + in index.json.
+            endorsements_show_revoke,
         )
         .route_with_task(
             "/v1/members/{did}",

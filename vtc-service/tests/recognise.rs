@@ -69,6 +69,8 @@ async fn build() -> Fixture {
     let sync_cursor_ks = store.keyspace("sync_cursor").unwrap();
     let relationships_ks = store.keyspace("relationships").unwrap();
     let relationships_by_did_ks = store.keyspace("relationships_by_did").unwrap();
+    let endorsement_types_ks = store.keyspace("endorsement_types").unwrap();
+    let endorsements_ks = store.keyspace("endorsements").unwrap();
     let audit_ks = store.keyspace("audit").unwrap();
     let audit_key_ks = store.keyspace("audit_key").unwrap();
 
@@ -106,6 +108,8 @@ async fn build() -> Fixture {
         sync_cursor_ks,
         relationships_ks,
         relationships_by_did_ks,
+        endorsement_types_ks,
+        endorsements_ks,
         registry_client: None,
         registry_health: RegistryHealth::new(),
         credential_signer: None,

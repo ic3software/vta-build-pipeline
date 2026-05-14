@@ -44,10 +44,12 @@
 //! VMC has no `credentialStatus`, which is the expected
 //! pre-status-list state in tests.
 
+pub mod custom_endorsement;
 pub mod signer;
 pub mod vec;
 pub mod vmc;
 
+pub use custom_endorsement::{CustomEndorsementParams, build_custom_endorsement};
 pub use signer::LocalSigner;
 pub use vec::{RoleVecParams, build_role_vec};
 pub use vmc::{CredentialStatusRef, VmcParams, build_vmc};
