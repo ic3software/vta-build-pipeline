@@ -3,8 +3,8 @@
 //! Drives the VTA-provisioned bootstrap of a fresh VTC daemon per
 //! `tasks/vtc-mvp/vta-driven-keys.md` §3:
 //!
-//! 1. Prompt the operator for the five configuration knobs (config
-//!    path, VTC URL, admin UX URL, VTA DID, context).
+//! 1. Prompt the operator for the four configuration knobs (config
+//!    path, VTC base URL, VTA DID, context).
 //! 2. Mint an ephemeral `did:key` for the round-trip.
 //! 3. Pause for the operator to create the target context at the VTA
 //!    and grant the ephemeral DID admin access in one step
@@ -14,7 +14,11 @@
 //!    template-driven integration setups read the same.
 //! 4. Drive `vta_sdk::provision_client::run_provision` with
 //!    `VtaIntent::FullSetup` + `ProvisionAsk::for_template
-//!    ("vtc-host", { URL, ADMIN_UX_URL }, ctx)`.
+//!    ("vtc-host", { URL = base_url }, ctx)`. `URL` is the daemon's
+//!    host base — the template's default `STATUS_LIST_PATH` is
+//!    `/v1/status-lists`, so the rendered status-list endpoint is
+//!    `{base_url}/v1/status-lists`. Passing the API base with `/v1`
+//!    here renders a double-`/v1` endpoint in the DID doc.
 //! 5. Open the sealed bundle; extract the `DidKeyMaterial` into a
 //!    [`crate::setup::VtcKeyBundle`].
 //! 6. Write the bundle into the chosen secret-store backend; the
@@ -129,7 +133,7 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
         config_path.clone(),
         integration_did.clone(),
         inputs.vta_did.clone(),
-        inputs.vtc_url.clone(),
+        inputs.base_url.clone(),
         data_dir.clone(),
         secrets,
     )?;
@@ -150,7 +154,7 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
 
     // 8. Mint a one-shot install token. The operator uses this to
     //    claim their admin passkey on the running daemon.
-    let install_url = mint_initial_install_token(&app_config, &bundle, &inputs.vtc_url).await?;
+    let install_url = mint_initial_install_token(&app_config, &bundle, &inputs.base_url).await?;
 
     println!();
     println!("\x1b[1;32m✅ VTC setup complete.\x1b[0m");
@@ -175,8 +179,12 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
 // ---------------------------------------------------------------------------
 
 struct WizardInputs {
-    vtc_url: String,
-    admin_ux_url: String,
+    /// Daemon's host base URL (e.g. `https://vtc.example.com`). The
+    /// three surfaces — API, admin UX, public website — all mount
+    /// under this in path mode (the default). Stored verbatim as
+    /// `public_url` in the config and passed as the `vtc-host`
+    /// template's `URL` var.
+    base_url: String,
     vta_did: String,
     context: String,
 }
@@ -214,33 +222,28 @@ fn refuse_if_already_set_up(config_path: &std::path::Path) -> Result<(), AppErro
 
 fn prompt_inputs() -> Result<WizardInputs, AppError> {
     println!();
-    println!("Provisioning a fresh VTC requires the VTC + admin UX URLs, the VTA's");
-    println!("DID, and the context name. The VTA's transport endpoints are resolved");
-    println!("from its DID document — no separate VTA URL is needed.");
+    println!("Provisioning a fresh VTC requires the daemon's base URL, the VTA's DID,");
+    println!("and the context name. The VTA's transport endpoints are resolved from");
+    println!("its DID document — no separate VTA URL is needed.");
     println!();
-    println!("The VTC daemon serves three surfaces — API, admin UX, public website.");
-    println!("They can share one domain (path mode, the default) or sit on separate");
-    println!("subdomains (subdomain mode). Pick one before answering:");
+    println!("The VTC daemon serves three surfaces — API, admin UX, public website —");
+    println!("all mounted under one base URL by default:");
     println!();
-    println!("  Path mode (default — no extra DNS, no config changes):");
-    println!("    VTC URL       https://vtc.example.com/v1");
-    println!("    Admin UX URL  https://vtc.example.com/admin");
-    println!("    Website       https://vtc.example.com/");
+    println!("  Base URL      https://vtc.example.com");
+    println!("    API         https://vtc.example.com/v1/...");
+    println!("    Admin UX    https://vtc.example.com/admin");
+    println!("    Website     https://vtc.example.com/");
     println!();
-    println!("  Subdomain mode (separate certs; set [routing.*].host in config.toml");
-    println!("  after setup — see docs/03-vtc/website-and-admin.md):");
-    println!("    VTC URL       https://api.vtc.example.com/v1");
-    println!("    Admin UX URL  https://admin.vtc.example.com");
-    println!("    Website       https://vtc.example.com/");
+    println!("If you want separate subdomains per surface (e.g. api.vtc.example.com,");
+    println!("admin.vtc.example.com), keep the base URL as the public-website host");
+    println!("here and add [routing.api].host / [routing.admin_ui].host to config.toml");
+    println!("after setup. See docs/03-vtc/website-and-admin.md.");
     println!();
-    let vtc_url: String = Input::new()
-        .with_prompt("VTC URL (API base, ends in /v1)")
+    let base_url: String = Input::new()
+        .with_prompt("VTC base URL (no trailing slash, no /v1, e.g. https://vtc.example.com)")
         .interact_text()
         .map_err(prompt_err)?;
-    let admin_ux_url: String = Input::new()
-        .with_prompt("Admin UX URL")
-        .interact_text()
-        .map_err(prompt_err)?;
+    let base_url = base_url.trim_end_matches('/').to_string();
     let vta_did: String = Input::new()
         .with_prompt("VTA DID (e.g. did:webvh:vta.example.com:abc)")
         .interact_text()
@@ -251,8 +254,7 @@ fn prompt_inputs() -> Result<WizardInputs, AppError> {
         .interact_text()
         .map_err(prompt_err)?;
     Ok(WizardInputs {
-        vtc_url,
-        admin_ux_url,
+        base_url,
         vta_did,
         context,
     })
@@ -628,10 +630,12 @@ async fn run_provision_quietly(
     setup_key: &EphemeralSetupKey,
 ) -> Result<ProvisionResult, AppError> {
     let mut vars = BTreeMap::new();
-    vars.insert("URL".to_string(), JsonValue::String(inputs.vtc_url.clone()));
+    // The template appends `STATUS_LIST_PATH` (default `/v1/status-lists`)
+    // to `URL`, so `URL` must be the host base — passing the API base
+    // with `/v1` here renders a double-`/v1` endpoint in the DID doc.
     vars.insert(
-        "ADMIN_UX_URL".to_string(),
-        JsonValue::String(inputs.admin_ux_url.clone()),
+        "URL".to_string(),
+        JsonValue::String(inputs.base_url.clone()),
     );
     let ask = ProvisionAsk::for_template("vtc-host", vars, inputs.context.clone())
         .with_label("vtc-host integration");
@@ -799,7 +803,7 @@ fn open_keyspaces(config: &AppConfig) -> Result<(), AppError> {
 async fn mint_initial_install_token(
     config: &AppConfig,
     bundle: &VtcKeyBundle,
-    vtc_url: &str,
+    base_url: &str,
 ) -> Result<String, AppError> {
     let ed25519 = bundle.ed25519_private_bytes()?;
     let signer = InstallTokenSigner::from_master_seed(&*ed25519)?;
@@ -828,7 +832,7 @@ async fn mint_initial_install_token(
 
     Ok(format!(
         "{}/install?token={}",
-        vtc_url.trim_end_matches('/'),
+        base_url.trim_end_matches('/'),
         minted.jwt
     ))
 }
