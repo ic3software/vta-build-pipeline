@@ -6,8 +6,12 @@
 //! 1. Prompt the operator for the five configuration knobs (config
 //!    path, VTC URL, admin UX URL, VTA DID, context).
 //! 2. Mint an ephemeral `did:key` for the round-trip.
-//! 3. Pause for the operator to authorize the ephemeral DID at the
-//!    VTA (`pnm acl create --did <…> --role admin --contexts <ctx>`).
+//! 3. Pause for the operator to create the target context at the VTA
+//!    and grant the ephemeral DID admin access in one step
+//!    (`pnm contexts create --id <ctx> --name "VTC" --admin-did <…>
+//!    --admin-expires 1h`). Matches the canonical
+//!    `MediatorMessages` / `WebvhServerMessages` shape so all
+//!    template-driven integration setups read the same.
 //! 4. Drive `vta_sdk::provision_client::run_provision` with
 //!    `VtaIntent::FullSetup` + `ProvisionAsk::for_template
 //!    ("vtc-host", { URL, ADMIN_UX_URL }, ctx)`.
@@ -255,6 +259,12 @@ fn prompt_inputs() -> Result<WizardInputs, AppError> {
 }
 
 fn prompt_secrets_config() -> Result<SecretsConfig, AppError> {
+    #[cfg_attr(not(feature = "aws-secrets"), allow(unused_mut))]
+    let mut resolvers = BackendResolvers::empty();
+    #[cfg(feature = "aws-secrets")]
+    {
+        resolvers.aws = Some(Box::new(aws_resolver));
+    }
     let choice = configure_secrets(
         &AvailableBackends {
             keyring: cfg!(feature = "keyring"),
@@ -265,10 +275,114 @@ fn prompt_secrets_config() -> Result<SecretsConfig, AppError> {
             plaintext: true,
         },
         "vtc",
-        BackendResolvers::empty(),
+        resolvers,
     )
     .map_err(secrets_prompt_err)?;
     Ok(secrets_choice_to_config(choice))
+}
+
+/// AWS Secrets Manager: prompt for region, list existing secrets,
+/// let the operator pick one or type a name for a new secret.
+///
+/// Bridges to async AWS SDK calls via `tokio::task::block_in_place`
+/// because `configure_secrets` is sync. Safe under the wizard's
+/// multi-thread `#[tokio::main]` runtime; would panic on a
+/// current-thread runtime (no test takes this path).
+#[cfg(feature = "aws-secrets")]
+fn aws_resolver() -> Result<(String, Option<String>), SecretsPromptError> {
+    let region: String = dialoguer::Input::new()
+        .with_prompt("AWS region (leave empty for SDK default)")
+        .allow_empty(true)
+        .interact_text()?;
+    let region_opt = if region.is_empty() {
+        None
+    } else {
+        Some(region)
+    };
+
+    let listing = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(list_aws_secrets(region_opt.as_deref()))
+    });
+
+    let default_name = "vtc-master-seed";
+    let secret_name = match listing {
+        Ok(names) if !names.is_empty() => {
+            let mut items: Vec<String> = names;
+            items.push("Create new secret".into());
+            let pick = dialoguer::Select::new()
+                .with_prompt("Select an existing secret or create a new one")
+                .items(&items)
+                .default(0)
+                .interact()?;
+            if pick == items.len() - 1 {
+                dialoguer::Input::new()
+                    .with_prompt("AWS Secrets Manager secret name")
+                    .default(default_name.into())
+                    .interact_text()?
+            } else {
+                items.swap_remove(pick)
+            }
+        }
+        Ok(_) => {
+            eprintln!("  No existing secrets found in this region.");
+            dialoguer::Input::new()
+                .with_prompt("AWS Secrets Manager secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+        Err(e) => {
+            warn!(error = %e, "could not list AWS secrets");
+            eprintln!("  Warning: could not list secrets ({e}).");
+            dialoguer::Input::new()
+                .with_prompt("AWS Secrets Manager secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+    };
+
+    Ok((secret_name, region_opt))
+}
+
+/// Paginate through every Secrets Manager secret in the configured
+/// region and return the names. Caps at 10k to bound memory + keep
+/// the operator picker usable. Mirrors `vta-service::setup::interactive::list_aws_secrets`.
+#[cfg(feature = "aws-secrets")]
+async fn list_aws_secrets(
+    region: Option<&str>,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    const MAX_SECRETS: usize = 10_000;
+
+    let mut loader = aws_config::from_env();
+    if let Some(r) = region {
+        loader = loader.region(aws_config::Region::new(r.to_owned()));
+    }
+    let sdk_config = loader.load().await;
+    let client = aws_sdk_secretsmanager::Client::new(&sdk_config);
+
+    let mut names: Vec<String> = Vec::new();
+    let mut next_token: Option<String> = None;
+    loop {
+        let mut req = client.list_secrets();
+        if let Some(token) = next_token.as_ref() {
+            req = req.next_token(token.clone());
+        }
+        let output = req.send().await?;
+        names.extend(
+            output
+                .secret_list()
+                .iter()
+                .filter_map(|entry| entry.name().map(String::from)),
+        );
+        if names.len() >= MAX_SECRETS {
+            names.truncate(MAX_SECRETS);
+            break;
+        }
+        match output.next_token() {
+            Some(t) if !t.is_empty() => next_token = Some(t.to_string()),
+            _ => break,
+        }
+    }
+    Ok(names)
 }
 
 fn secrets_choice_to_config(choice: SecretsBackendChoice) -> SecretsConfig {
@@ -343,7 +457,8 @@ async fn run_provision_quietly(
     .map_err(|e| {
         AppError::Internal(format!(
             "VTA provisioning failed: {e}. Double-check the VTA URL/DID and that the \
-             ephemeral DID was authorized via `pnm acl create`."
+             ephemeral DID was authorized via `pnm contexts create` (or `pnm acl create` if \
+             the context already exists)."
         ))
     })?;
     drain_task.abort();
@@ -369,9 +484,15 @@ impl OperatorMessages for VtcHostMessages {
         "vtc"
     }
     fn pnm_admin_command_hint(&self, context_id: &str, setup_did: &str) -> String {
+        // Matches the canonical `MediatorMessages` /
+        // `WebvhServerMessages` shape: create the context AND grant
+        // the admin ACL atomically. The previous `pnm acl create`
+        // form failed against a fresh VTA where the target context
+        // hadn't been created yet — the VTA returned "context not
+        // found" and the wizard hung.
         format!(
-            "pnm acl create --did {setup_did} --role admin --contexts {context_id} \\\n  \
-             --expires 1h"
+            "pnm contexts create --id {context_id} --name \"VTC\" \\\n  \
+             --admin-did {setup_did} --admin-expires 1h"
         )
     }
 }
@@ -546,6 +667,13 @@ fn print_acl_step(inputs: &WizardInputs, setup_key: &EphemeralSetupKey) {
     );
     println!();
     println!(
+        "  {}",
+        VtcHostMessages.pnm_admin_command_hint(&inputs.context, &setup_key.did)
+    );
+    println!();
+    println!("  If the context already exists, grant admin access to the ephemeral DID instead:");
+    println!();
+    println!(
         "  pnm acl create --did {} \\\n    --role admin --contexts {} --expires 1h",
         setup_key.did, inputs.context,
     );
@@ -635,11 +763,19 @@ mod tests {
     }
 
     #[test]
-    fn vtc_host_messages_use_pnm_acl_command() {
+    fn vtc_host_messages_use_pnm_contexts_create_command() {
+        // Must match the canonical MediatorMessages / WebvhServerMessages
+        // shape: one command that creates the context and grants the
+        // admin ACL atomically. The previous `pnm acl create` form failed
+        // against a fresh VTA where the target context didn't exist yet.
         let msg = VtcHostMessages.pnm_admin_command_hint("ctx-x", "did:key:zAbc");
-        assert!(msg.contains("pnm acl create"));
-        assert!(msg.contains("--did did:key:zAbc"));
-        assert!(msg.contains("--contexts ctx-x"));
-        assert!(msg.contains("--expires 1h"));
+        assert!(
+            msg.contains("pnm contexts create"),
+            "expected `pnm contexts create` form, got: {msg}"
+        );
+        assert!(msg.contains("--id ctx-x"));
+        assert!(msg.contains("--name \"VTC\""));
+        assert!(msg.contains("--admin-did did:key:zAbc"));
+        assert!(msg.contains("--admin-expires 1h"));
     }
 }
