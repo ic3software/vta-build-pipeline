@@ -259,11 +259,26 @@ fn prompt_inputs() -> Result<WizardInputs, AppError> {
 }
 
 fn prompt_secrets_config() -> Result<SecretsConfig, AppError> {
-    #[cfg_attr(not(feature = "aws-secrets"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(
+            feature = "aws-secrets",
+            feature = "gcp-secrets",
+            feature = "azure-secrets"
+        )),
+        allow(unused_mut)
+    )]
     let mut resolvers = BackendResolvers::empty();
     #[cfg(feature = "aws-secrets")]
     {
         resolvers.aws = Some(Box::new(aws_resolver));
+    }
+    #[cfg(feature = "gcp-secrets")]
+    {
+        resolvers.gcp = Some(Box::new(gcp_resolver));
+    }
+    #[cfg(feature = "azure-secrets")]
+    {
+        resolvers.azure = Some(Box::new(azure_resolver));
     }
     let choice = configure_secrets(
         &AvailableBackends {
@@ -380,6 +395,187 @@ async fn list_aws_secrets(
         match output.next_token() {
             Some(t) if !t.is_empty() => next_token = Some(t.to_string()),
             _ => break,
+        }
+    }
+    Ok(names)
+}
+
+/// GCP Secret Manager: prompt for project, list existing secrets,
+/// let the operator pick one or type a name. Same async-from-sync
+/// bridging as [`aws_resolver`]; same pagination cap.
+#[cfg(feature = "gcp-secrets")]
+fn gcp_resolver() -> Result<(String, String), SecretsPromptError> {
+    let project: String = dialoguer::Input::new()
+        .with_prompt("GCP project ID")
+        .interact_text()?;
+
+    let listing = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(list_gcp_secrets(&project))
+    });
+
+    let default_name = "vtc-master-seed";
+    let secret_name = match listing {
+        Ok(names) if !names.is_empty() => {
+            let mut items: Vec<String> = names;
+            items.push("Create new secret".into());
+            let pick = dialoguer::Select::new()
+                .with_prompt("Select an existing secret or create a new one")
+                .items(&items)
+                .default(0)
+                .interact()?;
+            if pick == items.len() - 1 {
+                dialoguer::Input::new()
+                    .with_prompt("GCP Secret Manager secret name")
+                    .default(default_name.into())
+                    .interact_text()?
+            } else {
+                items.swap_remove(pick)
+            }
+        }
+        Ok(_) => {
+            eprintln!("  No existing secrets found in this project.");
+            dialoguer::Input::new()
+                .with_prompt("GCP Secret Manager secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+        Err(e) => {
+            warn!(error = %e, "could not list GCP secrets");
+            eprintln!("  Warning: could not list secrets ({e}).");
+            dialoguer::Input::new()
+                .with_prompt("GCP Secret Manager secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+    };
+
+    Ok((project, secret_name))
+}
+
+/// Paginate every Secret Manager secret in `project` via the response's
+/// `next_page_token`. Strips the `projects/<id>/secrets/` prefix so the
+/// picker shows bare names. Mirrors `vta-service::setup::interactive::list_gcp_secrets`.
+#[cfg(feature = "gcp-secrets")]
+async fn list_gcp_secrets(
+    project: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    const MAX_SECRETS: usize = 10_000;
+
+    let client = google_cloud_secretmanager_v1::client::SecretManagerService::builder()
+        .build()
+        .await?;
+    let prefix = format!("projects/{project}/secrets/");
+
+    let mut names: Vec<String> = Vec::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut req = client
+            .list_secrets()
+            .set_parent(format!("projects/{project}"));
+        if let Some(token) = page_token.as_ref() {
+            req = req.set_page_token(token.clone());
+        }
+        let response = req.send().await?;
+        names.extend(
+            response
+                .secrets
+                .iter()
+                .map(|s| s.name.strip_prefix(&prefix).unwrap_or(&s.name).to_owned()),
+        );
+        if names.len() >= MAX_SECRETS {
+            names.truncate(MAX_SECRETS);
+            break;
+        }
+        if response.next_page_token.is_empty() {
+            break;
+        }
+        page_token = Some(response.next_page_token);
+    }
+    Ok(names)
+}
+
+/// Azure Key Vault: prompt for vault URL, list existing secrets,
+/// let the operator pick one or type a name. Credentials come from
+/// `DeveloperToolsCredential` (Azure CLI / Developer CLI / VS Code),
+/// mirroring the runtime credential resolution used by
+/// [`crate::keys::seed_store::azure::AzureSecretStore`].
+///
+/// Note: vta-service's wizard does not currently have an Azure picker
+/// (it falls back to a plain input). vtc-service is intentionally
+/// ahead — both crates use the same `azure_security_keyvault_secrets`
+/// client at runtime, so listing at setup is a strict UX improvement.
+#[cfg(feature = "azure-secrets")]
+fn azure_resolver() -> Result<(String, String), SecretsPromptError> {
+    let vault_url: String = dialoguer::Input::new()
+        .with_prompt("Azure Key Vault URL (e.g. https://my-vault.vault.azure.net)")
+        .interact_text()?;
+
+    let listing = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(list_azure_secrets(&vault_url))
+    });
+
+    let default_name = "vtc-master-seed";
+    let secret_name = match listing {
+        Ok(names) if !names.is_empty() => {
+            let mut items: Vec<String> = names;
+            items.push("Create new secret".into());
+            let pick = dialoguer::Select::new()
+                .with_prompt("Select an existing secret or create a new one")
+                .items(&items)
+                .default(0)
+                .interact()?;
+            if pick == items.len() - 1 {
+                dialoguer::Input::new()
+                    .with_prompt("Azure Key Vault secret name")
+                    .default(default_name.into())
+                    .interact_text()?
+            } else {
+                items.swap_remove(pick)
+            }
+        }
+        Ok(_) => {
+            eprintln!("  No existing secrets found in this vault.");
+            dialoguer::Input::new()
+                .with_prompt("Azure Key Vault secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+        Err(e) => {
+            warn!(error = %e, "could not list Azure secrets");
+            eprintln!("  Warning: could not list secrets ({e}).");
+            dialoguer::Input::new()
+                .with_prompt("Azure Key Vault secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+    };
+
+    Ok((vault_url, secret_name))
+}
+
+/// Drain the `list_secret_properties` pager and return the bare
+/// secret names. The Azure SDK's `ResourceExt::resource_id()` parses
+/// the secret URL — `https://<vault>.vault.azure.net/secrets/<name>`
+/// — and returns the trailing `name`. Capped at 10k for the same
+/// reasons as [`list_aws_secrets`].
+#[cfg(feature = "azure-secrets")]
+async fn list_azure_secrets(
+    vault_url: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    use azure_security_keyvault_secrets::{ResourceExt, SecretClient};
+    use futures_util::TryStreamExt;
+
+    const MAX_SECRETS: usize = 10_000;
+
+    let credential = azure_identity::DeveloperToolsCredential::new(None)?;
+    let client = SecretClient::new(vault_url, credential, None)?;
+
+    let mut names: Vec<String> = Vec::new();
+    let mut pager = client.list_secret_properties(None)?;
+    while let Some(secret) = pager.try_next().await? {
+        names.push(secret.resource_id()?.name);
+        if names.len() >= MAX_SECRETS {
+            break;
         }
     }
     Ok(names)

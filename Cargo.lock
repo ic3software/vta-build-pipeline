@@ -9281,6 +9281,7 @@ dependencies = [
  "ed25519-dalek",
  "fjall",
  "flate2",
+ "futures-util",
  "gethostname",
  "google-cloud-auth",
  "google-cloud-secretmanager-v1",
