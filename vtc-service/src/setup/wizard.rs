@@ -161,7 +161,14 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
 
     // 9. Mint a one-shot install token. The operator uses this to
     //    claim their admin passkey on the running daemon.
-    let install_url = mint_initial_install_token(&app_config, &bundle, &inputs.base_url).await?;
+    // Admin DID for the install ceremony — the rotated long-term DID
+    // the VTA returned from the bootstrap. Same identity at both VTA
+    // and VTC: a single admin credential the operator can use for
+    // either daemon's auth. The install URL attaches a passkey to this
+    // DID for browser-based admin UI access.
+    let admin_did = provision.admin_did().to_string();
+    let install_url =
+        mint_initial_install_token(&app_config, &bundle, &admin_did, &inputs.base_url).await?;
 
     println!();
     println!("\x1b[1;32m✅ VTC setup complete.\x1b[0m");
@@ -933,6 +940,7 @@ fn open_keyspaces(config: &AppConfig) -> Result<(), AppError> {
 async fn mint_initial_install_token(
     config: &AppConfig,
     bundle: &VtcKeyBundle,
+    admin_did: &str,
     base_url: &str,
 ) -> Result<String, AppError> {
     let ed25519 = bundle.ed25519_private_bytes()?;
@@ -940,6 +948,7 @@ async fn mint_initial_install_token(
     let minted = mint_install_token(
         &signer,
         &bundle.integration_did,
+        admin_did,
         INSTALL_TOKEN_DEFAULT_TTL_SECS,
     )?;
 

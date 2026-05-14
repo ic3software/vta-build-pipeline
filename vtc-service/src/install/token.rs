@@ -127,6 +127,12 @@ pub struct InstallTokenClaims {
     /// candidate `did:key` signature without trusting the wire
     /// shape of the ceremony alone.
     pub epubkey: String,
+    /// Admin DID this invite materialises an ACL entry + passkey for.
+    /// Carried in the JWT so `claim_finish` doesn't have to derive
+    /// the DID from the passkey — the passkey can be any algorithm
+    /// (ES256, RS256, EdDSA), matching what platform authenticators
+    /// produce. Modelled on `affinidi-webvh-service::Enrollment::did`.
+    pub admin_did: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +287,7 @@ pub struct MintedInstallToken {
 pub fn mint_install_token(
     signer: &InstallTokenSigner,
     issuer_did: &str,
+    admin_did: &str,
     ttl_seconds: u64,
 ) -> Result<MintedInstallToken, AppError> {
     let now = SystemTime::now()
@@ -308,6 +315,7 @@ pub fn mint_install_token(
         jti: jti.to_string(),
         cnonce,
         epubkey,
+        admin_did: admin_did.to_string(),
     };
     let jwt = signer.encode(&claims)?;
 
@@ -390,7 +398,13 @@ mod tests {
     #[test]
     fn round_trip_returns_same_claims() {
         let signer = signer();
-        let minted = mint_install_token(&signer, "did:webvh:vtc.example.com:abc", 600).unwrap();
+        let minted = mint_install_token(
+            &signer,
+            "did:webvh:vtc.example.com:abc",
+            "did:key:zAdmin",
+            600,
+        )
+        .unwrap();
         let back = parse_install_token(&signer, &minted.jwt).unwrap();
         assert_eq!(back.iss, "did:webvh:vtc.example.com:abc");
         assert_eq!(back.aud, INSTALL_AUDIENCE);
@@ -405,7 +419,7 @@ mod tests {
         init_jwt_provider();
         let a = InstallTokenSigner::from_master_seed(&[0x01; 32]).unwrap();
         let b = InstallTokenSigner::from_master_seed(&[0x02; 32]).unwrap();
-        let minted = mint_install_token(&a, "did:webvh:x", 60).unwrap();
+        let minted = mint_install_token(&a, "did:webvh:x", "did:key:zAdmin", 60).unwrap();
         let err = parse_install_token(&b, &minted.jwt).expect_err("must reject");
         assert!(matches!(err, AppError::Unauthorized(_)));
     }
@@ -415,7 +429,7 @@ mod tests {
         let signer = signer();
         // TTL = 0 means `exp == iat`; jsonwebtoken treats `exp <= now`
         // as expired.
-        let minted = mint_install_token(&signer, "did:webvh:x", 0).unwrap();
+        let minted = mint_install_token(&signer, "did:webvh:x", "did:key:zAdmin", 0).unwrap();
         // Allow the second to tick — jsonwebtoken's clock-skew
         // tolerance is 60s by default, but `validate_exp = true` with
         // `leeway = 0` (Validation::new default sets leeway=60) means
@@ -434,7 +448,7 @@ mod tests {
     #[test]
     fn wrong_audience_is_rejected() {
         let signer = signer();
-        let minted = mint_install_token(&signer, "did:webvh:x", 600).unwrap();
+        let minted = mint_install_token(&signer, "did:webvh:x", "did:key:zAdmin", 600).unwrap();
         // Re-sign with a different aud claim.
         let mut claims = minted.claims.clone();
         claims.aud = "VTC".to_string();
@@ -446,7 +460,7 @@ mod tests {
     #[test]
     fn wrong_subject_is_rejected() {
         let signer = signer();
-        let minted = mint_install_token(&signer, "did:webvh:x", 600).unwrap();
+        let minted = mint_install_token(&signer, "did:webvh:x", "did:key:zAdmin", 600).unwrap();
         let mut claims = minted.claims.clone();
         claims.sub = "session".to_string();
         let stale = signer.encode(&claims).unwrap();
@@ -457,7 +471,7 @@ mod tests {
     #[test]
     fn tampered_signature_is_rejected() {
         let signer = signer();
-        let minted = mint_install_token(&signer, "did:webvh:x", 600).unwrap();
+        let minted = mint_install_token(&signer, "did:webvh:x", "did:key:zAdmin", 600).unwrap();
         // Flip the very last byte of the base64-encoded signature.
         let mut bytes = minted.jwt.into_bytes();
         let last = bytes.len() - 1;
@@ -470,7 +484,7 @@ mod tests {
     #[test]
     fn cnonce_is_32_bytes_base64url() {
         let signer = signer();
-        let minted = mint_install_token(&signer, "did:webvh:x", 600).unwrap();
+        let minted = mint_install_token(&signer, "did:webvh:x", "did:key:zAdmin", 600).unwrap();
         let decoded = B64.decode(&minted.claims.cnonce).unwrap();
         assert_eq!(decoded.len(), 32);
         // And the round-tripped raw bytes match.
@@ -480,7 +494,7 @@ mod tests {
     #[test]
     fn epubkey_is_32_bytes_base64url() {
         let signer = signer();
-        let minted = mint_install_token(&signer, "did:webvh:x", 600).unwrap();
+        let minted = mint_install_token(&signer, "did:webvh:x", "did:key:zAdmin", 600).unwrap();
         let decoded = B64.decode(&minted.claims.epubkey).unwrap();
         assert_eq!(decoded.len(), 32);
     }

@@ -183,8 +183,13 @@ async fn build_fixture() -> Fixture {
 /// Step 1 (continued): mint a fresh install token + record it in
 /// the install store so `claim/start` finds the state.
 async fn mint_install(fix: &Fixture) -> String {
-    let minted = mint_install_token(&fix.install_signer, "did:webvh:vtc.example.com:abc", 600)
-        .expect("mint install token");
+    let minted = mint_install_token(
+        &fix.install_signer,
+        "did:webvh:vtc.example.com:abc",
+        "did:key:z6MkAdmin",
+        600,
+    )
+    .expect("mint install token");
     let exp = Utc::now() + ChronoDuration::seconds(600);
     fix.install_store
         .record_issued(

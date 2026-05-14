@@ -172,6 +172,7 @@ async fn mint_token_and_record(fix: &Fixture, ttl_seconds: u64) -> String {
     let minted = mint_install_token(
         &fix.install_signer,
         "did:webvh:vtc.example.com:abc",
+        "did:key:z6MkAdmin",
         ttl_seconds,
     )
     .expect("mint install token");

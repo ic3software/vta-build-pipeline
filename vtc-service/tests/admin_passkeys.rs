@@ -110,7 +110,7 @@ async fn build_fixture(with_audit: bool) -> Fixture {
     // post-bootstrap state M0.6.2 leaves the system in.
     let mut authenticator = SoftEd25519Authenticator::new();
     let user_uuid = Uuid::new_v4();
-    let (ccr, reg_state) = vtc_service::webauthn::start_eddsa_passkey_registration(
+    let (ccr, reg_state) = vtc_service::webauthn::start_passkey_registration(
         &webauthn,
         user_uuid,
         "did:key:zPlaceholder",
@@ -119,12 +119,9 @@ async fn build_fixture(with_audit: bool) -> Fixture {
     )
     .unwrap();
     let (register_cred, ed25519_pub) = authenticator.register(&ccr, RP_ORIGIN);
-    let bootstrap_passkey = vtc_service::webauthn::finish_eddsa_passkey_registration(
-        &webauthn,
-        &register_cred,
-        &reg_state,
-    )
-    .unwrap();
+    let bootstrap_passkey =
+        vtc_service::webauthn::finish_passkey_registration(&webauthn, &register_cred, &reg_state)
+            .unwrap();
     let admin_did = format!(
         "did:key:{}",
         vta_sdk::did_key::ed25519_multibase_pubkey(&ed25519_pub)

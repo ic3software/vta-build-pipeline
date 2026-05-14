@@ -154,6 +154,7 @@ async fn mint_token_and_record(fix: &Fixture, ttl_seconds: u64) -> (String, Uuid
     let minted = mint_install_token(
         &fix.install_signer,
         "did:webvh:vtc.example.com:abc",
+        "did:key:z6MkAdmin",
         ttl_seconds,
     )
     .expect("mint install token");
@@ -315,8 +316,13 @@ async fn start_rejects_unknown_jti() {
     // Mint a valid token but never call `record_issued` — the install
     // store has no state for the jti and `start_claim` must fail.
     let fix = build_fixture(Some(RP_ORIGIN), true).await;
-    let minted =
-        mint_install_token(&fix.install_signer, "did:webvh:vtc.example.com:abc", 600).unwrap();
+    let minted = mint_install_token(
+        &fix.install_signer,
+        "did:webvh:vtc.example.com:abc",
+        "did:key:z6MkAdmin",
+        600,
+    )
+    .unwrap();
     let (status, _body) = post_json(
         &fix.router,
         "/v1/install/claim/start",

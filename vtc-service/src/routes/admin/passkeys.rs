@@ -52,7 +52,7 @@ use webauthn_rs::prelude::{
 
 use crate::acl::admin::{AdminEntry, RegisteredPasskey, get_admin_entry, store_admin_entry};
 use crate::server::AppState;
-use crate::webauthn::{finish_eddsa_passkey_registration, start_eddsa_passkey_registration};
+use crate::webauthn::{finish_passkey_registration, start_passkey_registration};
 
 /// Serialises every passkey mutation per admin DID (in practice
 /// per-process since there's only one VTC). The last-passkey CAS
@@ -178,7 +178,7 @@ pub async fn register_start(
         .collect();
     let user_uuid = pk_user.user_uuid;
     let (register_options, reg_state) =
-        start_eddsa_passkey_registration(webauthn, user_uuid, &did, &did, Some(exclude))?;
+        start_passkey_registration(webauthn, user_uuid, &did, &did, Some(exclude))?;
 
     let registration_id = Uuid::new_v4().to_string();
     store_registration_state(&state.passkey_ks, &registration_id, &reg_state).await?;
@@ -218,8 +218,7 @@ pub async fn register_finish(
     let reg_state = take_registration_state(&state.passkey_ks, &req.registration_id)
         .await?
         .ok_or_else(|| AppError::Unauthorized("no registration in progress".into()))?;
-    let new_passkey =
-        finish_eddsa_passkey_registration(webauthn, &req.register_response, &reg_state)?;
+    let new_passkey = finish_passkey_registration(webauthn, &req.register_response, &reg_state)?;
 
     let new_cred_id_hex = passkey_cred_id_hex(&new_passkey);
 

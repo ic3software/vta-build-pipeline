@@ -286,7 +286,17 @@ pub async fn run_emergency_bootstrap_with_store(
     let ed25519 = bundle.ed25519_private_bytes()?;
     let signer = InstallTokenSigner::from_master_seed(&*ed25519)?;
     let issuer = bundle.integration_did.clone();
-    let minted = mint_install_token(&signer, &issuer, INSTALL_TOKEN_DEFAULT_TTL_SECS)?;
+    // Reuse the recovery DID as the new admin — the operator already
+    // proved control of it via the VTA recovery context, and it's the
+    // identity they currently hold private keys for. Operators who
+    // want a different admin DID can rotate via the regular flow
+    // after the emergency bootstrap completes.
+    let minted = mint_install_token(
+        &signer,
+        &issuer,
+        &setup_key.did,
+        INSTALL_TOKEN_DEFAULT_TTL_SECS,
+    )?;
     let exp = Utc::now() + chrono::Duration::seconds(INSTALL_TOKEN_DEFAULT_TTL_SECS as i64);
     install_store
         .record_issued(
