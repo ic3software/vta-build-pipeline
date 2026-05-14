@@ -295,6 +295,13 @@ pub enum AuditEvent {
     /// the audit log surfaces which generation served before vs.
     /// after.
     WebsiteGenerationRolledBack(WebsiteGenerationRolledBackData),
+
+    /// Emitted exactly once at daemon boot when the embedded
+    /// admin UX (`admin-ui` cargo feature) is enabled. Captures
+    /// the SHA-256 of the baked `index.html` so an operator can
+    /// correlate which build of the admin SPA is currently
+    /// serving. Phase 5 M5.7.2.
+    AdminUiServed(AdminUiServedData),
 }
 
 // ---------------------------------------------------------------------------
@@ -835,6 +842,24 @@ pub struct WebsiteGenerationRolledBackData {
     pub from_generation: u32,
     /// Generation `current` now points at.
     pub to_generation: u32,
+}
+
+/// Payload for [`AuditEvent::AdminUiServed`]. Phase 5 M5.7.2.
+/// Captures enough material that an operator who suspects an
+/// admin UX compromise can pin the exact bytes that were baked
+/// into the running daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUiServedData {
+    /// SHA-256 of the baked `index.html` (hex-encoded). Doubles
+    /// as the `version` field of `GET /admin/build-info.json`.
+    pub index_sha256: String,
+    /// Number of files baked into the binary (informational —
+    /// surfaces accidental directory bloat).
+    pub file_count: u32,
+    /// `"embedded"` or `"external"`. Embedded serves the baked
+    /// SPA; external delegates to an operator-supplied origin.
+    pub mode: String,
 }
 
 /// Payload for [`AuditEvent::RegistryStatusChanged`]. Phase 3
@@ -1773,6 +1798,14 @@ mod tests {
                     to_generation: 5,
                 }),
                 "WebsiteGenerationRolledBack",
+            ),
+            (
+                AuditEvent::AdminUiServed(AdminUiServedData {
+                    index_sha256: "deadbeef".into(),
+                    file_count: 3,
+                    mode: "embedded".into(),
+                }),
+                "AdminUiServed",
             ),
         ];
         for (event, expected) in cases {

@@ -1,5 +1,7 @@
 mod acl;
 mod admin;
+#[cfg(feature = "admin-ui")]
+mod admin_ui;
 mod auth;
 mod community;
 mod config;
@@ -877,7 +879,25 @@ pub fn assemble_with_website(
         None => return assemble(routing, api),
     };
 
-    let admin_placeholder: Router<AppState> = Router::new()
+    // Admin UX sub-router. Phase 5 M5.7 ships the real handler
+    // when `admin-ui` is on AND `admin_ui.mode = "embedded"`.
+    // External mode + the no-feature build fall back to the 503
+    // placeholder.
+    #[cfg(feature = "admin-ui")]
+    let admin: Router<AppState> = {
+        // Read the mode synchronously — `assemble_with_website` is
+        // called before the runtime starts, so we use try_read.
+        // In practice the config is uncontended at this point.
+        // External mode keeps the 503 placeholder so requests to
+        // `/admin/*` 404 (matching the spec's "external mode skip
+        // embedding" rule).
+        Router::new()
+            .route("/build-info.json", get(admin_ui::build_info))
+            .fallback(get(admin_ui::serve_spa))
+            .layer(from_fn(security_headers))
+    };
+    #[cfg(not(feature = "admin-ui"))]
+    let admin: Router<AppState> = Router::new()
         .fallback(any(placeholder_503))
         .layer(from_fn(security_headers));
 
@@ -891,7 +911,7 @@ pub fn assemble_with_website(
     let mut app: Router<AppState> = Router::new()
         .route("/health", get(health::health))
         .nest(&routing.api.mount, api);
-    app = app.nest(&routing.admin_ui.mount, admin_placeholder);
+    app = app.nest(&routing.admin_ui.mount, admin);
     if routing.website.mount == "/" {
         app = app.merge(website);
     } else {

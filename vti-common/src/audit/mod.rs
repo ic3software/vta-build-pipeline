@@ -31,14 +31,14 @@ pub mod writer;
 
 pub use envelope::{AuditEnvelope, EVENT_VERSION, SCHEMA_VERSION};
 pub use event::{
-    AdminPasskeyData, AdminPromotedData, AuditEvent, AuditKeyRotatedData, CommunityInstalledData,
-    CommunityProfileUpdatedData, ConfigChange, ConfigChangedData, ConfigReloadedData, ConfigSource,
-    CredentialIssuedData, CrossCommunitySessionMintedData, CustomEndorsementIssuedData,
-    CustomEndorsementRevokedData, DidRotatedData, EmergencyBootstrapData,
-    EndorsementTypeDeletedData, EndorsementTypeRegisteredData, JoinRequestData,
-    JoinRequestRejectedData, MemberAddedData, MemberRemovedData, MemberUpdatedData,
-    MembershipRenewedData, PersonhoodAssertedData, PersonhoodRevokedData, PolicyActivatedData,
-    PolicyUploadedData, REDACTED_MARKER, RegistryRecordPolicyOverrideData,
+    AdminPasskeyData, AdminPromotedData, AdminUiServedData, AuditEvent, AuditKeyRotatedData,
+    CommunityInstalledData, CommunityProfileUpdatedData, ConfigChange, ConfigChangedData,
+    ConfigReloadedData, ConfigSource, CredentialIssuedData, CrossCommunitySessionMintedData,
+    CustomEndorsementIssuedData, CustomEndorsementRevokedData, DidRotatedData,
+    EmergencyBootstrapData, EndorsementTypeDeletedData, EndorsementTypeRegisteredData,
+    JoinRequestData, JoinRequestRejectedData, MemberAddedData, MemberRemovedData,
+    MemberUpdatedData, MembershipRenewedData, PersonhoodAssertedData, PersonhoodRevokedData,
+    PolicyActivatedData, PolicyUploadedData, REDACTED_MARKER, RegistryRecordPolicyOverrideData,
     RegistryStatusChangedData, RegistrySyncOutcomeData, RestartRequestedData, RoleChangedData,
     StatusListFlippedData, VrcPublishedData, VrcRevokedData, WebsiteBundleDeployedData,
     WebsiteFileDeletedData, WebsiteFileWrittenData, WebsiteGenerationRolledBackData,

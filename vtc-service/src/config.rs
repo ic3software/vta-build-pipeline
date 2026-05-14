@@ -46,8 +46,50 @@ pub struct AppConfig {
     /// the cargo feature is default-on.
     #[serde(default)]
     pub website: WebsiteConfig,
+    /// Admin UX settings (Phase 5 M5.7). When `mode = "external"`,
+    /// the embedded SPA is skipped and `/admin/*` returns 404; the
+    /// configured `external_origin` is added to
+    /// `cors.allowed_origins` so an external SPA hosted on that
+    /// origin can drive the API.
+    #[serde(default)]
+    pub admin_ui: AdminUiConfig,
     #[serde(skip)]
     pub config_path: PathBuf,
+}
+
+/// Admin UX configuration (§12.2, Phase 5 M5.7).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AdminUiConfig {
+    /// `"embedded"` (default): serve the baked admin SPA at
+    /// `routing.admin_ui.mount`. `"external"`: skip embedding;
+    /// the operator hosts the SPA elsewhere and the daemon
+    /// merely allowlists their origin.
+    #[serde(default = "default_admin_ui_mode")]
+    pub mode: String,
+    /// Origin the external SPA serves from. Required when
+    /// `mode = "external"`; ignored otherwise.
+    #[serde(default)]
+    pub external_origin: Option<String>,
+    /// WebAuthn RP-ID override. When `None`, derived from the
+    /// routing mode (path-mode → base host; subdomain-mode →
+    /// base domain).
+    #[serde(default)]
+    pub rp_id: Option<String>,
+}
+
+impl Default for AdminUiConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_admin_ui_mode(),
+            external_origin: None,
+            rp_id: None,
+        }
+    }
+}
+
+fn default_admin_ui_mode() -> String {
+    "embedded".into()
 }
 
 /// Public community website (§12.1, Phase 5 M5.4.1). Filesystem-
