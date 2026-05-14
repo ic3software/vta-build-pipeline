@@ -170,13 +170,28 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
     let install_url =
         mint_initial_install_token(&app_config, &bundle, &admin_did, &inputs.base_url).await?;
 
+    // Surface the long-term admin key material so the operator can
+    // save it for CLI use (the wizard doesn't yet write it to a
+    // keyring — manual handling is the MVP). The integration key
+    // doesn't contain the admin private key; we pull it from the
+    // provision result.
+    let admin_key_summary = provision
+        .admin_key()
+        .and_then(|k| serde_json::to_string_pretty(k).ok());
+
     println!();
     println!("\x1b[1;32m✅ VTC setup complete.\x1b[0m");
     println!();
-    println!("VTC DID:     {integration_did}");
-    println!("Config:      {}", config_path.display());
-    println!("Data dir:    {}", data_dir.display());
+    println!("VTC DID:       {integration_did}");
+    println!("Admin DID:     {admin_did}");
+    println!("Config:        {}", config_path.display());
+    println!("Data dir:      {}", data_dir.display());
     println!();
+    if let Some(key_json) = admin_key_summary.as_deref() {
+        println!("\x1b[1;33mAdmin key (save this — needed for CLI access):\x1b[0m");
+        println!("{key_json}");
+        println!();
+    }
     println!("\x1b[1mInstall URL (one-shot, 15 min TTL):\x1b[0m");
     println!("  {install_url}");
     println!();

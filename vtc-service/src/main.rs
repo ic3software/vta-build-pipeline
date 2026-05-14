@@ -68,6 +68,26 @@ enum AdminCommands {
         #[arg(long)]
         context: Option<String>,
     },
+    /// Mint a fresh single-use install URL for `--did`.
+    ///
+    /// Run on a **stopped** daemon (fjall lock). Non-destructive —
+    /// existing admins and passkeys are untouched. The URL is
+    /// claimed in a browser the same way the wizard's initial URL
+    /// is: the operator opens it, registers a passkey, and the
+    /// passkey gets attached to the admin DID supplied here.
+    ///
+    /// Pairs with the install ceremony's separation of admin DID
+    /// from passkey: operators can issue invites for any DID they
+    /// want to grant admin access, without going through the
+    /// destructive `emergency-bootstrap` path.
+    Invite {
+        /// Admin DID the install URL grants a passkey for.
+        #[arg(long)]
+        did: String,
+        /// Token TTL in seconds (default: 900 = 15 min).
+        #[arg(long, default_value_t = 900)]
+        ttl: u64,
+    },
 }
 
 #[tokio::main]
@@ -121,6 +141,12 @@ async fn main() {
                         if let Err(e) = run_emergency_bootstrap_cli(cli.config, yes, context).await
                         {
                             eprintln!("Emergency bootstrap failed: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                    AdminCommands::Invite { did, ttl } => {
+                        if let Err(e) = run_invite_cli(cli.config, did, ttl).await {
+                            eprintln!("Invite failed: {e}");
                             std::process::exit(1);
                         }
                     }
@@ -227,6 +253,84 @@ async fn run_emergency_bootstrap_cli(
         "Restart the daemon (`vtc`) so the `EmergencyBootstrapInvoked` audit event lands\n\
          and the install carve-out reopens. Then claim the install URL with a fresh passkey."
     );
+    Ok(())
+}
+
+/// `vtc admin invite --did <did>` — mint a fresh single-use install
+/// URL for an existing admin DID. Runs on a stopped daemon (fjall
+/// lock) and is non-destructive: existing admins and passkeys are
+/// untouched. Records the issued token in the install keyspace so
+/// the next claim/start finds it.
+#[cfg(feature = "setup")]
+async fn run_invite_cli(
+    config_path: Option<std::path::PathBuf>,
+    admin_did: String,
+    ttl_seconds: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use chrono::{Duration as ChronoDuration, Utc};
+    use vtc_service::install::{InstallTokenSigner, InstallTokenStore, mint_install_token};
+    use vtc_service::keys::seed_store::create_secret_store;
+    use vtc_service::setup::VtcKeyBundle;
+    use vti_common::store::Store as VtiStore;
+
+    if !admin_did.starts_with("did:") {
+        return Err(format!("--did must start with 'did:' (got '{admin_did}')").into());
+    }
+
+    let config = vtc_service::config::AppConfig::load(config_path)?;
+    let vtc_did = config
+        .vtc_did
+        .clone()
+        .ok_or("config has no vtc_did — has setup completed?")?;
+    let base_url = config
+        .public_url
+        .clone()
+        .ok_or("config has no public_url — operators cannot build a clickable install URL")?;
+
+    let secret_store = create_secret_store(&config)?;
+    let bundle_bytes = secret_store
+        .get()
+        .await?
+        .ok_or("secret store has no VTC bundle — has setup completed?")?;
+    let bundle = VtcKeyBundle::from_secret_store_bytes(&bundle_bytes)?;
+
+    let ed25519 = bundle.ed25519_private_bytes()?;
+    let signer = InstallTokenSigner::from_master_seed(&*ed25519)?;
+
+    // Open the install keyspace directly. The daemon must be stopped
+    // — fjall does not allow concurrent processes on the same data
+    // dir.
+    let store = VtiStore::open(&config.store)?;
+    let install_ks = store.keyspace("install")?;
+    let install_store = InstallTokenStore::new(install_ks);
+
+    let minted = mint_install_token(&signer, &vtc_did, &admin_did, ttl_seconds)?;
+    let exp = Utc::now() + ChronoDuration::seconds(ttl_seconds as i64);
+    install_store
+        .record_issued(
+            &minted.jti,
+            minted.cnonce_bytes,
+            *minted.ephemeral_signing_key,
+            exp,
+        )
+        .await?;
+
+    let install_url = format!(
+        "{}/admin/install?token={}",
+        base_url.trim_end_matches('/'),
+        minted.jwt
+    );
+
+    eprintln!();
+    eprintln!("✅ install URL minted");
+    eprintln!("   Admin DID: {admin_did}");
+    eprintln!("   TTL:       {ttl_seconds}s");
+    eprintln!();
+    eprintln!("Install URL (one-shot):");
+    eprintln!("   {install_url}");
+    eprintln!();
+    eprintln!("Restart the daemon (`vtc`) before claiming — the daemon must be running");
+    eprintln!("for the browser to reach `/admin/install` and `/v1/install/claim/*`.");
     Ok(())
 }
 
