@@ -1,0 +1,21 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/personhood/challenge/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — Personhood Assert Challenge",
+  "description": "POST /v1/members/{did}/personhood/challenge response. Phase 4 M4.3.",
+  "type": "object",
+  "required": ["challengeId", "expiresAt"],
+  "properties": {
+    "challengeId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Single-use nonce. Embed into the assert VP's proof.challenge."
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 expiry. The assert handler refuses past this point."
+    }
+  },
+  "additionalProperties": false
+}

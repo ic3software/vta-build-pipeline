@@ -1,0 +1,36 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/personhood/assert/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — Personhood Assert",
+  "description": "POST /v1/members/{did}/personhood request + response. Phase 4 M4.3.",
+  "oneOf": [
+    {
+      "title": "Request",
+      "type": "object",
+      "required": ["presentation"],
+      "properties": {
+        "presentation": {
+          "type": "object",
+          "description": "W3C Verifiable Presentation. Must carry `holder` matching the path-DID, `proof` with `challenge` from the paired challenge endpoint, and at least one `verifiableCredential` entry satisfying the active personhood.rego."
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "title": "Response",
+      "type": "object",
+      "required": ["did", "personhood", "vmc", "roleVec"],
+      "properties": {
+        "did": { "type": "string" },
+        "personhood": {
+          "type": "boolean",
+          "const": true,
+          "description": "Always `true` on success. The flag flipped or stayed asserted."
+        },
+        "vmc": { "type": "object" },
+        "roleVec": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

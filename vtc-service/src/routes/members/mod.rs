@@ -16,6 +16,7 @@
 //! non-Admin authenticated sessions; the Member-role policy
 //! surface is Phase 2+).
 
+pub mod personhood;
 pub mod promote;
 pub mod read;
 pub mod remove;

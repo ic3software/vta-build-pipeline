@@ -140,6 +140,22 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let members_rotate = TrustTask::new("https://trusttasks.org/openvtc/vtc/members/rotate/1.0")
         .expect("static Trust-Task URL");
+    // Phase 4 M4.3 + M4.4 — personhood lifecycle.
+    let members_personhood_challenge =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/members/personhood/challenge/1.0")
+            .expect("static Trust-Task URL");
+    let members_personhood_assert =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/members/personhood/assert/1.0")
+            .expect("static Trust-Task URL");
+    // `members_personhood_revoke` (`members/personhood/revoke/1.0`)
+    // exists on disk + in index.json so the soft-gate surface
+    // stays complete, but the DELETE method shares the
+    // `members/personhood/assert/1.0` mount at the router
+    // layer pending per-method selectors. Same workaround as
+    // `members/{did}` show + update + admin-remove.
+    let _members_personhood_revoke =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/members/personhood/revoke/1.0")
+            .expect("static Trust-Task URL");
     // Phase 3 M3.8 — trust-registry reconciler diagnostics.
     // Admin-gated (not super-admin) so on-call ops can read
     // queue depth + RTBF-batched + failed counts without the
@@ -345,6 +361,27 @@ pub fn router() -> Router<AppState> {
             "/v1/members/me/rotate",
             post(members::rotate::rotate),
             members_rotate,
+        )
+        // Phase 4 M4.3 + M4.4 — personhood lifecycle. Three
+        // mounts on the same path prefix; declared BEFORE
+        // `/v1/members/{did}` so axum's path-trie matches the
+        // literal segment first. Personhood is a per-member
+        // resource; `{did}` is the subject.
+        .route_with_task(
+            "/v1/members/{did}/personhood/challenge",
+            post(members::personhood::challenge),
+            members_personhood_challenge,
+        )
+        .route_with_task(
+            "/v1/members/{did}/personhood",
+            post(members::personhood::assert).delete(members::personhood::revoke),
+            // POST + DELETE share `personhood/assert/1.0` at
+            // the router layer pending per-method selectors;
+            // the standalone `personhood/revoke/1.0` Trust Task
+            // exists on disk + in index.json so the soft-gate
+            // surface stays complete. (Same workaround as
+            // members/{did}'s show + update + admin-remove.)
+            members_personhood_assert,
         )
         .route_with_task(
             "/v1/members/{did}",
