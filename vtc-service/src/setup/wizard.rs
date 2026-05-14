@@ -194,6 +194,12 @@ struct WizardInputs {
     base_url: String,
     vta_did: String,
     context: String,
+    /// Optional path component for the minted `did:webvh:<scid>:
+    /// <host>:<path>` — when `Some`, the wizard injects it as the
+    /// `WEBVH_PATH` template var so the VTA's webvh server uses it
+    /// instead of auto-assigning. Blank input → `None` → server
+    /// auto-assigns.
+    webvh_path: Option<String>,
 }
 
 fn prompt_config_path(initial: Option<PathBuf>) -> Result<PathBuf, AppError> {
@@ -260,10 +266,33 @@ fn prompt_inputs() -> Result<WizardInputs, AppError> {
         .default("default".into())
         .interact_text()
         .map_err(prompt_err)?;
+
+    // Optional webvh path (the `<path>` slot in
+    // `did:webvh:<scid>:<host>:<path>`). Blank → server auto-assigns
+    // a path. Operators with a naming convention (e.g. `vtc-prod`,
+    // `community-name`) can pin it here. The server-selection prompt
+    // is deferred to a follow-up; for now the VTA's auto-pick handles
+    // the 0-or-1-server case, which is the MVP norm.
+    let webvh_path_raw: String = Input::new()
+        .with_prompt("WebVH path (blank → server auto-assigns)")
+        .default(String::new())
+        .allow_empty(true)
+        .interact_text()
+        .map_err(prompt_err)?;
+    let webvh_path = {
+        let trimmed = webvh_path_raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+
     Ok(WizardInputs {
         base_url,
         vta_did,
         context,
+        webvh_path,
     })
 }
 
@@ -723,6 +752,19 @@ async fn run_provision_quietly(
         "URL".to_string(),
         JsonValue::String(inputs.base_url.clone()),
     );
+    // `WEBVH_PATH` is a sideband hint consumed VTA-side (see
+    // `provision_integration::webvh::take_webvh_path`) before render —
+    // it pins the SCID-trailing path component of the minted
+    // `did:webvh:<scid>:<host>:<path>`. `run_provision` only injects
+    // its own value when the caller's `webvh_path` arg is `Some`, so a
+    // pre-set var here survives intact and the 0-or-1-server auto-pick
+    // continues to work for `webvh_server_id` itself.
+    if let Some(path) = inputs.webvh_path.as_deref() {
+        vars.insert(
+            "WEBVH_PATH".to_string(),
+            JsonValue::String(path.to_string()),
+        );
+    }
     let ask = ProvisionAsk::for_template("vtc-host", vars, inputs.context.clone())
         .with_label("vtc-host integration");
 
