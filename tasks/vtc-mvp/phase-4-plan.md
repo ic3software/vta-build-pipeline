@@ -699,6 +699,190 @@ pattern).
 ## Phase 4 outcomes
 
 Recorded at M4.11 close-out. Each row links a pre-impl
-decision (D1–D10) or risk (R1–R7) to the as-shipped reality.
+decision (D1–D10) or risk (R1–R6) to the as-shipped reality.
 
-(Filled in at M4.11.)
+### D1 — VRC issuance authority
+
+**As shipped as proposed**: the asserting *member* is the
+issuer. The VTC never mints VRCs; the publish handler
+verifies the caller's session DID equals the VC's `issuer`
+and verifies the data-integrity proof against the issuer's
+resolved `#key-0`. `LocalSigner` is uninvolved.
+
+### D2 — Personhood evidence shape
+
+**As shipped per planning review (VP-only)**: the
+`POST /v1/members/{did}/personhood` body carries a single
+W3C Verifiable Presentation signed by the member's
+`#key-0`. The assert handler verifies the VP proof, runs
+`extract_vp_claims` (Phase 2 M2.6) to produce policy input,
+evaluates `personhood.rego`, then **discards the VP**. Only
+two fields persist on the `Member` row: `personhood: bool`
++ `personhood_asserted_at: Option<DateTime<Utc>>`. Operators
+wanting persistent evidence storage layer it via custom rego
++ extension fields.
+
+### D3 — Personhood revoke trigger
+
+**As shipped as proposed**: three triggers, all wired —
+admin-driven `DELETE`, self-`DELETE`, and renewal-policy
+downgrade (M4.2.2). Each emits `PersonhoodRevoked` with a
+stable `reason` discriminator (`admin` / `self` /
+`renewal-policy`).
+
+### D4 — Custom endorsement type registry
+
+**As shipped per planning review (operator-uploaded
+registry)**: bundled into M4.8 per the planning review.
+- New `endorsement_types:` keyspace with percent-encoded URI
+  keys (handles colons + slashes safely).
+- Three admin-gated CRUD routes under `/v1/endorsement-types`.
+- `RESERVED_TYPE_URIS` ships with `"CommunityRole"`
+  pre-reserved — registrar refuses with `409
+  endorsement-type-reserved`.
+- Issuance path consults `type_exists` and refuses unknown
+  types with `400 endorsement-type-not-registered`.
+- Delete path refuses with `409 endorsement-type-in-use`
+  when `count_live_by_type > 0`.
+
+### D5 — Renewal re-evaluation semantics
+
+**As shipped per planning review (operator-configurable)**:
+config knob `vtc.renewal.on_personhood_fail` with values
+`downgrade` (default) and `refuse`. The renewal hook reads
+`Member.personhood` + `personhood_asserted_at` and feeds
+them to `personhood.rego` as `current_personhood` +
+`asserted_at_seconds_ago`. On downgrade-arm: flag flips +
+VMC re-mints with `personhood: false` + paired
+`PersonhoodRevoked { reason: "renewal-policy" }` audit. On
+refuse-arm: `422 personhood-renewal-refused` + Member row
+untouched. Default config preserves §3-B "ACL is
+authoritative".
+
+### D6 — Audit envelope shape for VRC
+
+**As shipped per planning review (8 variants total, not
+6)**: D6 originally proposed 6 variants; the D4 review's
+type-registry decision added two more
+(`EndorsementTypeRegistered` + `EndorsementTypeDeleted`).
+All 8 variants ship with round-trip + discriminator-table
+coverage in `vti-common/src/audit/event.rs` (M4.1.2).
+
+### D7 — Status-list slot allocation for VRCs
+
+**As shipped as proposed**: VRCs carry **no
+`credentialStatus`**. Revocation is row deletion in the
+`relationships:` keyspace, not a status-list bit flip.
+Verifiers querying the trust-graph see the absence directly;
+external observers relying on a status-list URL get a clean
+404.
+
+### D8 — Custom endorsement revocation
+
+**As shipped per planning review (shared status list)**:
+custom endorsements allocate slots on the same `Revocation`
+BitstringStatusList VMCs use. No upstream
+`affinidi-status-list` PR; no new `StatusPurpose::Endorsement`
+variant. The shared list's reserved-slot discipline (§6.2)
+still applies — revoked slots are never reallocated, even
+across endorsement types.
+
+### D9 — Trust Task IDs
+
+**As shipped as proposed**: 13 new Trust Tasks shipped
+across PR-2/3/4 (challenge + assert + revoke for personhood,
+publish + list + revoke for relationships, register + list +
+delete for endorsement-types, issue + list + show + revoke
+for endorsements). Trust Task index ↔ on-disk count
+verified at M4.10 (55 ↔ 55 ↔ 55).
+
+### D10 — Personhood Rego input shape (default policy)
+
+**As shipped as proposed**: default policy allows on
+`WitnessCredential` presence with a non-empty issuer. The
+renewal-time eval reads `current_personhood` +
+`asserted_at_seconds_ago` (per D2 review's "no evidence
+persistence" — operators get only the flag + age, plus an
+empty `vp_claims` for shape compatibility). Operators
+upload custom rego when they want richer eval.
+
+### R1 — Status-list slot pressure
+
+**Not realised at Phase 4 scale.** Each member can now hold
+a VMC slot **plus** any number of custom endorsement slots.
+For a 100k-member community with average 5 endorsements
+each, that's 600k slots out of the BitstringStatusList's
+131,072-byte minimum capacity (1,048,576 slots). Headroom
+remains; Phase 5+ may add per-purpose dedicated lists if
+endorsement growth outpaces this.
+
+### R2 — Personhood proof TTL
+
+**Not realised yet.** Personhood VPs verify against the
+member's `#key-0` at assert time. The default policy
+doesn't enforce a max age via
+`asserted_at_seconds_ago`; operators uploading time-based
+rego get the input field for free. Phase 5 admin UX can
+surface the staleness when it lands.
+
+### R3 — Custom endorsement claim explosion
+
+**As shipped with the 8 KiB cap.** Each endorsement's
+`claim` body is capped at 8 KiB JSON; the route layer
+validates before any state mutation. Operators wanting
+larger payloads upload via off-chain storage + reference
+URIs in the claim body.
+
+### R4 — VRC graph quadratic growth
+
+**As shipped with secondary index.** The
+`relationships_by_did:` keyspace keeps per-DID list queries
+O(matched-rows) rather than O(full-table). Pagination + the
+§12.3 Purge-strip happen at the route layer; no quadratic
+blowup observed in tests up to 10 edges.
+
+### R5 — Endorsement type registry collisions
+
+**Not realised** thanks to the D4 registry. Operators can't
+pick `"CommunityRole"` (reserved); duplicate registrations
+409. The pre-issue lookup means stale-cache callers get a
+clean 422 rather than minting against a non-existent type.
+
+### R6 — VP-only assert + lost evidence audit trail
+
+**Acknowledged trade-off** from D2 review. The assert audit
+envelope records `vmc_id` + `asserted_at` but not the VP's
+hash — the VP is verify-then-discard. Operators wanting the
+audit trail upload a custom rego + extension fields that
+write claim metadata to `Member.extensions` themselves.
+
+### Spec amendments applied at M4.11
+
+- **§5.2**: `Member` row gains two new fields —
+  `personhood: bool`, `personhood_asserted_at:
+  Option<DateTime<Utc>>`. Evidence is not persisted on the
+  row (planning-review D2).
+- **§5.4**: VRCs carry no `credentialStatus` (D7).
+  Revocation is row deletion via
+  `DELETE /v1/relationships/{id}`.
+- **§6.1**: custom endorsements come with an operator-
+  uploaded type registry (D4 review). Workspace-reserved
+  `"CommunityRole"` URI is refused at registration time.
+- **§6.2**: custom endorsements share the existing
+  `Revocation` status list (D8 review). Reserved-slot
+  discipline applies across both VMC + endorsement slots.
+- **§6.3 step 3**: renewal-time personhood failure is
+  operator-configurable via `vtc.renewal.on_personhood_fail`
+  (`downgrade` | `refuse`, default `downgrade`). The
+  `refuse` flavour returns `422` and skips the VMC re-mint.
+- **§6.4**: personhood assert body is a single Verifiable
+  Presentation (D2 review). Evidence is verified at request
+  time and discarded.
+- **§7.1**: default `personhood.rego` flipped from deny-all
+  to minimal-allow on `WitnessCredential` presence (M4.2.1).
+  Default `relationships.rego` allows when both parties are
+  current community members.
+- **§11.4**: audit catalogue extended with 8 new variants
+  (D6 + D4 review).
+- **§17.1**: reference policy templates documentation
+  deferred to a Phase 5 follow-up.

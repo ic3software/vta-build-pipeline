@@ -646,7 +646,7 @@ revocation, status-list backing all live.
 
 ## M4.9 — Audit variants snapshot tests
 
-### `[ ]` M4.9.1 — Round-trip + discriminator coverage
+### `[x]` M4.9.1 — Round-trip + discriminator coverage
 
 - **Acceptance**
   - The **eight** Phase 4 audit variants (D6 + D4 review:
@@ -668,7 +668,7 @@ revocation, status-list backing all live.
 
 ## M4.10 — Trust Task drafts + index
 
-### `[ ]` M4.10.1 — On-disk + index entries
+### `[x]` M4.10.1 — On-disk + index entries
 
 - **Acceptance**
   - **Thirteen** new Trust Task directories per plan §D9 +
@@ -702,7 +702,7 @@ revocation, status-list backing all live.
 
 ## M4.11 — Phase 4 outcomes + spec amendments
 
-### `[ ]` M4.11.1 — Document the as-shipped reality
+### `[x]` M4.11.1 — Document the as-shipped reality
 
 - **Acceptance**
   - `tasks/vtc-mvp/phase-4-plan.md` gains a "Phase 4
@@ -722,7 +722,7 @@ revocation, status-list backing all live.
 
 ## M4.12 — Phase 4 gate
 
-### `[ ]` M4.12.1 — Workspace gate green
+### `[x]` M4.12.1 — Workspace gate green
 
 - **Acceptance** (mirrors M3.14.1)
   - `cargo build --workspace` green.

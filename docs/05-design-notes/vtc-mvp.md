@@ -262,11 +262,21 @@ default `"en"`), `created_at`, `extensions` (§3-M).
 
 ```
 did, role, joined_at, status_list_index, publish_consent,
-departure_preference, current_vmc_id, current_role_vec_id, extensions
+departure_preference, current_vmc_id, current_role_vec_id, extensions,
+personhood, personhood_asserted_at
 ```
 
 Admin entries additionally carry `passkeys: Vec<RegisteredPasskey>`
 (§4.3).
+
+**Personhood fields (Phase 4 M4.1 + planning-review D2).** Two
+fields persist: `personhood: bool` (default `false`) and
+`personhood_asserted_at: Option<DateTime<Utc>>` (timestamp of
+the most recent successful assert). The presented VP itself is
+**not** persisted — Phase 4's planning review pinned a
+verify-then-discard model. Operators wanting persistent
+evidence storage layer it via custom rego + the existing
+`extensions` slot.
 
 ### 5.3 `Role`
 
@@ -346,8 +356,25 @@ active_from, active_to, last_synced_at
 | Member ↔ member trust edge | **VRC** | member DID | other member DID | Self-issued, optionally published (§12.3). |
 | Member contact card | **RCard** | member or community | member | jCard value. |
 | Event/proximity witness | **VWC** | external | applicant | Consumed in join VPs; VTC does not issue. |
-| Custom endorsement (badges, attestations) | **VEC** | community (issuer role) | any DID | Community-defined `endorsement` value. The hook for "we don't invent credential types". |
+| Custom endorsement (badges, attestations) | **VEC** | community (issuer role) | any DID | Community-defined `endorsement` value. **Operator-uploaded type registry** (Phase 4 M4.8.1, planning-review D4) — only registered types are issuable. Workspace-reserved `"CommunityRole"` URI refused at registration time. |
 | Persona | VPC | community | member | **v2**. Not in MVP. |
+
+**Custom endorsement type registry (Phase 4 M4.8.1).** Operators
+register endorsement type URIs via
+`POST /v1/endorsement-types` before the issuance path accepts
+them. The issue handler refuses unknown types with `400
+endorsement-type-not-registered`. The delete-type handler
+refuses with `409 endorsement-type-in-use` when any live
+endorsement still references the type.
+
+**Self-issued VRC (Phase 4 M4.6).** Members publish trust edges
+via `POST /v1/relationships`. The caller's session DID must
+equal the VC's `issuer` field — the VTC verifies the
+data-integrity proof against the issuer's resolved `#key-0`
+but never mints VRCs on a member's behalf. Per planning-review
+D7, VRCs carry **no `credentialStatus`** — revocation is row
+deletion in the `relationships:` keyspace via
+`DELETE /v1/relationships/{id}`.
 
 ### 6.2 Status list
 
@@ -366,6 +393,11 @@ active_from, active_to, last_synced_at
   the departed identity. Index space is sized accordingly.
 - Telemetry emits `StatusListOccupancyWarning` at 75% (live +
   reserved). Chaining is v2 (§17).
+- **Custom endorsements share the `Revocation` status list**
+  (Phase 4 M4.8 + planning-review D8). The reserved-slot
+  discipline above applies uniformly across VMC slots +
+  endorsement slots — a revoked endorsement's slot stays
+  permanently reserved.
 
 ### 6.3 Renewal — unconditional on ACL membership
 
@@ -385,19 +417,55 @@ Issuance steps:
    `personhood` flag on the new VMC. If the flag changes from the
    prior VMC, the audit event `MembershipRenewed` records
    `personhood_changed: true`.
+
+   **Renewal-time policy failure is operator-configurable** (Phase
+   4 M4.2.2 + planning-review D5) via
+   `vtc.renewal.on_personhood_fail`:
+   - `downgrade` (default): flag flips to `false`, VMC re-mints
+     with `personhood: false`, paired `PersonhoodRevoked
+     { reason: "renewal-policy" }` audit envelope fires. Preserves
+     §3-B "ACL is authoritative".
+   - `refuse`: returns `422 personhood-renewal-refused`; Member
+     row untouched; no VMC re-mint. The member must re-assert
+     before retrying renewal.
 4. Sealed-transfer to member's DID.
 
 ### 6.4 Personhood
 
-`personhood.rego` ships as a **deny-all stub**. Community admins
-author the actual rule. Personhood is asserted via a dedicated
-`POST /v1/members/{did}/personhood/assert` (re-mints VMC with
-`personhood: true`), and revoked via `DELETE` (re-mints with
-`false`). The policy re-evaluates on every renewal (§6.3 step 3) —
-losing personhood is not gated on operator action.
+`personhood.rego` ships as a **minimal-allow default** (Phase 4
+M4.2.1): allow when the applicant's VP carries at least one
+`WitnessCredential` from a non-empty issuer. Operators upload
+stricter policies when the witness-only baseline isn't enough.
 
-Policy input contract: `data.input = { applicant_did, vp_claims }`.
-Communities extend via `data.*` namespaces they populate themselves.
+**Assert flow (Phase 4 M4.3, planning-review D2 — VP-only body).**
+
+1. Caller mints a single-use nonce via
+   `POST /v1/members/{did}/personhood/challenge` (10-min TTL).
+2. Caller assembles a W3C Verifiable Presentation signed by
+   their `#key-0`, with `proof.challenge` set to the nonce,
+   and submits via `POST /v1/members/{did}/personhood`.
+3. Handler consumes the challenge, verifies the VP proof
+   against the member's resolved `#key-0`, runs
+   `extract_vp_claims`, evaluates `personhood.rego`.
+4. On allow: flag flips, `personhood_asserted_at` stamps now,
+   VMC re-mints with `personhood: true`,
+   `PersonhoodAsserted { vmc_id, asserted_at }` audit emitted.
+5. **The presented VP is then discarded** (planning-review
+   D2). Only the flag + timestamp persist on the `Member` row.
+
+**Revoke flow.** `DELETE /v1/members/{did}/personhood` is
+admin-driven OR self-revoke. Idempotent no-op when already
+`false`. Emits `PersonhoodRevoked { vmc_id, reason: "admin" |
+"self" }`. The renewal-policy downgrade arm (§6.3 step 3) is
+the third trigger, emitting `reason: "renewal-policy"`.
+
+Policy input contract:
+`data.input = { applicant_did, vp_claims }` for the assert
+path; `data.input = { applicant_did, current_personhood,
+asserted_at_seconds_ago, vp_claims }` for the renewal re-eval.
+The empty `vp_claims` on renewal is intentional — operators
+wanting evidence-aware renewal eval upload custom rego that
+consults live inputs (trust-registry queries, etc.).
 
 ## 7. Policy engine
 
@@ -407,7 +475,7 @@ Communities extend via `data.*` namespaces they populate themselves.
 |---|---|---|
 | `join` | Decide join requests | Template `policies.open` (accept any signed VP) |
 | `removal` | Decide admin-initiated removals | Any admin may remove any non-admin |
-| `personhood` | Decide personhood assertion | **Deny-all stub** |
+| `personhood` | Decide personhood assertion | **Minimal-allow on `WitnessCredential` presence** (Phase 4 M4.2.1) |
 | `registry` | Trust-registry publish + departure disposition | Publish on join; default disposition `Tombstone` |
 | `directory` | Member-directory visibility | Members see DID + role only |
 | `role_definitions` | Map roles to permissions (incl. Custom) | The matrix in §5.3 for standard roles only |
@@ -898,6 +966,27 @@ per-key sensitivity: keys flagged `sensitive: true` redact
 `old_value` + `new_value` in the audit record (e.g., TLS paths;
 future webhook URLs with tokens). Complete catalog lives alongside
 the source in `vti-common::audit::events`.
+
+**Phase 4 additions (M4.1.2 + D4 review — eight new variants):**
+- `VrcPublished { vrc_id, subject_did?, edge_type }` — self-issued
+  trust edge stored.
+- `VrcRevoked { vrc_id, revoked_by }` — paired with the
+  `relationships:` row deletion (per D7, no `credentialStatus`
+  bit-flip).
+- `PersonhoodAsserted { vmc_id, asserted_at }` — after a
+  successful `POST .../personhood`. VP is discarded post-eval
+  (D2 review) so no evidence hash appears here.
+- `PersonhoodRevoked { vmc_id?, reason }` — `reason ∈ {
+  "admin", "self", "renewal-policy" }`. `vmc_id` is `None`
+  only on the `refuse`-arm of M4.2.2 (no VMC re-mint).
+- `CustomEndorsementIssued { endorsement_id, endorsement_type,
+  status_list_index }` + paired `VecIssued` for accounting.
+- `CustomEndorsementRevoked { endorsement_id, endorsement_type }`
+  + paired `StatusListFlipped` (same shared-list discipline as
+  VMC revocation).
+- `EndorsementTypeRegistered { type_uri, description? }` /
+  `EndorsementTypeDeleted { type_uri }` — admin-driven registry
+  CRUD (M4.8.1).
 
 ## 12. Optional surfaces
 
