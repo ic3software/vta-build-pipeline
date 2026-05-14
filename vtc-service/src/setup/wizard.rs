@@ -39,7 +39,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 use vta_sdk::provision_client::{
     EphemeralSetupKey, OperatorMessages, ProvisionAsk, ProvisionResult, VtaIntent, VtaReply,
-    run_provision,
+    resolve_vta, run_provision,
 };
 
 use vti_common::config::StoreConfig;
@@ -50,7 +50,7 @@ use vti_common::setup::secrets_prompt::{
 };
 use vti_common::store::Store;
 
-use crate::config::{AppConfig, AuthConfig, LogConfig, SecretsConfig};
+use crate::config::{AppConfig, AuthConfig, LogConfig, MessagingConfig, SecretsConfig};
 use crate::install::{
     INSTALL_TOKEN_DEFAULT_TTL_SECS, InstallTokenSigner, InstallTokenStore, mint_install_token,
 };
@@ -66,7 +66,13 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
 
     let inputs = prompt_inputs()?;
 
-    // 1. Mint the ephemeral DID first so we can show it to the
+    // 1. Mediator choice. Done immediately after `prompt_inputs` so
+    //    the VTA DID resolution doubles as an early "is the VTA DID
+    //    valid?" check — bail fast on a typo rather than after the
+    //    operator has gone off to grant the ACL.
+    let messaging = prompt_messaging(&inputs.vta_did).await?;
+
+    // 2. Mint the ephemeral DID first so we can show it to the
     //    operator before they pick a secret-store backend (the
     //    pause for the ACL step is the slow part — get the
     //    decision-needed-from-the-operator instructions on screen
@@ -83,7 +89,7 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
         return Err(AppError::Validation("setup aborted".into()));
     }
 
-    // 2. Pick a secrets-store backend. We delay this until after
+    // 3. Pick a secrets-store backend. We delay this until after
     //    the ACL pause because the operator may want to interrupt
     //    setup at this point (e.g. realise they typed the VTA URL
     //    wrong); resolving the keyring path before the VTA
@@ -91,7 +97,7 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
     //    layer.
     let secrets = prompt_secrets_config()?;
 
-    // 3. Drive the provision-integration round-trip. Capture and
+    // 4. Drive the provision-integration round-trip. Capture and
     //    discard event traffic so the wizard's UX stays terse —
     //    long-form progress UX is for `pnm`, not the daemon setup
     //    flow.
@@ -115,7 +121,7 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
     })?;
     let bundle = VtcKeyBundle::from_did_key_material(integration_did.clone(), integration_key);
 
-    // 4. Persist the did.jsonl log so the daemon's `GET
+    // 5. Persist the did.jsonl log so the daemon's `GET
     //    /v1/{scid}/did.jsonl` route can serve it after restart.
     let did_log = provision.webvh_log().ok_or_else(|| {
         AppError::Internal(
@@ -127,7 +133,7 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
     let scid = extract_scid_or_err(&integration_did)?;
     write_did_log(&data_dir, &scid, did_log)?;
 
-    // 5. Materialise the config + write it to disk so
+    // 6. Materialise the config + write it to disk so
     //    `create_secret_store` sees the chosen backend.
     let app_config = build_app_config(
         config_path.clone(),
@@ -136,10 +142,11 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
         inputs.base_url.clone(),
         data_dir.clone(),
         secrets,
+        messaging,
     )?;
     write_config_toml(&config_path, &app_config)?;
 
-    // 6. Write the bundle into the secret store.
+    // 7. Write the bundle into the secret store.
     let secret_store = create_secret_store(&app_config)
         .map_err(|e| AppError::Config(format!("failed to construct secret store: {e}")))?;
     let bundle_bytes = bundle.to_secret_store_bytes()?;
@@ -148,11 +155,11 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
         .await
         .map_err(|e| AppError::SecretStore(format!("failed to store VTC key bundle: {e}")))?;
 
-    // 7. Materialise the keyspaces so a `vtc` start doesn't have
+    // 8. Materialise the keyspaces so a `vtc` start doesn't have
     //    to pay the partition-create cost.
     open_keyspaces(&app_config)?;
 
-    // 8. Mint a one-shot install token. The operator uses this to
+    // 9. Mint a one-shot install token. The operator uses this to
     //    claim their admin passkey on the running daemon.
     let install_url = mint_initial_install_token(&app_config, &bundle, &inputs.base_url).await?;
 
@@ -258,6 +265,85 @@ fn prompt_inputs() -> Result<WizardInputs, AppError> {
         vta_did,
         context,
     })
+}
+
+/// Resolve the VTA DID and ask the operator which mediator the VTC
+/// should route DIDComm traffic through. Three paths:
+///
+/// 1. Use the same mediator the VTA advertises in its DID document.
+///    This is the dominant choice for single-operator deployments —
+///    one mediator serves both the VTA and its VTCs.
+/// 2. Specify a different mediator DID (e.g. the operator runs a
+///    per-VTC mediator, or the VTA's mediator is overloaded).
+/// 3. Skip messaging entirely. The daemon logs a one-line warning at
+///    startup ("messaging not configured — inbound message handling
+///    disabled") but otherwise stays healthy on the REST surface.
+///
+/// Resolving the VTA DID doubles as a "is this DID resolvable?"
+/// sanity check; a typo here surfaces *before* the operator runs off
+/// to grant the ACL. A resolution failure that yields no mediator
+/// hint falls through to options 2 + 3 with a warning — bootstrapping
+/// can continue if the operator already knows which mediator to use.
+async fn prompt_messaging(vta_did: &str) -> Result<Option<MessagingConfig>, AppError> {
+    use dialoguer::Select;
+
+    let vta_mediator = match resolve_vta(vta_did).await {
+        Ok(resolved) => resolved.mediator_did,
+        Err(e) => {
+            warn!(error = %e, vta_did, "could not resolve VTA DID — mediator suggestion unavailable");
+            None
+        }
+    };
+
+    println!();
+    let mut labels: Vec<String> = Vec::new();
+    let mut tags: Vec<&str> = Vec::new();
+    if let Some(med) = vta_mediator.as_deref() {
+        labels.push(format!("Use the VTA's mediator ({med})"));
+        tags.push("vta-mediator");
+    } else {
+        println!("  Note: the VTA's DID document does not advertise a DIDComm mediator;");
+        println!("        you'll need to supply one yourself or skip messaging.");
+        println!();
+    }
+    labels.push("Specify a different mediator DID".to_string());
+    tags.push("custom");
+    labels.push("Skip messaging (DIDComm disabled)".to_string());
+    tags.push("skip");
+
+    let idx = Select::new()
+        .with_prompt("DIDComm messaging")
+        .items(&labels)
+        .default(0)
+        .interact()
+        .map_err(prompt_err)?;
+
+    let mediator_did = match tags[idx] {
+        "vta-mediator" => vta_mediator.expect("present when tag was inserted"),
+        "custom" => Input::new()
+            .with_prompt("Mediator DID (must start with `did:`)")
+            .validate_with(|input: &String| -> Result<(), String> {
+                if input.starts_with("did:") {
+                    Ok(())
+                } else {
+                    Err("DID must start with 'did:' (e.g. did:webvh:... or did:key:...)".into())
+                }
+            })
+            .interact_text()
+            .map_err(prompt_err)?,
+        "skip" => return Ok(None),
+        other => {
+            return Err(AppError::Internal(format!(
+                "internal: unknown messaging tag '{other}'"
+            )));
+        }
+    };
+
+    Ok(Some(MessagingConfig {
+        mediator_url: String::new(),
+        mediator_did,
+        mediator_host: None,
+    }))
 }
 
 fn prompt_secrets_config() -> Result<SecretsConfig, AppError> {
@@ -726,6 +812,7 @@ fn build_app_config(
     public_url: String,
     data_dir: PathBuf,
     secrets: SecretsConfig,
+    messaging: Option<MessagingConfig>,
 ) -> Result<AppConfig, AppError> {
     let toml_skeleton = format!(
         r#"
@@ -741,6 +828,7 @@ data_dir = "{}"
     let mut config: AppConfig =
         toml::from_str(&toml_skeleton).map_err(|e| AppError::Config(format!("config: {e}")))?;
     config.secrets = secrets;
+    config.messaging = messaging;
     config.auth = AuthConfig {
         jwt_signing_key: Some(generate_jwt_signing_key()),
         ..AuthConfig::default()
