@@ -541,18 +541,27 @@ pub async fn run(
         }
     }
 
-    // Snapshot the CORS allowlist before the AppState `move` into
-    // the REST thread. The layer is fixed at start-up; a future
-    // M0.8.x extension can swap the layer on `POST /v1/admin/config/reload`
-    // if operators demand live updates.
+    // Snapshot the CORS allowlist + routing config before the
+    // AppState `move` into the REST thread. Both layers are fixed
+    // at start-up; a future `POST /v1/admin/config/reload` can
+    // swap them if operators demand live updates.
     let rest_cors = state.config.read().await.cors.clone();
+    let rest_routing = state.config.read().await.routing.clone();
 
     // Spawn three named OS threads
     let mut rest_shutdown_rx = shutdown_rx.clone();
     let rest_state = state.clone();
     let rest_handle = std::thread::Builder::new()
         .name("vtc-rest".into())
-        .spawn(move || run_rest_thread(std_listener, rest_state, rest_cors, &mut rest_shutdown_rx))
+        .spawn(move || {
+            run_rest_thread(
+                std_listener,
+                rest_state,
+                rest_cors,
+                rest_routing,
+                &mut rest_shutdown_rx,
+            )
+        })
         .map_err(|e| AppError::Internal(format!("failed to spawn REST thread: {e}")))?;
 
     let mut didcomm_shutdown_rx = shutdown_rx.clone();
@@ -751,6 +760,7 @@ fn run_rest_thread(
     std_listener: std::net::TcpListener,
     state: AppState,
     cors: crate::config::CorsConfig,
+    routing: crate::config::RoutingConfig,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -766,19 +776,42 @@ fn run_rest_thread(
 
         let cors_layer = build_cors_layer(&cors);
 
-        let app = routes::router()
+        // Subdomain-mode host-dispatch (Phase 5 M5.1.2). The
+        // middleware is a no-op when every routing surface has
+        // `host = None` (pure path mode), so configuring it
+        // unconditionally is cheap.
+        let host_map = crate::routing::host_dispatch::HostMap::from_routing(&routing);
+        let host_layer =
+            axum::middleware::from_fn_with_state(host_map, crate::routing::host_dispatch::enforce);
+
+        // CSRF double-submit + Sec-Fetch-Site check (Phase 5
+        // M5.2.2). Bootstrapping flows + the public form-post
+        // target are path-exempt — see `routing::csrf` for the
+        // exemption list.
+        let csrf_layer = axum::middleware::from_fn(crate::routing::csrf::enforce);
+
+        let app = routes::router_with(&routing)
             .with_state(state)
+            .layer(csrf_layer)
+            .layer(host_layer)
             .layer(cors_layer)
             .layer(TraceLayer::new_for_http());
 
         let shutdown_rx = shutdown_rx.clone();
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let mut rx = shutdown_rx;
-                let _ = rx.changed().await;
-            })
-            .await
-            .expect("axum serve failed");
+        // `into_make_service_with_connect_info` is required for the
+        // tower-governor `SmartIpKeyExtractor` to fall back to the
+        // peer socket address when `X-Forwarded-For` / `X-Real-IP`
+        // headers are absent (Phase 5 M5.1.5).
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let mut rx = shutdown_rx;
+            let _ = rx.changed().await;
+        })
+        .await
+        .expect("axum serve failed");
 
         info!("REST thread shutting down");
     });

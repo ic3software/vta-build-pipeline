@@ -15,35 +15,68 @@ pub mod recognise;
 mod relationships;
 pub(crate) mod status_lists;
 
+use std::sync::Arc;
+
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::extract::DefaultBodyLimit;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::{any, delete, get, post};
+use tower_governor::GovernorLayer;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::key_extractor::SmartIpKeyExtractor;
 
 use vti_common::trust_task::{TrustTask, TrustTaskRouter};
 
+use crate::config::RoutingConfig;
 use crate::server::AppState;
 
-/// Build the public router.
+/// Global API surface body cap (Phase 5 M5.1.4 — §14.4 runtime
+/// guard). Matches the VTA's `MAX_BODY_SIZE`. Website management
+/// routes (M5.5) override per-route with larger caps via
+/// `DefaultBodyLimit::disable() + RequestBodyLimitLayer::new(...)`.
+pub const MAX_BODY_SIZE: usize = 1024 * 1024;
+
+/// Tighter body cap for unauthenticated routes. Aligned with
+/// `vta-service`'s `UNAUTH_BODY_SIZE` — generous enough for a
+/// JWE / sealed-transfer envelope but small enough to reject 1 MB
+/// blob floods that the rate limiter alone cannot starve out.
+pub const UNAUTH_BODY_SIZE: usize = 64 * 1024;
+
+/// Build the public router with default routing (path mode, `/v1`
+/// API mount, `/admin` UX placeholder, `/` website fallback).
 ///
-/// Migrates the pre-MVP route table under `/v1/` and attaches a
-/// Trust-Task header check to every endpoint per spec §9.4. The
-/// existing handlers are unchanged in behaviour — only the wire
-/// surface moves. Trust Task IDs use a `*/legacy/*` namespace
-/// because these endpoints will be re-shaped during M0.5+ to align
-/// with the install + passkey + admin flows; the placeholder IDs
-/// give the wire surface a stable identifier from day one (soft
-/// gate from spec §9.4 / plan M0.1.1).
-///
-/// `/health` is the **single** Trust-Task-exempt endpoint — kept at
-/// the root path for trivial monitoring integration.
+/// Convenience wrapper around [`router_with`] for integration-test
+/// fixtures and any caller that doesn't carry a [`RoutingConfig`].
+/// Production startup goes through [`router_with`] from `server.rs`
+/// so operator-supplied mount overrides take effect.
 pub fn router() -> Router<AppState> {
-    let auth_challenge =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/challenge/1.0")
-            .expect("static Trust-Task URL");
-    let auth_authenticate =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/authenticate/1.0")
-            .expect("static Trust-Task URL");
-    let auth_refresh = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/refresh/1.0")
-        .expect("static Trust-Task URL");
+    router_with(&RoutingConfig::default())
+}
+
+/// Build the public router with operator-supplied routing config
+/// (Phase 5 M5.1.1). Three logical surfaces under one
+/// [`axum::Router`]:
+///
+/// - **API** (`routing.api.mount`, default `/v1`): the existing
+///   [`TrustTaskRouter`]-built handler set. Every mutating + read
+///   handler the daemon ships lives here. Phase 5 keeps handler
+///   attach order identical to Phase 0–4; only the prefix moves
+///   from inline `/v1/...` literals to a single `nest` boundary.
+/// - **Admin UX** (`routing.admin_ui.mount`, default `/admin`):
+///   placeholder router that returns 503 until M5.7 lands the
+///   baked SPA. The mount is reserved so cookie-scope isolation
+///   (§9.3) doesn't have to wait for the SPA to exist.
+/// - **Website** (`routing.website.mount`, default `/`):
+///   placeholder fallback that returns 503 until M5.4 lands the
+///   filesystem-backed static handler. When the website mount is
+///   `/`, attached as a catch-all fallback; otherwise nested.
+///
+/// `/health` is the **single** Trust-Task-exempt endpoint — kept
+/// at the parent-router root (above every nest boundary) so
+/// monitoring integration stays trivial regardless of routing
+/// mode.
+pub fn router_with(routing: &RoutingConfig) -> Router<AppState> {
     let auth_sessions_manage =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/sessions/manage/1.0")
             .expect("static Trust-Task URL");
@@ -73,12 +106,6 @@ pub fn router() -> Router<AppState> {
             .expect("static Trust-Task URL");
     let admin_config_import =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/config/import/1.0")
-            .expect("static Trust-Task URL");
-    let install_claim_start =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/start/1.0")
-            .expect("static Trust-Task URL");
-    let install_claim_finish =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/finish/1.0")
             .expect("static Trust-Task URL");
     let admin_bootstrap = TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/bootstrap/1.0")
         .expect("static Trust-Task URL");
@@ -224,15 +251,14 @@ pub fn router() -> Router<AppState> {
     // surface stays complete; the wire enforcement collapses to
     // the POST task on the shared mount.
 
-    TrustTaskRouter::<AppState>::new()
-        .route_exempt("/health", get(health::health))
+    let api = TrustTaskRouter::<AppState>::new()
         .route_with_task(
-            "/v1/health/diagnostics",
+            "/health/diagnostics",
             get(health::diagnostics),
             health_diagnostics,
         )
         .route_with_task(
-            "/v1/auth/recognise",
+            "/auth/recognise",
             post(recognise::recognise),
             auth_recognise,
         )
@@ -241,39 +267,36 @@ pub fn router() -> Router<AppState> {
         // not a general-purpose did:webvh host: the handler matches
         // the URL `scid` against the VTC's own DID and 404s on any
         // other request. See `tasks/vtc-mvp/vta-driven-keys.md` §10.
-        .route_exempt("/v1/{scid}/did.jsonl", get(did_log::did_log))
+        .route_exempt("/{scid}/did.jsonl", get(did_log::did_log))
         // BitstringStatusList publication (M2.11). Trust-Task-
         // exempt — external verifiers don't carry our extension
         // header (same rationale as `did.jsonl`).
-        .route_exempt("/v1/status-lists/{purpose}", get(status_lists::show))
-        // Auth routes
-        .route_with_task("/v1/auth/challenge", post(auth::challenge), auth_challenge)
-        .route_with_task("/v1/auth/", post(auth::authenticate), auth_authenticate)
-        .route_with_task("/v1/auth/refresh", post(auth::refresh), auth_refresh)
+        .route_exempt("/status-lists/{purpose}", get(status_lists::show))
+        // Auth routes. `POST /v1/auth/{challenge,authenticate,refresh}`
+        // are unauthenticated and live in `build_unauth_routes` so the
+        // tower-governor + tighter body cap apply. The two
+        // session-management endpoints below are authenticated and
+        // stay on the main chain.
         .route_with_task(
-            "/v1/auth/sessions",
+            "/auth/sessions",
             get(auth::session_list).delete(auth::revoke_sessions_by_did),
             auth_sessions_manage,
         )
         .route_with_task(
-            "/v1/auth/sessions/{session_id}",
+            "/auth/sessions/{session_id}",
             delete(auth::revoke_session),
             auth_sessions_revoke,
         )
         // Config
         .route_with_task(
-            "/v1/config",
+            "/config",
             get(config::get_config).patch(config::update_config),
             config_manage,
         )
         // ACL
+        .route_with_task("/acl", get(acl::list_acl).post(acl::create_acl), acl_manage)
         .route_with_task(
-            "/v1/acl",
-            get(acl::list_acl).post(acl::create_acl),
-            acl_manage,
-        )
-        .route_with_task(
-            "/v1/acl/{did}",
+            "/acl/{did}",
             get(acl::get_acl)
                 .patch(acl::update_acl)
                 .delete(acl::delete_acl),
@@ -284,7 +307,7 @@ pub fn router() -> Router<AppState> {
         // community/profile/update/1.0 lands when TrustTaskRouter
         // gains per-method task selectors in Phase 1+).
         .route_with_task(
-            "/v1/community/profile",
+            "/community/profile",
             get(community::profile::get_profile).put(community::profile::put_profile),
             community_profile,
         )
@@ -292,7 +315,7 @@ pub fn router() -> Router<AppState> {
         // split into admin/config/show/1.0 + patch/1.0 when
         // TrustTaskRouter gains per-method selectors).
         .route_with_task(
-            "/v1/admin/config",
+            "/admin/config",
             get(admin::config::get_config).patch(admin::config::patch_config),
             admin_config,
         )
@@ -300,12 +323,12 @@ pub fn router() -> Router<AppState> {
         // settings in-place; restart requires a supervisor (412
         // `SupervisorRequired` otherwise).
         .route_with_task(
-            "/v1/admin/config/reload",
+            "/admin/config/reload",
             post(admin::config::reload_config),
             admin_config_reload,
         )
         .route_with_task(
-            "/v1/admin/config/restart",
+            "/admin/config/restart",
             post(admin::config::restart_config),
             admin_config_restart,
         )
@@ -313,33 +336,24 @@ pub fn router() -> Router<AppState> {
         // (db-layer overrides + community profile) JSON; import runs
         // diff-and-confirm via `?confirm=true|false`.
         .route_with_task(
-            "/v1/admin/config/export",
+            "/admin/config/export",
             post(admin::config::export_config),
             admin_config_export,
         )
         .route_with_task(
-            "/v1/admin/config/import",
+            "/admin/config/import",
             post(admin::config::import_config),
             admin_config_import,
         )
-        // Install claim (M0.5.2) — distinct Trust Tasks because the
-        // two phases of the WebAuthn ceremony have different
-        // semantics. Both are POST-only.
-        .route_with_task(
-            "/v1/install/claim/start",
-            post(install::claim_start),
-            install_claim_start,
-        )
-        .route_with_task(
-            "/v1/install/claim/finish",
-            post(install::claim_finish),
-            install_claim_finish,
-        )
+        // Install claim endpoints (`/install/claim/start` and
+        // `/install/claim/finish`) are unauthenticated and live in
+        // `build_unauth_routes` so the tower-governor + tighter
+        // body cap apply.
         // Admin bootstrap (M0.6.2) — closes the install carve-out
         // and writes the first admin ACL entry. Unauthenticated
         // because the setup-session JWT IS the auth credential.
         .route_with_task(
-            "/v1/admin/bootstrap",
+            "/admin/bootstrap",
             post(admin::bootstrap::bootstrap),
             admin_bootstrap,
         )
@@ -349,42 +363,38 @@ pub fn router() -> Router<AppState> {
         // passkey; `register/finish` and `revoke/finish` reject if
         // the UV assertion doesn't verify.
         .route_with_task(
-            "/v1/admin/passkeys",
+            "/admin/passkeys",
             get(admin::passkeys::list),
             admin_passkeys_list,
         )
         .route_with_task(
-            "/v1/admin/passkeys/register/start",
+            "/admin/passkeys/register/start",
             post(admin::passkeys::register_start),
             admin_passkeys_register.clone(),
         )
         .route_with_task(
-            "/v1/admin/passkeys/register/finish",
+            "/admin/passkeys/register/finish",
             post(admin::passkeys::register_finish),
             admin_passkeys_register,
         )
         .route_with_task(
-            "/v1/admin/passkeys/revoke/start",
+            "/admin/passkeys/revoke/start",
             post(admin::passkeys::revoke_start),
             admin_passkeys_revoke.clone(),
         )
         .route_with_task(
-            "/v1/admin/passkeys/revoke/finish",
+            "/admin/passkeys/revoke/finish",
             post(admin::passkeys::revoke_finish),
             admin_passkeys_revoke,
         )
         // Members (Phase 1 M1.4–M1.6).
-        .route_with_task(
-            "/v1/members",
-            get(members::read::list_members),
-            members_list,
-        )
+        .route_with_task("/members", get(members::read::list_members), members_list)
         // `/v1/members/me` for self-remove (M1.11.1). Must be
         // declared BEFORE the `/v1/members/{did}` mount otherwise
         // axum's path-trie picks the parameterised route first
         // and routes "me" as a literal DID.
         .route_with_task(
-            "/v1/members/me",
+            "/members/me",
             axum::routing::delete(members::remove::self_remove),
             members_self_remove,
         )
@@ -392,7 +402,7 @@ pub fn router() -> Router<AppState> {
         // Trust Task header check + per-method selectors are
         // unambiguous.
         .route_with_task(
-            "/v1/members/me/renew",
+            "/members/me/renew",
             post(members::renew::renew),
             members_renew,
         )
@@ -400,12 +410,12 @@ pub fn router() -> Router<AppState> {
         // mints a single-use rotation_id, the finish endpoint
         // applies the co-signed swap atomically.
         .route_with_task(
-            "/v1/members/me/rotate/challenge",
+            "/members/me/rotate/challenge",
             post(members::rotate::challenge),
             members_rotate_challenge,
         )
         .route_with_task(
-            "/v1/members/me/rotate",
+            "/members/me/rotate",
             post(members::rotate::rotate),
             members_rotate,
         )
@@ -415,12 +425,12 @@ pub fn router() -> Router<AppState> {
         // literal segment first. Personhood is a per-member
         // resource; `{did}` is the subject.
         .route_with_task(
-            "/v1/members/{did}/personhood/challenge",
+            "/members/{did}/personhood/challenge",
             post(members::personhood::challenge),
             members_personhood_challenge,
         )
         .route_with_task(
-            "/v1/members/{did}/personhood",
+            "/members/{did}/personhood",
             post(members::personhood::assert).delete(members::personhood::revoke),
             // POST + DELETE share `personhood/assert/1.0` at
             // the router layer pending per-method selectors;
@@ -435,24 +445,24 @@ pub fn router() -> Router<AppState> {
         // and must precede the catchall `/v1/members/{did}`
         // (same path-trie precedence as personhood).
         .route_with_task(
-            "/v1/members/{did}/relationships",
+            "/members/{did}/relationships",
             get(members::relationships::list),
             relationships_list,
         )
         .route_with_task(
-            "/v1/relationships",
+            "/relationships",
             post(relationships::publish),
             relationships_publish,
         )
         .route_with_task(
-            "/v1/relationships/{id}",
+            "/relationships/{id}",
             delete(relationships::revoke),
             relationships_revoke,
         )
         // Phase 4 M4.8.1 — operator-uploaded endorsement type
         // registry. Admin-gated CRUD.
         .route_with_task(
-            "/v1/endorsement-types",
+            "/endorsement-types",
             post(endorsement_types::register).get(endorsement_types::list),
             // POST + GET share `register/1.0` at the router
             // layer pending per-method selectors; standalone
@@ -460,14 +470,14 @@ pub fn router() -> Router<AppState> {
             endorsement_types_register,
         )
         .route_with_task(
-            "/v1/endorsement-types/{type_uri}",
+            "/endorsement-types/{type_uri}",
             delete(endorsement_types::delete),
             endorsement_types_delete,
         )
         // Phase 4 M4.8.2-4 — custom endorsement issuance +
         // retrieval + revocation. Admin OR Issuer-role member.
         .route_with_task(
-            "/v1/credentials/endorsements",
+            "/credentials/endorsements",
             post(endorsements::issue).get(endorsements::list),
             // POST + GET share `issue/1.0` at the router
             // layer pending per-method selectors; standalone
@@ -475,7 +485,7 @@ pub fn router() -> Router<AppState> {
             endorsements_issue,
         )
         .route_with_task(
-            "/v1/credentials/endorsements/{id}",
+            "/credentials/endorsements/{id}",
             axum::routing::get(endorsements::show).delete(endorsements::revoke),
             // GET + DELETE share `show/1.0` at the router
             // layer pending per-method selectors; standalone
@@ -483,7 +493,7 @@ pub fn router() -> Router<AppState> {
             endorsements_show_revoke,
         )
         .route_with_task(
-            "/v1/members/{did}",
+            "/members/{did}",
             get(members::read::show_member)
                 .patch(members::update::update_member)
                 .delete(members::remove::admin_remove),
@@ -496,18 +506,18 @@ pub fn router() -> Router<AppState> {
             members_show,
         )
         .route_with_task(
-            "/v1/members/{did}/promote-to-admin/start",
+            "/members/{did}/promote-to-admin/start",
             post(members::promote::promote_start),
             members_promote.clone(),
         )
         .route_with_task(
-            "/v1/members/{did}/promote-to-admin/finish",
+            "/members/{did}/promote-to-admin/finish",
             post(members::promote::promote_finish),
             members_promote,
         )
         // Join requests (Phase 1 M1.7–M1.10).
         .route_with_task(
-            "/v1/join-requests",
+            "/join-requests",
             // Submit (unauth) + admin list share the mount; the
             // submit Trust Task `join-requests/submit/1.0` covers
             // both methods here. Per-method selectors land
@@ -516,17 +526,17 @@ pub fn router() -> Router<AppState> {
             join_submit,
         )
         .route_with_task(
-            "/v1/join-requests/{id}",
+            "/join-requests/{id}",
             get(join_requests::read::show_join_request),
             join_show,
         )
         .route_with_task(
-            "/v1/join-requests/{id}/approve",
+            "/join-requests/{id}/approve",
             post(join_requests::decide::approve),
             join_approve,
         )
         .route_with_task(
-            "/v1/join-requests/{id}/reject",
+            "/join-requests/{id}/reject",
             post(join_requests::decide::reject),
             join_reject,
         )
@@ -535,12 +545,12 @@ pub fn router() -> Router<AppState> {
         // the per-purpose active pointer; `test` evaluates a stored
         // policy without mutating state.
         .route_with_task(
-            "/v1/policies",
+            "/policies",
             get(policies::read::list_policies).post(policies::admin::upload),
             policies_upload.clone(),
         )
         .route_with_task(
-            "/v1/policies/{id}",
+            "/policies/{id}",
             get(policies::read::show_policy),
             // Reuses the upload task on the shared mount; the
             // `policies/show/1.0` Trust Task lives in index.json
@@ -548,14 +558,179 @@ pub fn router() -> Router<AppState> {
             policies_upload.clone(),
         )
         .route_with_task(
-            "/v1/policies/{id}/activate",
+            "/policies/{id}/activate",
             post(policies::admin::activate),
             policies_activate,
         )
         .route_with_task(
-            "/v1/policies/{id}/test",
+            "/policies/{id}/test",
             post(policies::admin::test),
             policies_test,
         )
         .into_router()
+        // §14.4 — every authenticated API route inherits the 1 MiB
+        // global body cap. Per-route overrides for `/v1/website/*`
+        // bundle deploys (M5.5) disable this with
+        // `DefaultBodyLimit::disable()` and attach a wider per-route
+        // `RequestBodyLimitLayer`.
+        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE));
+
+    // Unauthenticated routes — tighter body cap + per-IP governor.
+    let unauth = build_unauth_routes();
+
+    assemble(routing, api.merge(unauth))
+}
+
+/// Build the unauthenticated sub-router: 5 POST routes that drive
+/// expensive crypto against attacker-controlled bytes.
+///
+/// - `POST /auth/challenge`
+/// - `POST /auth/` (authenticate)
+/// - `POST /auth/refresh`
+/// - `POST /install/claim/start`
+/// - `POST /install/claim/finish`
+///
+/// Layers:
+/// - [`UNAUTH_BODY_SIZE`] body cap (tighter than the 1 MiB main
+///   API cap — generous enough for a JWE / sealed-transfer
+///   envelope, small enough to reject blob floods).
+/// - Per-IP `tower-governor` (5 rps + 10 burst) via
+///   [`SmartIpKeyExtractor`].
+fn build_unauth_routes() -> Router<AppState> {
+    let auth_challenge =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/challenge/1.0")
+            .expect("static Trust-Task URL");
+    let auth_authenticate =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/authenticate/1.0")
+            .expect("static Trust-Task URL");
+    let auth_refresh = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/refresh/1.0")
+        .expect("static Trust-Task URL");
+    let install_claim_start =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/start/1.0")
+            .expect("static Trust-Task URL");
+    let install_claim_finish =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/finish/1.0")
+            .expect("static Trust-Task URL");
+
+    let governor_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(5)
+            .burst_size(10)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("governor config values are static and non-zero"),
+    );
+    let governor = GovernorLayer::new(governor_config);
+
+    // `SmartIpKeyExtractor` reads `X-Forwarded-For` / `X-Real-IP` /
+    // `Forwarded` headers first and only falls back to `ConnectInfo`
+    // when none are set. In production the `axum::serve` call in
+    // `server.rs` wires `into_make_service_with_connect_info` so the
+    // peer-IP fallback works; in integration tests built on
+    // `Router::oneshot`, neither headers nor `ConnectInfo` are present
+    // and the extractor errors with 500. This synthetic-`ConnectInfo`
+    // middleware inserts a `127.0.0.1` placeholder **only when missing**
+    // so test calls take the peer-IP fallback path — production traffic
+    // (which already carries `ConnectInfo` from the service factory)
+    // is untouched.
+    let synth_connect_info = axum::middleware::from_fn(insert_default_connect_info_if_missing);
+
+    TrustTaskRouter::<AppState>::new()
+        .route_with_task("/auth/challenge", post(auth::challenge), auth_challenge)
+        .route_with_task("/auth/", post(auth::authenticate), auth_authenticate)
+        .route_with_task("/auth/refresh", post(auth::refresh), auth_refresh)
+        .route_with_task(
+            "/install/claim/start",
+            post(install::claim_start),
+            install_claim_start,
+        )
+        .route_with_task(
+            "/install/claim/finish",
+            post(install::claim_finish),
+            install_claim_finish,
+        )
+        .into_router()
+        .layer(DefaultBodyLimit::max(UNAUTH_BODY_SIZE))
+        .layer(governor)
+        .layer(synth_connect_info)
+}
+
+/// Middleware that inserts a `ConnectInfo<SocketAddr>(127.0.0.1)`
+/// extension if the request doesn't already carry one. See the
+/// rationale comment in [`build_unauth_routes`].
+async fn insert_default_connect_info_if_missing(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use axum::extract::ConnectInfo;
+
+    if request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_none()
+    {
+        let synthetic =
+            ConnectInfo::<SocketAddr>(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0));
+        request.extensions_mut().insert(synthetic);
+    }
+    next.run(request).await
+}
+
+/// Build the public router from the API sub-router + placeholder
+/// admin/website surfaces. Extracted so unit tests can exercise
+/// nest behaviour without rebuilding the full TrustTaskRouter.
+fn assemble(routing: &RoutingConfig, api: Router<AppState>) -> Router<AppState> {
+    use axum::middleware::from_fn;
+
+    use crate::routing::security_headers::security_headers;
+
+    // Admin UX + website sub-routers serve HTML/JS to a browser;
+    // both get the default CSP + `X-Content-Type-Options: nosniff`
+    // layer (Phase 5 M5.3.2). The API sub-router is a JSON wire
+    // surface and is intentionally excluded — CSP is browser-only.
+    let admin_placeholder: Router<AppState> = Router::new()
+        .fallback(any(placeholder_503))
+        .layer(from_fn(security_headers));
+    let website_placeholder: Router<AppState> = Router::new()
+        .fallback(any(placeholder_503))
+        .layer(from_fn(security_headers));
+
+    let mut app: Router<AppState> = Router::new()
+        // `/health` is the single Trust-Task-exempt endpoint;
+        // attached at the parent-router root so monitoring works
+        // identically across path mode and subdomain mode (the
+        // operator just curls `/health` on whichever host the
+        // daemon is reachable on).
+        .route("/health", get(health::health))
+        // API surface — existing TrustTaskRouter result nested at
+        // the configured mount.
+        .nest(&routing.api.mount, api);
+
+    // Admin UX surface. The cookie-scope guard in
+    // `validate_routing` already refuses admin_ui at `/`; here we
+    // just trust the prior validation.
+    app = app.nest(&routing.admin_ui.mount, admin_placeholder);
+
+    // Website surface. axum 0.8 refuses `nest("/", ...)`; when the
+    // mount is the root, merge instead so the placeholder's
+    // fallback (with security headers attached) becomes the
+    // parent's fallback. Non-root mounts use the regular nest path.
+    if routing.website.mount == "/" {
+        app = app.merge(website_placeholder);
+    } else {
+        app = app.nest(&routing.website.mount, website_placeholder);
+    }
+
+    app
+}
+
+/// Placeholder handler returned by the admin UX + website
+/// sub-routers until M5.4 / M5.7 land real handlers.
+async fn placeholder_503() -> impl IntoResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "surface not yet implemented",
+    )
 }

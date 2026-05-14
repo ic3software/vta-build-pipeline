@@ -34,6 +34,7 @@ pub mod recognition;
 pub mod registry;
 pub mod relationships;
 pub mod routes;
+pub mod routing;
 pub mod server;
 pub mod setup;
 pub mod status;

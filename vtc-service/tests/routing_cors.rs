@@ -85,6 +85,7 @@ fn rejects_admin_ui_mounted_at_root_in_path_mode() {
             mount: "/site".into(),
             host: None,
         },
+        subdomain_mode_strict: true,
     };
     let err = cfg_with(routing, Default::default())
         .validate_routing_and_cors()
@@ -109,6 +110,7 @@ fn allows_admin_ui_at_root_when_host_routed() {
             mount: "/".into(),
             host: Some("example.com".into()),
         },
+        subdomain_mode_strict: true,
     };
     cfg_with(routing, Default::default())
         .validate_routing_and_cors()
@@ -130,6 +132,7 @@ fn rejects_duplicate_path_mounts() {
             mount: "/".into(),
             host: None,
         },
+        subdomain_mode_strict: true,
     };
     let err = cfg_with(routing, Default::default())
         .validate_routing_and_cors()

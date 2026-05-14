@@ -165,6 +165,19 @@ pub struct RoutingConfig {
     pub admin_ui: MountConfig,
     #[serde(default = "default_website_mount")]
     pub website: MountConfig,
+    /// Subdomain-mode strictness (Phase 5 M5.1.2). When at least one
+    /// surface has `host` set:
+    ///
+    /// - `true` (default): a request whose `Host` header doesn't match
+    ///   any configured surface returns 404 `HostNotRecognised`.
+    /// - `false`: unknown hosts fall back to path-mode prefix
+    ///   matching against the parent router. Debug aid only — not
+    ///   recommended for production.
+    ///
+    /// No effect when every surface has `host = None` (pure path
+    /// mode).
+    #[serde(default = "default_subdomain_mode_strict")]
+    pub subdomain_mode_strict: bool,
 }
 
 impl Default for RoutingConfig {
@@ -173,8 +186,13 @@ impl Default for RoutingConfig {
             api: default_api_mount(),
             admin_ui: default_admin_ui_mount(),
             website: default_website_mount(),
+            subdomain_mode_strict: default_subdomain_mode_strict(),
         }
     }
+}
+
+fn default_subdomain_mode_strict() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
