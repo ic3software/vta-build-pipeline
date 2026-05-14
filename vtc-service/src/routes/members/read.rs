@@ -36,6 +36,19 @@ pub struct MemberResponse {
     pub current_vmc_id: Option<String>,
     pub current_role_vec_id: Option<String>,
     pub extensions: JsonValue,
+    /// Personhood flag (Phase 4 M4.1). Surfaces the Member row's
+    /// `personhood` field. Read-only on this response —
+    /// `POST /v1/members/{did}/personhood/assert` flips it (M4.3),
+    /// `DELETE /v1/members/{did}/personhood` clears it (M4.4),
+    /// and renewal-policy downgrade clears it (M4.2.2).
+    pub personhood: bool,
+    /// Timestamp of the most recent assert. Operator-private —
+    /// the value is included on Admin-gated responses (this
+    /// route is `AdminAuth`) so operators can audit; the
+    /// public member-facing renewal response carries only the
+    /// `personhood` flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub personhood_asserted_at: Option<DateTime<Utc>>,
 }
 
 impl MemberResponse {
@@ -55,6 +68,8 @@ impl MemberResponse {
             current_vmc_id: member.current_vmc_id,
             current_role_vec_id: member.current_role_vec_id,
             extensions: member.extensions,
+            personhood: member.personhood,
+            personhood_asserted_at: member.personhood_asserted_at,
         }
     }
 }

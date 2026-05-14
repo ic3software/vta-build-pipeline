@@ -143,6 +143,8 @@ impl MemberResponse {
             current_vmc_id: member.current_vmc_id,
             current_role_vec_id: member.current_role_vec_id,
             extensions: member.extensions,
+            personhood: member.personhood,
+            personhood_asserted_at: member.personhood_asserted_at,
         }
     }
 }

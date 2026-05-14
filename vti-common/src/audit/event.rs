@@ -215,6 +215,63 @@ pub enum AuditEvent {
     /// `registry-unreachable` / `validity-window` / `malformed`
     /// / `role-mapping-denied`).
     CrossCommunitySessionMinted(CrossCommunitySessionMintedData),
+
+    // ─── Phase 4 lifecycle ─────────────────────────────────
+    /// A member published a self-issued Verifiable Recognition
+    /// Credential (VRC) — a trust edge `issuer-member → subject-
+    /// member` per spec §5.4 + §6.1. Phase 4 M4.6. The actor is
+    /// the issuer; the target is the subject DID.
+    VrcPublished(VrcPublishedData),
+
+    /// A VRC was revoked — either by the original issuer or by
+    /// an admin acting on behalf of the community. Phase 4 M4.6.
+    /// Per D7, VRCs carry no `credentialStatus`; revocation is
+    /// row deletion in the local `relationships:` keyspace.
+    VrcRevoked(VrcRevokedData),
+
+    /// A member's personhood flag was asserted true via
+    /// `POST /v1/members/{did}/personhood/assert`. Phase 4
+    /// M4.3. The actor is the asserter (admin or issuer); the
+    /// target is the member. Per D2 review (VP-only assert),
+    /// the presented evidence is verified at assert time and
+    /// discarded — no `evidence_sha256` field on this envelope.
+    PersonhoodAsserted(PersonhoodAssertedData),
+
+    /// A member's personhood flag was revoked. Phase 4 M4.4 +
+    /// M4.2.2. The `reason` discriminator pins which of the
+    /// three triggers fired: `"admin"` (admin `DELETE`),
+    /// `"self"` (member `DELETE`), or `"renewal-policy"`
+    /// (renewal-time policy downgrade per D5 review's
+    /// `downgrade` arm).
+    PersonhoodRevoked(PersonhoodRevokedData),
+
+    /// A custom (non-role) endorsement credential was issued
+    /// by an issuer or admin. Phase 4 M4.8. Per D8 review, the
+    /// credential carries a `credentialStatus` entry on the
+    /// shared `Revocation` status list — `status_list_index`
+    /// records the allocated slot.
+    CustomEndorsementIssued(CustomEndorsementIssuedData),
+
+    /// A custom endorsement was revoked. Phase 4 M4.8. Flips
+    /// the `Revocation` status-list bit at the credential's
+    /// `status_list_index`. Paired with a
+    /// `StatusListFlipped { purpose: "revocation", index,
+    /// revoked: true }` envelope (existing variant) so the
+    /// status-list audit surface stays uniform.
+    CustomEndorsementRevoked(CustomEndorsementRevokedData),
+
+    /// An operator registered a new custom endorsement type
+    /// via `POST /v1/endorsement-types`. Phase 4 M4.8.1 (D4
+    /// review). The actor is the admin; the `type_uri` field
+    /// records what was registered.
+    EndorsementTypeRegistered(EndorsementTypeRegisteredData),
+
+    /// An operator deleted a custom endorsement type via
+    /// `DELETE /v1/endorsement-types/{uri}`. Phase 4 M4.8.1.
+    /// The registry refuses deletion when at least one live
+    /// endorsement of this type still exists; this envelope
+    /// only fires after a successful delete.
+    EndorsementTypeDeleted(EndorsementTypeDeletedData),
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +639,121 @@ pub struct CrossCommunitySessionMintedData {
     /// `"role-mapping-denied"` for the policy-rejection arm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+// ─── Phase 4 payload structs ──────────────────────────────
+
+/// Payload for [`AuditEvent::VrcPublished`]. Phase 4 M4.6.
+/// Self-issued trust edge from one member to another.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VrcPublishedData {
+    /// Server-allocated id (UUID) of the relationship row.
+    /// The wire-form `id` lives at `urn:uuid:<vrc_id>` on the
+    /// VRC's top-level `id` field.
+    pub vrc_id: String,
+    /// Subject DID — the *other* member the edge points at.
+    /// HMAC-hashed in `target_did_hash` on the envelope; the
+    /// raw value lives here only when operator policy allows
+    /// (default: omitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_did: Option<String>,
+    /// Free-form trust-relationship type tag from the VRC's
+    /// `endorsement.type`. Examples: `"endorses"`, `"reports-to"`,
+    /// `"collaborates-with"` — operator-defined.
+    pub edge_type: String,
+}
+
+/// Payload for [`AuditEvent::VrcRevoked`]. Phase 4 M4.6.
+/// Issued whether the original issuer or an admin performed
+/// the revocation; the envelope's `actor_did` distinguishes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VrcRevokedData {
+    pub vrc_id: String,
+    /// `"issuer"` (the original member revoked their own VRC)
+    /// or `"admin"` (an admin revoked on behalf of the
+    /// community).
+    pub revoked_by: String,
+}
+
+/// Payload for [`AuditEvent::PersonhoodAsserted`]. Phase 4
+/// M4.3. The envelope's `actor_did` is the asserter (admin or
+/// issuer); `target_did_hash` is the member.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonhoodAssertedData {
+    /// VMC id minted with the new `personhood: true` flag.
+    /// Empty when the assert ran inside an idempotent retry
+    /// that didn't mint a fresh credential.
+    pub vmc_id: String,
+    /// `now` at assert time, in RFC3339. Persisted on the
+    /// Member row as `personhood_asserted_at` (per D2 review,
+    /// only the timestamp persists — not the VP itself).
+    pub asserted_at: String,
+}
+
+/// Payload for [`AuditEvent::PersonhoodRevoked`]. Phase 4
+/// M4.4 / M4.2.2.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonhoodRevokedData {
+    /// VMC id minted with the new `personhood: false` flag.
+    /// `None` on the `refuse` arm of `on_personhood_fail`
+    /// (no VMC re-mint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vmc_id: Option<String>,
+    /// Discriminator for the three triggers: `"admin"`,
+    /// `"self"`, or `"renewal-policy"`.
+    pub reason: String,
+}
+
+/// Payload for [`AuditEvent::CustomEndorsementIssued`]. Phase 4
+/// M4.8.2. The envelope's `actor_did` is the issuer (issuer-
+/// role member or admin); `target_did_hash` is the subject.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEndorsementIssuedData {
+    /// Server-allocated id (UUID) of the endorsement row.
+    pub endorsement_id: String,
+    /// The registered endorsement type URI.
+    pub endorsement_type: String,
+    /// Allocated slot index on the shared `Revocation` status
+    /// list (D8 review). Paired with the credential's
+    /// `credentialStatus.statusListIndex` field.
+    pub status_list_index: u32,
+}
+
+/// Payload for [`AuditEvent::CustomEndorsementRevoked`]. Phase 4
+/// M4.8.4. Paired with the existing `StatusListFlipped` envelope
+/// so the bit-flip is independently auditable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEndorsementRevokedData {
+    pub endorsement_id: String,
+    pub endorsement_type: String,
+}
+
+/// Payload for [`AuditEvent::EndorsementTypeRegistered`].
+/// Phase 4 M4.8.1 (D4 review).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EndorsementTypeRegisteredData {
+    /// The newly-registered type URI. Operators use this on
+    /// the issuance path's `body.type` field.
+    pub type_uri: String,
+    /// Optional human-readable description supplied at
+    /// registration time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Payload for [`AuditEvent::EndorsementTypeDeleted`]. Phase 4
+/// M4.8.1.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EndorsementTypeDeletedData {
+    pub type_uri: String,
 }
 
 /// Payload for [`AuditEvent::RegistryStatusChanged`]. Phase 3
@@ -1115,6 +1287,149 @@ mod tests {
         round_trip(&e);
     }
 
+    // ─── Phase 4 round-trip coverage ───────────────────
+
+    #[test]
+    fn vrc_published_round_trip() {
+        let e = AuditEvent::VrcPublished(VrcPublishedData {
+            vrc_id: "11111111-1111-1111-1111-111111111111".into(),
+            subject_did: Some("did:key:zSubject".into()),
+            edge_type: "endorses".into(),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "VrcPublished");
+        assert_eq!(v["data"]["vrcId"], "11111111-1111-1111-1111-111111111111");
+        assert_eq!(v["data"]["subjectDid"], "did:key:zSubject");
+        assert_eq!(v["data"]["edgeType"], "endorses");
+        round_trip(&e);
+    }
+
+    #[test]
+    fn vrc_published_omits_subject_did_when_none() {
+        let e = AuditEvent::VrcPublished(VrcPublishedData {
+            vrc_id: "id".into(),
+            subject_did: None,
+            edge_type: "reports-to".into(),
+        });
+        let v = wire_value(&e);
+        assert!(v["data"].get("subjectDid").is_none());
+        round_trip(&e);
+    }
+
+    #[test]
+    fn vrc_revoked_round_trip() {
+        let e = AuditEvent::VrcRevoked(VrcRevokedData {
+            vrc_id: "id".into(),
+            revoked_by: "issuer".into(),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "VrcRevoked");
+        assert_eq!(v["data"]["revokedBy"], "issuer");
+        round_trip(&e);
+    }
+
+    #[test]
+    fn personhood_asserted_round_trip() {
+        let e = AuditEvent::PersonhoodAsserted(PersonhoodAssertedData {
+            vmc_id: "vmc-7".into(),
+            asserted_at: "2026-05-14T10:00:00Z".into(),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "PersonhoodAsserted");
+        assert_eq!(v["data"]["vmcId"], "vmc-7");
+        assert_eq!(v["data"]["assertedAt"], "2026-05-14T10:00:00Z");
+        round_trip(&e);
+    }
+
+    #[test]
+    fn personhood_revoked_round_trip() {
+        let e = AuditEvent::PersonhoodRevoked(PersonhoodRevokedData {
+            vmc_id: Some("vmc-8".into()),
+            reason: "admin".into(),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "PersonhoodRevoked");
+        assert_eq!(v["data"]["vmcId"], "vmc-8");
+        assert_eq!(v["data"]["reason"], "admin");
+        round_trip(&e);
+    }
+
+    #[test]
+    fn personhood_revoked_omits_vmc_id_when_refuse_arm() {
+        // `refuse` arm of on_personhood_fail doesn't re-mint
+        // a VMC, so vmc_id is None.
+        let e = AuditEvent::PersonhoodRevoked(PersonhoodRevokedData {
+            vmc_id: None,
+            reason: "renewal-policy".into(),
+        });
+        let v = wire_value(&e);
+        assert!(v["data"].get("vmcId").is_none());
+        assert_eq!(v["data"]["reason"], "renewal-policy");
+        round_trip(&e);
+    }
+
+    #[test]
+    fn custom_endorsement_issued_round_trip() {
+        let e = AuditEvent::CustomEndorsementIssued(CustomEndorsementIssuedData {
+            endorsement_id: "end-1".into(),
+            endorsement_type: "https://example.com/v1/skills/rust".into(),
+            status_list_index: 42,
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "CustomEndorsementIssued");
+        assert_eq!(
+            v["data"]["endorsementType"],
+            "https://example.com/v1/skills/rust"
+        );
+        assert_eq!(v["data"]["statusListIndex"], 42);
+        round_trip(&e);
+    }
+
+    #[test]
+    fn custom_endorsement_revoked_round_trip() {
+        let e = AuditEvent::CustomEndorsementRevoked(CustomEndorsementRevokedData {
+            endorsement_id: "end-1".into(),
+            endorsement_type: "https://example.com/v1/skills/rust".into(),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "CustomEndorsementRevoked");
+        round_trip(&e);
+    }
+
+    #[test]
+    fn endorsement_type_registered_round_trip() {
+        let e = AuditEvent::EndorsementTypeRegistered(EndorsementTypeRegisteredData {
+            type_uri: "https://example.com/v1/skills/rust".into(),
+            description: Some("Rust proficiency endorsement".into()),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "EndorsementTypeRegistered");
+        assert_eq!(v["data"]["typeUri"], "https://example.com/v1/skills/rust");
+        assert_eq!(v["data"]["description"], "Rust proficiency endorsement");
+        round_trip(&e);
+    }
+
+    #[test]
+    fn endorsement_type_registered_omits_description_when_none() {
+        let e = AuditEvent::EndorsementTypeRegistered(EndorsementTypeRegisteredData {
+            type_uri: "https://example.com/v1/x".into(),
+            description: None,
+        });
+        let v = wire_value(&e);
+        assert!(v["data"].get("description").is_none());
+        round_trip(&e);
+    }
+
+    #[test]
+    fn endorsement_type_deleted_round_trip() {
+        let e = AuditEvent::EndorsementTypeDeleted(EndorsementTypeDeletedData {
+            type_uri: "https://example.com/v1/skills/rust".into(),
+        });
+        let v = wire_value(&e);
+        assert_eq!(v["type"], "EndorsementTypeDeleted");
+        round_trip(&e);
+    }
+
     #[test]
     fn variant_discriminator_strings() {
         let cases: Vec<(AuditEvent, &str)> = vec![
@@ -1289,6 +1604,63 @@ mod tests {
                     reason: None,
                 }),
                 "CrossCommunitySessionMinted",
+            ),
+            (
+                AuditEvent::VrcPublished(VrcPublishedData {
+                    vrc_id: "id".into(),
+                    subject_did: Some("did:key:zX".into()),
+                    edge_type: "endorses".into(),
+                }),
+                "VrcPublished",
+            ),
+            (
+                AuditEvent::VrcRevoked(VrcRevokedData {
+                    vrc_id: "id".into(),
+                    revoked_by: "admin".into(),
+                }),
+                "VrcRevoked",
+            ),
+            (
+                AuditEvent::PersonhoodAsserted(PersonhoodAssertedData {
+                    vmc_id: "v".into(),
+                    asserted_at: "2026-05-14T10:00:00Z".into(),
+                }),
+                "PersonhoodAsserted",
+            ),
+            (
+                AuditEvent::PersonhoodRevoked(PersonhoodRevokedData {
+                    vmc_id: Some("v".into()),
+                    reason: "self".into(),
+                }),
+                "PersonhoodRevoked",
+            ),
+            (
+                AuditEvent::CustomEndorsementIssued(CustomEndorsementIssuedData {
+                    endorsement_id: "end".into(),
+                    endorsement_type: "https://x/v1/t".into(),
+                    status_list_index: 0,
+                }),
+                "CustomEndorsementIssued",
+            ),
+            (
+                AuditEvent::CustomEndorsementRevoked(CustomEndorsementRevokedData {
+                    endorsement_id: "end".into(),
+                    endorsement_type: "https://x/v1/t".into(),
+                }),
+                "CustomEndorsementRevoked",
+            ),
+            (
+                AuditEvent::EndorsementTypeRegistered(EndorsementTypeRegisteredData {
+                    type_uri: "https://x/v1/t".into(),
+                    description: None,
+                }),
+                "EndorsementTypeRegistered",
+            ),
+            (
+                AuditEvent::EndorsementTypeDeleted(EndorsementTypeDeletedData {
+                    type_uri: "https://x/v1/t".into(),
+                }),
+                "EndorsementTypeDeleted",
             ),
         ];
         for (event, expected) in cases {

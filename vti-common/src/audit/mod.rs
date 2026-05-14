@@ -33,11 +33,14 @@ pub use envelope::{AuditEnvelope, EVENT_VERSION, SCHEMA_VERSION};
 pub use event::{
     AdminPasskeyData, AdminPromotedData, AuditEvent, AuditKeyRotatedData, CommunityInstalledData,
     CommunityProfileUpdatedData, ConfigChange, ConfigChangedData, ConfigReloadedData, ConfigSource,
-    CredentialIssuedData, CrossCommunitySessionMintedData, DidRotatedData, EmergencyBootstrapData,
-    JoinRequestData, JoinRequestRejectedData, MemberAddedData, MemberRemovedData,
-    MemberUpdatedData, MembershipRenewedData, PolicyActivatedData, PolicyUploadedData,
-    REDACTED_MARKER, RegistryRecordPolicyOverrideData, RegistryStatusChangedData,
-    RegistrySyncOutcomeData, RestartRequestedData, RoleChangedData, StatusListFlippedData,
+    CredentialIssuedData, CrossCommunitySessionMintedData, CustomEndorsementIssuedData,
+    CustomEndorsementRevokedData, DidRotatedData, EmergencyBootstrapData,
+    EndorsementTypeDeletedData, EndorsementTypeRegisteredData, JoinRequestData,
+    JoinRequestRejectedData, MemberAddedData, MemberRemovedData, MemberUpdatedData,
+    MembershipRenewedData, PersonhoodAssertedData, PersonhoodRevokedData, PolicyActivatedData,
+    PolicyUploadedData, REDACTED_MARKER, RegistryRecordPolicyOverrideData,
+    RegistryStatusChangedData, RegistrySyncOutcomeData, RestartRequestedData, RoleChangedData,
+    StatusListFlippedData, VrcPublishedData, VrcRevokedData,
 };
 pub use key_store::{AuditKey, AuditKeyStore, KeyId, RotationReason};
 pub use writer::AuditWriter;

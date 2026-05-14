@@ -80,6 +80,23 @@ pub struct Member {
     /// reconciler hasn't yet caught up on.
     #[serde(default)]
     pub removed_at: Option<DateTime<Utc>>,
+    /// Personhood flag (spec §6.3 + Phase 4 M4.1). `true` after a
+    /// successful `POST /v1/members/{did}/personhood/assert`
+    /// (M4.3); flipped back to `false` on revoke (M4.4) or
+    /// renewal-time policy downgrade (M4.2.2). Surfaced on the
+    /// member's VMC `credentialSubject.personhood` field — every
+    /// renewed VMC re-evaluates this against `personhood.rego`.
+    #[serde(default)]
+    pub personhood: bool,
+    /// Timestamp of the most recent successful personhood assert
+    /// (Phase 4 M4.1). `None` when personhood was never asserted
+    /// or has been revoked. The default `personhood.rego` (M4.2)
+    /// reads this to compute an "age" input for time-based
+    /// expiry policies. Per planning-review D2: the *evidence*
+    /// VP is verified at assert time and discarded — only this
+    /// timestamp persists.
+    #[serde(default)]
+    pub personhood_asserted_at: Option<DateTime<Utc>>,
 }
 
 impl Member {
@@ -102,6 +119,8 @@ impl Member {
             current_role_vec_id: None,
             extensions: JsonValue::Null,
             removed_at: None,
+            personhood: false,
+            personhood_asserted_at: None,
         }
     }
 
@@ -123,6 +142,13 @@ impl Member {
         self.current_role_vec_id = None;
         self.extensions = JsonValue::Null;
         self.removed_at = Some(Utc::now());
+        // Tombstone wipes personhood — it's a PII-bearing
+        // assertion (timestamps reveal when the operator
+        // performed the assert ceremony). Members reasserting
+        // after un-tombstone would have to re-present
+        // evidence.
+        self.personhood = false;
+        self.personhood_asserted_at = None;
     }
 
     /// Mark the row historical — keep all fields verbatim, just

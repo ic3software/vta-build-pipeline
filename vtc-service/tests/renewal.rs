@@ -54,6 +54,9 @@ struct Fixture {
     signer: Arc<LocalSigner>,
     members_ks: vti_common::store::KeyspaceHandle,
     status_lists_ks: vti_common::store::KeyspaceHandle,
+    policies_ks: vti_common::store::KeyspaceHandle,
+    active_policies_ks: vti_common::store::KeyspaceHandle,
+    audit_ks: vti_common::store::KeyspaceHandle,
     _dir: tempfile::TempDir,
 }
 
@@ -195,7 +198,7 @@ async fn build_fixture() -> Fixture {
         supervisor: None,
     };
 
-    let router = routes::router().with_state(state);
+    let router = routes::router().with_state(state.clone());
 
     Fixture {
         router,
@@ -203,6 +206,9 @@ async fn build_fixture() -> Fixture {
         signer,
         members_ks,
         status_lists_ks,
+        policies_ks: state.policies_ks,
+        active_policies_ks: state.active_policies_ks,
+        audit_ks: state.audit_ks,
         _dir: dir,
     }
 }
@@ -304,4 +310,132 @@ async fn renew_requires_authentication() {
         .unwrap();
     let resp = fix.router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ─── Phase 4 M4.2.2: renewal personhood eval ─────────────
+
+#[tokio::test]
+async fn renew_preserves_personhood_when_already_asserted() {
+    // Member.personhood = true, default policy preserves on
+    // renewal. The new VMC should carry personhood: true.
+    let fix = build_fixture().await;
+    let mut m = get_member(&fix.members_ks, MEMBER_DID)
+        .await
+        .unwrap()
+        .unwrap();
+    m.personhood = true;
+    m.personhood_asserted_at = Some(chrono::Utc::now());
+    store_member(&fix.members_ks, &m).await.unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/members/me/renew")
+        .header("authorization", format!("Bearer {}", fix.member_token))
+        .header("trust-task", RENEW_TASK)
+        .body(Body::empty())
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["personhood"], true);
+    assert_eq!(body["personhoodChanged"], false);
+
+    let m2 = get_member(&fix.members_ks, MEMBER_DID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(m2.personhood);
+    assert!(m2.personhood_asserted_at.is_some());
+}
+
+#[tokio::test]
+async fn renew_default_downgrades_when_policy_drops_flag() {
+    // Member.personhood = true but we activate a strict
+    // policy that denies for everyone. With default
+    // on_personhood_fail = Downgrade, renewal succeeds with
+    // personhood: false; Member row flips + paired
+    // PersonhoodRevoked envelope is emitted.
+    //
+    // The Refuse-mode arm is exercised by a Fixture variant
+    // that takes a PersonhoodFailMode parameter — deferred
+    // to PR-2 alongside the assert/revoke endpoints.
+    use vti_common::audit::AuditEvent;
+
+    let fix = build_fixture().await;
+
+    let mut m = get_member(&fix.members_ks, MEMBER_DID)
+        .await
+        .unwrap()
+        .unwrap();
+    m.personhood = true;
+    m.personhood_asserted_at = Some(chrono::Utc::now());
+    store_member(&fix.members_ks, &m).await.unwrap();
+
+    // Activate a strict deny-all personhood policy via the
+    // fixture's already-open keyspace handles (fjall is
+    // single-process-locked; can't re-open the dir).
+    let src = "package vtc.personhood\nimport rego.v1\ndefault allow := false\n";
+    use sha2::{Digest, Sha256};
+    let sha: [u8; 32] = Sha256::digest(src.as_bytes()).into();
+    let id = uuid::Uuid::new_v4();
+    let strict = vtc_service::policy::Policy {
+        id,
+        purpose: vtc_service::policy::PolicyPurpose::Personhood,
+        rego_source: src.into(),
+        sha256: sha,
+        activated_at: Some(chrono::Utc::now()),
+        author_did: "did:key:test".into(),
+        created_at: chrono::Utc::now(),
+        version: 1,
+    };
+    vtc_service::policy::store_policy(&fix.policies_ks, &strict)
+        .await
+        .unwrap();
+    vtc_service::policy::set_active_policy_id(
+        &fix.active_policies_ks,
+        vtc_service::policy::PolicyPurpose::Personhood,
+        id,
+    )
+    .await
+    .unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/members/me/renew")
+        .header("authorization", format!("Bearer {}", fix.member_token))
+        .header("trust-task", RENEW_TASK)
+        .body(Body::empty())
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "downgrade must succeed");
+
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["personhood"], false, "downgraded");
+    assert_eq!(body["personhoodChanged"], true);
+
+    let m2 = get_member(&fix.members_ks, MEMBER_DID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!m2.personhood);
+    assert!(m2.personhood_asserted_at.is_none());
+
+    let pairs = fix.audit_ks.prefix_iter_raw(Vec::new()).await.unwrap();
+    let mut saw_revoked = false;
+    for (_k, v) in pairs {
+        let env: vti_common::audit::AuditEnvelope = serde_json::from_slice(&v).unwrap();
+        if let AuditEvent::PersonhoodRevoked(data) = env.event
+            && data.reason == "renewal-policy"
+        {
+            saw_revoked = true;
+            break;
+        }
+    }
+    assert!(
+        saw_revoked,
+        "downgrade path must emit PersonhoodRevoked with reason=renewal-policy"
+    );
 }

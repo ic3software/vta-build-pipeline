@@ -199,6 +199,8 @@ mod tests {
             current_role_vec_id: Some("vec-1".into()),
             extensions: serde_json::json!({ "team": "platform" }),
             removed_at: None,
+            personhood: false,
+            personhood_asserted_at: None,
         };
         let json = serde_json::to_value(&m).unwrap();
         assert!(json["joinedAt"].is_string());
@@ -207,8 +209,51 @@ mod tests {
         assert_eq!(json["departurePreference"], "historical");
         assert_eq!(json["currentVmcId"], "vmc-1");
         assert_eq!(json["currentRoleVecId"], "vec-1");
+        assert_eq!(json["personhood"], false);
+        assert!(json["personhoodAssertedAt"].is_null());
         let parsed: Member = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, m);
+    }
+
+    #[test]
+    fn member_round_trips_with_personhood_asserted() {
+        let now = Utc::now();
+        let m = Member {
+            did: "did:key:zPerson".into(),
+            joined_at: now,
+            status_list_index: None,
+            publish_consent: false,
+            departure_preference: Disposition::PolicyDefault,
+            current_vmc_id: None,
+            current_role_vec_id: None,
+            extensions: serde_json::Value::Null,
+            removed_at: None,
+            personhood: true,
+            personhood_asserted_at: Some(now),
+        };
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["personhood"], true);
+        assert!(json["personhoodAssertedAt"].is_string());
+        let parsed: Member = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, m);
+    }
+
+    #[test]
+    fn member_backward_compat_pre_phase4_row_deserialises() {
+        // Hand-crafted JSON from before M4.1 — no `personhood`
+        // or `personhoodAssertedAt` keys. Round-trips with the
+        // new fields defaulted (`false`, `None`).
+        let raw = serde_json::json!({
+            "did": "did:key:zLegacy",
+            "joinedAt": "2026-01-15T00:00:00Z",
+            "publishConsent": false,
+            "departurePreference": "tombstone",
+            "extensions": null
+        });
+        let parsed: Member = serde_json::from_value(raw).expect("legacy row deserialises");
+        assert_eq!(parsed.did, "did:key:zLegacy");
+        assert!(!parsed.personhood);
+        assert!(parsed.personhood_asserted_at.is_none());
     }
 
     #[test]

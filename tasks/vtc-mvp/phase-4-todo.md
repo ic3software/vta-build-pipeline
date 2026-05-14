@@ -18,7 +18,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M4.1 — Member row personhood persistence + audit variant stubs
 
-### `[ ]` M4.1.1 — Extend `Member` with personhood state
+### `[x]` M4.1.1 — Extend `Member` with personhood state
 
 - **Acceptance**
   - `vtc_service::members::Member` gains **two** fields, both
@@ -48,7 +48,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Deps**: none
 - **Pre-impl decision**: **D2** (planning-review VP-only assert).
 
-### `[ ]` M4.1.2 — Audit variant stubs (no emitters yet)
+### `[x]` M4.1.2 — Audit variant stubs (no emitters yet)
 
 - **Acceptance**
   - **Eight** new variants added to
@@ -75,7 +75,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M4.2 — Default `personhood.rego` rewrite + renewal hook fix
 
-### `[ ]` M4.2.1 — Replace deny-all stub with minimal-allow default
+### `[x]` M4.2.1 — Replace deny-all stub with minimal-allow default
 
 - **Acceptance**
   - `vtc-service/policies/default/personhood.rego` is
@@ -99,7 +99,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Deps**: M4.1.1
 - **Pre-impl decision**: **D10** (default policy shape).
 
-### `[ ]` M4.2.2 — Renewal hook reads Member.personhood
+### `[x]` M4.2.2 — Renewal hook reads Member.personhood
 
 - **Acceptance**
   - `routes/members/renew.rs::evaluate_personhood` feeds
