@@ -1633,9 +1633,8 @@ mod tests {
         let inputs = parse(raw).expect(
             "docs/02-vta/examples/vta-setup.example.toml must be valid against WizardInputs",
         );
-        validate_inputs(&inputs).expect(
-            "docs/02-vta/examples/vta-setup.example.toml must pass cross-field validation",
-        );
+        validate_inputs(&inputs)
+            .expect("docs/02-vta/examples/vta-setup.example.toml must pass cross-field validation");
     }
 
     #[test]
