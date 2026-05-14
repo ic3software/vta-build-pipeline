@@ -3,7 +3,7 @@
 //!
 //! Drives a full register + authenticate ceremony through `webauthn-rs`,
 //! using the EdDSA-restricting wrappers from
-//! `vtc_service::webauthn::start_eddsa_passkey_registration`. If this
+//! `vtc_service::webauthn::start_passkey_registration`. If this
 //! test passes end-to-end then the harness produces wire output
 //! `webauthn-rs-core` accepts and signatures `webauthn-rs` verifies —
 //! which is the contract M0.5.2's install-claim integration tests
@@ -22,7 +22,7 @@ use vti_common::auth::passkey::build_webauthn;
 use webauthn_rs::Webauthn;
 use webauthn_rs_proto::COSEAlgorithm;
 
-use vtc_service::webauthn::{finish_eddsa_passkey_registration, start_eddsa_passkey_registration};
+use vtc_service::webauthn::{finish_passkey_registration, start_passkey_registration};
 
 use common::webauthn_harness::SoftEd25519Authenticator;
 
@@ -39,19 +39,19 @@ fn register_then_authenticate_completes_end_to_end() {
 
     // -- register ------------------------------------------------------
     let user_uuid = Uuid::new_v4();
-    let (ccr, reg_state) = start_eddsa_passkey_registration(
+    let (ccr, reg_state) = start_passkey_registration(
         &webauthn,
         user_uuid,
         "did:key:zHarness",
         "did:key:zHarness",
         None,
     )
-    .expect("start_eddsa_passkey_registration");
+    .expect("start_passkey_registration");
 
     let (register_cred, ed25519_pub) = authenticator.register(&ccr, RP_ORIGIN);
 
-    let passkey = finish_eddsa_passkey_registration(&webauthn, &register_cred, &reg_state)
-        .expect("finish_eddsa_passkey_registration");
+    let passkey = finish_passkey_registration(&webauthn, &register_cred, &reg_state)
+        .expect("finish_passkey_registration");
 
     // Sanity: webauthn-rs registered an EdDSA passkey, not something
     // else that webauthn-rs core's algorithm filter let through.
@@ -97,7 +97,7 @@ fn second_authenticate_increments_sign_count() {
     let webauthn = webauthn();
     let mut authenticator = SoftEd25519Authenticator::new();
 
-    let (ccr, reg_state) = start_eddsa_passkey_registration(
+    let (ccr, reg_state) = start_passkey_registration(
         &webauthn,
         Uuid::new_v4(),
         "did:key:zHarness2",
@@ -106,7 +106,7 @@ fn second_authenticate_increments_sign_count() {
     )
     .unwrap();
     let (register_cred, _ed25519_pub) = authenticator.register(&ccr, RP_ORIGIN);
-    let passkey = finish_eddsa_passkey_registration(&webauthn, &register_cred, &reg_state).unwrap();
+    let passkey = finish_passkey_registration(&webauthn, &register_cred, &reg_state).unwrap();
 
     // First authentication.
     let (rcr1, state1) = webauthn

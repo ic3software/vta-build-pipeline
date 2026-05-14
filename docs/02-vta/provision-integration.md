@@ -1203,7 +1203,7 @@ serve it later.
   authored, uploaded, resolved (context → global → built-in).
 - [`integration-guide.md`](integration-guide.md) — building an
   application that consumes a provisioned integration's keys.
-- [`../02-operating/cold-start.md`](../02-operating/cold-start.md) —
+- [`../02-vta/cold-start.md`](../02-vta/cold-start.md) —
   interactive VTA setup walkthrough and admin seeding.
-- [`../02-operating/non-interactive-setup.md`](../02-operating/non-interactive-setup.md) —
+- [`../02-vta/non-interactive-setup.md`](../02-vta/non-interactive-setup.md) —
   `vta setup --from <file>` for the pre-provision VTA stand-up step.

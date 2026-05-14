@@ -11,10 +11,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use chrono::{Duration as ChronoDuration, Utc};
-use ed25519_dalek::Signer;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
@@ -157,6 +154,7 @@ async fn mint_token_and_record(fix: &Fixture, ttl_seconds: u64) -> (String, Uuid
     let minted = mint_install_token(
         &fix.install_signer,
         "did:webvh:vtc.example.com:abc",
+        "did:key:z6MkAdmin",
         ttl_seconds,
     )
     .expect("mint install token");
@@ -227,21 +225,11 @@ async fn full_ceremony_completes_end_to_end() {
     assert_eq!(status, StatusCode::OK, "start: {body}");
 
     let registration_id = body["registrationId"].as_str().unwrap().to_string();
-    let challenge_b64 = body["didBindingChallenge"].as_str().unwrap().to_string();
-    let challenge: [u8; 32] = B64.decode(&challenge_b64).unwrap().try_into().unwrap();
     let ccr = parse_ccr(&body);
 
     // -- harness produces the registration response --------------------
     let mut authenticator = SoftEd25519Authenticator::new();
-    let (register_cred, ed25519_pub) = authenticator.register(&ccr, RP_ORIGIN);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&harness_seed_for(
-        ccr.public_key.challenge.as_ref(),
-        &ccr.public_key.rp.id,
-    ));
-    // Sanity: derived key matches what the harness gave us.
-    assert_eq!(signing_key.verifying_key().to_bytes(), ed25519_pub);
-
-    let did_binding_signature = B64.encode(signing_key.sign(&challenge).to_bytes());
+    let (register_cred, _ed25519_pub) = authenticator.register(&ccr, RP_ORIGIN);
 
     // -- finish --------------------------------------------------------
     let (status, body) = post_json(
@@ -252,7 +240,6 @@ async fn full_ceremony_completes_end_to_end() {
             "install_token": token,
             "registration_id": registration_id,
             "webauthn_response": register_cred,
-            "did_binding_signature": did_binding_signature,
         }),
     )
     .await;
@@ -270,23 +257,10 @@ async fn full_ceremony_completes_end_to_end() {
             "install_token": token,
             "registration_id": registration_id,
             "webauthn_response": register_cred,
-            "did_binding_signature": did_binding_signature,
         }),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-/// Reconstruct the harness's deterministic Ed25519 seed for the given
-/// (challenge, rp_id) pair. Mirrors the algorithm in
-/// `tests/common/webauthn_harness.rs::SoftEd25519Authenticator::register`.
-fn harness_seed_for(challenge: &[u8], rp_id: &str) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(challenge);
-    h.update(rp_id.as_bytes());
-    h.update(b"soft-eddsa-seed/v1");
-    h.finalize().into()
 }
 
 // ---------------------------------------------------------------------------
@@ -342,8 +316,13 @@ async fn start_rejects_unknown_jti() {
     // Mint a valid token but never call `record_issued` — the install
     // store has no state for the jti and `start_claim` must fail.
     let fix = build_fixture(Some(RP_ORIGIN), true).await;
-    let minted =
-        mint_install_token(&fix.install_signer, "did:webvh:vtc.example.com:abc", 600).unwrap();
+    let minted = mint_install_token(
+        &fix.install_signer,
+        "did:webvh:vtc.example.com:abc",
+        "did:key:z6MkAdmin",
+        600,
+    )
+    .unwrap();
     let (status, _body) = post_json(
         &fix.router,
         "/v1/install/claim/start",
@@ -390,16 +369,9 @@ async fn finish_rejects_mismatched_registration_id() {
         json!({ "install_token": token }),
     )
     .await;
-    let challenge_b64 = body["didBindingChallenge"].as_str().unwrap().to_string();
     let ccr = parse_ccr(&body);
     let mut authenticator = SoftEd25519Authenticator::new();
     let (register_cred, _pub) = authenticator.register(&ccr, RP_ORIGIN);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&harness_seed_for(
-        ccr.public_key.challenge.as_ref(),
-        &ccr.public_key.rp.id,
-    ));
-    let challenge: [u8; 32] = B64.decode(&challenge_b64).unwrap().try_into().unwrap();
-    let sig = B64.encode(signing_key.sign(&challenge).to_bytes());
 
     let (status, _body) = post_json(
         &fix.router,
@@ -409,45 +381,6 @@ async fn finish_rejects_mismatched_registration_id() {
             "install_token": token,
             "registration_id": Uuid::new_v4().to_string(),
             "webauthn_response": register_cred,
-            "did_binding_signature": sig,
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn finish_rejects_wrong_did_binding_signature() {
-    let fix = build_fixture(Some(RP_ORIGIN), true).await;
-    let (token, _jti) = mint_token_and_record(&fix, 600).await;
-
-    let (_status, body) = post_json(
-        &fix.router,
-        "/v1/install/claim/start",
-        START_TASK,
-        json!({ "install_token": &token }),
-    )
-    .await;
-    let registration_id = body["registrationId"].as_str().unwrap().to_string();
-    let ccr = parse_ccr(&body);
-    let mut authenticator = SoftEd25519Authenticator::new();
-    let (register_cred, _pub) = authenticator.register(&ccr, RP_ORIGIN);
-
-    // Sign a *different* 32-byte buffer — the server's challenge was
-    // discarded but the attacker doesn't know that, so any non-matching
-    // signature must be rejected.
-    let wrong_signer = ed25519_dalek::SigningKey::from_bytes(&[0x99; 32]);
-    let bogus_sig = B64.encode(wrong_signer.sign(&[0u8; 32]).to_bytes());
-
-    let (status, _body) = post_json(
-        &fix.router,
-        "/v1/install/claim/finish",
-        FINISH_TASK,
-        json!({
-            "install_token": token,
-            "registration_id": registration_id,
-            "webauthn_response": register_cred,
-            "did_binding_signature": bogus_sig,
         }),
     )
     .await;
@@ -480,7 +413,6 @@ async fn finish_without_start_fails() {
             "install_token": token,
             "registration_id": jti.to_string(),
             "webauthn_response": dummy_cred,
-            "did_binding_signature": B64.encode([0u8; 64]),
         }),
     )
     .await;

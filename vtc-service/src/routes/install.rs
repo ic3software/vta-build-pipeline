@@ -12,16 +12,21 @@
 //! - `start` verifies the install token, takes the install-keyspace
 //!   ceremony lock (`InstallTokenStore::start_claim`), and returns a
 //!   WebAuthn `CreationChallengeResponse` constrained to Ed25519 via
-//!   `vtc_service::webauthn::start_eddsa_passkey_registration`. It
-//!   also returns a server-issued 32-byte "DID-binding challenge"
-//!   that the operator must sign with their newly-minted Ed25519 key.
+//!   `vtc_service::webauthn::start_passkey_registration`, which
+//!   accepts any algorithm the authenticator can produce
+//!   (ES256, RS256, EdDSA).
 //! - `finish` verifies the WebAuthn response, derives the candidate
 //!   admin `did:key` from the credential's Ed25519 public key,
-//!   verifies the DID-binding signature with that same key (proves
-//!   single-key control over both signing paths — spec §4.2 third
-//!   bullet), consumes the install token, persists the passkey,
-//!   and mints a short-lived setup-session token consumed by M0.6's
+//!   consumes the install token, persists the passkey, and mints a
+//!   short-lived setup-session token consumed by M0.6's
 //!   `/v1/admin/bootstrap`.
+//!
+//! The WebAuthn attestation already proves the operator controls the
+//! Ed25519 keypair that materialises the candidate did:key — modelled
+//! on `affinidi-webvh-service`'s `enroll_finish` (no extra raw-bytes
+//! binding signature). The previous design required a raw Ed25519
+//! signature over a server challenge, which is impossible to produce
+//! in a real browser (WebAuthn never exposes the private key).
 //!
 //! The carve-out *stays open* until admin bootstrap; until then the
 //! install token is consumed but the `InstallTokenStore::close_carveout`
@@ -34,9 +39,6 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
@@ -45,16 +47,13 @@ use vti_common::auth::passkey::store::{
     store_passkey_user, store_registration_state, store_registration_user, take_registration_state,
 };
 use vti_common::error::AppError;
-use webauthn_rs::prelude::{
-    CreationChallengeResponse, Passkey, RegisterPublicKeyCredential, Webauthn,
-};
+use webauthn_rs::prelude::{CreationChallengeResponse, RegisterPublicKeyCredential, Webauthn};
 
 use crate::install::{
     INSTALL_SESSION_DEFAULT_TTL_SECS, InstallTokenSigner, mint_install_session_token,
     parse_install_token,
 };
 use crate::server::AppState;
-use crate::webauthn::{finish_eddsa_passkey_registration, start_eddsa_passkey_registration};
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -75,12 +74,6 @@ pub struct ClaimStartResponse {
     /// The WebAuthn `PublicKeyCredentialCreationOptions` payload —
     /// the operator's UA passes this to `navigator.credentials.create()`.
     pub options: CreationChallengeResponse,
-    /// 32 random server bytes (base64url-no-pad). The operator
-    /// signs these with the Ed25519 private key materialised inside
-    /// their authenticator and returns the signature in
-    /// `claim/finish` — proves the WebAuthn key and the candidate
-    /// `did:key` are the same keypair.
-    pub did_binding_challenge: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,9 +81,6 @@ pub struct ClaimFinishRequest {
     pub install_token: String,
     pub registration_id: String,
     pub webauthn_response: RegisterPublicKeyCredential,
-    /// Base64url-no-pad Ed25519 signature over the raw 32 bytes the
-    /// server returned in `did_binding_challenge`.
-    pub did_binding_signature: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,14 +88,6 @@ pub struct ClaimFinishRequest {
 pub struct ClaimFinishResponse {
     pub admin_did: String,
     pub setup_session_token: String,
-}
-
-// ---------------------------------------------------------------------------
-// Storage key helpers
-// ---------------------------------------------------------------------------
-
-fn did_binding_key(jti: &Uuid) -> Vec<u8> {
-    format!("install_did_binding:{jti}").into_bytes()
 }
 
 // ---------------------------------------------------------------------------
@@ -129,14 +111,21 @@ pub async fn claim_start(
     let _outcome = store.start_claim(&jti).await?;
 
     let user_uuid = jti;
-    // `user_name` / `user_display_name` are operator-visible labels in
-    // the authenticator's UI. The install URL only exists pre-bootstrap
-    // — no real admin DID yet — so we use a stable, install-specific
-    // placeholder. The label is overwritten when M0.6 bootstraps the
-    // real admin DID.
-    let user_label = format!("vtc-install-{jti}");
-    let (ccr, reg_state) =
-        start_eddsa_passkey_registration(webauthn, user_uuid, &user_label, &user_label, None)?;
+    // Show the operator their admin DID in the authenticator's UI —
+    // it's the identity the passkey will authenticate as. Modelled on
+    // `affinidi-webvh-service`'s enroll-start which uses `user.did`
+    // for both user_name and display_name. No algorithm restriction
+    // here so any platform authenticator (Apple iCloud Keychain,
+    // Windows Hello, Chrome passkeys, hardware keys) works — the
+    // admin DID's shape is fixed in the install token, not derived
+    // from the passkey.
+    let (ccr, reg_state) = crate::webauthn::start_passkey_registration(
+        webauthn,
+        user_uuid,
+        &claims.admin_did,
+        &claims.admin_did,
+        None,
+    )?;
 
     // Persist the registration state under `jti` so `claim_finish`
     // can complete the ceremony against the same challenge.
@@ -146,14 +135,6 @@ pub async fn claim_start(
     // the PasskeyUser by registration_id without re-deriving it.
     store_registration_user(&state.passkey_ks, &jti.to_string(), &user_uuid).await?;
 
-    // 32 random bytes for the DID-binding challenge.
-    let mut challenge_bytes = [0u8; 32];
-    rand::fill(&mut challenge_bytes);
-    state
-        .passkey_ks
-        .insert_raw(did_binding_key(&jti), challenge_bytes.to_vec())
-        .await?;
-
     info!(jti = %jti, "install claim ceremony started");
 
     Ok((
@@ -161,7 +142,6 @@ pub async fn claim_start(
         Json(ClaimStartResponse {
             registration_id: jti.to_string(),
             options: ccr,
-            did_binding_challenge: B64.encode(challenge_bytes),
         }),
     ))
 }
@@ -192,37 +172,19 @@ pub async fn claim_finish(
             )
         })?;
 
-    let challenge_bytes = state
-        .passkey_ks
-        .get_raw(did_binding_key(&jti))
-        .await?
-        .ok_or_else(|| AppError::Internal("missing DID-binding challenge".into()))?;
-    let challenge: [u8; 32] = challenge_bytes
-        .try_into()
-        .map_err(|_| AppError::Internal("DID-binding challenge malformed".into()))?;
-
-    // Run the WebAuthn ceremony. EdDSA enforcement happens here and
-    // is asserted twice — once by webauthn-rs against the rewritten
-    // `credential_algorithms` list, once by
-    // `finish_eddsa_passkey_registration` checking `cred_algorithm()`.
-    let passkey = finish_eddsa_passkey_registration(webauthn, &req.webauthn_response, &reg_state)?;
-
-    let ed25519_pub = extract_ed25519_public_key(&passkey)?;
-    let admin_did = ed25519_pub_to_did_key(&ed25519_pub);
-
-    // Verify the DID-binding signature: proves the operator can sign
-    // raw bytes with the same Ed25519 key that the authenticator
-    // generated. Without this an attacker who acquired only the
-    // WebAuthn assertion couldn't reproduce the candidate did:key's
-    // signing path.
-    verify_did_binding(&ed25519_pub, &challenge, &req.did_binding_signature)?;
+    // Run the WebAuthn ceremony. Any algorithm the authenticator
+    // offers is acceptable — the admin DID is carried in the install
+    // token, not derived from the passkey, so a platform passkey
+    // (Apple iCloud Keychain, Windows Hello, Chrome passkeys, etc.)
+    // works regardless of whether it produces ES256, EdDSA, or RS256.
+    let passkey = webauthn
+        .finish_passkey_registration(&req.webauthn_response, &reg_state)
+        .map_err(|e| AppError::Authentication(format!("passkey registration failed: {e}")))?;
+    let admin_did = claims.admin_did.clone();
 
     // Consume the install token (Issued → Consumed). Carve-out stays
     // open until M0.6's bootstrap closes it.
     store.finish_claim(&jti).await?;
-
-    // Drop the one-shot DID-binding challenge.
-    state.passkey_ks.remove(did_binding_key(&jti)).await?;
 
     // Persist the passkey + credential mapping so M0.6's bootstrap
     // and subsequent passkey login can find the credential.
@@ -296,156 +258,10 @@ fn parse_jti(s: &str) -> Result<Uuid, AppError> {
         .map_err(|_| AppError::Unauthorized("invalid install token (malformed jti)".into()))
 }
 
-/// Lift the raw 32-byte Ed25519 public key out of a registered
-/// [`Passkey`]. webauthn-rs serialises the COSE key under
-/// `cred.cred.key.EC_OKP.x` (base64url-no-pad string) in the current
-/// shape; we serde-walk it rather than depend on the
-/// `danger-credential-internals` feature.
-fn extract_ed25519_public_key(passkey: &Passkey) -> Result<[u8; 32], AppError> {
-    let value = serde_json::to_value(passkey)
-        .map_err(|e| AppError::Internal(format!("passkey serialise: {e}")))?;
-    let bytes = walk_eddsa_x(&value)
-        .ok_or_else(|| AppError::Internal("passkey has no Ed25519 x coordinate".into()))?;
-    bytes
-        .try_into()
-        .map_err(|_| AppError::Internal("Ed25519 x coordinate not 32 bytes".into()))
-}
-
-fn walk_eddsa_x(value: &serde_json::Value) -> Option<Vec<u8>> {
-    match value {
-        serde_json::Value::Object(map) => {
-            if let Some(x) = map.get("x")
-                && let Some(bytes) = decode_x_value(x)
-            {
-                return Some(bytes);
-            }
-            for v in map.values() {
-                if let Some(found) = walk_eddsa_x(v) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        serde_json::Value::Array(items) => items.iter().find_map(walk_eddsa_x),
-        _ => None,
-    }
-}
-
-fn decode_x_value(value: &serde_json::Value) -> Option<Vec<u8>> {
-    if let Ok(bytes) = serde_json::from_value::<Vec<u8>>(value.clone())
-        && bytes.len() == 32
-    {
-        return Some(bytes);
-    }
-    if let Some(s) = value.as_str()
-        && let Ok(bytes) = B64.decode(s)
-        && bytes.len() == 32
-    {
-        return Some(bytes);
-    }
-    None
-}
-
-/// Project a 32-byte Ed25519 public key into a `did:key`. Multicodec
-/// prefix `0xed01` + raw key, multibase-encoded with `z` (base58btc).
-fn ed25519_pub_to_did_key(pubkey: &[u8; 32]) -> String {
-    format!(
-        "did:key:{}",
-        vta_sdk::did_key::ed25519_multibase_pubkey(pubkey)
-    )
-}
-
-/// Verify a base64url-no-pad Ed25519 signature over `challenge`
-/// using `pubkey`.
-fn verify_did_binding(
-    pubkey: &[u8; 32],
-    challenge: &[u8; 32],
-    signature_b64u: &str,
-) -> Result<(), AppError> {
-    let sig_bytes = B64
-        .decode(signature_b64u)
-        .map_err(|_| AppError::Unauthorized("invalid DID-binding signature encoding".into()))?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|_| AppError::Unauthorized("DID-binding signature must be 64 bytes".into()))?;
-    let verifying = VerifyingKey::from_bytes(pubkey)
-        .map_err(|_| AppError::Internal("malformed Ed25519 public key".into()))?;
-    verifying
-        .verify(challenge, &Signature::from_bytes(&sig_arr))
-        .map_err(|_| AppError::Unauthorized("DID-binding signature does not verify".into()))?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Unit tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
-
-    #[test]
-    fn eddsa_alg_constant_matches_cose() {
-        // Drift sentinel — if `EDDSA_ALG` ever changes the install
-        // route's enforcement is no longer aligned with the rest of
-        // the workspace.
-        assert_eq!(crate::webauthn::EDDSA_ALG, -8);
-    }
-
-    #[test]
-    fn did_key_round_trips_through_vta_sdk() {
-        let pubkey = [0xAA; 32];
-        let did = ed25519_pub_to_did_key(&pubkey);
-        assert!(did.starts_with("did:key:z"));
-        // Decode back via the SDK to confirm the same bytes survive.
-        let mb = did.strip_prefix("did:key:").unwrap();
-        let decoded = vta_sdk::did_key::decode_ed25519_public_key_multibase(mb).unwrap();
-        assert_eq!(decoded, pubkey);
-    }
-
-    #[test]
-    fn verify_did_binding_accepts_valid_signature() {
-        let signing = SigningKey::from_bytes(&[0x11; 32]);
-        let pubkey = signing.verifying_key().to_bytes();
-        let challenge = [0x42u8; 32];
-        let sig = signing.sign(&challenge).to_bytes();
-        verify_did_binding(&pubkey, &challenge, &B64.encode(sig)).unwrap();
-    }
-
-    #[test]
-    fn verify_did_binding_rejects_wrong_pubkey() {
-        let signing = SigningKey::from_bytes(&[0x11; 32]);
-        let other = SigningKey::from_bytes(&[0x22; 32]);
-        let challenge = [0x42u8; 32];
-        let sig = signing.sign(&challenge).to_bytes();
-        let err = verify_did_binding(
-            &other.verifying_key().to_bytes(),
-            &challenge,
-            &B64.encode(sig),
-        )
-        .expect_err("must reject");
-        assert!(matches!(err, AppError::Unauthorized(_)));
-    }
-
-    #[test]
-    fn verify_did_binding_rejects_tampered_challenge() {
-        let signing = SigningKey::from_bytes(&[0x11; 32]);
-        let pubkey = signing.verifying_key().to_bytes();
-        let challenge = [0x42u8; 32];
-        let sig = signing.sign(&challenge).to_bytes();
-        let mut tampered = challenge;
-        tampered[0] ^= 0x01;
-        let err =
-            verify_did_binding(&pubkey, &tampered, &B64.encode(sig)).expect_err("must reject");
-        assert!(matches!(err, AppError::Unauthorized(_)));
-    }
-
-    #[test]
-    fn verify_did_binding_rejects_short_signature() {
-        let pubkey = [0u8; 32];
-        let err = verify_did_binding(&pubkey, &[0u8; 32], &B64.encode([0u8; 16]))
-            .expect_err("must reject");
-        assert!(matches!(err, AppError::Unauthorized(_)));
-    }
-}
+// All Ed25519-derivation helpers (extract_ed25519_public_key,
+// walk_eddsa_x, decode_x_value, ed25519_pub_to_did_key) lived here
+// to project the WebAuthn key into the admin did:key. The redesigned
+// flow carries admin_did in the install token, so the helpers are
+// no longer needed. Removing them lets the install ceremony accept
+// any algorithm the authenticator offers (ES256 from platform
+// passkeys, EdDSA from hardware keys, etc.).

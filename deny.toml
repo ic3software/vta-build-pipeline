@@ -149,6 +149,12 @@ version = 2
 confidence-threshold = 0.8
 allow = [
   "MIT",
+  # MIT No Attribution — MIT minus the copyright-notice preservation
+  # clause. OSI-approved, more permissive than MIT itself. Pulled in
+  # transitively via regorus → jsonschema → referencing → fluent-uri
+  # → borrow-or-share. Consistent with the "0BSD" entry below, which
+  # is the functionally-equivalent BSD variant we already accept.
+  "MIT-0",
   "Apache-2.0",
   "BSD-2-Clause",
   "BSD-3-Clause",

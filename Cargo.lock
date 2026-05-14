@@ -9252,7 +9252,7 @@ dependencies = [
 
 [[package]]
 name = "vtc-service"
-version = "0.6.0"
+version = "0.1.0"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -9281,6 +9281,7 @@ dependencies = [
  "ed25519-dalek",
  "fjall",
  "flate2",
+ "futures-util",
  "gethostname",
  "google-cloud-auth",
  "google-cloud-secretmanager-v1",

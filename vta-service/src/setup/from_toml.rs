@@ -194,7 +194,7 @@ pub enum SecretsBackendInput {
     /// HashiCorp Vault (KV v2). Authenticates via Kubernetes (default),
     /// AppRole, or a static token. The seed is stored at
     /// `<kv_mount>/<secret_path>` in the configured field (default
-    /// `seed`). See `docs/02-operating/vault-secrets.md` for the
+    /// `seed`). See `docs/02-vta/secret-backends.md` for the
     /// auth-method matrix.
     Vault {
         /// Vault server URL (e.g. `https://vault.example.com:8200`).
@@ -1625,17 +1625,16 @@ mod tests {
     }
 
     /// Catch drift between `WizardInputs` and the operator-facing example
-    /// file at `docs/02-operating/examples/vta-setup.example.toml`. If you
+    /// file at `docs/02-vta/examples/vta-setup.example.toml`. If you
     /// change the schema and forget to update the example, this test fails.
     #[test]
     fn shipped_example_parses() {
-        let raw = include_str!("../../../docs/02-operating/examples/vta-setup.example.toml");
+        let raw = include_str!("../../../docs/02-vta/examples/vta-setup.example.toml");
         let inputs = parse(raw).expect(
-            "docs/02-operating/examples/vta-setup.example.toml must be valid against WizardInputs",
+            "docs/02-vta/examples/vta-setup.example.toml must be valid against WizardInputs",
         );
-        validate_inputs(&inputs).expect(
-            "docs/02-operating/examples/vta-setup.example.toml must pass cross-field validation",
-        );
+        validate_inputs(&inputs)
+            .expect("docs/02-vta/examples/vta-setup.example.toml must pass cross-field validation");
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub mod bundle;
 #[cfg(feature = "website")]
 pub mod cache;
 #[cfg(feature = "website")]
+pub mod default_site;
+#[cfg(feature = "website")]
 pub mod paths;
 #[cfg(feature = "website")]
 pub mod serve;

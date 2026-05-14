@@ -227,7 +227,7 @@ pnm webvh register-did --did <serverless-did> --server primary
 The second command pushes the existing local `did.jsonl` to the
 host and flips `server_id` so subsequent updates auto-publish.
 The DID identifier is unchanged. See
-`docs/03-integrating/runtime-service-management.md` for the full
+`docs/02-vta/runtime-service-management.md` for the full
 walkthrough. Refused if the DID is already server-managed.
 
 ## Open follow-ups

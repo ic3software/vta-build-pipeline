@@ -19,7 +19,7 @@
   raised from 1h to 24h, hard cap 30d, 1h floor over DIDComm
   transport. Reachable from both `pnm` (over REST or DIDComm) and
   the offline `vta services …` binary on a stopped VTA.
-  See `docs/03-integrating/runtime-service-management.md` for the
+  See `docs/02-vta/runtime-service-management.md` for the
   operator guide and
   `docs/05-design-notes/runtime-service-management.md` for the
   spec.
@@ -144,7 +144,7 @@ enabled, disabled, or migrated on a running VTA without rebuilding it.
   replay. All five admin operations are available over both REST
   and DIDComm transport (`enable` is REST-only by nature).
 
-  See `docs/03-integrating/didcomm-protocol-management.md` and
+  See `docs/02-vta/didcomm-protocol-management.md` and
   `docs/05-design-notes/didcomm-protocol-management.md`. New
   modules: `vti_common::telemetry`,
   `vta_service::messaging::{registry, drain_store, drain_sweeper,
@@ -163,7 +163,7 @@ enabled, disabled, or migrated on a running VTA without rebuilding it.
   DIDComm); `webvh-server` exposes `DIDCommMessaging` only (witness,
   watcher, server consumed via DIDComm). The renderer stays declarative —
   no conditionals — so the template name is a 1:1 promise of what comes
-  out. See `docs/03-integrating/provision-integration.md` for the
+  out. See `docs/02-vta/provision-integration.md` for the
   comparison matrix.
 - **`ProvisionAsk` builders renamed to match.** `ProvisionAsk::webvh_service`
   → `ProvisionAsk::webvh_server`, `ProvisionAsk::webvh_hosting_server` →
@@ -373,7 +373,7 @@ The entries below are the actionable changes that landed.
   `cargo doc` is no longer empty — covers Quick Start, sealed-transfer
   pointer, feature-flag table, module map.
 - **README + integration-guide fixes.** Workspace `README.md`,
-  `pnm-cli/README.md`, and `docs/03-integrating/integration-guide.md`
+  `pnm-cli/README.md`, and `docs/02-vta/integration-guide.md`
   no longer document non-existent flags or missing API methods.
   Version pins bumped from `0.4` to `0.5`.
 - **Stale CLAUDE.md notes struck.** The "backup `vta_did` cross-check

@@ -19,10 +19,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use chrono::{Duration as ChronoDuration, Utc};
-use ed25519_dalek::Signer;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
@@ -175,6 +172,7 @@ async fn mint_token_and_record(fix: &Fixture, ttl_seconds: u64) -> String {
     let minted = mint_install_token(
         &fix.install_signer,
         "did:webvh:vtc.example.com:abc",
+        "did:key:z6MkAdmin",
         ttl_seconds,
     )
     .expect("mint install token");
@@ -220,15 +218,6 @@ async fn post_json(
     (status, json)
 }
 
-fn harness_seed_for(challenge: &[u8], rp_id: &str) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(challenge);
-    h.update(rp_id.as_bytes());
-    h.update(b"soft-eddsa-seed/v1");
-    h.finalize().into()
-}
-
 /// Drive a full claim ceremony and return the setup-session JWT plus
 /// the candidate admin DID the server returned.
 async fn run_claim_ceremony(fix: &Fixture) -> (String, String) {
@@ -244,18 +233,11 @@ async fn run_claim_ceremony(fix: &Fixture) -> (String, String) {
     assert_eq!(status, StatusCode::OK, "start: {body}");
 
     let registration_id = body["registrationId"].as_str().unwrap().to_string();
-    let challenge_b64 = body["didBindingChallenge"].as_str().unwrap();
-    let challenge: [u8; 32] = B64.decode(challenge_b64).unwrap().try_into().unwrap();
     let ccr: webauthn_rs::prelude::CreationChallengeResponse =
         serde_json::from_value(body["options"].clone()).unwrap();
 
     let mut authenticator = SoftEd25519Authenticator::new();
     let (register_cred, _ed25519_pub) = authenticator.register(&ccr, RP_ORIGIN);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&harness_seed_for(
-        ccr.public_key.challenge.as_ref(),
-        &ccr.public_key.rp.id,
-    ));
-    let sig = B64.encode(signing_key.sign(&challenge).to_bytes());
 
     let (status, body) = post_json(
         &fix.router,
@@ -265,7 +247,6 @@ async fn run_claim_ceremony(fix: &Fixture) -> (String, String) {
             "install_token": token,
             "registration_id": registration_id,
             "webauthn_response": register_cred,
-            "did_binding_signature": sig,
         }),
     )
     .await;

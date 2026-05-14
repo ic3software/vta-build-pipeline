@@ -197,7 +197,7 @@ the seal as part of live access control — it's a setup-time guardrail.
   auto-seal.
 - [`cold-start.md`](cold-start.md) — the interactive walkthrough, which
   reaches the same end state through prompts.
-- [`provision-integration.md`](../03-integrating/provision-integration.md)
+- [`provision-integration.md`](../02-vta/provision-integration.md)
   — the offline integration-provisioning flow whose `reprovision` /
   `provision-integration` subcommands trip the seal.
 - [`security-model.md`](../01-concepts/security-model.md) — Layer 6 of

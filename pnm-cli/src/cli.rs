@@ -271,7 +271,7 @@ pub(crate) enum BootstrapCommands {
     /// provision-request` — same wire shape, same on-disk layout,
     /// different default seed directory.
     ///
-    /// See `docs/03-integrating/provision-integration.md` for the flow.
+    /// See `docs/02-vta/provision-integration.md` for the flow.
     ProvisionRequest {
         /// DID template name the VTA should render (e.g.
         /// `didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`, or an

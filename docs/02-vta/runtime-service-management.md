@@ -254,7 +254,7 @@ removed.
 ```bash
 # 1. Provision a mediator separately. The mediator is its own VTA.
 #    Use the `didcomm-mediator` template on a different VTA host.
-#    See docs/03-integrating/provision-integration.md.
+#    See docs/02-vta/provision-integration.md.
 
 # 2. Get the mediator's DID — typically did:webvh:scid:mediator.example.com:m1
 mediator_did=did:webvh:abcd1234:mediator.example.com:m1
@@ -622,5 +622,5 @@ For day-to-day service management against a running VTA, prefer
   the dependency-ordered implementation plan
 - `docs/05-design-notes/runtime-service-management-tasks.md` —
   the 33-task breakdown
-- `docs/03-integrating/didcomm-protocol-management.md` —
+- `docs/02-vta/didcomm-protocol-management.md` —
   redirects here (legacy DIDComm-only guide superseded in P5)

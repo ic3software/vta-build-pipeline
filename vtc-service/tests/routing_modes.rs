@@ -153,31 +153,89 @@ async fn path_mode_health_at_root_is_exempt() {
 }
 
 #[tokio::test]
-async fn path_mode_admin_placeholder_returns_503() {
+async fn path_mode_admin_surface_serves_embedded_spa() {
+    // Phase 5 M5.7: the admin UX feature is default-on, so
+    // `/admin/*` serves the baked in-tree SPA rather than the
+    // 503 placeholder.
     let routing = RoutingConfig::default();
     let (router, _dir) = build_router(&routing).await;
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/anything")
+        .uri("/admin/build-info.json")
         .body(Body::empty())
         .unwrap();
-    let (status, _) = request(&router, req).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let (status, body) = request(&router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["indexSha256"].is_string(), "got {json}");
 }
 
 #[tokio::test]
-async fn path_mode_website_fallback_returns_503() {
+async fn path_mode_admin_bare_prefix_serves_admin_spa() {
+    // `GET /admin` (no trailing slash) must hit the admin SPA's
+    // `index.html`. Bare `/admin` is what operators type in browsers.
     let routing = RoutingConfig::default();
     let (router, _dir) = build_router(&routing).await;
 
     let req = Request::builder()
         .method("GET")
-        .uri("/not-a-real-path")
+        .uri("/admin")
         .body(Body::empty())
         .unwrap();
-    let (status, _) = request(&router, req).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let (status, body) = request(&router, req).await;
+    assert_eq!(status, StatusCode::OK, "/admin returned {status}");
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains("VTC Admin"),
+        "/admin did not serve admin SPA — got first 200 chars: {}",
+        &html[..html.len().min(200)]
+    );
+}
+
+#[tokio::test]
+async fn path_mode_admin_trailing_slash_serves_admin_spa() {
+    // `GET /admin/` (with trailing slash) must also hit the admin
+    // SPA, not fall through to the website's default landing page —
+    // user-reported regression.
+    let routing = RoutingConfig::default();
+    let (router, _dir) = build_router(&routing).await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/admin/")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = request(&router, req).await;
+    assert_eq!(status, StatusCode::OK, "/admin/ returned {status}");
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains("VTC Admin"),
+        "/admin/ did not serve admin SPA — got first 200 chars: {}",
+        &html[..html.len().min(200)]
+    );
+}
+
+#[tokio::test]
+async fn path_mode_website_fallback_serves_default_landing_page() {
+    // Follow-up to M5.4: when `website.root_dir` is unset, the
+    // catch-all serves the in-tree default landing page from
+    // `vtc-service/website-default/` instead of returning 503.
+    let routing = RoutingConfig::default();
+    let (router, _dir) = build_router(&routing).await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = request(&router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains("Verifiable Trust Community"),
+        "default landing page drifted: {html}"
+    );
 }
 
 #[tokio::test]

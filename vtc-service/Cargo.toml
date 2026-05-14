@@ -2,7 +2,7 @@
 name = "vtc-service"
 description = "Service for Verifiable Trust Communities"
 readme = "README.md"
-version = "0.6.0"
+version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 authors.workspace = true
@@ -17,14 +17,21 @@ setup = ["dep:dialoguer", "dep:didwebvh-rs", "dep:url"]
 # hosting at `website.root_dir`. Default-on so MVP `cargo run`
 # serves a site; operators who host externally can compile it
 # out via `--no-default-features --features setup,keyring`.
-website = ["dep:mime_guess", "dep:unicode-normalization", "dep:tar", "dep:flate2"]
+website = [
+  "dep:mime_guess",
+  "dep:unicode-normalization",
+  "dep:tar",
+  "dep:flate2",
+  # `default_site` bakes the placeholder landing page via `include_dir!`.
+  "dep:include_dir",
+]
 # Embedded admin UX (§12.2). Static HTML/CSS/JS source lives at
 # `vtc-service/admin-ui/`; baked into the binary via `include_dir!`
 # at compile time. Per Phase 5 D1, the source is **in-tree** —
 # there is no sibling repo, no release-signed tarball fetch, no
 # offline-build fallback. Operators replace the directory contents
 # to ship a custom UX.
-admin-ui = ["dep:include_dir", "website"]
+admin-ui = ["website"]
 # OS keyring backend for the VTC secret. Enables vta-sdk's keyring feature
 # so the binary can register a platform store once via
 # `vta_sdk::keyring_init::install_default_store()` at startup.
@@ -36,7 +43,15 @@ gcp-secrets = [
   "dep:google-cloud-auth",
   "dep:bytes",
 ]
-azure-secrets = ["dep:azure_security_keyvault_secrets", "dep:azure_identity"]
+azure-secrets = [
+  "dep:azure_security_keyvault_secrets",
+  "dep:azure_identity",
+  # `TryStreamExt::try_next` is the idiomatic way to drain the
+  # azure-core pager that `list_secret_properties` returns. Already
+  # a transitive workspace dep — naming it direct just so the wizard
+  # can consume it.
+  "dep:futures-util",
+]
 
 [[bin]]
 name = "vtc"
@@ -124,6 +139,7 @@ rand = { workspace = true }
 dialoguer = { workspace = true, optional = true }
 azure_security_keyvault_secrets = { workspace = true, optional = true }
 azure_identity = { workspace = true, optional = true }
+futures-util = { version = "0.3", optional = true }
 sha2 = { workspace = true }
 hkdf = { workspace = true }
 x25519-dalek = { workspace = true }

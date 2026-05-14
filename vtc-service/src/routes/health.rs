@@ -13,6 +13,12 @@ use crate::server::AppState;
 pub struct HealthResponse {
     status: &'static str,
     version: &'static str,
+    /// The VTC's own did:webvh, set during `vtc setup`. Exposed
+    /// publicly because external verifiers, registries, and the
+    /// default website's landing page all need to display it —
+    /// it's the community's identity, not a secret.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vtc_did: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mediator_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -22,6 +28,7 @@ pub struct HealthResponse {
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     debug!("health check");
     let config = state.config.read().await;
+    let vtc_did = config.vtc_did.clone();
     let (mediator_url, mediator_did) = config
         .messaging
         .as_ref()
@@ -30,6 +37,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+        vtc_did,
         mediator_url,
         mediator_did,
     })

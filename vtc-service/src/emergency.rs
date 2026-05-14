@@ -286,7 +286,17 @@ pub async fn run_emergency_bootstrap_with_store(
     let ed25519 = bundle.ed25519_private_bytes()?;
     let signer = InstallTokenSigner::from_master_seed(&*ed25519)?;
     let issuer = bundle.integration_did.clone();
-    let minted = mint_install_token(&signer, &issuer, INSTALL_TOKEN_DEFAULT_TTL_SECS)?;
+    // Reuse the recovery DID as the new admin — the operator already
+    // proved control of it via the VTA recovery context, and it's the
+    // identity they currently hold private keys for. Operators who
+    // want a different admin DID can rotate via the regular flow
+    // after the emergency bootstrap completes.
+    let minted = mint_install_token(
+        &signer,
+        &issuer,
+        &setup_key.did,
+        INSTALL_TOKEN_DEFAULT_TTL_SECS,
+    )?;
     let exp = Utc::now() + chrono::Duration::seconds(INSTALL_TOKEN_DEFAULT_TTL_SECS as i64);
     install_store
         .record_issued(
@@ -307,9 +317,15 @@ pub async fn run_emergency_bootstrap_with_store(
         .await?;
 
     // --- install URL ------------------------------------------------
+    // `/admin/install` so the embedded admin SPA picks the request
+    // up and runs the install-claim ceremony in-browser. The bare
+    // `/install` path would hit the website fallback, which has no
+    // install page. The `vtc://install?token=…` fallback (when
+    // `public_url` is unset) intentionally keeps the bare-path shape
+    // because nothing renders it; it's a sentinel for ops scripts.
     let install_url = match &config.public_url {
         Some(base) => format!(
-            "{}/install?token={}",
+            "{}/admin/install?token={}",
             base.trim_end_matches('/'),
             minted.jwt
         ),

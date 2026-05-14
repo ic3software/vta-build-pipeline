@@ -75,7 +75,7 @@ Tests and docs refer to DIDs, not pubkeys.
 
 ## Use DID templates, don't hand-roll DID shapes
 
-The workspace has a **DID templates feature** (`docs/03-integrating/did-templates.md`,
+The workspace has a **DID templates feature** (`docs/02-vta/did-templates.md`,
 `vta-sdk/src/did_templates`, `vta-service/src/routes/did_templates.rs`). A
 template is a JSON file describing the **shape** of a DID document with
 `{TOKEN}` placeholders; the VTA renders them server-side, filling in keys it
@@ -229,7 +229,7 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Code**: `vta-service/src/setup/interactive.rs`, `vta-service/src/setup/from_toml.rs`.
 - **Seed**: 24-word BIP-39 mnemonic, stored via `affinidi-secrets-resolver`
   backend (OS keyring by default; AWS/GCP/Azure via feature flags).
-- **Docs**: `docs/02-operating/cold-start.md`, `docs/02-operating/non-interactive-setup.md`.
+- **Docs**: `docs/02-vta/cold-start.md`, `docs/02-vta/non-interactive-setup.md`.
 
 ### Admin credential cold-start
 - **What**: Bootstrap the first operator without a running VTA.
@@ -238,7 +238,7 @@ new flow, update both this section and the relevant `docs/*.md`.
   authenticates → on first authenticated call PNM **auto-rotates** to a
   fresh `did:key`, creates the new ACL entry, deletes the temp one.
 - **Code**: `pnm-cli/src/setup.rs`, `vta-service/src/main.rs` (`import-did`).
-- **Docs**: `docs/02-operating/cold-start.md` §3–6.
+- **Docs**: `docs/02-vta/cold-start.md` §3–6.
 
 ### Deferred VTA-DID setup (non-TEE)
 - **What**: Mint the PNM admin `did:key` *before* the VTA exists, so
@@ -263,7 +263,7 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Carve-out**: Single-use. `BOOTSTRAP_CARVEOUT_CLOSED_KEY` flips on
   first success; subsequent calls return 410.
 - **Code**: `vta-service/src/routes/bootstrap.rs`, `vta-service/src/tee/`.
-- **Docs**: `sealed-bootstrap.md`, `docs/01-concepts/tee-architecture.md`.
+- **Docs**: `sealed-bootstrap.md`, `docs/02-vta/tee-architecture.md`.
 
 ### DIDComm challenge-response auth
 - **What**: Session initiation for any authenticated call.
@@ -331,7 +331,7 @@ new flow, update both this section and the relevant `docs/*.md`.
   `vta-sdk/src/provision_integration/{http,didcomm}.rs`,
   `vta-service/src/routes/bootstrap.rs:provision_integration`,
   `vta-service/src/messaging/handlers.rs:handle_provision_integration`.
-- **Docs**: `docs/03-integrating/provision-integration.md`.
+- **Docs**: `docs/02-vta/provision-integration.md`.
 
 ### Runtime service management
 - **What**: Add, update, remove, or roll back the VTA's
@@ -403,7 +403,7 @@ new flow, update both this section and the relevant `docs/*.md`.
   `vta-service/src/services_cli.rs` (the offline
   `vta services …` surface — direct fjall access, no auth
   ceremony, not for TEE deployments).
-- **Docs**: `docs/03-integrating/runtime-service-management.md`
+- **Docs**: `docs/02-vta/runtime-service-management.md`
   (operator guide), `docs/05-design-notes/runtime-service-management.md`
   (spec). The earlier `didcomm-protocol-management.md` docs in
   both directories are superseded redirects.
@@ -456,7 +456,7 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Code**: `vta-service/src/operations/did_webvh/register_server.rs`,
   `vta-service/src/routes/did_webvh.rs::register_did_with_server_handler`,
   `vta_sdk::client::VtaClient::register_did_with_server`.
-- **Docs**: `docs/03-integrating/runtime-service-management.md`
+- **Docs**: `docs/02-vta/runtime-service-management.md`
   (walkthrough section).
 
 ### DID template management
@@ -470,7 +470,7 @@ new flow, update both this section and the relevant `docs/*.md`.
   for witness/watcher).
 - **Code**: `vta-sdk/src/did_templates/`,
   `vta-service/src/routes/did_templates.rs`, `vta-service/src/operations/did_templates.rs`.
-- **Docs**: `docs/03-integrating/did-templates.md`.
+- **Docs**: `docs/02-vta/did-templates.md`.
 
 ## Runtime guards to preserve
 

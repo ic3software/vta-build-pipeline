@@ -22,14 +22,14 @@
 //! `Webauthn::start_passkey_registration` /
 //! `Webauthn::finish_passkey_registration` directly:
 //!
-//! - [`start_eddsa_passkey_registration`] — runs the upstream start,
+//! - [`start_passkey_registration`] — runs the upstream start,
 //!   then rewrites `CreationChallengeResponse.public_key.pub_key_cred_params`
 //!   and `PasskeyRegistration.rs.credential_algorithms` to contain
 //!   **only** EDDSA. The rewrite uses the `danger-allow-state-serialisation`
 //!   feature (enabled workspace-wide) to round-trip the state through
 //!   JSON — there is no other public path into the private
 //!   `credential_algorithms` field.
-//! - [`finish_eddsa_passkey_registration`] — runs the upstream finish,
+//! - [`finish_passkey_registration`] — runs the upstream finish,
 //!   then rejects any returned `Passkey` whose `cred_algorithm()` is
 //!   not `EDDSA` (defence-in-depth: upstream's own check already
 //!   asserts the credential matches `credential_algorithms`, but we
@@ -45,7 +45,7 @@
 use webauthn_rs::prelude::{
     CreationChallengeResponse, Passkey, PasskeyRegistration, RegisterPublicKeyCredential, Webauthn,
 };
-use webauthn_rs_proto::{COSEAlgorithm, PubKeyCredParams};
+use webauthn_rs_proto::PubKeyCredParams;
 
 use crate::error::AppError;
 
@@ -53,17 +53,15 @@ use crate::error::AppError;
 /// runtime check is independent of upstream renaming `COSEAlgorithm::EDDSA`.
 pub const EDDSA_ALG: i64 = -8;
 
-/// Start a passkey registration ceremony constrained to Ed25519.
-///
-/// Calls `Webauthn::start_passkey_registration` then post-processes
-/// both the wire challenge and the persisted ceremony state so that:
-///
-/// - The browser's `navigator.credentials.create()` call advertises
-///   **only** `{type: "public-key", alg: -8}` in `pubKeyCredParams`.
-/// - Upstream's finish-time check
-///   (`credential_algorithms.iter().any(|alg| alg == &cred.type_)`)
-///   only accepts EdDSA credentials.
-pub fn start_eddsa_passkey_registration(
+/// Start a passkey registration ceremony that accepts ES256, RS256,
+/// and EdDSA. The upstream default offers ES256 + RS256 — sufficient
+/// for every browser-platform authenticator. This wrapper adds EdDSA
+/// so Ed25519-capable hardware keys (YubiKey 5+, soft test
+/// authenticators) also work. The candidate admin DID is carried in
+/// the install token, so the algorithm of the credential the
+/// authenticator produces is purely an auth-factor choice — not an
+/// identity input.
+pub fn start_passkey_registration(
     webauthn: &Webauthn,
     user_unique_id: uuid::Uuid,
     user_name: &str,
@@ -79,63 +77,59 @@ pub fn start_eddsa_passkey_registration(
         )
         .map_err(|e| AppError::Internal(format!("webauthn registration start failed: {e}")))?;
 
-    restrict_ccr_to_eddsa(&mut ccr);
-    let reg_state = restrict_state_to_eddsa(&reg_state)?;
+    extend_ccr_with_eddsa(&mut ccr);
+    let reg_state = extend_state_with_eddsa(&reg_state)?;
 
     Ok((ccr, reg_state))
 }
 
-/// Finish a passkey registration ceremony and assert the resulting
-/// credential is Ed25519.
-///
-/// `Webauthn::finish_passkey_registration` already validates the
-/// credential's algorithm against the state's
-/// `credential_algorithms` list — but only because
-/// [`start_eddsa_passkey_registration`] mutated that list to
-/// `[EDDSA]`. This second check defends against a future bug where
-/// the start-side mutation silently fails to apply (e.g. a serde
-/// schema change in upstream): we'd still reject the non-EdDSA
-/// credential here rather than emit a malformed `did:key`.
-pub fn finish_eddsa_passkey_registration(
+/// Finish a passkey registration ceremony. Any algorithm accepted by
+/// the ceremony's `credential_algorithms` list (ES256, RS256, EdDSA)
+/// is valid — the install token, not the passkey shape, dictates the
+/// admin DID.
+pub fn finish_passkey_registration(
     webauthn: &Webauthn,
     credential: &RegisterPublicKeyCredential,
     state: &PasskeyRegistration,
 ) -> Result<Passkey, AppError> {
-    let passkey = webauthn
+    webauthn
         .finish_passkey_registration(credential, state)
-        .map_err(|e| AppError::Authentication(format!("passkey registration failed: {e}")))?;
-
-    let cred_alg = passkey.cred_algorithm();
-    if *cred_alg != COSEAlgorithm::EDDSA {
-        return Err(AppError::Authentication(format!(
-            "passkey registration rejected: VTC requires Ed25519 (EdDSA), authenticator returned {cred_alg:?}",
-        )));
-    }
-
-    Ok(passkey)
+        .map_err(|e| AppError::Authentication(format!("passkey registration failed: {e}")))
 }
 
-/// Mutate a [`CreationChallengeResponse`] in place so that
-/// `public_key.pub_key_cred_params` lists **only** EdDSA. Public so
-/// the unit tests can drive it directly without spinning up a full
-/// `Webauthn`.
-pub(crate) fn restrict_ccr_to_eddsa(ccr: &mut CreationChallengeResponse) {
-    ccr.public_key.pub_key_cred_params = vec![PubKeyCredParams {
+/// Mutate a [`CreationChallengeResponse`] in place to **add** EdDSA
+/// to `pub_key_cred_params` if not already present. The webauthn-rs
+/// default offers ES256 + RS256 — enough for every browser-platform
+/// authenticator (Apple iCloud Keychain, Windows Hello, Chrome
+/// passkeys) — but no EdDSA. Operators with Ed25519-capable hardware
+/// keys (YubiKey 5+ etc.) still get a working ceremony when we
+/// append it here. Public so the unit tests can drive it directly.
+pub(crate) fn extend_ccr_with_eddsa(ccr: &mut CreationChallengeResponse) {
+    if ccr
+        .public_key
+        .pub_key_cred_params
+        .iter()
+        .any(|p| p.alg == EDDSA_ALG)
+    {
+        return;
+    }
+    ccr.public_key.pub_key_cred_params.push(PubKeyCredParams {
         type_: "public-key".to_string(),
         alg: EDDSA_ALG,
-    }];
+    });
 }
 
-/// Round-trip a [`PasskeyRegistration`] through JSON and rewrite the
-/// inner state's `credential_algorithms` to `[EDDSA]`. Requires the
-/// `danger-allow-state-serialisation` feature on `webauthn-rs`
-/// (enabled workspace-wide in the root `Cargo.toml`).
+/// Round-trip a [`PasskeyRegistration`] through JSON and append
+/// `"EDDSA"` to `rs.credential_algorithms` so the finish-time check
+/// accepts it alongside the upstream-default ES256 + RS256.
+/// Requires the `danger-allow-state-serialisation` feature on
+/// `webauthn-rs` (enabled workspace-wide in the root `Cargo.toml`).
 ///
 /// Returns an [`AppError::Internal`] if the state's JSON shape ever
 /// drifts and the rewrite cannot find the expected
 /// `rs.credential_algorithms` path. That is a hard upstream-breakage
 /// signal, not an operator-facing condition.
-pub(crate) fn restrict_state_to_eddsa(
+pub(crate) fn extend_state_with_eddsa(
     state: &PasskeyRegistration,
 ) -> Result<PasskeyRegistration, AppError> {
     let mut value = serde_json::to_value(state).map_err(|e| {
@@ -151,21 +145,24 @@ pub(crate) fn restrict_state_to_eddsa(
             AppError::Internal("passkey registration state missing 'rs' object".into())
         })?;
 
-    if !rs.contains_key("credential_algorithms") {
-        return Err(AppError::Internal(
-            "passkey registration state missing 'rs.credential_algorithms'".into(),
-        ));
-    }
+    let algs = rs
+        .get_mut("credential_algorithms")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| {
+            AppError::Internal(
+                "passkey registration state missing 'rs.credential_algorithms'".into(),
+            )
+        })?;
 
-    // `Vec<COSEAlgorithm>` serialises as a sequence of *enum-variant
-    // strings* (the upstream enum has no `#[serde(repr)]`), not as
-    // COSE integer identifiers. Use `"EDDSA"` to match the round-trip
-    // shape — `[-8]` would fail with "invalid type: number, expected
-    // string or map".
-    rs.insert(
-        "credential_algorithms".to_string(),
-        serde_json::json!(["EDDSA"]),
-    );
+    // `Vec<COSEAlgorithm>` serialises as enum-variant strings, not COSE
+    // integer identifiers. Match the upstream round-trip shape with the
+    // string `"EDDSA"`.
+    let already_present = algs
+        .iter()
+        .any(|v| v.as_str().map(|s| s == "EDDSA").unwrap_or(false));
+    if !already_present {
+        algs.push(serde_json::json!("EDDSA"));
+    }
 
     serde_json::from_value(value).map_err(|e| {
         AppError::Internal(format!(
@@ -189,94 +186,106 @@ mod tests {
     }
 
     #[test]
-    fn start_rewrites_ccr_to_eddsa_only() {
+    fn start_advertises_eddsa_alongside_default_algorithms() {
         let w = webauthn();
-        let (ccr, _state) = start_eddsa_passkey_registration(
-            &w,
-            Uuid::new_v4(),
-            "did:key:zABC",
-            "did:key:zABC",
-            None,
-        )
-        .unwrap();
+        let (ccr, _state) =
+            start_passkey_registration(&w, Uuid::new_v4(), "did:key:zABC", "did:key:zABC", None)
+                .unwrap();
 
-        assert_eq!(
-            ccr.public_key.pub_key_cred_params.len(),
-            1,
-            "expected exactly one cred params entry after EdDSA restriction"
+        // EdDSA must be in the advertised list so Ed25519-capable
+        // authenticators (YubiKey 5+, soft test harness) work.
+        assert!(
+            ccr.public_key
+                .pub_key_cred_params
+                .iter()
+                .any(|p| p.alg == EDDSA_ALG),
+            "EdDSA missing from pub_key_cred_params: {:?}",
+            ccr.public_key.pub_key_cred_params
         );
-        let params = &ccr.public_key.pub_key_cred_params[0];
-        assert_eq!(params.type_, "public-key");
-        assert_eq!(params.alg, EDDSA_ALG, "alg must be EdDSA (-8)");
+        // Upstream defaults (ES256, RS256) must also remain — that's
+        // what platform passkey providers actually produce.
+        assert!(
+            ccr.public_key.pub_key_cred_params.len() >= 2,
+            "expected at least default ES256+RS256 plus EdDSA"
+        );
     }
 
     #[test]
-    fn start_rewrites_state_credential_algorithms_to_eddsa_only() {
+    fn start_state_credential_algorithms_includes_eddsa() {
         let w = webauthn();
-        let (_ccr, state) = start_eddsa_passkey_registration(
-            &w,
-            Uuid::new_v4(),
-            "did:key:zABC",
-            "did:key:zABC",
-            None,
-        )
-        .unwrap();
+        let (_ccr, state) =
+            start_passkey_registration(&w, Uuid::new_v4(), "did:key:zABC", "did:key:zABC", None)
+                .unwrap();
 
         // `PasskeyRegistration` exposes no public algorithms accessor;
-        // serialise and inspect the JSON instead. This is the same
-        // mechanism the implementation uses to perform the rewrite,
-        // so the round-trip is the assertion.
+        // inspect the JSON instead.
         let json = serde_json::to_value(&state).unwrap();
         let algs = json
             .get("rs")
             .and_then(|rs| rs.get("credential_algorithms"))
-            .expect("credential_algorithms present");
-        assert_eq!(
-            algs,
-            &serde_json::json!(["EDDSA"]),
-            "credential_algorithms must contain only EdDSA (serialised as the enum-variant name)"
+            .and_then(|v| v.as_array())
+            .expect("credential_algorithms is an array");
+        assert!(
+            algs.iter().any(|v| v.as_str() == Some("EDDSA")),
+            "credential_algorithms must include EDDSA so the finish-time check accepts Ed25519 credentials: {algs:?}"
         );
     }
 
     #[test]
-    fn restrict_ccr_overwrites_default_algorithm_list() {
+    fn extend_ccr_is_idempotent_and_additive() {
         let w = webauthn();
         let (mut ccr, _state) = w
             .start_passkey_registration(Uuid::new_v4(), "u", "u", None)
             .unwrap();
 
-        // Sanity: upstream's default list contains more than one entry
-        // and does NOT include EdDSA today (see workspace CLAUDE.md
-        // discussion). If this assertion ever fails it means upstream
-        // started shipping EdDSA in `secure_algs()` — at which point the
-        // rewrite becomes pure defence-in-depth and we can simplify.
-        assert!(ccr.public_key.pub_key_cred_params.len() >= 2);
-        assert!(
-            !ccr.public_key
-                .pub_key_cred_params
-                .iter()
-                .any(|p| p.alg == EDDSA_ALG)
-        );
+        let before = ccr.public_key.pub_key_cred_params.clone();
+        // Sanity: upstream's default list contains at least one entry
+        // and does NOT include EdDSA. If this assertion fails it
+        // means upstream started shipping EdDSA in `secure_algs()` —
+        // at which point the extend is a no-op (still safe).
+        assert!(!before.is_empty());
 
-        restrict_ccr_to_eddsa(&mut ccr);
+        extend_ccr_with_eddsa(&mut ccr);
+        // EdDSA appended exactly once.
+        let eddsa_count = ccr
+            .public_key
+            .pub_key_cred_params
+            .iter()
+            .filter(|p| p.alg == EDDSA_ALG)
+            .count();
+        assert_eq!(eddsa_count, 1);
 
-        assert_eq!(ccr.public_key.pub_key_cred_params.len(), 1);
-        assert_eq!(ccr.public_key.pub_key_cred_params[0].alg, EDDSA_ALG);
+        // Re-running is a no-op.
+        let after_first = ccr.public_key.pub_key_cred_params.len();
+        extend_ccr_with_eddsa(&mut ccr);
+        assert_eq!(ccr.public_key.pub_key_cred_params.len(), after_first);
+
+        // Original entries preserved (PubKeyCredParams doesn't impl PartialEq;
+        // compare on the alg field).
+        for p in &before {
+            assert!(
+                ccr.public_key
+                    .pub_key_cred_params
+                    .iter()
+                    .any(|q| q.alg == p.alg && q.type_ == p.type_)
+            );
+        }
     }
 
     #[test]
-    fn restrict_state_round_trips_through_serde() {
+    fn extend_state_round_trips_through_serde() {
         let w = webauthn();
         let (_ccr, state) = w
             .start_passkey_registration(Uuid::new_v4(), "u", "u", None)
             .unwrap();
 
-        let rewritten = restrict_state_to_eddsa(&state).unwrap();
+        let rewritten = extend_state_with_eddsa(&state).unwrap();
 
         let json = serde_json::to_value(&rewritten).unwrap();
-        assert_eq!(
-            json["rs"]["credential_algorithms"],
-            serde_json::json!(["EDDSA"])
+        let algs = json["rs"]["credential_algorithms"].as_array().unwrap();
+        assert!(
+            algs.iter().any(|v| v.as_str() == Some("EDDSA")),
+            "EDDSA must be appended: {algs:?}"
         );
 
         // Other state fields survive the round-trip — pick `policy`

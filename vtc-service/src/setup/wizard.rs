@@ -3,14 +3,22 @@
 //! Drives the VTA-provisioned bootstrap of a fresh VTC daemon per
 //! `tasks/vtc-mvp/vta-driven-keys.md` §3:
 //!
-//! 1. Prompt the operator for the five configuration knobs (config
-//!    path, VTC URL, admin UX URL, VTA URL, VTA DID, context).
+//! 1. Prompt the operator for the four configuration knobs (config
+//!    path, VTC base URL, VTA DID, context).
 //! 2. Mint an ephemeral `did:key` for the round-trip.
-//! 3. Pause for the operator to authorize the ephemeral DID at the
-//!    VTA (`pnm acl create --did <…> --role admin --contexts <ctx>`).
+//! 3. Pause for the operator to create the target context at the VTA
+//!    and grant the ephemeral DID admin access in one step
+//!    (`pnm contexts create --id <ctx> --name "VTC" --admin-did <…>
+//!    --admin-expires 1h`). Matches the canonical
+//!    `MediatorMessages` / `WebvhServerMessages` shape so all
+//!    template-driven integration setups read the same.
 //! 4. Drive `vta_sdk::provision_client::run_provision` with
 //!    `VtaIntent::FullSetup` + `ProvisionAsk::for_template
-//!    ("vtc-host", { URL, ADMIN_UX_URL }, ctx)`.
+//!    ("vtc-host", { URL = base_url }, ctx)`. `URL` is the daemon's
+//!    host base — the template's default `STATUS_LIST_PATH` is
+//!    `/v1/status-lists`, so the rendered status-list endpoint is
+//!    `{base_url}/v1/status-lists`. Passing the API base with `/v1`
+//!    here renders a double-`/v1` endpoint in the DID doc.
 //! 5. Open the sealed bundle; extract the `DidKeyMaterial` into a
 //!    [`crate::setup::VtcKeyBundle`].
 //! 6. Write the bundle into the chosen secret-store backend; the
@@ -31,7 +39,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 use vta_sdk::provision_client::{
     EphemeralSetupKey, OperatorMessages, ProvisionAsk, ProvisionResult, VtaIntent, VtaReply,
-    run_provision,
+    resolve_vta, run_provision,
 };
 
 use vti_common::config::StoreConfig;
@@ -42,7 +50,7 @@ use vti_common::setup::secrets_prompt::{
 };
 use vti_common::store::Store;
 
-use crate::config::{AppConfig, AuthConfig, LogConfig, SecretsConfig};
+use crate::config::{AppConfig, AuthConfig, LogConfig, MessagingConfig, SecretsConfig};
 use crate::install::{
     INSTALL_TOKEN_DEFAULT_TTL_SECS, InstallTokenSigner, InstallTokenStore, mint_install_token,
 };
@@ -58,7 +66,13 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
 
     let inputs = prompt_inputs()?;
 
-    // 1. Mint the ephemeral DID first so we can show it to the
+    // 1. Mediator choice. Done immediately after `prompt_inputs` so
+    //    the VTA DID resolution doubles as an early "is the VTA DID
+    //    valid?" check — bail fast on a typo rather than after the
+    //    operator has gone off to grant the ACL.
+    let messaging = prompt_messaging(&inputs.vta_did).await?;
+
+    // 2. Mint the ephemeral DID first so we can show it to the
     //    operator before they pick a secret-store backend (the
     //    pause for the ACL step is the slow part — get the
     //    decision-needed-from-the-operator instructions on screen
@@ -75,7 +89,7 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
         return Err(AppError::Validation("setup aborted".into()));
     }
 
-    // 2. Pick a secrets-store backend. We delay this until after
+    // 3. Pick a secrets-store backend. We delay this until after
     //    the ACL pause because the operator may want to interrupt
     //    setup at this point (e.g. realise they typed the VTA URL
     //    wrong); resolving the keyring path before the VTA
@@ -83,7 +97,7 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
     //    layer.
     let secrets = prompt_secrets_config()?;
 
-    // 3. Drive the provision-integration round-trip. Capture and
+    // 4. Drive the provision-integration round-trip. Capture and
     //    discard event traffic so the wizard's UX stays terse —
     //    long-form progress UX is for `pnm`, not the daemon setup
     //    flow.
@@ -107,7 +121,7 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
     })?;
     let bundle = VtcKeyBundle::from_did_key_material(integration_did.clone(), integration_key);
 
-    // 4. Persist the did.jsonl log so the daemon's `GET
+    // 5. Persist the did.jsonl log so the daemon's `GET
     //    /v1/{scid}/did.jsonl` route can serve it after restart.
     let did_log = provision.webvh_log().ok_or_else(|| {
         AppError::Internal(
@@ -119,19 +133,20 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
     let scid = extract_scid_or_err(&integration_did)?;
     write_did_log(&data_dir, &scid, did_log)?;
 
-    // 5. Materialise the config + write it to disk so
+    // 6. Materialise the config + write it to disk so
     //    `create_secret_store` sees the chosen backend.
     let app_config = build_app_config(
         config_path.clone(),
         integration_did.clone(),
         inputs.vta_did.clone(),
-        inputs.vtc_url.clone(),
+        inputs.base_url.clone(),
         data_dir.clone(),
         secrets,
+        messaging,
     )?;
     write_config_toml(&config_path, &app_config)?;
 
-    // 6. Write the bundle into the secret store.
+    // 7. Write the bundle into the secret store.
     let secret_store = create_secret_store(&app_config)
         .map_err(|e| AppError::Config(format!("failed to construct secret store: {e}")))?;
     let bundle_bytes = bundle.to_secret_store_bytes()?;
@@ -140,21 +155,43 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
         .await
         .map_err(|e| AppError::SecretStore(format!("failed to store VTC key bundle: {e}")))?;
 
-    // 7. Materialise the keyspaces so a `vtc` start doesn't have
+    // 8. Materialise the keyspaces so a `vtc` start doesn't have
     //    to pay the partition-create cost.
     open_keyspaces(&app_config)?;
 
-    // 8. Mint a one-shot install token. The operator uses this to
+    // 9. Mint a one-shot install token. The operator uses this to
     //    claim their admin passkey on the running daemon.
-    let install_url = mint_initial_install_token(&app_config, &bundle, &inputs.vtc_url).await?;
+    // Admin DID for the install ceremony — the rotated long-term DID
+    // the VTA returned from the bootstrap. Same identity at both VTA
+    // and VTC: a single admin credential the operator can use for
+    // either daemon's auth. The install URL attaches a passkey to this
+    // DID for browser-based admin UI access.
+    let admin_did = provision.admin_did().to_string();
+    let install_url =
+        mint_initial_install_token(&app_config, &bundle, &admin_did, &inputs.base_url).await?;
+
+    // Surface the long-term admin key material so the operator can
+    // save it for CLI use (the wizard doesn't yet write it to a
+    // keyring — manual handling is the MVP). The integration key
+    // doesn't contain the admin private key; we pull it from the
+    // provision result.
+    let admin_key_summary = provision
+        .admin_key()
+        .and_then(|k| serde_json::to_string_pretty(k).ok());
 
     println!();
     println!("\x1b[1;32m✅ VTC setup complete.\x1b[0m");
     println!();
-    println!("VTC DID:     {integration_did}");
-    println!("Config:      {}", config_path.display());
-    println!("Data dir:    {}", data_dir.display());
+    println!("VTC DID:       {integration_did}");
+    println!("Admin DID:     {admin_did}");
+    println!("Config:        {}", config_path.display());
+    println!("Data dir:      {}", data_dir.display());
     println!();
+    if let Some(key_json) = admin_key_summary.as_deref() {
+        println!("\x1b[1;33mAdmin key (save this — needed for CLI access):\x1b[0m");
+        println!("{key_json}");
+        println!();
+    }
     println!("\x1b[1mInstall URL (one-shot, 15 min TTL):\x1b[0m");
     println!("  {install_url}");
     println!();
@@ -171,11 +208,20 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
 // ---------------------------------------------------------------------------
 
 struct WizardInputs {
-    vtc_url: String,
-    admin_ux_url: String,
-    vta_url: String,
+    /// Daemon's host base URL (e.g. `https://vtc.example.com`). The
+    /// three surfaces — API, admin UX, public website — all mount
+    /// under this in path mode (the default). Stored verbatim as
+    /// `public_url` in the config and passed as the `vtc-host`
+    /// template's `URL` var.
+    base_url: String,
     vta_did: String,
     context: String,
+    /// Optional path component for the minted `did:webvh:<scid>:
+    /// <host>:<path>` — when `Some`, the wizard injects it as the
+    /// `WEBVH_PATH` template var so the VTA's webvh server uses it
+    /// instead of auto-assigning. Blank input → `None` → server
+    /// auto-assigns.
+    webvh_path: Option<String>,
 }
 
 fn prompt_config_path(initial: Option<PathBuf>) -> Result<PathBuf, AppError> {
@@ -211,20 +257,28 @@ fn refuse_if_already_set_up(config_path: &std::path::Path) -> Result<(), AppErro
 
 fn prompt_inputs() -> Result<WizardInputs, AppError> {
     println!();
-    println!("Provisioning a fresh VTC requires four URLs and the VTA's DID + context.");
+    println!("Provisioning a fresh VTC requires the daemon's base URL, the VTA's DID,");
+    println!("and the context name. The VTA's transport endpoints are resolved from");
+    println!("its DID document — no separate VTA URL is needed.");
     println!();
-    let vtc_url: String = Input::new()
-        .with_prompt("VTC URL (e.g. https://vtc.example.com/v1)")
+    println!("The VTC daemon serves three surfaces — API, admin UX, public website —");
+    println!("all mounted under one base URL by default:");
+    println!();
+    println!("  Base URL      https://vtc.example.com");
+    println!("    API         https://vtc.example.com/v1/...");
+    println!("    Admin UX    https://vtc.example.com/admin");
+    println!("    Website     https://vtc.example.com/");
+    println!();
+    println!("If you want separate subdomains per surface (e.g. api.vtc.example.com,");
+    println!("admin.vtc.example.com), keep the base URL as the public-website host");
+    println!("here and add [routing.api].host / [routing.admin_ui].host to config.toml");
+    println!("after setup. See docs/03-vtc/website-and-admin.md.");
+    println!();
+    let base_url: String = Input::new()
+        .with_prompt("VTC base URL (no trailing slash, no /v1, e.g. https://vtc.example.com)")
         .interact_text()
         .map_err(prompt_err)?;
-    let admin_ux_url: String = Input::new()
-        .with_prompt("Admin UX URL (e.g. https://admin.vtc.example.com)")
-        .interact_text()
-        .map_err(prompt_err)?;
-    let vta_url: String = Input::new()
-        .with_prompt("VTA URL (e.g. https://vta.example.com)")
-        .interact_text()
-        .map_err(prompt_err)?;
+    let base_url = base_url.trim_end_matches('/').to_string();
     let vta_did: String = Input::new()
         .with_prompt("VTA DID (e.g. did:webvh:vta.example.com:abc)")
         .interact_text()
@@ -234,16 +288,137 @@ fn prompt_inputs() -> Result<WizardInputs, AppError> {
         .default("default".into())
         .interact_text()
         .map_err(prompt_err)?;
+
+    // Optional webvh path (the `<path>` slot in
+    // `did:webvh:<scid>:<host>:<path>`). Blank → server auto-assigns
+    // a path. Operators with a naming convention (e.g. `vtc-prod`,
+    // `community-name`) can pin it here. The server-selection prompt
+    // is deferred to a follow-up; for now the VTA's auto-pick handles
+    // the 0-or-1-server case, which is the MVP norm.
+    let webvh_path_raw: String = Input::new()
+        .with_prompt("WebVH path (blank → server auto-assigns)")
+        .default(String::new())
+        .allow_empty(true)
+        .interact_text()
+        .map_err(prompt_err)?;
+    let webvh_path = {
+        let trimmed = webvh_path_raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+
     Ok(WizardInputs {
-        vtc_url,
-        admin_ux_url,
-        vta_url,
+        base_url,
         vta_did,
         context,
+        webvh_path,
     })
 }
 
+/// Resolve the VTA DID and ask the operator which mediator the VTC
+/// should route DIDComm traffic through. Three paths:
+///
+/// 1. Use the same mediator the VTA advertises in its DID document.
+///    This is the dominant choice for single-operator deployments —
+///    one mediator serves both the VTA and its VTCs.
+/// 2. Specify a different mediator DID (e.g. the operator runs a
+///    per-VTC mediator, or the VTA's mediator is overloaded).
+/// 3. Skip messaging entirely. The daemon logs a one-line warning at
+///    startup ("messaging not configured — inbound message handling
+///    disabled") but otherwise stays healthy on the REST surface.
+///
+/// Resolving the VTA DID doubles as a "is this DID resolvable?"
+/// sanity check; a typo here surfaces *before* the operator runs off
+/// to grant the ACL. A resolution failure that yields no mediator
+/// hint falls through to options 2 + 3 with a warning — bootstrapping
+/// can continue if the operator already knows which mediator to use.
+async fn prompt_messaging(vta_did: &str) -> Result<Option<MessagingConfig>, AppError> {
+    use dialoguer::Select;
+
+    let vta_mediator = match resolve_vta(vta_did).await {
+        Ok(resolved) => resolved.mediator_did,
+        Err(e) => {
+            warn!(error = %e, vta_did, "could not resolve VTA DID — mediator suggestion unavailable");
+            None
+        }
+    };
+
+    println!();
+    let mut labels: Vec<String> = Vec::new();
+    let mut tags: Vec<&str> = Vec::new();
+    if let Some(med) = vta_mediator.as_deref() {
+        labels.push(format!("Use the VTA's mediator ({med})"));
+        tags.push("vta-mediator");
+    } else {
+        println!("  Note: the VTA's DID document does not advertise a DIDComm mediator;");
+        println!("        you'll need to supply one yourself or skip messaging.");
+        println!();
+    }
+    labels.push("Specify a different mediator DID".to_string());
+    tags.push("custom");
+    labels.push("Skip messaging (DIDComm disabled)".to_string());
+    tags.push("skip");
+
+    let idx = Select::new()
+        .with_prompt("DIDComm messaging")
+        .items(&labels)
+        .default(0)
+        .interact()
+        .map_err(prompt_err)?;
+
+    let mediator_did = match tags[idx] {
+        "vta-mediator" => vta_mediator.expect("present when tag was inserted"),
+        "custom" => Input::new()
+            .with_prompt("Mediator DID (must start with `did:`)")
+            .validate_with(|input: &String| -> Result<(), String> {
+                if input.starts_with("did:") {
+                    Ok(())
+                } else {
+                    Err("DID must start with 'did:' (e.g. did:webvh:... or did:key:...)".into())
+                }
+            })
+            .interact_text()
+            .map_err(prompt_err)?,
+        "skip" => return Ok(None),
+        other => {
+            return Err(AppError::Internal(format!(
+                "internal: unknown messaging tag '{other}'"
+            )));
+        }
+    };
+
+    Ok(Some(MessagingConfig {
+        mediator_url: String::new(),
+        mediator_did,
+        mediator_host: None,
+    }))
+}
+
 fn prompt_secrets_config() -> Result<SecretsConfig, AppError> {
+    #[cfg_attr(
+        not(any(
+            feature = "aws-secrets",
+            feature = "gcp-secrets",
+            feature = "azure-secrets"
+        )),
+        allow(unused_mut)
+    )]
+    let mut resolvers = BackendResolvers::empty();
+    #[cfg(feature = "aws-secrets")]
+    {
+        resolvers.aws = Some(Box::new(aws_resolver));
+    }
+    #[cfg(feature = "gcp-secrets")]
+    {
+        resolvers.gcp = Some(Box::new(gcp_resolver));
+    }
+    #[cfg(feature = "azure-secrets")]
+    {
+        resolvers.azure = Some(Box::new(azure_resolver));
+    }
     let choice = configure_secrets(
         &AvailableBackends {
             keyring: cfg!(feature = "keyring"),
@@ -254,10 +429,295 @@ fn prompt_secrets_config() -> Result<SecretsConfig, AppError> {
             plaintext: true,
         },
         "vtc",
-        BackendResolvers::empty(),
+        resolvers,
     )
     .map_err(secrets_prompt_err)?;
     Ok(secrets_choice_to_config(choice))
+}
+
+/// AWS Secrets Manager: prompt for region, list existing secrets,
+/// let the operator pick one or type a name for a new secret.
+///
+/// Bridges to async AWS SDK calls via `tokio::task::block_in_place`
+/// because `configure_secrets` is sync. Safe under the wizard's
+/// multi-thread `#[tokio::main]` runtime; would panic on a
+/// current-thread runtime (no test takes this path).
+#[cfg(feature = "aws-secrets")]
+fn aws_resolver() -> Result<(String, Option<String>), SecretsPromptError> {
+    let region: String = dialoguer::Input::new()
+        .with_prompt("AWS region (leave empty for SDK default)")
+        .allow_empty(true)
+        .interact_text()?;
+    let region_opt = if region.is_empty() {
+        None
+    } else {
+        Some(region)
+    };
+
+    let listing = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(list_aws_secrets(region_opt.as_deref()))
+    });
+
+    let default_name = "vtc-master-seed";
+    let secret_name = match listing {
+        Ok(names) if !names.is_empty() => {
+            let mut items: Vec<String> = names;
+            items.push("Create new secret".into());
+            let pick = dialoguer::Select::new()
+                .with_prompt("Select an existing secret or create a new one")
+                .items(&items)
+                .default(0)
+                .interact()?;
+            if pick == items.len() - 1 {
+                dialoguer::Input::new()
+                    .with_prompt("AWS Secrets Manager secret name")
+                    .default(default_name.into())
+                    .interact_text()?
+            } else {
+                items.swap_remove(pick)
+            }
+        }
+        Ok(_) => {
+            eprintln!("  No existing secrets found in this region.");
+            dialoguer::Input::new()
+                .with_prompt("AWS Secrets Manager secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+        Err(e) => {
+            warn!(error = %e, "could not list AWS secrets");
+            eprintln!("  Warning: could not list secrets ({e}).");
+            dialoguer::Input::new()
+                .with_prompt("AWS Secrets Manager secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+    };
+
+    Ok((secret_name, region_opt))
+}
+
+/// Paginate through every Secrets Manager secret in the configured
+/// region and return the names. Caps at 10k to bound memory + keep
+/// the operator picker usable. Mirrors `vta-service::setup::interactive::list_aws_secrets`.
+#[cfg(feature = "aws-secrets")]
+async fn list_aws_secrets(
+    region: Option<&str>,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    const MAX_SECRETS: usize = 10_000;
+
+    let mut loader = aws_config::from_env();
+    if let Some(r) = region {
+        loader = loader.region(aws_config::Region::new(r.to_owned()));
+    }
+    let sdk_config = loader.load().await;
+    let client = aws_sdk_secretsmanager::Client::new(&sdk_config);
+
+    let mut names: Vec<String> = Vec::new();
+    let mut next_token: Option<String> = None;
+    loop {
+        let mut req = client.list_secrets();
+        if let Some(token) = next_token.as_ref() {
+            req = req.next_token(token.clone());
+        }
+        let output = req.send().await?;
+        names.extend(
+            output
+                .secret_list()
+                .iter()
+                .filter_map(|entry| entry.name().map(String::from)),
+        );
+        if names.len() >= MAX_SECRETS {
+            names.truncate(MAX_SECRETS);
+            break;
+        }
+        match output.next_token() {
+            Some(t) if !t.is_empty() => next_token = Some(t.to_string()),
+            _ => break,
+        }
+    }
+    Ok(names)
+}
+
+/// GCP Secret Manager: prompt for project, list existing secrets,
+/// let the operator pick one or type a name. Same async-from-sync
+/// bridging as [`aws_resolver`]; same pagination cap.
+#[cfg(feature = "gcp-secrets")]
+fn gcp_resolver() -> Result<(String, String), SecretsPromptError> {
+    let project: String = dialoguer::Input::new()
+        .with_prompt("GCP project ID")
+        .interact_text()?;
+
+    let listing = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(list_gcp_secrets(&project))
+    });
+
+    let default_name = "vtc-master-seed";
+    let secret_name = match listing {
+        Ok(names) if !names.is_empty() => {
+            let mut items: Vec<String> = names;
+            items.push("Create new secret".into());
+            let pick = dialoguer::Select::new()
+                .with_prompt("Select an existing secret or create a new one")
+                .items(&items)
+                .default(0)
+                .interact()?;
+            if pick == items.len() - 1 {
+                dialoguer::Input::new()
+                    .with_prompt("GCP Secret Manager secret name")
+                    .default(default_name.into())
+                    .interact_text()?
+            } else {
+                items.swap_remove(pick)
+            }
+        }
+        Ok(_) => {
+            eprintln!("  No existing secrets found in this project.");
+            dialoguer::Input::new()
+                .with_prompt("GCP Secret Manager secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+        Err(e) => {
+            warn!(error = %e, "could not list GCP secrets");
+            eprintln!("  Warning: could not list secrets ({e}).");
+            dialoguer::Input::new()
+                .with_prompt("GCP Secret Manager secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+    };
+
+    Ok((project, secret_name))
+}
+
+/// Paginate every Secret Manager secret in `project` via the response's
+/// `next_page_token`. Strips the `projects/<id>/secrets/` prefix so the
+/// picker shows bare names. Mirrors `vta-service::setup::interactive::list_gcp_secrets`.
+#[cfg(feature = "gcp-secrets")]
+async fn list_gcp_secrets(
+    project: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    const MAX_SECRETS: usize = 10_000;
+
+    let client = google_cloud_secretmanager_v1::client::SecretManagerService::builder()
+        .build()
+        .await?;
+    let prefix = format!("projects/{project}/secrets/");
+
+    let mut names: Vec<String> = Vec::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut req = client
+            .list_secrets()
+            .set_parent(format!("projects/{project}"));
+        if let Some(token) = page_token.as_ref() {
+            req = req.set_page_token(token.clone());
+        }
+        let response = req.send().await?;
+        names.extend(
+            response
+                .secrets
+                .iter()
+                .map(|s| s.name.strip_prefix(&prefix).unwrap_or(&s.name).to_owned()),
+        );
+        if names.len() >= MAX_SECRETS {
+            names.truncate(MAX_SECRETS);
+            break;
+        }
+        if response.next_page_token.is_empty() {
+            break;
+        }
+        page_token = Some(response.next_page_token);
+    }
+    Ok(names)
+}
+
+/// Azure Key Vault: prompt for vault URL, list existing secrets,
+/// let the operator pick one or type a name. Credentials come from
+/// `DeveloperToolsCredential` (Azure CLI / Developer CLI / VS Code),
+/// mirroring the runtime credential resolution used by
+/// [`crate::keys::seed_store::azure::AzureSecretStore`].
+///
+/// Note: vta-service's wizard does not currently have an Azure picker
+/// (it falls back to a plain input). vtc-service is intentionally
+/// ahead — both crates use the same `azure_security_keyvault_secrets`
+/// client at runtime, so listing at setup is a strict UX improvement.
+#[cfg(feature = "azure-secrets")]
+fn azure_resolver() -> Result<(String, String), SecretsPromptError> {
+    let vault_url: String = dialoguer::Input::new()
+        .with_prompt("Azure Key Vault URL (e.g. https://my-vault.vault.azure.net)")
+        .interact_text()?;
+
+    let listing = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(list_azure_secrets(&vault_url))
+    });
+
+    let default_name = "vtc-master-seed";
+    let secret_name = match listing {
+        Ok(names) if !names.is_empty() => {
+            let mut items: Vec<String> = names;
+            items.push("Create new secret".into());
+            let pick = dialoguer::Select::new()
+                .with_prompt("Select an existing secret or create a new one")
+                .items(&items)
+                .default(0)
+                .interact()?;
+            if pick == items.len() - 1 {
+                dialoguer::Input::new()
+                    .with_prompt("Azure Key Vault secret name")
+                    .default(default_name.into())
+                    .interact_text()?
+            } else {
+                items.swap_remove(pick)
+            }
+        }
+        Ok(_) => {
+            eprintln!("  No existing secrets found in this vault.");
+            dialoguer::Input::new()
+                .with_prompt("Azure Key Vault secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+        Err(e) => {
+            warn!(error = %e, "could not list Azure secrets");
+            eprintln!("  Warning: could not list secrets ({e}).");
+            dialoguer::Input::new()
+                .with_prompt("Azure Key Vault secret name")
+                .default(default_name.into())
+                .interact_text()?
+        }
+    };
+
+    Ok((vault_url, secret_name))
+}
+
+/// Drain the `list_secret_properties` pager and return the bare
+/// secret names. The Azure SDK's `ResourceExt::resource_id()` parses
+/// the secret URL — `https://<vault>.vault.azure.net/secrets/<name>`
+/// — and returns the trailing `name`. Capped at 10k for the same
+/// reasons as [`list_aws_secrets`].
+#[cfg(feature = "azure-secrets")]
+async fn list_azure_secrets(
+    vault_url: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    use azure_security_keyvault_secrets::{ResourceExt, SecretClient};
+    use futures_util::TryStreamExt;
+
+    const MAX_SECRETS: usize = 10_000;
+
+    let credential = azure_identity::DeveloperToolsCredential::new(None)?;
+    let client = SecretClient::new(vault_url, credential, None)?;
+
+    let mut names: Vec<String> = Vec::new();
+    let mut pager = client.list_secret_properties(None)?;
+    while let Some(secret) = pager.try_next().await? {
+        names.push(secret.resource_id()?.name);
+        if names.len() >= MAX_SECRETS {
+            break;
+        }
+    }
+    Ok(names)
 }
 
 fn secrets_choice_to_config(choice: SecretsBackendChoice) -> SecretsConfig {
@@ -307,11 +767,26 @@ async fn run_provision_quietly(
     setup_key: &EphemeralSetupKey,
 ) -> Result<ProvisionResult, AppError> {
     let mut vars = BTreeMap::new();
-    vars.insert("URL".to_string(), JsonValue::String(inputs.vtc_url.clone()));
+    // The template appends `STATUS_LIST_PATH` (default `/v1/status-lists`)
+    // to `URL`, so `URL` must be the host base — passing the API base
+    // with `/v1` here renders a double-`/v1` endpoint in the DID doc.
     vars.insert(
-        "ADMIN_UX_URL".to_string(),
-        JsonValue::String(inputs.admin_ux_url.clone()),
+        "URL".to_string(),
+        JsonValue::String(inputs.base_url.clone()),
     );
+    // `WEBVH_PATH` is a sideband hint consumed VTA-side (see
+    // `provision_integration::webvh::take_webvh_path`) before render —
+    // it pins the SCID-trailing path component of the minted
+    // `did:webvh:<scid>:<host>:<path>`. `run_provision` only injects
+    // its own value when the caller's `webvh_path` arg is `Some`, so a
+    // pre-set var here survives intact and the 0-or-1-server auto-pick
+    // continues to work for `webvh_server_id` itself.
+    if let Some(path) = inputs.webvh_path.as_deref() {
+        vars.insert(
+            "WEBVH_PATH".to_string(),
+            JsonValue::String(path.to_string()),
+        );
+    }
     let ask = ProvisionAsk::for_template("vtc-host", vars, inputs.context.clone())
         .with_label("vtc-host integration");
 
@@ -332,7 +807,8 @@ async fn run_provision_quietly(
     .map_err(|e| {
         AppError::Internal(format!(
             "VTA provisioning failed: {e}. Double-check the VTA URL/DID and that the \
-             ephemeral DID was authorized via `pnm acl create`."
+             ephemeral DID was authorized via `pnm contexts create` (or `pnm acl create` if \
+             the context already exists)."
         ))
     })?;
     drain_task.abort();
@@ -358,9 +834,15 @@ impl OperatorMessages for VtcHostMessages {
         "vtc"
     }
     fn pnm_admin_command_hint(&self, context_id: &str, setup_did: &str) -> String {
+        // Matches the canonical `MediatorMessages` /
+        // `WebvhServerMessages` shape: create the context AND grant
+        // the admin ACL atomically. The previous `pnm acl create`
+        // form failed against a fresh VTA where the target context
+        // hadn't been created yet — the VTA returned "context not
+        // found" and the wizard hung.
         format!(
-            "pnm acl create --did {setup_did} --role admin --contexts {context_id} \\\n  \
-             --expires 1h"
+            "pnm contexts create --id {context_id} --name \"VTC\" \\\n  \
+             --admin-did {setup_did} --admin-expires 1h"
         )
     }
 }
@@ -394,6 +876,7 @@ fn build_app_config(
     public_url: String,
     data_dir: PathBuf,
     secrets: SecretsConfig,
+    messaging: Option<MessagingConfig>,
 ) -> Result<AppConfig, AppError> {
     let toml_skeleton = format!(
         r#"
@@ -409,6 +892,7 @@ data_dir = "{}"
     let mut config: AppConfig =
         toml::from_str(&toml_skeleton).map_err(|e| AppError::Config(format!("config: {e}")))?;
     config.secrets = secrets;
+    config.messaging = messaging;
     config.auth = AuthConfig {
         jwt_signing_key: Some(generate_jwt_signing_key()),
         ..AuthConfig::default()
@@ -471,13 +955,15 @@ fn open_keyspaces(config: &AppConfig) -> Result<(), AppError> {
 async fn mint_initial_install_token(
     config: &AppConfig,
     bundle: &VtcKeyBundle,
-    vtc_url: &str,
+    admin_did: &str,
+    base_url: &str,
 ) -> Result<String, AppError> {
     let ed25519 = bundle.ed25519_private_bytes()?;
     let signer = InstallTokenSigner::from_master_seed(&*ed25519)?;
     let minted = mint_install_token(
         &signer,
         &bundle.integration_did,
+        admin_did,
         INSTALL_TOKEN_DEFAULT_TTL_SECS,
     )?;
 
@@ -498,9 +984,13 @@ async fn mint_initial_install_token(
         )
         .await?;
 
+    // `/admin/install` so the embedded admin SPA picks the request
+    // up and runs the install-claim ceremony in-browser. The bare
+    // `/install` path would hit the website fallback, which has no
+    // install page. See `docs/03-vtc/getting-started.md` §"Step 3".
     Ok(format!(
-        "{}/install?token={}",
-        vtc_url.trim_end_matches('/'),
+        "{}/admin/install?token={}",
+        base_url.trim_end_matches('/'),
         minted.jwt
     ))
 }
@@ -530,9 +1020,16 @@ fn print_acl_step(inputs: &WizardInputs, setup_key: &EphemeralSetupKey) {
     println!("  Context:  {}", inputs.context);
     println!();
     println!(
-        "Run on a machine with PNM admin access to {}:",
-        inputs.vta_url
+        "Run on a machine with PNM admin access to the VTA ({}):",
+        inputs.vta_did
     );
+    println!();
+    println!(
+        "  {}",
+        VtcHostMessages.pnm_admin_command_hint(&inputs.context, &setup_key.did)
+    );
+    println!();
+    println!("  If the context already exists, grant admin access to the ephemeral DID instead:");
     println!();
     println!(
         "  pnm acl create --did {} \\\n    --role admin --contexts {} --expires 1h",
@@ -624,11 +1121,19 @@ mod tests {
     }
 
     #[test]
-    fn vtc_host_messages_use_pnm_acl_command() {
+    fn vtc_host_messages_use_pnm_contexts_create_command() {
+        // Must match the canonical MediatorMessages / WebvhServerMessages
+        // shape: one command that creates the context and grants the
+        // admin ACL atomically. The previous `pnm acl create` form failed
+        // against a fresh VTA where the target context didn't exist yet.
         let msg = VtcHostMessages.pnm_admin_command_hint("ctx-x", "did:key:zAbc");
-        assert!(msg.contains("pnm acl create"));
-        assert!(msg.contains("--did did:key:zAbc"));
-        assert!(msg.contains("--contexts ctx-x"));
-        assert!(msg.contains("--expires 1h"));
+        assert!(
+            msg.contains("pnm contexts create"),
+            "expected `pnm contexts create` form, got: {msg}"
+        );
+        assert!(msg.contains("--id ctx-x"));
+        assert!(msg.contains("--name \"VTC\""));
+        assert!(msg.contains("--admin-did did:key:zAbc"));
+        assert!(msg.contains("--admin-expires 1h"));
     }
 }

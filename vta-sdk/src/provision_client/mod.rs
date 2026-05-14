@@ -39,7 +39,7 @@
 //! This module never invents wire shapes. The bootstrap request, sealed
 //! response, and producer assertion all sit on top of the formats defined
 //! by [`crate::provision_integration`] and [`crate::sealed_transfer`]. See
-//! the workspace `docs/03-integrating/provision-integration.md` for the
+//! the workspace `docs/02-vta/provision-integration.md` for the
 //! end-to-end flow.
 
 pub mod ask;

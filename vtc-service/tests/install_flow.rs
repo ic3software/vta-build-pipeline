@@ -23,10 +23,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use chrono::{Duration as ChronoDuration, Utc};
-use ed25519_dalek::Signer;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
@@ -186,8 +183,13 @@ async fn build_fixture() -> Fixture {
 /// Step 1 (continued): mint a fresh install token + record it in
 /// the install store so `claim/start` finds the state.
 async fn mint_install(fix: &Fixture) -> String {
-    let minted = mint_install_token(&fix.install_signer, "did:webvh:vtc.example.com:abc", 600)
-        .expect("mint install token");
+    let minted = mint_install_token(
+        &fix.install_signer,
+        "did:webvh:vtc.example.com:abc",
+        "did:key:z6MkAdmin",
+        600,
+    )
+    .expect("mint install token");
     let exp = Utc::now() + ChronoDuration::seconds(600);
     fix.install_store
         .record_issued(
@@ -239,15 +241,6 @@ async fn request(
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     };
     (status, json)
-}
-
-fn harness_seed_for(challenge: &[u8], rp_id: &str) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(challenge);
-    h.update(rp_id.as_bytes());
-    h.update(b"soft-eddsa-seed/v1");
-    h.finalize().into()
 }
 
 /// Mint a VTC admin JWT for `admin_did` so subsequent admin-gated
@@ -311,23 +304,13 @@ async fn end_to_end_install_flow_phase_0_gate() {
     .await;
     assert_eq!(status, StatusCode::OK, "claim/start: {body}");
     let registration_id = body["registrationId"].as_str().unwrap().to_string();
-    let challenge: [u8; 32] = B64
-        .decode(body["didBindingChallenge"].as_str().unwrap())
-        .unwrap()
-        .try_into()
-        .unwrap();
     let ccr: CreationChallengeResponse = serde_json::from_value(body["options"].clone()).unwrap();
 
     // ----------------------------------------------------------------
-    // Step 3 — harness signs both ceremonies, then claim/finish
+    // Step 3 — soft authenticator runs the WebAuthn ceremony, then claim/finish
     // ----------------------------------------------------------------
     let mut authenticator = SoftEd25519Authenticator::new();
     let (register_cred, _ed25519_pub) = authenticator.register(&ccr, RP_ORIGIN);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&harness_seed_for(
-        ccr.public_key.challenge.as_ref(),
-        &ccr.public_key.rp.id,
-    ));
-    let did_binding_signature = B64.encode(signing_key.sign(&challenge).to_bytes());
 
     let (status, body) = request(
         &fix.router,
@@ -339,7 +322,6 @@ async fn end_to_end_install_flow_phase_0_gate() {
             "install_token": install_token,
             "registration_id": registration_id,
             "webauthn_response": register_cred,
-            "did_binding_signature": did_binding_signature,
         })),
     )
     .await;

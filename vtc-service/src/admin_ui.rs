@@ -82,18 +82,38 @@ pub async fn serve(req: Request<Body>) -> Response {
     let rel = req.uri().path().trim_start_matches("/admin");
     let rel = if rel.is_empty() || rel == "/" {
         "/index.html"
+    } else if rel == "/install" {
+        // Install-claim ceremony. The wizard mints URLs of the shape
+        // `{base}/admin/install?token=…`; this is the page that runs
+        // the WebAuthn registration ceremony in the browser. Map
+        // before the lookup so the extensionless path resolves to
+        // the actual file rather than falling through to
+        // `index.html` (which would lose the page-specific JS).
+        "/install.html"
     } else {
         rel
     };
 
-    let bytes = lookup(rel).or_else(|| lookup("/index.html"));
-    let Some(bytes) = bytes else {
-        return (StatusCode::NOT_FOUND, "admin UX not embedded").into_response();
+    // SPA history-mode fallback: extensionless paths like
+    // `/admin/install` aren't on disk, so we serve `index.html` and
+    // let the client-side router pick up. The mime must reflect the
+    // *served* bytes (`text/html`), not the *requested* path —
+    // otherwise the browser sees `application/octet-stream` and
+    // tries to download the page.
+    let (bytes, mime) = match lookup(rel) {
+        Some(b) => (
+            b,
+            mime_guess::from_path(rel)
+                .first_or_octet_stream()
+                .to_string(),
+        ),
+        None => match lookup("/index.html") {
+            Some(b) => (b, "text/html; charset=utf-8".to_string()),
+            None => {
+                return (StatusCode::NOT_FOUND, "admin UX not embedded").into_response();
+            }
+        },
     };
-
-    let mime = mime_guess::from_path(rel)
-        .first_or_octet_stream()
-        .to_string();
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
@@ -128,6 +148,30 @@ mod tests {
     #[test]
     fn lookup_returns_none_for_unknown() {
         assert!(lookup("/missing.html").is_none());
+    }
+
+    #[test]
+    fn install_page_is_embedded() {
+        // The wizard mints install URLs of shape `{base}/admin/install?
+        // token=…` and the route handler maps `/install` → `install.html`.
+        // If the file ever drifts out of the directory the ceremony breaks
+        // silently — fail loud at build time instead.
+        let bytes = lookup("/install.html").expect("install.html present");
+        let body = std::str::from_utf8(bytes).unwrap();
+        assert!(
+            body.contains("Claim Admin Passkey"),
+            "install.html drifted: {body}"
+        );
+    }
+
+    #[test]
+    fn install_js_is_embedded() {
+        let bytes = lookup("/install.js").expect("install.js present");
+        let body = std::str::from_utf8(bytes).unwrap();
+        assert!(
+            body.contains("navigator.credentials.create"),
+            "install.js drifted — WebAuthn ceremony missing"
+        );
     }
 
     #[test]

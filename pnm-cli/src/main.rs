@@ -46,7 +46,7 @@ async fn main() {
         eprintln!("  {replacement}");
         eprintln!();
         eprintln!("See `pnm services --help` for the full surface, or");
-        eprintln!("docs/03-integrating/runtime-service-management.md.");
+        eprintln!("docs/02-vta/runtime-service-management.md.");
         std::process::exit(2);
     }
 

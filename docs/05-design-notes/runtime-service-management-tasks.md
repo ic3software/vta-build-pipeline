@@ -384,21 +384,21 @@ hits routes that already exist or land with P1/P2).
 ## P7 — Documentation + memory
 
 ### T7.1 · New operator guide
-- **Acceptance:** `docs/03-integrating/runtime-service-management.md`
+- **Acceptance:** `docs/02-vta/runtime-service-management.md`
   walks through every §5.1 command with an example transcript.
   Top of the file has the migration note (T7.4 folds in here).
 - **Verify:** manual review.
-- **Files:** `docs/03-integrating/runtime-service-management.md`
+- **Files:** `docs/02-vta/runtime-service-management.md`
   (new).
 - **Deps:** T5.4 (so transcripts use the final command shape)
 
 ### T7.2 · Fold + redirect old DIDComm docs
-- **Acceptance:** `docs/03-integrating/didcomm-protocol-management.md`
+- **Acceptance:** `docs/02-vta/didcomm-protocol-management.md`
   becomes a one-screen redirect stub linking to T7.1.
   `docs/05-design-notes/didcomm-protocol-management.md` updated to
   state it has been superseded by `runtime-service-management.md`.
 - **Verify:** broken-link grep clean; manual review.
-- **Files:** `docs/03-integrating/didcomm-protocol-management.md`,
+- **Files:** `docs/02-vta/didcomm-protocol-management.md`,
   `docs/05-design-notes/didcomm-protocol-management.md`.
 - **Deps:** T7.1
 
@@ -417,7 +417,7 @@ hits routes that already exist or land with P1/P2).
   commands and their new equivalents, plus the 24h default drain
   behavior change.
 - **Verify:** read the section.
-- **Files:** `docs/03-integrating/runtime-service-management.md`.
+- **Files:** `docs/02-vta/runtime-service-management.md`.
 - **Deps:** T7.1
 
 ### T7.5 · Memory updates
