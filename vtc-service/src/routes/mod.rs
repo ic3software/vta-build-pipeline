@@ -938,6 +938,22 @@ pub fn assemble_with_website(
         .route("/health", get(health::health))
         .nest(&routing.api.mount, api);
     app = app.nest(&routing.admin_ui.mount, admin);
+    // axum 0.8's `nest("/admin", inner)` registers `/admin` (bare)
+    // and `/admin/{*rest}` (sub-paths). Neither matches `/admin/`
+    // exactly — that path has no characters after the slash, so the
+    // wildcard fails — and the request falls through to the website
+    // fallback. Operators routinely paste `/admin/` into a browser,
+    // so we register the trailing-slash form explicitly to point at
+    // the same SPA handler.
+    let admin_slash = format!("{}/", routing.admin_ui.mount.trim_end_matches('/'));
+    #[cfg(feature = "admin-ui")]
+    {
+        app = app.route(admin_slash.as_str(), get(admin_ui::serve_spa));
+    }
+    #[cfg(not(feature = "admin-ui"))]
+    {
+        app = app.route(admin_slash.as_str(), any(placeholder_503));
+    }
     if routing.website.mount == "/" {
         app = app.fallback_service(website);
     } else {

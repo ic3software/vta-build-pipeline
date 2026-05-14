@@ -22,18 +22,27 @@ function setText(id, text) {
 
 async function refresh() {
   // Health probe — small + unauthenticated so it works on a
-  // freshly-installed daemon with no auth keys yet.
+  // freshly-installed daemon with no auth keys yet. Also the
+  // canonical source for the VTC's own DID (post-setup).
+  let healthJson = null;
   try {
-    const health = await fetchJson("/health");
-    setText("health-status", JSON.stringify(health));
+    healthJson = await fetchJson("/health");
+    setText("health-status", `${healthJson.status} (v${healthJson.version})`);
+    if (healthJson.vtc_did) {
+      setText("community-did", healthJson.vtc_did);
+    } else {
+      setText("community-did", "(not yet provisioned — run `vtc setup`)");
+    }
   } catch (err) {
     setText("health-status", `error: ${err.message}`);
+    setText("community-did", `error: ${err.message}`);
   }
 
-  // Community profile — best-effort. The endpoint requires no
+  // Community profile — best-effort, for the friendly name +
+  // description shown in the header. The endpoint requires no
   // auth for the public fields used here. On a fresh install the
-  // profile may not exist yet; in that case we leave the
-  // placeholder text from index.html in place.
+  // profile may not exist yet; the placeholder text from
+  // index.html stays in place.
   try {
     const profile = await fetchJson("/v1/community/profile");
     if (profile && typeof profile === "object") {
@@ -44,12 +53,9 @@ async function refresh() {
       if (profile.description) {
         setText("community-description", profile.description);
       }
-      if (profile.vtcDid || profile.vtc_did) {
-        setText("community-did", profile.vtcDid ?? profile.vtc_did);
-      }
     }
-  } catch (err) {
-    setText("community-did", `(profile not yet set: ${err.message})`);
+  } catch {
+    // Silent — leave the placeholder text.
   }
 }
 
