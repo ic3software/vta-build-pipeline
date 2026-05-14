@@ -343,6 +343,48 @@
       "status": "Draft",
       "path": "credentials/endorsements/revoke/1.0",
       "rest": "DELETE /v1/credentials/endorsements/{id}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/website/files/list/1.0",
+      "status": "Draft",
+      "path": "website/files/list/1.0",
+      "rest": "GET /v1/website/files"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/website/files/show/1.0",
+      "status": "Draft",
+      "path": "website/files/show/1.0",
+      "rest": "GET /v1/website/files/{*path}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/website/files/write/1.0",
+      "status": "Draft",
+      "path": "website/files/write/1.0",
+      "rest": "PUT /v1/website/files/{*path}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/website/files/delete/1.0",
+      "status": "Draft",
+      "path": "website/files/delete/1.0",
+      "rest": "DELETE /v1/website/files/{*path}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/website/deploy/1.0",
+      "status": "Draft",
+      "path": "website/deploy/1.0",
+      "rest": "POST /v1/website/deploy"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/website/generations/list/1.0",
+      "status": "Draft",
+      "path": "website/generations/list/1.0",
+      "rest": "GET /v1/website/generations"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/website/rollback/1.0",
+      "status": "Draft",
+      "path": "website/rollback/1.0",
+      "rest": "POST /v1/website/rollback/{gen}"
     }
   ]
 }

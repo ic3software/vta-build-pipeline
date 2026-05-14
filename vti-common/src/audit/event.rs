@@ -272,6 +272,29 @@ pub enum AuditEvent {
     /// endorsement of this type still exists; this envelope
     /// only fires after a successful delete.
     EndorsementTypeDeleted(EndorsementTypeDeletedData),
+
+    /// `PUT /v1/website/files/{path}` succeeded. Phase 5 M5.5.2.
+    /// Records the path + size + SHA-256 of the new content so the
+    /// audit log carries enough material to reconstruct a deploy
+    /// without persisting the full file body.
+    WebsiteFileWritten(WebsiteFileWrittenData),
+
+    /// `DELETE /v1/website/files/{path}` succeeded. Phase 5
+    /// M5.5.2. Records the path; no content digest because the
+    /// file no longer exists.
+    WebsiteFileDeleted(WebsiteFileDeletedData),
+
+    /// `POST /v1/website/deploy` succeeded. Phase 5 M5.5.3.
+    /// Captures the bundle's SHA-256, byte size, target deploy
+    /// mode, and (managed mode only) the new generation number
+    /// + how many old generations were pruned.
+    WebsiteBundleDeployed(WebsiteBundleDeployedData),
+
+    /// `POST /v1/website/rollback/{gen}` succeeded. Phase 5
+    /// M5.5.4. Managed mode only. Records the symlink swap so
+    /// the audit log surfaces which generation served before vs.
+    /// after.
+    WebsiteGenerationRolledBack(WebsiteGenerationRolledBackData),
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +777,64 @@ pub struct EndorsementTypeRegisteredData {
 #[serde(rename_all = "camelCase")]
 pub struct EndorsementTypeDeletedData {
     pub type_uri: String,
+}
+
+/// Payload for [`AuditEvent::WebsiteFileWritten`]. Phase 5 M5.5.2.
+/// Records enough material to audit the deploy without persisting
+/// the file body itself — the SHA-256 + size pin what was written.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebsiteFileWrittenData {
+    /// Path **relative to** `website.root_dir`, NFC-normalised
+    /// and free of `..` segments.
+    pub path: String,
+    /// File size in bytes (post-write).
+    pub size_bytes: u64,
+    /// SHA-256 of the written content, hex-encoded. Doubles as
+    /// the ETag value the response returns to the caller.
+    pub sha256: String,
+}
+
+/// Payload for [`AuditEvent::WebsiteFileDeleted`]. Phase 5 M5.5.2.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebsiteFileDeletedData {
+    /// Path **relative to** `website.root_dir`, NFC-normalised.
+    pub path: String,
+}
+
+/// Payload for [`AuditEvent::WebsiteBundleDeployed`]. Phase 5
+/// M5.5.3. Live + managed modes share this variant; the
+/// `target_generation` + `pruned_generations` fields are populated
+/// in managed mode and zero in live mode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebsiteBundleDeployedData {
+    /// SHA-256 of the uploaded tar.gz, hex-encoded.
+    pub bundle_sha256: String,
+    /// Size of the uploaded tar.gz, in bytes.
+    pub bundle_size_bytes: u64,
+    /// `"live"` or `"managed"` (matches
+    /// `website.deploy_mode`).
+    pub deploy_mode: String,
+    /// New generation number in managed mode; `0` in live mode.
+    pub target_generation: u32,
+    /// Number of old generations pruned to honour
+    /// `managed_generations_keep` (managed mode only; `0` in
+    /// live mode).
+    pub pruned_generations: u32,
+}
+
+/// Payload for [`AuditEvent::WebsiteGenerationRolledBack`]. Phase
+/// 5 M5.5.4. Managed mode only — the symlink swap is the audit
+/// surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebsiteGenerationRolledBackData {
+    /// Generation `current` pointed at before the rollback.
+    pub from_generation: u32,
+    /// Generation `current` now points at.
+    pub to_generation: u32,
 }
 
 /// Payload for [`AuditEvent::RegistryStatusChanged`]. Phase 3
@@ -1661,6 +1742,37 @@ mod tests {
                     type_uri: "https://x/v1/t".into(),
                 }),
                 "EndorsementTypeDeleted",
+            ),
+            (
+                AuditEvent::WebsiteFileWritten(WebsiteFileWrittenData {
+                    path: "index.html".into(),
+                    size_bytes: 42,
+                    sha256: "deadbeef".into(),
+                }),
+                "WebsiteFileWritten",
+            ),
+            (
+                AuditEvent::WebsiteFileDeleted(WebsiteFileDeletedData {
+                    path: "old.html".into(),
+                }),
+                "WebsiteFileDeleted",
+            ),
+            (
+                AuditEvent::WebsiteBundleDeployed(WebsiteBundleDeployedData {
+                    bundle_sha256: "deadbeef".into(),
+                    bundle_size_bytes: 1024,
+                    deploy_mode: "managed".into(),
+                    target_generation: 7,
+                    pruned_generations: 2,
+                }),
+                "WebsiteBundleDeployed",
+            ),
+            (
+                AuditEvent::WebsiteGenerationRolledBack(WebsiteGenerationRolledBackData {
+                    from_generation: 7,
+                    to_generation: 5,
+                }),
+                "WebsiteGenerationRolledBack",
             ),
         ];
         for (event, expected) in cases {

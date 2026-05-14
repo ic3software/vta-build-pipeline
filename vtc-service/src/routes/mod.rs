@@ -14,6 +14,8 @@ pub(crate) mod policies;
 pub mod recognise;
 mod relationships;
 pub(crate) mod status_lists;
+#[cfg(feature = "website")]
+mod website;
 
 use std::sync::Arc;
 
@@ -607,13 +609,89 @@ fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
             "/policies/{id}/test",
             post(policies::admin::test),
             policies_test,
+        );
+
+    // Phase 5 M5.5 — public-website management routes. The
+    // `route_with_task` helper accepts a pre-layered `MethodRouter`
+    // so per-route body caps override the 1 MiB global. We attach
+    // these BEFORE the global `DefaultBodyLimit` layer so the
+    // route-specific cap wins.
+    #[cfg(feature = "website")]
+    let api = {
+        use axum::extract::DefaultBodyLimit;
+
+        let website_files_list =
+            TrustTask::new("https://trusttasks.org/openvtc/vtc/website/files/list/1.0")
+                .expect("static Trust-Task URL");
+        let website_files_show =
+            TrustTask::new("https://trusttasks.org/openvtc/vtc/website/files/show/1.0")
+                .expect("static Trust-Task URL");
+        // write + delete tasks share the show mount; standalone
+        // tasks ship on disk + in index.json for the soft-gate
+        // surface (same workaround the rest of the router uses).
+        let _website_files_write =
+            TrustTask::new("https://trusttasks.org/openvtc/vtc/website/files/write/1.0")
+                .expect("static Trust-Task URL");
+        let _website_files_delete =
+            TrustTask::new("https://trusttasks.org/openvtc/vtc/website/files/delete/1.0")
+                .expect("static Trust-Task URL");
+        let website_deploy =
+            TrustTask::new("https://trusttasks.org/openvtc/vtc/website/deploy/1.0")
+                .expect("static Trust-Task URL");
+        let website_gens_list =
+            TrustTask::new("https://trusttasks.org/openvtc/vtc/website/generations/list/1.0")
+                .expect("static Trust-Task URL");
+        let website_rollback =
+            TrustTask::new("https://trusttasks.org/openvtc/vtc/website/rollback/1.0")
+                .expect("static Trust-Task URL");
+
+        // 64 MiB upper bound on the per-route body cap covers
+        // both `max_bundle_size_mb` (default 50) and
+        // `max_file_size_mb` (default 10). Handler then enforces
+        // the operator-configured value at runtime.
+        const WEBSITE_ROUTE_CAP: usize = 64 * 1024 * 1024;
+
+        api.route_with_task(
+            "/website/files",
+            get(website::files::list),
+            website_files_list,
         )
+        .route_with_task(
+            "/website/files/{*path}",
+            get(website::files::show)
+                .put(website::files::write)
+                .delete(website::files::delete)
+                .layer(DefaultBodyLimit::max(WEBSITE_ROUTE_CAP)),
+            // Three methods on the same mount share the show
+            // task per the TrustTaskRouter limitation already
+            // documented elsewhere. The `write` and `delete`
+            // tasks are still registered on disk + in index.json
+            // for the soft-gate surface.
+            website_files_show,
+        )
+        .route_with_task(
+            "/website/deploy",
+            post(website::deploy::deploy).layer(DefaultBodyLimit::max(WEBSITE_ROUTE_CAP)),
+            website_deploy,
+        )
+        .route_with_task(
+            "/website/generations",
+            get(website::generations::list),
+            website_gens_list,
+        )
+        .route_with_task(
+            "/website/rollback/{gen_num}",
+            post(website::generations::rollback),
+            website_rollback,
+        )
+    };
+
+    let api = api
         .into_router()
         // §14.4 — every authenticated API route inherits the 1 MiB
-        // global body cap. Per-route overrides for `/v1/website/*`
-        // bundle deploys (M5.5) disable this with
-        // `DefaultBodyLimit::disable()` and attach a wider per-route
-        // `RequestBodyLimitLayer`.
+        // global body cap. The per-route overrides above for
+        // `/v1/website/*` apply first; this layer is the default
+        // for everything else.
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE));
 
     // Unauthenticated routes — tighter body cap + per-IP governor.

@@ -17,7 +17,7 @@ setup = ["dep:dialoguer", "dep:didwebvh-rs", "dep:url"]
 # hosting at `website.root_dir`. Default-on so MVP `cargo run`
 # serves a site; operators who host externally can compile it
 # out via `--no-default-features --features setup,keyring`.
-website = ["dep:mime_guess", "dep:unicode-normalization"]
+website = ["dep:mime_guess", "dep:unicode-normalization", "dep:tar", "dep:flate2"]
 # OS keyring backend for the VTC secret. Enables vta-sdk's keyring feature
 # so the binary can register a platform store once via
 # `vta_sdk::keyring_init::install_default_store()` at startup.
@@ -90,6 +90,8 @@ tower-http = { workspace = true, features = ["cors", "trace"] }
 tower_governor = "0.8"
 mime_guess = { version = "2", optional = true }
 unicode-normalization = { version = "0.1", optional = true }
+tar = { version = "0.4", optional = true }
+flate2 = { version = "1", optional = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

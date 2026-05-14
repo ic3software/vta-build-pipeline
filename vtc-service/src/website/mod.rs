@@ -26,6 +26,8 @@
 //! 404s — so the audit trail records the rejection rationale.
 
 #[cfg(feature = "website")]
+pub mod bundle;
+#[cfg(feature = "website")]
 pub mod cache;
 #[cfg(feature = "website")]
 pub mod paths;

@@ -1,0 +1,7 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/website/generations/list/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — Website generations list",
+  "description": "Managed-mode-only listing of generation directories under website.root_dir.",
+  "type": "object"
+}
