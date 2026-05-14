@@ -385,6 +385,12 @@
       "status": "Draft",
       "path": "website/rollback/1.0",
       "rest": "POST /v1/website/rollback/{gen}"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/admin-ui/build-info/1.0",
+      "status": "Draft",
+      "path": "admin-ui/build-info/1.0",
+      "rest": "GET /admin/build-info.json"
     }
   ]
 }

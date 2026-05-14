@@ -548,6 +548,29 @@ pub async fn run(
     let rest_cors = state.config.read().await.cors.clone();
     let rest_routing = state.config.read().await.routing.clone();
 
+    // Phase 5 M5.7.2 — emit `AdminUiServed` audit envelope exactly
+    // once at boot, after the audit writer is online. Captures the
+    // SHA-256 of the baked admin SPA's `index.html` so an operator
+    // who suspects a compromise can pin the running build.
+    #[cfg(feature = "admin-ui")]
+    if let Some(writer) = state.audit_writer.as_ref() {
+        let mode = state.config.read().await.admin_ui.mode.clone();
+        let info = crate::admin_ui::AdminUiInfo::from_embedded(&mode);
+        let _ = writer
+            .write(
+                "daemon",
+                None,
+                vti_common::audit::AuditEvent::AdminUiServed(
+                    vti_common::audit::AdminUiServedData {
+                        index_sha256: (*info.index_sha256).clone(),
+                        file_count: info.file_count,
+                        mode: (*info.mode).clone(),
+                    },
+                ),
+            )
+            .await;
+    }
+
     // Spawn three named OS threads
     let mut rest_shutdown_rx = shutdown_rx.clone();
     let rest_state = state.clone();
