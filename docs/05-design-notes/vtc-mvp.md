@@ -647,6 +647,13 @@ Route priority (highest first): `/health`, `/v1/*`,
 by `Host`. Hosts not matching any surface return 404. Subdomain mode
 implies the operator handles per-surface TLS certs and DNS.
 
+The strictness of unknown-Host dispatch is configured by
+`routing.subdomain_mode_strict: bool` (default `true`). When `false`,
+unknown hosts fall back to path-mode prefix matching against the
+parent router. Use this only as a debugging aid — production
+deployments should leave it at the default so a misconfigured
+proxy can't silently serve API responses on the wrong host.
+
 **Multi-process daemons are not in MVP.** fjall is not multi-process-safe.
 Operators who need isolation strip surfaces at compile time via cargo
 features and put a reverse proxy / CDN in front.
@@ -1038,23 +1045,43 @@ front. Live-mode file-descriptor cache TTL configurable
 
 ### 12.2 Admin UX (`admin-ui` feature)
 
-The admin UX is a static SPA built and released from
-[OpenVTC/vtc-admin-ui](https://github.com/OpenVTC/vtc-admin-ui).
-`vtc-service`'s `build.rs` fetches a SHA-256-pinned release tarball
-and bakes it via `include_dir!`. Tarball must be **signed by the
-OpenVTC release key**; `build.rs` verifies the signature *and* the
-digest before extracting. Offline builds use a vendored fallback
-under `VTC_OFFLINE_BUILD=1`.
+The admin UX is a static SPA whose source lives **in-tree** at
+`vtc-service/admin-ui/`. The `include_dir!` macro bakes the
+directory at compile time; there is no out-of-tree dependency,
+no signed-tarball fetch, no `build.rs`, no `VTC_OFFLINE_BUILD=1`
+environment variable. `cargo build` produces a self-contained
+binary including the admin SPA.
 
-`admin_ui.mode = "embedded"` (default) serves the baked SPA at the
-configured mount. `mode = "external"` skips embedding; the operator
-hosts the UX elsewhere and the VTC just allows the origin in CORS.
+The Phase 5 MVP ships a plain HTML/CSS/JS placeholder (status
+panel + build-info readout). Operators wanting a richer UX
+replace the files under `vtc-service/admin-ui/` and rebuild —
+this trades the build-time `node` dependency for in-tree
+ownership of the SPA toolchain. See
+`vtc-service/admin-ui/README.md` for the contract.
 
-**WebAuthn `RP ID`.** With path-mode routing the `RP ID` is the base
-host. With subdomain routing, set `RP ID` to the *base domain* so
-credentials remain valid across subdomains. Migrating the admin UX
-to a different base domain re-registers all passkeys; documented in
-the operator runbook.
+`admin_ui.mode = "embedded"` (default) serves the baked SPA at
+`routing.admin_ui.mount`. `mode = "external"` skips embedding;
+the operator hosts the SPA elsewhere and the daemon allowlists
+their origin via `cors.allowed_origins`.
+
+`GET /admin/build-info.json` (unauth) returns
+`{ version, indexSha256, fileCount, mode }` so operators can
+pin which build is running. The boot path emits an
+`AdminUiServed` audit envelope capturing the same `indexSha256`.
+
+**WebAuthn `RP ID`.** Configured via `admin_ui.rp_id`. When
+unset, derived from the routing mode at WebAuthn ceremony time:
+path-mode → base host; subdomain-mode → base domain (so
+credentials remain valid across subdomains). Migrating the
+admin UX to a different base domain re-registers all passkeys;
+documented in the operator runbook.
+
+**Phase 5 deviation note**: an earlier draft of this section
+called for a sibling `OpenVTC/vtc-admin-ui` repo with a signed
+release tarball + `build.rs` fetch. The user chose the in-tree
+path at Phase 5 D1 to keep `cargo build` self-contained. The
+release-pipeline machinery may resurface later if a Vite/React
+SPA outgrows the in-tree placeholder.
 
 ### 12.3 VRC graph
 
@@ -1218,11 +1245,33 @@ Inherited from the workspace's standard guards: tower-governor on
 unauth routes (5 rps + 10 burst per IP); 1 MB global body cap;
 audience-isolated JWTs; install carve-out is single-use (§4).
 
+**Phase 5 note.** The §14.4 guards were aspirational until Phase 5
+M5.1.4 + M5.1.5 wired the actual `DefaultBodyLimit` + tower-governor
+layers. Phase 0-4 documented this section but did not land the
+middleware. The PR-1a commit message records the prior-phase gap.
+
+The unauth governor applies to 5 dedicated POST routes:
+`/v1/auth/{challenge,authenticate,refresh}` +
+`/v1/install/claim/{start,finish}`. `/v1/auth/admin-login`
+(Phase 5 M5.2.3) joins this set since it's the bootstrapping
+cookie-mint endpoint. Authenticated routes inherit the JWT auth
+as their rate-limit gate.
+
+`SmartIpKeyExtractor` reads `X-Forwarded-For` / `X-Real-IP` /
+`Forwarded` headers first and falls back to peer IP via
+`ConnectInfo<SocketAddr>` (wired in production via
+`into_make_service_with_connect_info::<SocketAddr>()`). Test
+fixtures using `Router::oneshot` get a synthetic `127.0.0.1`
+inserted by an in-handler middleware so the extractor doesn't
+500 on header-less requests.
+
 **Body-cap exception.** Website upload routes
-(`POST /v1/website/deploy`, `PUT /v1/website/files/{path}`) override
-the global body cap with per-route caps from
-`website.max_bundle_size_mb` (default 50) and `max_file_size_mb`
-(default 10). All other routes inherit 1 MB.
+(`POST /v1/website/deploy`, `PUT /v1/website/files/{*path}`)
+override the global body cap with a per-route 64 MiB allowance;
+the route handler then enforces the operator-configured
+`website.max_bundle_size_mb` (default 50) and
+`max_file_size_mb` (default 10) at runtime. All other routes
+inherit 1 MB.
 
 ## 15. CLI
 
@@ -1244,7 +1293,7 @@ workspace doctrine. Detailed verb list lives in
 | **2** | `regorus`, policy upload + activate, `join.rego` + `removal.rego`, **in-process VMC + VEC issuance** (cached-locally signer per §3-A), status-list with reserved-index discipline, renewal, DID rotation (`did:key` + `did:webvh`, domain-tagged) | Live policy + credentials. |
 | **3** | Trust-registry publish, three departure dispositions, `registry.rego`, `MembershipSyncer` + diagnostic surfacing, RTBF override + batched timing, cross-community recognition (session-mint hardening) | Community on the wider network. |
 | **4** | VRC self-issuance + `relationships.rego`, `personhood.rego` (deny-all stub) + assert/revoke + renewal re-eval, custom endorsement issuance (issuer role) | Graph + personhood live. |
-| **5** | Public website (filesystem-backed, CSP, path safety), admin UX consumed via `build.rs` (release-key-signed tarball), path-prefix routing default + subdomain support | MVP complete. |
+| **5** | Public website (filesystem-backed, CSP, path safety), admin UX baked in-tree via `include_dir!` (per Phase 5 D1; the original "sibling repo + signed tarball" plan was renegotiated), path-prefix routing default + subdomain support | MVP complete. |
 
 Phase 5 sub-tasks parallelise with phases 3–4. Phases 0–4 strictly
 serial. Each phase's PR set includes the Draft Trust Task spec files
