@@ -4,7 +4,7 @@
 //! `tasks/vtc-mvp/vta-driven-keys.md` §3:
 //!
 //! 1. Prompt the operator for the five configuration knobs (config
-//!    path, VTC URL, admin UX URL, VTA URL, VTA DID, context).
+//!    path, VTC URL, admin UX URL, VTA DID, context).
 //! 2. Mint an ephemeral `did:key` for the round-trip.
 //! 3. Pause for the operator to authorize the ephemeral DID at the
 //!    VTA (`pnm acl create --did <…> --role admin --contexts <ctx>`).
@@ -173,7 +173,6 @@ pub async fn run_setup_wizard(config_path: Option<PathBuf>) -> Result<(), AppErr
 struct WizardInputs {
     vtc_url: String,
     admin_ux_url: String,
-    vta_url: String,
     vta_did: String,
     context: String,
 }
@@ -212,7 +211,8 @@ fn refuse_if_already_set_up(config_path: &std::path::Path) -> Result<(), AppErro
 fn prompt_inputs() -> Result<WizardInputs, AppError> {
     println!();
     println!("Provisioning a fresh VTC requires the VTC + admin UX URLs, the VTA's");
-    println!("URL + DID, and the context name.");
+    println!("DID, and the context name. The VTA's transport endpoints are resolved");
+    println!("from its DID document — no separate VTA URL is needed.");
     println!();
     println!("The VTC daemon serves three surfaces — API, admin UX, public website.");
     println!("They can share one domain (path mode, the default) or sit on separate");
@@ -237,10 +237,6 @@ fn prompt_inputs() -> Result<WizardInputs, AppError> {
         .with_prompt("Admin UX URL")
         .interact_text()
         .map_err(prompt_err)?;
-    let vta_url: String = Input::new()
-        .with_prompt("VTA URL (e.g. https://vta.example.com)")
-        .interact_text()
-        .map_err(prompt_err)?;
     let vta_did: String = Input::new()
         .with_prompt("VTA DID (e.g. did:webvh:vta.example.com:abc)")
         .interact_text()
@@ -253,7 +249,6 @@ fn prompt_inputs() -> Result<WizardInputs, AppError> {
     Ok(WizardInputs {
         vtc_url,
         admin_ux_url,
-        vta_url,
         vta_did,
         context,
     })
@@ -546,8 +541,8 @@ fn print_acl_step(inputs: &WizardInputs, setup_key: &EphemeralSetupKey) {
     println!("  Context:  {}", inputs.context);
     println!();
     println!(
-        "Run on a machine with PNM admin access to {}:",
-        inputs.vta_url
+        "Run on a machine with PNM admin access to the VTA ({}):",
+        inputs.vta_did
     );
     println!();
     println!(
