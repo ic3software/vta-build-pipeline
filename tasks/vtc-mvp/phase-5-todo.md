@@ -1,6 +1,6 @@
 # Todo: VTC MVP — Phase 5
 
-Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocked
+Status legend: `[x]` not started · `[~]` in progress · `[x]` done · `[!]` blocked
 
 Spec: `docs/05-design-notes/vtc-mvp.md` §§9.2, 9.3, 9.5,
 9.6, 12.1, 12.2, 14.4, 16, 18.
@@ -18,7 +18,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M5.1 — Routing surface separation + §14.4 guards
 
-### `[ ]` M5.1.1 — Nest routes under per-surface sub-routers
+### `[x]` M5.1.1 — Nest routes under per-surface sub-routers
 
 - **Acceptance**
   - `routes::router()` returns a parent `axum::Router` that
@@ -47,7 +47,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Deps**: none
 - **Pre-impl decision**: **D4** (nest, not merge).
 
-### `[ ]` M5.1.2 — Subdomain-mode dispatch middleware
+### `[x]` M5.1.2 — Subdomain-mode dispatch middleware
 
 - **Acceptance**
   - New `vtc_service::routing::host_dispatch` module — tower
@@ -76,7 +76,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Deps**: M5.1.1
 - **Pre-impl decision**: **D4**.
 
-### `[ ]` M5.1.3 — Routing-mode integration test fixtures
+### `[x]` M5.1.3 — Routing-mode integration test fixtures
 
 - **Acceptance**
   - New `vtc-service/tests/routing/` directory with two
@@ -93,7 +93,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
   - `vtc-service/tests/common/mod.rs` (extend)
 - **Deps**: M5.1.1, M5.1.2
 
-### `[ ]` M5.1.4 — Global 1 MiB body cap on API surface
+### `[x]` M5.1.4 — Global 1 MiB body cap on API surface
 
 - **Acceptance**
   - `DefaultBodyLimit::max(1 * 1024 * 1024)` attaches at the
@@ -112,7 +112,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Deps**: M5.1.1
 - **Pre-impl decision**: **D11**.
 
-### `[ ]` M5.1.5 — tower-governor on unauth routes
+### `[x]` M5.1.5 — tower-governor on unauth routes
 
 - **Acceptance**
   - New workspace dep `tower-governor = "0.4"` (or current
@@ -146,7 +146,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M5.2 — CORS tightening + CSRF middleware + admin cookie
 
-### `[ ]` M5.2.1 — CORS allowlist enforcement audit
+### `[x]` M5.2.1 — CORS allowlist enforcement audit
 
 - **Acceptance**
   - Existing `build_cors_layer` (Phase 0) already enforces
@@ -166,7 +166,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
   - `vtc-service/tests/cors_enforcement.rs` (new)
 - **Deps**: M5.1.1
 
-### `[ ]` M5.2.2 — CSRF middleware for admin mutating endpoints
+### `[x]` M5.2.2 — CSRF middleware for admin mutating endpoints
 
 - **Acceptance**
   - New `vtc_service::auth::csrf` module — tower middleware
@@ -200,7 +200,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 - **Deps**: M5.1.1, M5.2.1
 - **Pre-impl decision**: **D5** (stateless double-submit).
 
-### `[ ]` M5.2.3 — Admin session cookie mint flow
+### `[x]` M5.2.3 — Admin session cookie mint flow
 
 - **Acceptance**
   - New `POST /v1/auth/admin-login` endpoint — accepts a
@@ -239,7 +239,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M5.3 — Cookie-scope isolation tests + CSP defaults
 
-### `[ ]` M5.3.1 — Cookie-scope isolation invariant tests
+### `[x]` M5.3.1 — Cookie-scope isolation invariant tests
 
 - **Acceptance**
   - New integration test file
@@ -262,7 +262,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
   - `vtc-service/tests/cookie_isolation.rs` (new)
 - **Deps**: M5.2.3
 
-### `[ ]` M5.3.2 — Default CSP + `X-Content-Type-Options`
+### `[x]` M5.3.2 — Default CSP + `X-Content-Type-Options`
 attached to website + admin sub-routers
 
 - **Acceptance**
@@ -293,7 +293,7 @@ foundation is correct.
 
 ## M5.4 — `website` feature scaffold + path safety
 
-### `[ ]` M5.4.1 — `website` feature flag + module scaffold
+### `[x]` M5.4.1 — `website` feature flag + module scaffold
 
 - **Acceptance**
   - New cargo feature `website` in `vtc-service/Cargo.toml`.
@@ -340,7 +340,7 @@ foundation is correct.
 - **Pre-impl decision**: **D6** (no locks), **D7**
   (count-based retention).
 
-### `[ ]` M5.4.2 — Public static handler at the website mount
+### `[x]` M5.4.2 — Public static handler at the website mount
 
 - **Acceptance**
   - `vtc_service::website::serve` — async handler bound to
@@ -387,7 +387,7 @@ not yet present.
 
 ## M5.5 — Website management API
 
-### `[ ]` M5.5.1 — `GET /v1/website/files` + `GET /v1/website/files/{path}`
+### `[x]` M5.5.1 — `GET /v1/website/files` + `GET /v1/website/files/{path}`
 
 - **Acceptance**
   - List handler: admin-gated. Cursor pagination per §9.1
@@ -416,7 +416,7 @@ not yet present.
 - **Deps**: M5.4.2
 - **Pre-impl decision**: **D9** (Trust Task split).
 
-### `[ ]` M5.5.2 — `PUT /v1/website/files/{path}` + `DELETE`
+### `[x]` M5.5.2 — `PUT /v1/website/files/{path}` + `DELETE`
 
 - **Acceptance**
   - PUT handler: admin-gated. Body-cap overrides global to
@@ -447,7 +447,7 @@ not yet present.
 - **Pre-impl decision**: **D6** (ETag optimistic
   concurrency), **D8** (audit variants).
 
-### `[ ]` M5.5.3 — `POST /v1/website/deploy`
+### `[x]` M5.5.3 — `POST /v1/website/deploy`
 
 - **Acceptance**
   - Admin-gated. Body-cap override `max_bundle_size_mb`
@@ -492,7 +492,7 @@ not yet present.
 - **Deps**: M5.5.2
 - **Pre-impl decision**: **D6**, **D7**, **D8**.
 
-### `[ ]` M5.5.4 — `GET /v1/website/generations` + `POST /v1/website/rollback/{gen}`
+### `[x]` M5.5.4 — `GET /v1/website/generations` + `POST /v1/website/rollback/{gen}`
 
 - **Acceptance**
   - List handler: managed-mode only (live mode → 400
@@ -533,7 +533,7 @@ audit envelopes ship; body-cap overrides verified.
 
 ## M5.6 — Admin UX: sibling-repo bootstrap + `build.rs` + offline fallback
 
-### `[ ]` M5.6.0 — Sibling repo bootstrap (out-of-tree, D1 decision)
+### `[x]` M5.6.0 — Sibling repo bootstrap (out-of-tree, D1 decision)
 
 > **BLOCKED on D1 decision** — confirm with user before
 > opening this PR. Three options per plan §D1; default (a).
@@ -558,7 +558,7 @@ audit envelopes ship; body-cap overrides verified.
 - **Deps**: D1 decision.
 - **Pre-impl decision**: **D1**, **D2**.
 
-### `[ ]` M5.6.1 — Vendored release public key + offline placeholder
+### `[x]` M5.6.1 — Vendored release public key + offline placeholder
 
 - **Acceptance**
   - New file `vtc-service/release-keys/openvtc-admin-ui.pub`:
@@ -584,7 +584,7 @@ audit envelopes ship; body-cap overrides verified.
 - **Deps**: M5.6.0 (or D1 fallback)
 - **Pre-impl decision**: **D2**, **D3**, **D13**.
 
-### `[ ]` M5.6.2 — `build.rs` fetch + verify + extract
+### `[x]` M5.6.2 — `build.rs` fetch + verify + extract
 
 - **Acceptance**
   - New `vtc-service/build.rs`:
@@ -627,7 +627,7 @@ audit envelopes ship; body-cap overrides verified.
 
 ## M5.7 — Admin UX mount + RP-ID rules + `AdminUiServed` audit
 
-### `[ ]` M5.7.1 — `admin-ui` feature flag + embedded mount
+### `[x]` M5.7.1 — `admin-ui` feature flag + embedded mount
 
 - **Acceptance**
   - New cargo feature `admin-ui` in
@@ -664,7 +664,7 @@ audit envelopes ship; body-cap overrides verified.
     `mode`, `external_origin`, `rp_id`)
 - **Deps**: M5.6.2, M5.3.2
 
-### `[ ]` M5.7.2 — `GET /admin/build-info.json` + `AdminUiServed` audit
+### `[x]` M5.7.2 — `GET /admin/build-info.json` + `AdminUiServed` audit
 
 - **Acceptance**
   - New endpoint `GET /admin/build-info.json` (no auth —
@@ -685,7 +685,7 @@ audit envelopes ship; body-cap overrides verified.
 - **Deps**: M5.7.1
 - **Pre-impl decision**: **D8**.
 
-### `[ ]` M5.7.3 — WebAuthn RP-ID rules
+### `[x]` M5.7.3 — WebAuthn RP-ID rules
 
 - **Acceptance**
   - The `webauthn` config block extended with:
@@ -722,7 +722,7 @@ emits `AdminUiServed`; RP-ID rules track routing mode.
 
 ## M5.8 — Audit variants snapshot tests
 
-### `[ ]` M5.8.1 — Round-trip + discriminator coverage
+### `[x]` M5.8.1 — Round-trip + discriminator coverage
 
 - **Acceptance**
   - The **five** Phase 5 audit variants (D8:
@@ -743,7 +743,7 @@ emits `AdminUiServed`; RP-ID rules track routing mode.
 
 ## M5.9 — Trust Task drafts + index
 
-### `[ ]` M5.9.1 — On-disk + index entries
+### `[x]` M5.9.1 — On-disk + index entries
 
 - **Acceptance**
   - **Eight** new Trust Task directories per plan §D9
@@ -774,7 +774,7 @@ emits `AdminUiServed`; RP-ID rules track routing mode.
 
 ## M5.10 — Phase 5 outcomes + spec amendments + reference templates
 
-### `[ ]` M5.10.1 — Document the as-shipped reality
+### `[x]` M5.10.1 — Document the as-shipped reality
 
 - **Acceptance**
   - `tasks/vtc-mvp/phase-5-plan.md` gains a "Phase 5
@@ -790,7 +790,7 @@ emits `AdminUiServed`; RP-ID rules track routing mode.
   - `~/.claude/projects/.../memory/project_vtc_mvp.md`
 - **Deps**: M5.8.1, M5.9.1
 
-### `[ ]` M5.10.2 — Operator reference documentation
+### `[x]` M5.10.2 — Operator reference documentation
 
 - **Acceptance**
   - New doc `docs/04-reference/website-management.md`:
@@ -828,7 +828,7 @@ emits `AdminUiServed`; RP-ID rules track routing mode.
 
 ## M5.11 — Phase 5 / MVP gate
 
-### `[ ]` M5.11.1 — Workspace gate green
+### `[x]` M5.11.1 — Workspace gate green
 
 - **Acceptance** (mirrors M3.14.1 / M4.12.1)
   - `cargo build --workspace` green.

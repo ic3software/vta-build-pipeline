@@ -933,9 +933,82 @@ pattern).
 
 ## Phase 5 outcomes
 
-> *To be filled in at M5.10 close-out, mirroring the
-> Phase 1–4 pattern. Each row links a pre-impl decision
-> (D1–D13) or risk (R1–R9) to the as-shipped reality.
-> Spec amendments listed at the bottom.*
+Phase 5 closed on 2026-05-14. Per the agreed PR cadence,
+M5.1+M5.2+M5.3 split into PR-1a / PR-1b once M5.2.3's
+cookie-session work (mint flow + extractor fallback + Trust
+Task + tests) outgrew the planner's single-PR estimate. The
+remaining four PRs (M5.4 / M5.5 / M5.6+M5.7 / closeout) landed
+sequentially.
+
+### Decision realisation (D1–D13)
+
+| ID | As-shipped reality |
+|---|---|
+| **D1** | **(In-tree, not sibling repo)** — user chose to keep the admin UX in-tree at `vtc-service/admin-ui/`. The `include_dir!` macro bakes it at compile time. No sibling repo, no signed-tarball fetch, no `VTC_OFFLINE_BUILD=1` env var. D2 / D3 / D13 collapsed as a consequence. |
+| **D2** | **Not applicable** (no out-of-tree tarball to sign). |
+| **D3** | **Not applicable** (no fallback needed — the source IS the fallback). |
+| **D4** | **(ii) Tower middleware + per-surface nest** — `routing::host_dispatch::enforce` short-circuits 404 in subdomain mode; `Router::nest` per surface in path mode. Configured via `routing.subdomain_mode_strict: bool`. |
+| **D5** | **Stateless double-submit** as planned. `routing::csrf::enforce` accepts either `Sec-Fetch-Site: same-origin` or matching `csrf` cookie + `X-CSRF-Token` header. Bootstrapping unauth flows (6 paths) exempt. |
+| **D6** | **ETag optimistic concurrency, no FS locks** as planned. `PUT /v1/website/files/{*path}` honours `If-Match`; mismatch → 409 (`AppError::Conflict` rather than a new 412 variant). |
+| **D7** | **Count-based, keep 5** as planned. `prune_generations` never prunes the currently-active generation. |
+| **D8** | **5 variants** as planned: `WebsiteFileWritten`, `WebsiteFileDeleted`, `WebsiteBundleDeployed`, `WebsiteGenerationRolledBack`, `AdminUiServed`. All ship round-trip + discriminator coverage. |
+| **D9** | **9 Trust Tasks** added — 7 website management + 1 admin UX + 1 admin-login. Final count: 55 (Phase 0-4) + 9 = **64**. |
+| **D10** | **Confirmed** — `/health` priority preserved at parent-router root; no path conflicts. |
+| **D11** | **Landed in M5.1.4 + M5.1.5** — 1 MiB global body cap + 5 rps unauth governor wired (Phase 0-4 hadn't actually landed these; PR-1a's commit message documents the prior-phase gap). |
+| **D12** | **HttpOnly cookie + CSRF double-submit** as planned. `POST /v1/auth/admin-login` mints the session cookie with `Path=/admin`; bearer JWT path stays for programmatic / DIDComm / cnm-cli. `AuthClaims` in vti-common gained the cookie fallback. |
+| **D13** | **Not applicable** (D1 collapses this). |
+
+### Risk realisation
+
+The planner's risks were mostly out-of-tree considerations
+(sibling-repo bootstrap delay, release-pipeline lag, Unicode
+confusables in path tests). R1 was sidestepped by D1's in-tree
+decision; R2 is covered by the NFC check in
+`crate::website::paths::canonical_within_root`; R5 is covered
+by the per-site `<root>/.vtc-website.toml` CSP override.
+
+### Spec amendments applied
+
+Captured in this PR's `docs/05-design-notes/vtc-mvp.md` diff:
+
+- **§9.2** — `routing.subdomain_mode_strict: bool` knob.
+- **§9.3** — CSRF middleware exempt-path table.
+- **§9.4** — Trust Task count → 64.
+- **§9.5** — `/v1/website/*` endpoints + `/admin/build-info.json`.
+- **§11.4** — 5 new audit variants.
+- **§12.1** — Per-site CSP override file format; defaults
+  pinned for `live_cache_ttl_seconds`, `managed_generations_keep`,
+  `executable_blocklist`.
+- **§12.2** — Rewritten for in-tree D1 reality. No sibling
+  repo, no signed tarball, no `build.rs` fetch ceremony.
+- **§14.4** — Guards now load-bearing.
+- **§17.1** — Personhood policy reference templates deferred
+  to a Phase-6 follow-up (the deny-all stub remains correct for
+  MVP; reference templates are operator-facing documentation
+  that ships best alongside the first real-world community
+  deployment).
+
+### Test count
+
+vtc-service: **603** (PR-1a 565 → PR-1b 573 → PR-2 593 → PR-3
+599 → PR-4 603). Workspace total **1951** across vta-service,
+vta-sdk, vti-common, pnm-cli, cnm-cli, vtc-service, e2e.
+
+### MVP gate
+
+After this PR merges, the VTC ships a complete MVP per spec
+§16:
+
+- **Phase 0-1** — Install + admin bootstrap + member CRUD
+- **Phase 2** — Policy engine + credential issuance + status
+  list + renewal + DID rotation
+- **Phase 3** — Trust-registry sync + cross-community
+  recognition
+- **Phase 4** — Relationships graph + personhood + custom
+  endorsements
+- **Phase 5** — Public website + admin UX + routing-mode-
+  flexible deployment
+
+The binary covers every §16 deliverable in full.
 ```
 
