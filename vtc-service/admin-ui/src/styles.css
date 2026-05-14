@@ -1,0 +1,137 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.5;
+  --bg: light-dark(#ffffff, #0d1117);
+  --bg-elev: light-dark(#f6f8fa, #161b22);
+  --border: light-dark(#d0d7de, #30363d);
+  --text: light-dark(#1f2328, #e6edf3);
+  --text-dim: light-dark(#656d76, #8b949e);
+  --accent: light-dark(#0969da, #2f81f7);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+}
+
+.nav {
+  background: var(--bg-elev);
+  border-right: 1px solid var(--border);
+  padding: 1rem 0;
+}
+
+.nav header {
+  padding: 0 1.25rem 1rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1rem;
+}
+
+.nav h1 {
+  font-size: 1rem;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+.nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.nav a {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1.25rem;
+  color: var(--text);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+}
+
+.nav a:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.nav a.active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+
+.nav-icon {
+  width: 1.5rem;
+  text-align: center;
+  font-size: 1.1rem;
+}
+
+.content {
+  padding: 2rem 2.5rem;
+  max-width: 80rem;
+}
+
+.page h2 {
+  margin-top: 0;
+}
+
+.card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  margin-block: 1rem;
+}
+
+.card.error {
+  border-color: light-dark(#d1242f, #f85149);
+  color: light-dark(#82071e, #ff7b72);
+}
+
+.card h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+dl {
+  display: grid;
+  grid-template-columns: 8rem 1fr;
+  gap: 0.5rem 1.25rem;
+  margin: 0;
+}
+
+dt {
+  color: var(--text-dim);
+}
+
+dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+  font-size: 0.9em;
+}
+
+.plugin-host {
+  display: contents;
+}
+
+a {
+  color: var(--accent);
+}

@@ -22,9 +22,13 @@ use axum::response::Response;
 use include_dir::{Dir, include_dir};
 use sha2::{Digest, Sha256};
 
-/// In-binary copy of `vtc-service/admin-ui/`. Walked at request
-/// time to map paths → file bytes.
-pub static ADMIN_UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/admin-ui");
+/// In-binary copy of `vtc-service/admin-ui/dist/` — the Vite build
+/// output. Produced by `build.rs` running `npm run build` before
+/// this file compiles. Walked at request time to map paths → file
+/// bytes. The admin SPA is a React app; client-side routing
+/// (history mode) means most paths resolve to `index.html` and the
+/// shell takes over.
+pub static ADMIN_UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/admin-ui/dist");
 
 /// Metadata derived once at startup. Used by the build-info
 /// endpoint and the `AdminUiServed` audit envelope.
@@ -82,24 +86,16 @@ pub async fn serve(req: Request<Body>) -> Response {
     let rel = req.uri().path().trim_start_matches("/admin");
     let rel = if rel.is_empty() || rel == "/" {
         "/index.html"
-    } else if rel == "/install" {
-        // Install-claim ceremony. The wizard mints URLs of the shape
-        // `{base}/admin/install?token=…`; this is the page that runs
-        // the WebAuthn registration ceremony in the browser. Map
-        // before the lookup so the extensionless path resolves to
-        // the actual file rather than falling through to
-        // `index.html` (which would lose the page-specific JS).
-        "/install.html"
     } else {
         rel
     };
 
     // SPA history-mode fallback: extensionless paths like
     // `/admin/install` aren't on disk, so we serve `index.html` and
-    // let the client-side router pick up. The mime must reflect the
-    // *served* bytes (`text/html`), not the *requested* path —
-    // otherwise the browser sees `application/octet-stream` and
-    // tries to download the page.
+    // let the React router pick up the rest of the URL. The mime
+    // must reflect the *served* bytes (`text/html`), not the
+    // *requested* path — otherwise the browser sees
+    // `application/octet-stream` and tries to download the page.
     let (bytes, mime) = match lookup(rel) {
         Some(b) => (
             b,
@@ -142,7 +138,17 @@ mod tests {
     fn lookup_returns_bytes_for_known_files() {
         let bytes = lookup("/index.html").expect("index.html");
         let body = std::str::from_utf8(bytes).unwrap();
-        assert!(body.contains("VTC Admin"), "got {body}");
+        // Vite's `index.html` shim has `<title>VTC Admin</title>`
+        // and a `<div id="root">` mount point. Both are stable
+        // build-tool output.
+        assert!(
+            body.contains("<title>VTC Admin</title>"),
+            "index.html title drifted: {body}"
+        );
+        assert!(
+            body.contains("id=\"root\""),
+            "index.html missing React mount point: {body}"
+        );
     }
 
     #[test]
@@ -151,34 +157,31 @@ mod tests {
     }
 
     #[test]
-    fn install_page_is_embedded() {
-        // The wizard mints install URLs of shape `{base}/admin/install?
-        // token=…` and the route handler maps `/install` → `install.html`.
-        // If the file ever drifts out of the directory the ceremony breaks
-        // silently — fail loud at build time instead.
-        let bytes = lookup("/install.html").expect("install.html present");
-        let body = std::str::from_utf8(bytes).unwrap();
-        assert!(
-            body.contains("Claim Admin Passkey"),
-            "install.html drifted: {body}"
-        );
-    }
-
-    #[test]
-    fn install_js_is_embedded() {
-        let bytes = lookup("/install.js").expect("install.js present");
-        let body = std::str::from_utf8(bytes).unwrap();
-        assert!(
-            body.contains("navigator.credentials.create"),
-            "install.js drifted — WebAuthn ceremony missing"
-        );
+    fn assets_dir_is_embedded() {
+        // Vite emits hashed bundles under `assets/`. Without them
+        // the index shim has nothing to execute. Walk the embedded
+        // tree to confirm the `assets/` dir landed.
+        let assets = ADMIN_UI_DIR
+            .get_dir("assets")
+            .expect("assets/ missing from dist — Vite build did not emit chunks");
+        let js_present = assets
+            .files()
+            .any(|f| f.path().extension().is_some_and(|e| e == "js"));
+        let css_present = assets
+            .files()
+            .any(|f| f.path().extension().is_some_and(|e| e == "css"));
+        assert!(js_present, "no .js asset in dist/assets/");
+        assert!(css_present, "no .css asset in dist/assets/");
     }
 
     #[test]
     fn info_carries_sha_of_index_html() {
         let info = AdminUiInfo::from_embedded("embedded");
         assert_eq!(info.index_sha256.len(), 64, "hex sha256 = 64 chars");
-        assert!(info.file_count >= 3, "expect index + css + js at minimum");
+        assert!(
+            info.file_count >= 3,
+            "expect index + at least one js + one css"
+        );
         assert_eq!(info.mode.as_str(), "embedded");
     }
 }

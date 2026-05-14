@@ -1,46 +1,12 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>VTC Admin</title>
-    <link rel="stylesheet" href="/admin/app.css" />
   </head>
   <body>
-    <main>
-      <h1>VTC Admin</h1>
-      <p class="lead">
-        Verifiable Trust Community administrative console.
-      </p>
-      <section id="status">
-        <h2>Daemon</h2>
-        <dl>
-          <dt>Build</dt>
-          <dd><code id="build-version">…</code></dd>
-          <dt>Health</dt>
-          <dd><code id="health-status">…</code></dd>
-        </dl>
-      </section>
-      <section>
-        <h2>Sign in</h2>
-        <p>
-          Programmatic clients should call
-          <code>POST /v1/auth/challenge</code> then
-          <code>POST /v1/auth/</code> to mint a bearer JWT. The
-          browser-based passkey flow that mints a cookie session
-          lands in a follow-up.
-        </p>
-      </section>
-      <footer>
-        <p>
-          This is the MVP admin shell. It ships as in-tree HTML/CSS/JS
-          so <code>cargo build</code> is self-contained — no npm,
-          no node, no network. Operators wanting a richer UX can
-          replace the files under <code>vtc-service/admin-ui/</code>
-          and rebuild.
-        </p>
-      </footer>
-    </main>
-    <script src="/admin/app.js" defer></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
