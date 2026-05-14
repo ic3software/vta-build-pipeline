@@ -731,6 +731,14 @@ fn build_unauth_routes() -> Router<AppState> {
     let auth_admin_login =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/admin-login/1.0")
             .expect("static Trust-Task URL");
+    // Browser-friendly passkey login. Separate start/finish so the
+    // WebAuthn ceremony can persist the auth_state between calls.
+    let auth_passkey_login_start =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/passkey-login/start/1.0")
+            .expect("static Trust-Task URL");
+    let auth_passkey_login_finish =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/passkey-login/finish/1.0")
+            .expect("static Trust-Task URL");
     let install_claim_start =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/start/1.0")
             .expect("static Trust-Task URL");
@@ -769,6 +777,16 @@ fn build_unauth_routes() -> Router<AppState> {
             "/auth/admin-login",
             post(auth::admin_login),
             auth_admin_login,
+        )
+        .route_with_task(
+            "/auth/passkey-login/start",
+            post(auth::passkey_login_start),
+            auth_passkey_login_start,
+        )
+        .route_with_task(
+            "/auth/passkey-login/finish",
+            post(auth::passkey_login_finish),
+            auth_passkey_login_finish,
         )
         .route_with_task(
             "/install/claim/start",

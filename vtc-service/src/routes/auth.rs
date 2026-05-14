@@ -257,6 +257,200 @@ pub async fn admin_login(
     Ok(response)
 }
 
+// ---------- POST /auth/passkey-login/start ----------
+
+/// `POST /v1/auth/passkey-login/start`.
+///
+/// Browser-friendly login: the admin SPA submits no body, the
+/// daemon returns a WebAuthn assertion challenge across every
+/// registered passkey (discoverable login — the user picks their
+/// device, the browser chooses the matching credential). Modelled
+/// on `affinidi-webvh-service::login_start`.
+///
+/// Unauthenticated by design: the eventual `finish` ceremony
+/// proves possession of an enrolled credential, which is the auth.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyLoginStartResponse {
+    pub auth_id: String,
+    pub options: webauthn_rs::prelude::RequestChallengeResponse,
+}
+
+pub async fn passkey_login_start(
+    State(state): State<AppState>,
+) -> Result<Json<PasskeyLoginStartResponse>, AppError> {
+    use vti_common::auth::passkey::store::{get_all_passkeys, store_auth_state};
+
+    let webauthn = state
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| AppError::Authentication("WebAuthn not configured".into()))?;
+
+    let passkeys = get_all_passkeys(&state.passkey_ks).await?;
+    if passkeys.is_empty() {
+        warn!("passkey login refused: no passkeys registered");
+        return Err(AppError::Authentication(
+            "no passkeys registered on this server".into(),
+        ));
+    }
+
+    let (rcr, auth_state) = webauthn
+        .start_passkey_authentication(&passkeys)
+        .map_err(|e| AppError::Internal(format!("webauthn auth start failed: {e}")))?;
+
+    let auth_id = Uuid::new_v4().to_string();
+    store_auth_state(&state.passkey_ks, &auth_id, &auth_state).await?;
+
+    info!(
+        auth_id = %auth_id,
+        passkey_count = passkeys.len(),
+        "passkey login challenge issued"
+    );
+
+    Ok(Json(PasskeyLoginStartResponse {
+        auth_id,
+        options: rcr,
+    }))
+}
+
+// ---------- POST /auth/passkey-login/finish ----------
+
+/// `POST /v1/auth/passkey-login/finish`.
+///
+/// Verifies the WebAuthn assertion, looks up the registered
+/// admin DID by credential ID, and mints the cookie session.
+/// Sets the same `vtc_admin_session` + `csrf` cookies as
+/// `admin_login` does for the DIDComm CLI path. Returns the bearer
+/// token in the body for clients that want to also use it
+/// programmatically.
+#[derive(Debug, Deserialize)]
+pub struct PasskeyLoginFinishRequest {
+    pub auth_id: String,
+    pub credential: webauthn_rs::prelude::PublicKeyCredential,
+}
+
+pub async fn passkey_login_finish(
+    State(state): State<AppState>,
+    Json(req): Json<PasskeyLoginFinishRequest>,
+) -> Result<axum::response::Response, AppError> {
+    use axum::http::HeaderValue;
+    use axum::http::header::SET_COOKIE;
+    use vti_common::auth::passkey::store::{
+        get_passkey_user_by_cred, store_passkey_user, take_auth_state,
+    };
+
+    let webauthn = state
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| AppError::Authentication("WebAuthn not configured".into()))?;
+    let jwt_keys = state
+        .jwt_keys
+        .as_ref()
+        .ok_or_else(|| AppError::Authentication("JWT keys not configured".into()))?;
+
+    let auth_state = take_auth_state(&state.passkey_ks, &req.auth_id)
+        .await?
+        .ok_or_else(|| AppError::Authentication("auth state not found or expired".into()))?;
+
+    let auth_result = webauthn
+        .finish_passkey_authentication(&req.credential, &auth_state)
+        .map_err(|e| {
+            warn!(auth_id = %req.auth_id, error = %e, "passkey authentication failed");
+            AppError::Authentication(format!("passkey authentication failed: {e}"))
+        })?;
+
+    let cred_id_hex = hex::encode(auth_result.cred_id());
+    let mut user = get_passkey_user_by_cred(&state.passkey_ks, &cred_id_hex)
+        .await?
+        .ok_or_else(|| AppError::Authentication("credential not registered".into()))?;
+
+    // Persist credential-counter update (WebAuthn replay protection).
+    for cred in &mut user.credentials {
+        cred.update_credential(&auth_result);
+    }
+    store_passkey_user(&state.passkey_ks, &user).await?;
+
+    // Check ACL — the DID must still be authorised; revocation
+    // since enrolment is a real path (operator demoted, etc.).
+    let (role, allowed_contexts) = check_acl_full(&state.acl_ks, &user.did).await?;
+
+    // Mint access + refresh tokens (mirrors `authenticate_and_mint`
+    // for parity with the DIDComm login path).
+    let config = state.config.read().await;
+    let access_expiry = config.auth.access_token_expiry;
+    let refresh_expiry = config.auth.refresh_token_expiry;
+    drop(config);
+
+    let session_id = Uuid::new_v4().to_string();
+    let claims = jwt_keys.new_claims(
+        user.did.clone(),
+        session_id.clone(),
+        role.to_string(),
+        allowed_contexts,
+        access_expiry,
+        false,
+    );
+    let access_expires_at = claims.exp;
+    let access_token = jwt_keys.encode(&claims)?;
+
+    let refresh_token = Uuid::new_v4().to_string();
+    let refresh_expires_at = now_epoch() + refresh_expiry;
+
+    // Persist the session record so `/auth/sessions` lists it and
+    // refresh-token rotation finds it. Same shape the DIDComm
+    // authenticate path writes — keeps `delete_session` etc.
+    // working uniformly across both login origins.
+    let session = Session {
+        session_id: session_id.clone(),
+        did: user.did.clone(),
+        challenge: String::new(),
+        state: SessionState::Authenticated,
+        created_at: now_epoch(),
+        refresh_token: Some(refresh_token.clone()),
+        refresh_expires_at: Some(refresh_expires_at),
+        tee_attested: false,
+    };
+    store_session(&state.sessions_ks, &session).await?;
+    store_refresh_index(&state.sessions_ks, &refresh_token, &session_id).await?;
+
+    info!(did = %user.did, %session_id, "passkey login successful");
+
+    // Set cookies — same shape as `admin_login`.
+    let max_age = access_expires_at.saturating_sub(now_epoch()).max(1);
+    let session_cookie = build_session_cookie(&access_token, max_age);
+
+    use rand::RngExt;
+    let mut csrf_bytes = [0u8; 32];
+    rand::rng().fill(&mut csrf_bytes);
+    let csrf = hex::encode(csrf_bytes);
+    let csrf_cookie = build_csrf_cookie(&csrf, max_age);
+
+    let resp = AuthenticateResponse {
+        session_id: Some(session_id),
+        data: AuthenticateData {
+            access_token,
+            access_expires_at,
+            refresh_token: Some(refresh_token),
+            refresh_expires_at: Some(refresh_expires_at),
+        },
+    };
+
+    let mut response = Json(resp).into_response();
+    let headers = response.headers_mut();
+    headers.append(
+        SET_COOKIE,
+        HeaderValue::try_from(session_cookie)
+            .map_err(|e| AppError::Internal(format!("invalid session cookie: {e}")))?,
+    );
+    headers.append(
+        SET_COOKIE,
+        HeaderValue::try_from(csrf_cookie)
+            .map_err(|e| AppError::Internal(format!("invalid csrf cookie: {e}")))?,
+    );
+
+    Ok(response)
+}
+
 /// Build the `vtc_admin_session` cookie value. Exposed as a pure
 /// helper so cookie-isolation invariants (Path=/admin,
 /// SameSite=Strict, Secure, HttpOnly) can be unit-tested
