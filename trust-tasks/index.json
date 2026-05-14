@@ -259,6 +259,24 @@
       "status": "Draft",
       "path": "auth/recognise/1.0",
       "rest": "POST /v1/auth/recognise"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/personhood/challenge/1.0",
+      "status": "Draft",
+      "path": "members/personhood/challenge/1.0",
+      "rest": "POST /v1/members/{did}/personhood/challenge"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/personhood/assert/1.0",
+      "status": "Draft",
+      "path": "members/personhood/assert/1.0",
+      "rest": "POST /v1/members/{did}/personhood"
+    },
+    {
+      "id": "https://trusttasks.org/openvtc/vtc/members/personhood/revoke/1.0",
+      "status": "Draft",
+      "path": "members/personhood/revoke/1.0",
+      "rest": "DELETE /v1/members/{did}/personhood"
     }
   ]
 }

@@ -161,7 +161,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M4.3 — `POST /v1/members/{did}/personhood/assert`
 
-### `[ ]` M4.3.1 — Personhood assert endpoint
+### `[x]` M4.3.1 — Personhood assert endpoint
 
 - **Acceptance**
   - `POST /v1/members/{did}/personhood/assert` — handler in
@@ -238,7 +238,7 @@ Every PR must be DCO-signed (`git commit -s`) and pass
 
 ## M4.4 — `DELETE /v1/members/{did}/personhood`
 
-### `[ ]` M4.4.1 — Personhood revoke endpoint
+### `[x]` M4.4.1 — Personhood revoke endpoint
 
 - **Acceptance**
   - `DELETE /v1/members/{did}/personhood` — handler in

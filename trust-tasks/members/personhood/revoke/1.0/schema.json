@@ -1,0 +1,25 @@
+{
+  "$id": "https://trusttasks.org/openvtc/vtc/members/personhood/revoke/1.0/schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTC — Personhood Revoke",
+  "description": "DELETE /v1/members/{did}/personhood response. Phase 4 M4.4. No request body.",
+  "type": "object",
+  "required": ["did", "personhood"],
+  "properties": {
+    "did": { "type": "string" },
+    "personhood": {
+      "type": "boolean",
+      "const": false,
+      "description": "Always `false` on success."
+    },
+    "vmc": {
+      "type": "object",
+      "description": "Newly-minted VMC carrying `personhood: false`. Omitted on idempotent no-op."
+    },
+    "roleVec": {
+      "type": "object",
+      "description": "Newly-minted role VEC. Omitted on idempotent no-op."
+    }
+  },
+  "additionalProperties": false
+}
