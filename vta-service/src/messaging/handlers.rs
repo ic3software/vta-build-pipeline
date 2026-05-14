@@ -466,6 +466,7 @@ pub async fn handle_create_acl(
         operations::acl::create_acl(
             &state.acl_ks,
             &state.audit_ks,
+            &state.contexts_ks,
             &auth,
             &body.did,
             role,
@@ -525,6 +526,7 @@ pub async fn handle_update_acl(
         operations::acl::update_acl(
             &state.acl_ks,
             &state.audit_ks,
+            &state.contexts_ks,
             &auth,
             &body.did,
             operations::acl::UpdateAclParams {

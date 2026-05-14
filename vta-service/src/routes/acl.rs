@@ -49,6 +49,7 @@ pub async fn create_acl(
     let result = operations::acl::create_acl(
         &state.acl_ks,
         &state.audit_ks,
+        &state.contexts_ks,
         &auth.0,
         &req.did,
         req.role,
@@ -90,6 +91,7 @@ pub async fn update_acl(
     let result = operations::acl::update_acl(
         &state.acl_ks,
         &state.audit_ks,
+        &state.contexts_ks,
         &auth.0,
         &did,
         operations::acl::UpdateAclParams {

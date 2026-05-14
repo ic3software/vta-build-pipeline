@@ -557,6 +557,7 @@ pub async fn provision_integration(
     match super::acl::create_acl(
         &state.acl_ks,
         &state.audit_ks,
+        &state.contexts_ks,
         auth,
         &admin_did,
         Role::Admin,
@@ -756,6 +757,7 @@ async fn provision_admin_rotation(
     match super::acl::create_acl(
         &state.acl_ks,
         &state.audit_ks,
+        &state.contexts_ks,
         auth,
         &admin_did,
         Role::Admin,

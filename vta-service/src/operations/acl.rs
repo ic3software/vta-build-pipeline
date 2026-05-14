@@ -11,6 +11,7 @@ use crate::acl::{
 };
 use crate::auth::AuthClaims;
 use crate::auth::session::now_epoch;
+use crate::contexts::get_context;
 use crate::error::AppError;
 use crate::store::KeyspaceHandle;
 
@@ -40,6 +41,32 @@ fn symmetric_difference_contexts(old: &[String], new: &[String]) -> Vec<String> 
         .collect()
 }
 
+/// Reject ACL entries that reference contexts which don't exist in
+/// the contexts keyspace. Without this check a super-admin's typo
+/// (`ctx-prod-1` instead of `ctx-prod1`) silently creates a grant
+/// against a non-existent realm; if `ctx-prod-1` is later created,
+/// the dangling grant springs to life unauthorized. The fix is
+/// symmetric to the cascade in `delete_context`, which prunes ACL
+/// entries when their context goes away.
+///
+/// Empty `contexts` (super-admin-shaped entry) is accepted — the
+/// loop short-circuits and the empty-shape guard lives in
+/// `validate_acl_modification`.
+async fn require_contexts_exist(
+    contexts_ks: &KeyspaceHandle,
+    contexts: &[String],
+) -> Result<(), AppError> {
+    for ctx in contexts {
+        if get_context(contexts_ks, ctx).await?.is_none() {
+            return Err(AppError::NotFound(format!(
+                "context '{ctx}' is not registered on this VTA — create it first via \
+                 'vta contexts create --id {ctx}' (offline) or 'pnm contexts create' (online)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn to_result_body(e: &AclEntry) -> CreateAclResultBody {
     CreateAclResultBody {
         did: e.did.clone(),
@@ -56,6 +83,7 @@ fn to_result_body(e: &AclEntry) -> CreateAclResultBody {
 pub async fn create_acl(
     acl_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
+    contexts_ks: &KeyspaceHandle,
     auth: &AuthClaims,
     did: &str,
     role: Role,
@@ -67,6 +95,7 @@ pub async fn create_acl(
     auth.require_manage()?;
     validate_role_assignment(auth, &role)?;
     validate_acl_modification(auth, &allowed_contexts)?;
+    require_contexts_exist(contexts_ks, &allowed_contexts).await?;
 
     if get_acl_entry(acl_ks, did).await?.is_some() {
         return Err(AppError::Conflict(format!(
@@ -151,6 +180,7 @@ pub async fn list_acl(
 pub async fn update_acl(
     acl_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
+    contexts_ks: &KeyspaceHandle,
     auth: &AuthClaims,
     did: &str,
     params: UpdateAclParams,
@@ -210,6 +240,19 @@ pub async fn update_acl(
         // produce an unrestricted entry by edit any more than by
         // create).
         validate_acl_modification(auth, &allowed_contexts)?;
+        // Validate only the *added* contexts. Removals are fine
+        // (they only narrow scope); pre-existing contexts were
+        // already validated at their original insertion point and
+        // re-checking them would cause spurious failures if the
+        // contexts keyspace evolved underneath in some other path.
+        let old_set: std::collections::HashSet<&str> =
+            entry.allowed_contexts.iter().map(String::as_str).collect();
+        let added: Vec<String> = allowed_contexts
+            .iter()
+            .filter(|c| !old_set.contains(c.as_str()))
+            .cloned()
+            .collect();
+        require_contexts_exist(contexts_ks, &added).await?;
         entry.allowed_contexts = allowed_contexts;
     }
 
@@ -292,7 +335,13 @@ mod tests {
     use crate::store::Store;
     use vti_common::config::StoreConfig;
 
-    async fn fresh_store() -> (Store, KeyspaceHandle, KeyspaceHandle, tempfile::TempDir) {
+    async fn fresh_store() -> (
+        Store,
+        KeyspaceHandle,
+        KeyspaceHandle,
+        KeyspaceHandle,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&StoreConfig {
             data_dir: dir.path().into(),
@@ -300,7 +349,34 @@ mod tests {
         .unwrap();
         let acl_ks = store.keyspace("acl").unwrap();
         let audit_ks = store.keyspace("audit").unwrap();
-        (store, acl_ks, audit_ks, dir)
+        let contexts_ks = store.keyspace("contexts").unwrap();
+        (store, acl_ks, audit_ks, contexts_ks, dir)
+    }
+
+    /// Seed `ContextRecord`s for the given ids so `require_contexts_exist`
+    /// has something to find. Index/base_path are arbitrary — the
+    /// existence check only looks at presence.
+    async fn seed_contexts(contexts_ks: &KeyspaceHandle, ids: &[&str]) {
+        use crate::contexts::{ContextRecord, store_context};
+        use chrono::Utc;
+        for (i, id) in ids.iter().enumerate() {
+            let now = Utc::now();
+            store_context(
+                contexts_ks,
+                &ContextRecord {
+                    id: (*id).into(),
+                    name: (*id).into(),
+                    did: None,
+                    description: None,
+                    base_path: format!("m/26'/2'/{i}'"),
+                    index: i as u32,
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        }
     }
 
     fn ctx_admin(did: &str, contexts: &[&str]) -> AuthClaims {
@@ -360,7 +436,8 @@ mod tests {
     /// scope; the new symmetric-diff check rejects it.
     #[tokio::test]
     async fn update_acl_rejects_shrink_across_caller_scope() {
-        let (_store, acl_ks, audit_ks, _dir) = fresh_store().await;
+        let (_store, acl_ks, audit_ks, contexts_ks, _dir) = fresh_store().await;
+        seed_contexts(&contexts_ks, &["ctx-a", "ctx-b"]).await;
         let target = "did:key:zTarget";
         seed_target(&acl_ks, target, &["ctx-a", "ctx-b"]).await;
 
@@ -368,6 +445,7 @@ mod tests {
         let err = update_acl(
             &acl_ks,
             &audit_ks,
+            &contexts_ks,
             &caller,
             target,
             UpdateAclParams {
@@ -389,7 +467,8 @@ mod tests {
     /// retains their independent grant.
     #[tokio::test]
     async fn update_acl_allows_remove_within_caller_scope() {
-        let (_store, acl_ks, audit_ks, _dir) = fresh_store().await;
+        let (_store, acl_ks, audit_ks, contexts_ks, _dir) = fresh_store().await;
+        seed_contexts(&contexts_ks, &["ctx-a", "ctx-b"]).await;
         let target = "did:key:zTarget2";
         seed_target(&acl_ks, target, &["ctx-a", "ctx-b"]).await;
 
@@ -399,6 +478,7 @@ mod tests {
         let body = update_acl(
             &acl_ks,
             &audit_ks,
+            &contexts_ks,
             &caller,
             target,
             UpdateAclParams {
@@ -419,7 +499,8 @@ mod tests {
     /// refactor doesn't accidentally regress it).
     #[tokio::test]
     async fn update_acl_rejects_add_outside_caller_scope() {
-        let (_store, acl_ks, audit_ks, _dir) = fresh_store().await;
+        let (_store, acl_ks, audit_ks, contexts_ks, _dir) = fresh_store().await;
+        seed_contexts(&contexts_ks, &["ctx-a", "ctx-b"]).await;
         let target = "did:key:zTarget3";
         seed_target(&acl_ks, target, &["ctx-a"]).await;
 
@@ -427,6 +508,7 @@ mod tests {
         let err = update_acl(
             &acl_ks,
             &audit_ks,
+            &contexts_ks,
             &caller,
             target,
             UpdateAclParams {
@@ -439,5 +521,103 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, AppError::Forbidden(_)), "got {err:?}");
+    }
+
+    /// Regression test: creating an ACL entry referencing a context
+    /// that doesn't exist in the contexts keyspace must be rejected.
+    /// Before this guard, a super-admin's typo silently created a
+    /// dangling grant that would spring into life if a context with
+    /// that id was later registered.
+    #[tokio::test]
+    async fn create_acl_rejects_unknown_context() {
+        let (_store, acl_ks, audit_ks, contexts_ks, _dir) = fresh_store().await;
+        seed_contexts(&contexts_ks, &["ctx-real"]).await;
+
+        // Super-admin caller — privileged enough to pass the scope
+        // checks, so the test pins the existence check specifically.
+        let caller = AuthClaims {
+            did: "did:key:zSuper".into(),
+            role: Role::Admin,
+            allowed_contexts: Vec::new(),
+        };
+        let err = create_acl(
+            &acl_ks,
+            &audit_ks,
+            &contexts_ks,
+            &caller,
+            "did:key:zNewAdmin",
+            Role::Admin,
+            None,
+            vec!["ctx-typo".into()],
+            None,
+            "test",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
+    }
+
+    /// Existing contexts in the contexts keyspace are accepted.
+    #[tokio::test]
+    async fn create_acl_accepts_known_context() {
+        let (_store, acl_ks, audit_ks, contexts_ks, _dir) = fresh_store().await;
+        seed_contexts(&contexts_ks, &["ctx-real"]).await;
+
+        let caller = AuthClaims {
+            did: "did:key:zSuper".into(),
+            role: Role::Admin,
+            allowed_contexts: Vec::new(),
+        };
+        let body = create_acl(
+            &acl_ks,
+            &audit_ks,
+            &contexts_ks,
+            &caller,
+            "did:key:zNewAdmin",
+            Role::Admin,
+            None,
+            vec!["ctx-real".into()],
+            None,
+            "test",
+        )
+        .await
+        .unwrap();
+        assert_eq!(body.allowed_contexts, vec!["ctx-real".to_string()]);
+    }
+
+    /// Updating an ACL entry to add a context that doesn't exist
+    /// must be rejected. Same rationale as the create-side check —
+    /// no path may produce a grant whose scope references an
+    /// unregistered context.
+    #[tokio::test]
+    async fn update_acl_rejects_adding_unknown_context() {
+        let (_store, acl_ks, audit_ks, contexts_ks, _dir) = fresh_store().await;
+        seed_contexts(&contexts_ks, &["ctx-a"]).await;
+        let target = "did:key:zTargetUnknown";
+        seed_target(&acl_ks, target, &["ctx-a"]).await;
+
+        // Super-admin caller bypasses the scope checks so we
+        // isolate the existence check.
+        let caller = AuthClaims {
+            did: "did:key:zSuper".into(),
+            role: Role::Admin,
+            allowed_contexts: Vec::new(),
+        };
+        let err = update_acl(
+            &acl_ks,
+            &audit_ks,
+            &contexts_ks,
+            &caller,
+            target,
+            UpdateAclParams {
+                role: None,
+                label: None,
+                allowed_contexts: Some(vec!["ctx-a".into(), "ctx-ghost".into()]),
+            },
+            "test",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
     }
 }

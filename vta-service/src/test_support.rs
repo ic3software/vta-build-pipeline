@@ -437,6 +437,30 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
     let sessions_ks = store.keyspace("sessions").unwrap();
     let acl_ks = store.keyspace("acl").unwrap();
     let contexts_ks = store.keyspace("contexts").unwrap();
+    // Seed a default `ctx1` context so route tests that reference
+    // it in ACL entries or key derivations don't have to set up
+    // contexts themselves. The ACL `create`/`update` operations
+    // now refuse to reference unregistered contexts (see
+    // `operations::acl::require_contexts_exist`).
+    {
+        use chrono::Utc;
+        let now = Utc::now();
+        crate::contexts::store_context(
+            &contexts_ks,
+            &crate::contexts::ContextRecord {
+                id: "ctx1".into(),
+                name: "ctx1".into(),
+                did: None,
+                description: None,
+                base_path: "m/26'/2'/0'".into(),
+                index: 0,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .expect("seed ctx1");
+    }
     let audit_ks = store.keyspace("audit").unwrap();
     let cache_ks = store.keyspace("cache").unwrap();
     let imported_ks = store.keyspace("imported_secrets").unwrap();
