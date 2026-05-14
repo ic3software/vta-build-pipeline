@@ -7,6 +7,7 @@ pub mod context_management;
 pub mod did_management;
 pub mod did_template_management;
 pub mod discovery;
+#[cfg(feature = "didcomm")]
 pub mod join_requests;
 pub mod key_management;
 pub mod protocol_management;
