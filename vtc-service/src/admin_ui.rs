@@ -86,14 +86,26 @@ pub async fn serve(req: Request<Body>) -> Response {
         rel
     };
 
-    let bytes = lookup(rel).or_else(|| lookup("/index.html"));
-    let Some(bytes) = bytes else {
-        return (StatusCode::NOT_FOUND, "admin UX not embedded").into_response();
+    // SPA history-mode fallback: extensionless paths like
+    // `/admin/install` aren't on disk, so we serve `index.html` and
+    // let the client-side router pick up. The mime must reflect the
+    // *served* bytes (`text/html`), not the *requested* path —
+    // otherwise the browser sees `application/octet-stream` and
+    // tries to download the page.
+    let (bytes, mime) = match lookup(rel) {
+        Some(b) => (
+            b,
+            mime_guess::from_path(rel)
+                .first_or_octet_stream()
+                .to_string(),
+        ),
+        None => match lookup("/index.html") {
+            Some(b) => (b, "text/html; charset=utf-8".to_string()),
+            None => {
+                return (StatusCode::NOT_FOUND, "admin UX not embedded").into_response();
+            }
+        },
     };
-
-    let mime = mime_guess::from_path(rel)
-        .first_or_octet_stream()
-        .to_string();
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)

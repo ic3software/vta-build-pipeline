@@ -307,9 +307,15 @@ pub async fn run_emergency_bootstrap_with_store(
         .await?;
 
     // --- install URL ------------------------------------------------
+    // `/admin/install` so the embedded admin SPA picks the request
+    // up and runs the install-claim ceremony in-browser. The bare
+    // `/install` path would hit the website fallback, which has no
+    // install page. The `vtc://install?token=…` fallback (when
+    // `public_url` is unset) intentionally keeps the bare-path shape
+    // because nothing renders it; it's a sentinel for ops scripts.
     let install_url = match &config.public_url {
         Some(base) => format!(
-            "{}/install?token={}",
+            "{}/admin/install?token={}",
             base.trim_end_matches('/'),
             minted.jwt
         ),

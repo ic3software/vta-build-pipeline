@@ -918,8 +918,12 @@ async fn mint_initial_install_token(
         )
         .await?;
 
+    // `/admin/install` so the embedded admin SPA picks the request
+    // up and runs the install-claim ceremony in-browser. The bare
+    // `/install` path would hit the website fallback, which has no
+    // install page. See `docs/03-vtc/getting-started.md` §"Step 3".
     Ok(format!(
-        "{}/install?token={}",
+        "{}/admin/install?token={}",
         base_url.trim_end_matches('/'),
         minted.jwt
     ))

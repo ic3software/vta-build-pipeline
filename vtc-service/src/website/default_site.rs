@@ -50,14 +50,27 @@ pub async fn serve(req: Request<Body>) -> Response {
         raw_path.to_string()
     };
 
-    let bytes = lookup(&req_path).or_else(|| lookup("/index.html"));
-    let Some(bytes) = bytes else {
-        return (StatusCode::NOT_FOUND, "default site not embedded").into_response();
+    // Track whether we served the requested path verbatim or fell
+    // back to `index.html` for SPA-style client-routing. When we
+    // fall back, the mime must reflect what we're actually returning
+    // (`text/html`) — not what was requested. Without this, an
+    // extensionless request like `/install` returns `index.html`'s
+    // bytes under `application/octet-stream`, which the browser
+    // treats as a file download instead of rendering as a page.
+    let (bytes, mime) = match lookup(&req_path) {
+        Some(b) => (
+            b,
+            mime_guess::from_path(&req_path)
+                .first_or_octet_stream()
+                .to_string(),
+        ),
+        None => match lookup("/index.html") {
+            Some(b) => (b, "text/html; charset=utf-8".to_string()),
+            None => {
+                return (StatusCode::NOT_FOUND, "default site not embedded").into_response();
+            }
+        },
     };
-
-    let mime = mime_guess::from_path(&req_path)
-        .first_or_octet_stream()
-        .to_string();
 
     Response::builder()
         .status(StatusCode::OK)
