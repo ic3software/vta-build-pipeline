@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Verifiable Trust Community</title>
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1 id="community-name">Verifiable Trust Community</h1>
+        <p class="lead" id="community-description">
+          A Verifiable Trust Community service is live at this endpoint.
+        </p>
+      </header>
+
+      <section class="status">
+        <h2>Daemon</h2>
+        <dl>
+          <dt>Health</dt>
+          <dd><code id="health-status">…</code></dd>
+          <dt>DID</dt>
+          <dd><code id="community-did">…</code></dd>
+        </dl>
+      </section>
+
+      <section class="cta">
+        <h2>What lives here</h2>
+        <p>
+          This is the default landing page. The operator hasn't configured
+          a public website yet (<code>website.root_dir</code> is unset).
+        </p>
+        <ul>
+          <li>
+            <strong>Operators</strong> point
+            <a href="/admin/"><code>/admin/</code></a>
+            at the admin UX to manage the community.
+          </li>
+          <li>
+            <strong>Members</strong> apply via the join flow on the API at
+            <code>POST /v1/join-requests</code>.
+          </li>
+          <li>
+            <strong>Developers</strong> hit the JSON API under
+            <code>/v1/*</code>.
+          </li>
+        </ul>
+      </section>
+
+      <footer>
+        <p>
+          Replace this page by setting <code>website.root_dir</code> in
+          the daemon config and populating the directory, or by uploading
+          a bundle via <code>POST /v1/website/deploy</code>.
+        </p>
+      </footer>
+    </main>
+    <script src="/site.js" defer></script>
+  </body>
+</html>

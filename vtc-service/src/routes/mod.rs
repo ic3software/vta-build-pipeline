@@ -812,6 +812,10 @@ async fn insert_default_connect_info_if_missing(
 /// Build the public router from the API sub-router + placeholder
 /// admin/website surfaces. Extracted so unit tests can exercise
 /// nest behaviour without rebuilding the full TrustTaskRouter.
+///
+/// Only used by the no-`website`-feature build path; the
+/// feature build always flows through [`assemble_with_website`].
+#[cfg_attr(feature = "website", allow(dead_code))]
 fn assemble(routing: &RoutingConfig, api: Router<AppState>) -> Router<AppState> {
     use axum::middleware::from_fn;
 
@@ -873,55 +877,79 @@ pub fn assemble_with_website(
 
     use crate::routing::security_headers::security_headers;
 
-    let website_state = match website_state {
-        Some(s) => s,
-        // No state → fall back to the 503-placeholder path.
-        None => return assemble(routing, api),
-    };
-
     // Admin UX sub-router. Phase 5 M5.7 ships the real handler
     // when `admin-ui` is on AND `admin_ui.mode = "embedded"`.
     // External mode + the no-feature build fall back to the 503
     // placeholder.
+    //
+    // We use explicit `route("/")` + `route("/{*path}")` rather
+    // than `Router::fallback`, because axum 0.8 doesn't propagate
+    // the nested router's fallback through `Router::merge` of a
+    // sibling router (the website surface) — the website
+    // fallback ends up intercepting requests to `/admin/*`. Two
+    // wildcard routes cover every reachable path.
     #[cfg(feature = "admin-ui")]
-    let admin: Router<AppState> = {
-        // Read the mode synchronously — `assemble_with_website` is
-        // called before the runtime starts, so we use try_read.
-        // In practice the config is uncontended at this point.
-        // External mode keeps the 503 placeholder so requests to
-        // `/admin/*` 404 (matching the spec's "external mode skip
-        // embedding" rule).
-        Router::new()
-            .route("/build-info.json", get(admin_ui::build_info))
-            .fallback(get(admin_ui::serve_spa))
-            .layer(from_fn(security_headers))
-    };
+    let admin: Router<AppState> = Router::new()
+        .route("/build-info.json", get(admin_ui::build_info))
+        .route("/", get(admin_ui::serve_spa))
+        .route("/{*path}", get(admin_ui::serve_spa))
+        .layer(from_fn(security_headers));
     #[cfg(not(feature = "admin-ui"))]
     let admin: Router<AppState> = Router::new()
-        .fallback(any(placeholder_503))
+        .route("/", any(placeholder_503))
+        .route("/{*path}", any(placeholder_503))
         .layer(from_fn(security_headers));
 
-    // Real website router. State-erased via `.with_state(...)` so
-    // it can be merged/nested under the AppState-typed parent.
-    let website: Router<AppState> = Router::new()
-        .fallback(get(crate::website::serve))
-        .layer(from_fn(security_headers))
-        .with_state(website_state);
+    // Website sub-router. Two dispatch paths, same rationale for
+    // explicit wildcard routes as the admin block above.
+    //
+    // - Operator configured `website.root_dir` → serve from the
+    //   filesystem via the M5.4 handler. `website_state` is
+    //   `Some`.
+    // - No `root_dir` → serve the in-tree default landing page
+    //   from `vtc-service/website-default/`. `website_state` is
+    //   `None`. This is the freshly-installed-daemon
+    //   out-of-the-box experience.
+    //
+    // Both paths share the security-headers layer so the default
+    // CSP applies uniformly.
+    // Built as `Router<()>` (state baked in via `with_state` for
+    // the operator-config branch; the default-site branch is
+    // state-less) so the parent `Router<AppState>` can mount it
+    // via `fallback_service` / `nest_service`. axum 0.8's `merge`
+    // doesn't preserve nested-router precedence when the merged
+    // router has a wildcard `route("/{*path}")` — the website's
+    // wildcard scores higher than the admin nest, so `/admin/*`
+    // ends up routed to the website. The service-level mount
+    // sidesteps that.
+    let website: axum::Router<()> = match website_state {
+        Some(state) => Router::new()
+            .route("/", get(crate::website::serve))
+            .route("/{*path}", get(crate::website::serve))
+            .layer(from_fn(security_headers))
+            .with_state(state),
+        None => Router::new()
+            .route("/", get(crate::website::default_site::serve))
+            .route("/{*path}", get(crate::website::default_site::serve))
+            .layer(from_fn(security_headers)),
+    };
 
     let mut app: Router<AppState> = Router::new()
         .route("/health", get(health::health))
         .nest(&routing.api.mount, api);
     app = app.nest(&routing.admin_ui.mount, admin);
     if routing.website.mount == "/" {
-        app = app.merge(website);
+        app = app.fallback_service(website);
     } else {
-        app = app.nest(&routing.website.mount, website);
+        app = app.nest_service(&routing.website.mount, website);
     }
     app
 }
 
-/// Placeholder handler returned by the admin UX + website
-/// sub-routers until M5.4 / M5.7 land real handlers.
+/// Placeholder 503 handler used by the admin sub-router when the
+/// `admin-ui` feature is off, and by the website sub-router in
+/// the no-`website`-feature build.
+#[cfg_attr(all(feature = "website", feature = "admin-ui"), allow(dead_code))]
 async fn placeholder_503() -> impl IntoResponse {
     (
         StatusCode::SERVICE_UNAVAILABLE,

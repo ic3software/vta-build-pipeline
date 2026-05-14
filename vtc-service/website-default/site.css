@@ -1,0 +1,88 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.55;
+}
+
+body {
+  margin: 0;
+  padding: 2rem 1.5rem;
+  max-width: 48rem;
+  margin-inline: auto;
+}
+
+header {
+  margin-block-end: 2rem;
+  padding-block-end: 1rem;
+  border-block-end: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.8rem, 2.2vw + 1rem, 2.4rem);
+}
+
+h2 {
+  margin-block-end: 0.75rem;
+  font-size: 1.05rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.lead {
+  margin-block-start: 0.5rem;
+  font-size: 1.1rem;
+  opacity: 0.8;
+}
+
+section {
+  margin-block: 1.75rem;
+}
+
+section.status dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 1.5rem;
+  row-gap: 0.5rem;
+  margin: 0;
+}
+
+section.status dt {
+  font-weight: 600;
+  opacity: 0.65;
+}
+
+section.status dd {
+  margin: 0;
+}
+
+section.cta ul {
+  margin: 0;
+  padding-inline-start: 1.25rem;
+}
+
+section.cta li {
+  margin-block: 0.5rem;
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  padding: 0.05em 0.35em;
+  border-radius: 0.25em;
+  font-size: 0.9em;
+}
+
+a {
+  color: inherit;
+  text-underline-offset: 0.2em;
+}
+
+footer {
+  margin-block-start: 3rem;
+  padding-block-start: 1rem;
+  border-block-start: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  font-size: 0.875rem;
+  opacity: 0.65;
+}
