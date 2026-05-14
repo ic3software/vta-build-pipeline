@@ -106,6 +106,9 @@ async fn build_router(routing: &RoutingConfig) -> (Router, tempfile::TempDir) {
         supervisor: None,
     };
 
+    #[cfg(feature = "website")]
+    let router = routes::router_with(routing, None).with_state(state);
+    #[cfg(not(feature = "website"))]
     let router = routes::router_with(routing).with_state(state);
     (router, dir)
 }

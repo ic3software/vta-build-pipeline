@@ -790,6 +790,20 @@ fn run_rest_thread(
         // exemption list.
         let csrf_layer = axum::middleware::from_fn(crate::routing::csrf::enforce);
 
+        // Public-website state (Phase 5 M5.4). `None` when the
+        // operator hasn't set `website.root_dir` — the website
+        // sub-router keeps the 503 placeholder in that case.
+        #[cfg(feature = "website")]
+        let website_state = build_website_state(&state.config).await;
+
+        #[cfg(feature = "website")]
+        let app = routes::router_with(&routing, website_state)
+            .with_state(state)
+            .layer(csrf_layer)
+            .layer(host_layer)
+            .layer(cors_layer)
+            .layer(TraceLayer::new_for_http());
+        #[cfg(not(feature = "website"))]
         let app = routes::router_with(&routing)
             .with_state(state)
             .layer(csrf_layer)
@@ -1065,6 +1079,51 @@ fn decode_jwt_key(b64: &str) -> Result<JwtKeys, AppError> {
     let keys = JwtKeys::from_ed25519_bytes(&key_bytes, "VTC")?;
     debug!("JWT signing key decoded successfully");
     Ok(keys)
+}
+
+/// Construct the public-website state from operator config (Phase 5
+/// M5.4). Returns `None` when:
+///
+/// - `website.root_dir` is unset (operator opt-out); the handler
+///   stays as the 503 placeholder.
+/// - The configured `deploy_mode` value isn't recognised; a
+///   warning is logged and the daemon falls back to the
+///   placeholder so a misconfiguration can't bring down the API
+///   surface.
+///
+/// On success, the returned [`crate::website::WebsiteState`] is
+/// passed to [`crate::routes::router_with`] which mounts the
+/// static handler at `routing.website.mount`.
+#[cfg(feature = "website")]
+async fn build_website_state(
+    config: &Arc<RwLock<crate::config::AppConfig>>,
+) -> Option<crate::website::WebsiteState> {
+    let cfg = config.read().await;
+    let root_dir = cfg.website.root_dir.as_ref()?;
+
+    let root = match crate::website::WebsiteRoot::new(root_dir, &cfg.website.deploy_mode) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("website.deploy_mode invalid ({e}); falling back to 503 placeholder");
+            return None;
+        }
+    };
+
+    let cache = crate::website::cache::WebsiteCache::new(cfg.website.live_cache_ttl_seconds);
+
+    info!(
+        root = %root_dir.display(),
+        mode = %cfg.website.deploy_mode,
+        "public-website handler enabled",
+    );
+
+    Some(crate::website::WebsiteState {
+        root,
+        cache,
+        executable_blocklist: cfg.website.executable_blocklist.clone(),
+        cache_control: cfg.website.cache_control.clone(),
+        csp_override_file: cfg.website.csp_override_file.clone(),
+    })
 }
 
 async fn shutdown_signal() {

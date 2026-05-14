@@ -40,8 +40,103 @@ pub struct AppConfig {
     /// flips a previously-asserted member's flag to `false`.
     #[serde(default)]
     pub renewal: RenewalConfig,
+    /// Public community website settings (Phase 5 M5.4). When
+    /// `root_dir` is unset the website handler 503s — the
+    /// feature is opt-in by operator configuration, even though
+    /// the cargo feature is default-on.
+    #[serde(default)]
+    pub website: WebsiteConfig,
     #[serde(skip)]
     pub config_path: PathBuf,
+}
+
+/// Public community website (§12.1, Phase 5 M5.4.1). Filesystem-
+/// backed static hosting under [`Self::root_dir`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct WebsiteConfig {
+    /// Directory served as the site root. `None` disables the
+    /// handler entirely (it 503s with a clear error). No default
+    /// — operators opt in by setting this to a real path.
+    #[serde(default)]
+    pub root_dir: Option<PathBuf>,
+    /// Deploy mode: `"live"` (default) or `"managed"`. See
+    /// [`crate::website::WebsiteRoot`].
+    #[serde(default = "default_deploy_mode")]
+    pub deploy_mode: String,
+    /// Cache TTL for the live-mode FD cache, in seconds.
+    /// Defaults to 5 — short enough that `scp` / `rsync` edits
+    /// surface quickly, long enough to amortise repeat hits.
+    #[serde(default = "default_live_cache_ttl_seconds")]
+    pub live_cache_ttl_seconds: u64,
+    /// Managed mode: retain this many old generations beyond
+    /// the active one. Default 5.
+    #[serde(default = "default_managed_generations_keep")]
+    pub managed_generations_keep: u32,
+    /// `Cache-Control` header on every successful response.
+    /// Defaults to `"public, max-age=300"` — five minutes for a
+    /// CDN to cache.
+    #[serde(default = "default_cache_control")]
+    pub cache_control: String,
+    /// Extensions refused unconditionally. Default
+    /// `[".cgi", ".php", ".exe"]`. Lowercased + dot-prefixed.
+    #[serde(default = "default_executable_blocklist")]
+    pub executable_blocklist: Vec<String>,
+    /// Maximum bundle size for `POST /v1/website/deploy` (M5.5).
+    /// Tested at the management API; informational here.
+    #[serde(default = "default_max_bundle_size_mb")]
+    pub max_bundle_size_mb: u64,
+    /// Maximum size for a single `PUT /v1/website/files/...`
+    /// upload (M5.5). Tested at the management API; informational
+    /// here.
+    #[serde(default = "default_max_file_size_mb")]
+    pub max_file_size_mb: u64,
+    /// Per-site override file (relative to `root_dir`). Currently
+    /// supports a single key, `csp = "..."`, that replaces the
+    /// default CSP for this site. Default `".vtc-website.toml"`.
+    #[serde(default = "default_csp_override_file")]
+    pub csp_override_file: String,
+}
+
+impl Default for WebsiteConfig {
+    fn default() -> Self {
+        Self {
+            root_dir: None,
+            deploy_mode: default_deploy_mode(),
+            live_cache_ttl_seconds: default_live_cache_ttl_seconds(),
+            managed_generations_keep: default_managed_generations_keep(),
+            cache_control: default_cache_control(),
+            executable_blocklist: default_executable_blocklist(),
+            max_bundle_size_mb: default_max_bundle_size_mb(),
+            max_file_size_mb: default_max_file_size_mb(),
+            csp_override_file: default_csp_override_file(),
+        }
+    }
+}
+
+fn default_deploy_mode() -> String {
+    "live".into()
+}
+fn default_live_cache_ttl_seconds() -> u64 {
+    5
+}
+fn default_managed_generations_keep() -> u32 {
+    5
+}
+fn default_cache_control() -> String {
+    "public, max-age=300".into()
+}
+fn default_executable_blocklist() -> Vec<String> {
+    vec![".cgi".into(), ".php".into(), ".exe".into()]
+}
+fn default_max_bundle_size_mb() -> u64 {
+    50
+}
+fn default_max_file_size_mb() -> u64 {
+    10
+}
+fn default_csp_override_file() -> String {
+    ".vtc-website.toml".into()
 }
 
 /// Renewal-path settings. Phase 4 M4.2.2.

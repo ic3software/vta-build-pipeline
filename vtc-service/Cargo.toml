@@ -11,8 +11,13 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["setup", "keyring"]
+default = ["setup", "keyring", "website"]
 setup = ["dep:dialoguer", "dep:didwebvh-rs", "dep:url"]
+# Public community website (§12.1). Filesystem-backed static
+# hosting at `website.root_dir`. Default-on so MVP `cargo run`
+# serves a site; operators who host externally can compile it
+# out via `--no-default-features --features setup,keyring`.
+website = ["dep:mime_guess", "dep:unicode-normalization"]
 # OS keyring backend for the VTC secret. Enables vta-sdk's keyring feature
 # so the binary can register a platform store once via
 # `vta_sdk::keyring_init::install_default_store()` at startup.
@@ -83,6 +88,8 @@ fjall = { workspace = true }
 toml = { workspace = true }
 tower-http = { workspace = true, features = ["cors", "trace"] }
 tower_governor = "0.8"
+mime_guess = { version = "2", optional = true }
+unicode-normalization = { version = "0.1", optional = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

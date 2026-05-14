@@ -51,7 +51,14 @@ pub const UNAUTH_BODY_SIZE: usize = 64 * 1024;
 /// Production startup goes through [`router_with`] from `server.rs`
 /// so operator-supplied mount overrides take effect.
 pub fn router() -> Router<AppState> {
-    router_with(&RoutingConfig::default())
+    #[cfg(feature = "website")]
+    {
+        router_with(&RoutingConfig::default(), None)
+    }
+    #[cfg(not(feature = "website"))]
+    {
+        router_with(&RoutingConfig::default())
+    }
 }
 
 /// Build the public router with operator-supplied routing config
@@ -76,7 +83,41 @@ pub fn router() -> Router<AppState> {
 /// at the parent-router root (above every nest boundary) so
 /// monitoring integration stays trivial regardless of routing
 /// mode.
+#[cfg(feature = "website")]
+pub fn router_with(
+    routing: &RoutingConfig,
+    website_state: Option<crate::website::WebsiteState>,
+) -> Router<AppState> {
+    router_with_inner(routing, website_state)
+}
+
+#[cfg(not(feature = "website"))]
 pub fn router_with(routing: &RoutingConfig) -> Router<AppState> {
+    router_with_inner(routing)
+}
+
+#[cfg(not(feature = "website"))]
+fn router_with_inner(routing: &RoutingConfig) -> Router<AppState> {
+    let (api_chain,) = (build_api_chain(routing),);
+    assemble(routing, api_chain)
+}
+
+#[cfg(feature = "website")]
+fn router_with_inner(
+    routing: &RoutingConfig,
+    website_state: Option<crate::website::WebsiteState>,
+) -> Router<AppState> {
+    let api_chain = build_api_chain(routing);
+    assemble_with_website(routing, api_chain, website_state)
+}
+
+/// Build the merged API+unauth surface. Identical shape regardless
+/// of the `website` feature; `routing` is currently unused inside
+/// the chain (the API mount prefix is applied by [`assemble`] /
+/// [`assemble_with_website`]) but threaded through so a future
+/// per-mount override can land without changing this function's
+/// signature.
+fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
     let auth_sessions_manage =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/sessions/manage/1.0")
             .expect("static Trust-Task URL");
@@ -577,8 +618,7 @@ pub fn router_with(routing: &RoutingConfig) -> Router<AppState> {
 
     // Unauthenticated routes — tighter body cap + per-IP governor.
     let unauth = build_unauth_routes();
-
-    assemble(routing, api.merge(unauth))
+    api.merge(unauth)
 }
 
 /// Build the unauthenticated sub-router: 5 POST routes that drive
@@ -734,6 +774,51 @@ fn assemble(routing: &RoutingConfig, api: Router<AppState>) -> Router<AppState> 
         app = app.nest(&routing.website.mount, website_placeholder);
     }
 
+    app
+}
+
+/// Production assembly: same as [`assemble`] but **replaces** the
+/// website 503 placeholder with the real static handler when a
+/// [`crate::website::WebsiteState`] is provided.
+///
+/// Mirrors the no-state path's nest/merge logic exactly so the
+/// route-priority semantics don't drift between the two builds.
+#[cfg(feature = "website")]
+pub fn assemble_with_website(
+    routing: &RoutingConfig,
+    api: Router<AppState>,
+    website_state: Option<crate::website::WebsiteState>,
+) -> Router<AppState> {
+    use axum::middleware::from_fn;
+
+    use crate::routing::security_headers::security_headers;
+
+    let website_state = match website_state {
+        Some(s) => s,
+        // No state → fall back to the 503-placeholder path.
+        None => return assemble(routing, api),
+    };
+
+    let admin_placeholder: Router<AppState> = Router::new()
+        .fallback(any(placeholder_503))
+        .layer(from_fn(security_headers));
+
+    // Real website router. State-erased via `.with_state(...)` so
+    // it can be merged/nested under the AppState-typed parent.
+    let website: Router<AppState> = Router::new()
+        .fallback(get(crate::website::serve))
+        .layer(from_fn(security_headers))
+        .with_state(website_state);
+
+    let mut app: Router<AppState> = Router::new()
+        .route("/health", get(health::health))
+        .nest(&routing.api.mount, api);
+    app = app.nest(&routing.admin_ui.mount, admin_placeholder);
+    if routing.website.mount == "/" {
+        app = app.merge(website);
+    } else {
+        app = app.nest(&routing.website.mount, website);
+    }
     app
 }
 
