@@ -12,6 +12,7 @@
 // awkward, the API is wrong.
 
 import { registerPlugin } from "@/plugin-api";
+import { Acl } from "@/plugins/acl";
 import { Dashboard } from "@/plugins/dashboard";
 import { Members } from "@/plugins/members";
 import { Profile } from "@/plugins/profile";
@@ -34,6 +35,14 @@ export function registerBuiltinPlugins(): void {
   });
 
   registerPlugin({
+    id: "acl",
+    label: "Access control",
+    path: "/acl",
+    icon: "🔐",
+    reactComponent: Acl,
+  });
+
+  registerPlugin({
     id: "profile",
     label: "Community profile",
     path: "/profile",
@@ -41,5 +50,5 @@ export function registerBuiltinPlugins(): void {
     reactComponent: Profile,
   });
 
-  // Later commits add: acl, join-requests.
+  // Later commits add: join-requests.
 }

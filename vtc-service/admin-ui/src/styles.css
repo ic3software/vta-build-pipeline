@@ -379,3 +379,25 @@ button.link {
 button.link:hover {
   text-decoration: underline;
 }
+
+button.destructive,
+button.secondary.destructive {
+  border-color: light-dark(#d1242f, #f85149);
+  color: light-dark(#d1242f, #f85149);
+}
+
+button.destructive:hover:not(:disabled),
+button.secondary.destructive:hover:not(:disabled) {
+  background: color-mix(in srgb, light-dark(#d1242f, #f85149) 10%, transparent);
+}
+
+.chip {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  margin-right: 0.25rem;
+  margin-block: 0.1rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.85em;
+  background: var(--bg);
+}
