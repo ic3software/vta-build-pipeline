@@ -37,6 +37,27 @@ function showMediatorRow(did) {
   row.hidden = false;
 }
 
+function showLogo(url, alt) {
+  const img = document.getElementById("community-logo");
+  if (!img || !url) return;
+  // Drop the alt text in too — community name when available,
+  // empty otherwise (the logo is decorative; the page already
+  // shows the name as text).
+  img.alt = alt ? `${alt} logo` : "";
+  // Hide again if the operator's URL 404s, points at a wrong MIME,
+  // or is otherwise unloadable — better silent than broken-image.
+  img.addEventListener(
+    "error",
+    () => {
+      img.hidden = true;
+      console.warn("community logo failed to load", url);
+    },
+    { once: true },
+  );
+  img.src = url;
+  img.hidden = false;
+}
+
 // ── Copy-to-clipboard wiring ───────────────────────────────
 //
 // Buttons carry `data-copy-target="<id>"`. On click, copy that
@@ -155,6 +176,9 @@ async function refresh() {
       }
       if (profile.description) {
         setText("community-description", profile.description);
+      }
+      if (profile.logoUrl) {
+        showLogo(profile.logoUrl, profile.name);
       }
       // The public-profile endpoint also surfaces the mediator DID
       // so a single fetch is enough; `/health` is a fallback for

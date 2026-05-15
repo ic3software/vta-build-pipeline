@@ -176,6 +176,29 @@ main {
   color: var(--brand-500);
 }
 
+/* Optional operator-supplied logo. Sits above the headline in the
+ * hero. `hidden` by default; site.js sets `src` + clears the
+ * `hidden` attribute when the public profile includes `logoUrl`. */
+.community-logo {
+  display: block;
+  margin: 1.5rem 0 0;
+  width: auto;
+  height: auto;
+  max-height: 96px;
+  max-width: min(220px, 100%);
+  /* Subtle elevation so PNGs with transparent backgrounds read on
+   * either theme without a hard border. */
+  border-radius: var(--radius-md);
+  object-fit: contain;
+  /* Soft drop shadow on light theme — invisible on dark, which is
+   * fine since dark backgrounds rarely need the lift. */
+  filter: drop-shadow(0 2px 8px rgb(0 0 0 / 0.06));
+}
+
+.community-logo[hidden] {
+  display: none;
+}
+
 .lead {
   margin: 1rem 0 0;
   font-size: clamp(1.05rem, 1vw + 0.85rem, 1.25rem);
