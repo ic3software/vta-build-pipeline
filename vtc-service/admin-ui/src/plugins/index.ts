@@ -13,6 +13,7 @@
 
 import { registerPlugin } from "@/plugin-api";
 import { Dashboard } from "@/plugins/dashboard";
+import { Members } from "@/plugins/members";
 import { Profile } from "@/plugins/profile";
 
 export function registerBuiltinPlugins(): void {
@@ -25,6 +26,14 @@ export function registerBuiltinPlugins(): void {
   });
 
   registerPlugin({
+    id: "members",
+    label: "Members",
+    path: "/members",
+    icon: "👥",
+    reactComponent: Members,
+  });
+
+  registerPlugin({
     id: "profile",
     label: "Community profile",
     path: "/profile",
@@ -32,6 +41,5 @@ export function registerBuiltinPlugins(): void {
     reactComponent: Profile,
   });
 
-  // Later commits add: members, acl, join-requests.
-  // Each lands as a self-contained folder under src/plugins/.
+  // Later commits add: acl, join-requests.
 }
