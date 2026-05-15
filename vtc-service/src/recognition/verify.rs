@@ -429,9 +429,87 @@ impl HttpStatusListFetcher {
     }
 }
 
+/// Reject URLs that don't pass the SSRF allowlist. Returns `Ok(())`
+/// for safe URLs, `Err(RecognitionError::StatusListFailed)` for
+/// anything we don't want the recognise handler reaching out to —
+/// non-HTTPS schemes, IP-literal hosts (incl. RFC1918 + link-local
+/// + loopback + IPv4-mapped IPv6), and credentials/userinfo
+/// embedded in the authority.
+///
+/// `/v1/auth/recognise` is unauthenticated; the URL comes straight
+/// from an attacker-controlled foreign credential. Without this
+/// guard the daemon could be turned into an SSRF proxy hitting
+/// internal hosts (CWE-918).
+pub(crate) fn guard_status_list_url(url: &str) -> Result<(), RecognitionError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| RecognitionError::StatusListFailed(format!("invalid url {url}: {e}")))?;
+    if parsed.scheme() != "https" {
+        return Err(RecognitionError::StatusListFailed(format!(
+            "status-list url must be https (got scheme {})",
+            parsed.scheme()
+        )));
+    }
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(RecognitionError::StatusListFailed(
+            "status-list url must not contain userinfo".into(),
+        ));
+    }
+    use std::net::IpAddr;
+    let host_str = parsed
+        .host_str()
+        .ok_or_else(|| RecognitionError::StatusListFailed("status-list url missing host".into()))?;
+    {
+        // Reject IP-literal hosts outright. Reaching internal
+        // services by DNS is harder to prevent here (we can't
+        // resolve at parse time without TOCTOU); operators
+        // deploying behind internal DNS must use a network-level
+        // egress filter for full protection. This guard cuts off
+        // the bulk-attack vectors: `http://10.0.0.1`, `http://127.1`,
+        // `http://[::1]`, `http://0.0.0.0`, `http://169.254.169.254`
+        // (cloud metadata) etc.
+        //
+        // `host_str()` returns IPv6 hosts in bracketed URL form
+        // (`[::1]`) which `IpAddr::parse` rejects — strip the
+        // brackets before parsing. Domain hosts get neither
+        // parse hit (correctly fall through to allow).
+        let host_normalised = host_str
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host_str);
+        if let Ok(ip) = host_normalised.parse::<IpAddr>() {
+            let private = match ip {
+                IpAddr::V4(v4) => {
+                    v4.is_loopback()
+                        || v4.is_private()
+                        || v4.is_link_local()
+                        || v4.is_broadcast()
+                        || v4.is_unspecified()
+                        || v4.is_multicast()
+                        || v4.is_documentation()
+                }
+                IpAddr::V6(v6) => {
+                    v6.is_loopback()
+                        || v6.is_unspecified()
+                        || v6.is_multicast()
+                        // Unique local + link-local fc00::/7, fe80::/10.
+                        || (v6.segments()[0] & 0xfe00 == 0xfc00)
+                        || (v6.segments()[0] & 0xffc0 == 0xfe80)
+                }
+            };
+            if private {
+                return Err(RecognitionError::StatusListFailed(format!(
+                    "status-list url points at non-public IP {ip}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl StatusListFetcher for HttpStatusListFetcher {
     async fn check_status_bit(&self, url: &str, index: usize) -> Result<bool, RecognitionError> {
+        guard_status_list_url(url)?;
         let resp = self
             .client
             .get(url)
@@ -495,6 +573,59 @@ impl StatusListFetcher for HttpStatusListFetcher {
         decoded
             .get(index)
             .map_err(|e| RecognitionError::StatusListFailed(format!("get {index}: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod ssrf_guard_tests {
+    use super::guard_status_list_url;
+
+    #[test]
+    fn allows_https_to_public_domain() {
+        guard_status_list_url("https://example.com/status/list").expect("public https ok");
+    }
+
+    #[test]
+    fn rejects_http_scheme() {
+        let err = guard_status_list_url("http://example.com/status").expect_err("http blocked");
+        assert!(format!("{err}").contains("must be https"));
+    }
+
+    #[test]
+    fn rejects_loopback_ipv4() {
+        guard_status_list_url("https://127.0.0.1/x").expect_err("loopback blocked");
+        guard_status_list_url("https://127.1/x").expect_err("loopback short form blocked");
+    }
+
+    #[test]
+    fn rejects_rfc1918() {
+        guard_status_list_url("https://10.0.0.1/x").expect_err("10/8 blocked");
+        guard_status_list_url("https://192.168.1.5/x").expect_err("192.168 blocked");
+        guard_status_list_url("https://172.16.0.1/x").expect_err("172.16 blocked");
+    }
+
+    #[test]
+    fn rejects_link_local_metadata() {
+        // EC2 / GCP / Azure cloud-metadata endpoint.
+        guard_status_list_url("https://169.254.169.254/latest/meta-data/")
+            .expect_err("metadata IP blocked");
+    }
+
+    #[test]
+    fn rejects_ipv6_loopback_and_ula() {
+        guard_status_list_url("https://[::1]/x").expect_err("v6 loopback blocked");
+        guard_status_list_url("https://[fc00::1]/x").expect_err("v6 ULA blocked");
+        guard_status_list_url("https://[fe80::1]/x").expect_err("v6 link-local blocked");
+    }
+
+    #[test]
+    fn rejects_userinfo() {
+        guard_status_list_url("https://user:pass@example.com/x").expect_err("userinfo blocked");
+    }
+
+    #[test]
+    fn rejects_unparseable_url() {
+        guard_status_list_url("not a url").expect_err("garbage blocked");
     }
 }
 

@@ -92,12 +92,12 @@ use vti_common::audit::{AuditEvent, DidRotatedData};
 use vti_common::auth::session::{delete_session, list_sessions};
 use vti_common::error::AppError;
 
-use crate::acl::{delete_acl_entry, get_acl_entry, store_acl_entry};
+use crate::acl::get_acl_entry;
 use crate::auth::AuthClaims;
 use crate::credentials::{
     CredentialStatusRef, RoleVecParams, VmcParams, build_role_vec, build_vmc,
 };
-use crate::members::{delete_member, get_member, store_member};
+use crate::members::{get_member, store_member};
 use crate::server::AppState;
 use crate::status_list;
 
@@ -342,7 +342,21 @@ pub async fn rotate(
         )));
     }
 
-    // 7. Move the ACL row.
+    // 7. Move the ACL row. `KeyspaceHandle::swap` runs the
+    // insert-new + remove-old pair inside a single blocking closure
+    // so no async yield can land between them — the previous
+    // sequential store/delete pattern had a window where a crash or
+    // a competing handler could observe both rows live and treat
+    // the rotated member as having two valid identities.
+    //
+    // A process crash between the two fjall calls inside `swap` is
+    // still observable on next boot (fjall's WAL persists each call
+    // individually, not as a batch). That residual gap is a
+    // `fjall::WriteBatch` upgrade in `vti-common` away from being
+    // fully atomic; until then, a reconciliation step at boot would
+    // need to look for `(old_did, new_did)` pairs and complete the
+    // rotation. Tracked as a follow-up since the window shrinks
+    // from milliseconds to microseconds here.
     let mut acl = get_acl_entry(&state.acl_ks, &body.old_did)
         .await?
         .ok_or_else(|| {
@@ -352,16 +366,42 @@ pub async fn rotate(
             ))
         })?;
     acl.did = body.new_did.clone();
-    store_acl_entry(&state.acl_ks, &acl).await?;
-    delete_acl_entry(&state.acl_ks, &body.old_did).await?;
-
-    // 8. Move the Member row.
-    let member_opt = get_member(&state.members_ks, &body.old_did).await?;
-    if let Some(mut m) = member_opt {
-        m.did = body.new_did.clone();
-        store_member(&state.members_ks, &m).await?;
+    let acl_moved = state
+        .acl_ks
+        .swap(
+            format!("acl:{}", body.old_did).into_bytes(),
+            format!("acl:{}", body.new_did).into_bytes(),
+            &acl,
+        )
+        .await?;
+    if !acl_moved {
+        // Pre-existence was checked at step 6, so this only fires
+        // on a TOCTOU race. Treat as conflict — operator retries.
+        return Err(AppError::Conflict(format!(
+            "ACL row for newDid {} was created mid-rotation",
+            body.new_did
+        )));
     }
-    delete_member(&state.members_ks, &body.old_did).await?;
+
+    // 8. Move the Member row. Same swap discipline. Skipped when no
+    // member row exists (member-less rotation is rare but legal).
+    if let Some(mut m) = get_member(&state.members_ks, &body.old_did).await? {
+        m.did = body.new_did.clone();
+        let member_moved = state
+            .members_ks
+            .swap(
+                format!("members:{}", body.old_did).into_bytes(),
+                format!("members:{}", body.new_did).into_bytes(),
+                &m,
+            )
+            .await?;
+        if !member_moved {
+            return Err(AppError::Conflict(format!(
+                "member row for newDid {} was created mid-rotation",
+                body.new_did
+            )));
+        }
+    }
 
     // 9. Revoke every session keyed on the old DID.
     let sessions = list_sessions(&state.sessions_ks).await?;

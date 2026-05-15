@@ -41,6 +41,7 @@ use axum::http::{HeaderValue, Method, Response, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use serde_json::json;
+use subtle::ConstantTimeEq;
 
 /// Paths exempt from CSRF: unauth bootstrapping flows + the public
 /// form-post target. Each is documented in the module-level
@@ -97,9 +98,16 @@ pub async fn enforce(request: Request, next: Next) -> Response<Body> {
         .get("x-csrf-token")
         .and_then(|v| v.to_str().ok());
 
+    // Constant-time comparison on the bytes. A naive `c == h` on a
+    // String would short-circuit at the first mismatching byte, which
+    // leaks prefix-match length over response timing. `ct_eq` runs
+    // in time proportional to the longer slice regardless of where
+    // the bytes diverge. Also gate on `len()` matching first so the
+    // unequal-length path doesn't fall into `ct_eq`'s zero-pad.
     if let (Some(c), Some(h)) = (cookie_token, header_token)
         && !c.is_empty()
-        && c == h
+        && c.len() == h.len()
+        && bool::from(c.as_bytes().ct_eq(h.as_bytes()))
     {
         return next.run(request).await;
     }

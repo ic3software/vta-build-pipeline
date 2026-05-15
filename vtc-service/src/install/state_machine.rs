@@ -313,9 +313,17 @@ impl InstallTokenStore {
     /// daemon calls this once at startup; a returned `Some(...)`
     /// fires the `EmergencyBootstrapInvoked` audit event. Subsequent
     /// startups (after the marker is consumed) see `None`.
+    ///
+    /// Held under [`INSTALL_TOKEN_LOCK`] so a concurrent caller (a
+    /// second boot path racing with a CLI invocation, or two test
+    /// helpers in the same process) can't both observe the marker
+    /// and emit two audit envelopes for the same emergency. Mirrors
+    /// the read-then-write discipline every other transition in this
+    /// module follows.
     pub async fn take_pending_emergency(
         &self,
     ) -> Result<Option<PendingEmergencyBootstrap>, AppError> {
+        let _guard = INSTALL_TOKEN_LOCK.lock().await;
         let key = EMERGENCY_PENDING_KEY.to_vec();
         let value: Option<PendingEmergencyBootstrap> = self.ks.get(key.clone()).await?;
         if value.is_some() {

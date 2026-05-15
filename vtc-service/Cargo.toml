@@ -93,6 +93,12 @@ affinidi-status-list = { workspace = true }
 # via affinidi-tdk; surfacing as a direct dep makes the
 # version pin visible to clippy + cargo-audit.
 reqwest = { workspace = true }
+# Constant-time byte comparison. Used by the CSRF + WebAuthn
+# challenge equality checks where naive `==` on a secret-derived
+# string leaks prefix-match length over the wire. Already in the
+# workspace dep tree via the crypto crates; surfacing here pins
+# the patch level for cargo-audit.
+subtle = "2.6.1"
 # `async-trait` — already a direct dep for emergency::VtaRecoveryProver;
 # Phase 3's TrustRegistryClient trait reuses it.
 # Lower-level DIDComm message types — needed for the join-request

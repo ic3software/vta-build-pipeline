@@ -306,9 +306,14 @@ fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
     let health_diagnostics =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/health/diagnostics/1.0")
             .expect("static Trust-Task URL");
-    // Phase 3 M3.10 — cross-community session mint.
-    let auth_recognise = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/recognise/1.0")
-        .expect("static Trust-Task URL");
+    // Phase 3 M3.10 — cross-community session mint. The Trust
+    // Task declaration moved to `build_unauth_routes` so the
+    // handler sits behind the tower-governor + the 64 KB body
+    // cap — it's an unauthenticated endpoint that does DID
+    // resolution + outbound HTTP fetch + Rego policy eval +
+    // session-JWT mint, all driven by attacker-controlled VEC/VMC
+    // JSON, and it was previously exposed on the 1 MB / no-rate-
+    // limit main chain.
     // Read endpoints (M2.4). GET /v1/policies and
     // GET /v1/policies/{id} share their mounts with the POST
     // /v1/policies upload and POST /v1/policies/{id}/activate
@@ -325,11 +330,6 @@ fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
             "/health/diagnostics",
             get(health::diagnostics),
             health_diagnostics,
-        )
-        .route_with_task(
-            "/auth/recognise",
-            post(recognise::recognise),
-            auth_recognise,
         )
         // `did:webvh` log publication (Trust-Task-exempt — DID
         // resolvers don't carry our extension header). The VTC is
@@ -796,6 +796,16 @@ fn build_unauth_routes() -> Router<AppState> {
     let install_claim_finish =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/finish/1.0")
             .expect("static Trust-Task URL");
+    // Phase 3 M3.10 — cross-community session mint. Sits in the
+    // unauth chain (not the main API chain) so the tower-governor
+    // + 64 KB body cap apply: the handler runs DID resolution,
+    // outbound HTTP fetch of the foreign `statusListCredential`
+    // URL, Rego policy eval, and a session JWT mint, all driven by
+    // attacker-supplied JSON. Behind the rate limit, a sustained
+    // SSRF / CPU-amplification probe is throttled to 5 rps per
+    // source IP.
+    let auth_recognise = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/recognise/1.0")
+        .expect("static Trust-Task URL");
 
     let governor_config = Arc::new(
         GovernorConfigBuilder::default()
@@ -848,6 +858,11 @@ fn build_unauth_routes() -> Router<AppState> {
             "/install/claim/finish",
             post(install::claim_finish),
             install_claim_finish,
+        )
+        .route_with_task(
+            "/auth/recognise",
+            post(recognise::recognise),
+            auth_recognise,
         )
         .into_router()
         .layer(DefaultBodyLimit::max(UNAUTH_BODY_SIZE))

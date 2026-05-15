@@ -286,15 +286,26 @@ impl MembershipSyncer {
         // gate: `publish_on_join` only governs new-member
         // publication, not lifecycle updates / departures.
         if job.kind == SyncJobKind::PublishMember && self.policy_skips_publish().await {
-            job.record_success();
-            self.emit_outcome(&job, true);
+            // Delete first, audit second. Emitting the success
+            // envelope before the delete used to mean: if the
+            // delete failed (transient fjall error, etc.), the job
+            // sat in the queue and re-fired next tick, emitting a
+            // *second* "succeeded" envelope for the same job_id —
+            // the audit log no longer matched reality.
+            //
+            // Order matters: a delete failure now leaves the row
+            // un-audited and queued for retry, which is the right
+            // outcome. A successful delete emits exactly once.
             if let Err(e) = delete_sync_job(&self.sync_queue_ks, job.id).await {
                 warn!(
                     error = %e,
                     job_id = %job.id,
-                    "failed to delete policy-skipped PublishMember job"
+                    "failed to delete policy-skipped PublishMember job — will retry next tick"
                 );
+                return;
             }
+            job.record_success();
+            self.emit_outcome(&job, true);
             debug!(
                 job_id = %job.id,
                 did = %job.member_did,

@@ -3,6 +3,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use vta_sdk::protocols::auth::{
@@ -129,7 +130,15 @@ async fn authenticate_and_mint(
             "session already authenticated (replay)".into(),
         ));
     }
-    if session.challenge != challenge {
+    // Constant-time compare on the challenge bytes. `==` on a
+    // `String` short-circuits at the first mismatching byte, leaking
+    // prefix-match length via response timing. The challenge is
+    // server-generated 32-byte URL-safe base64, so the length check
+    // is effectively a no-op in practice but covers the
+    // wrong-length-attack edge.
+    if session.challenge.len() != challenge.len()
+        || !bool::from(session.challenge.as_bytes().ct_eq(challenge.as_bytes()))
+    {
         warn!(session_id, "authentication rejected: challenge mismatch");
         return Err(AppError::Authentication("challenge mismatch".into()));
     }

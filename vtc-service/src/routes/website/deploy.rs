@@ -55,13 +55,20 @@ pub async fn deploy(
         )));
     }
 
+    // Decompression cap: max_bundle * expansion ratio. A 50 MiB
+    // compressed bundle is allowed to extract to at most ~500 MiB
+    // on disk by default — catches gzip bombs (1000:1 ratios) that
+    // would otherwise blow up to multi-GiB temporary directories.
+    let decompressed_cap =
+        max_bundle.saturating_mul(crate::website::bundle::DECOMPRESSION_EXPANSION_RATIO);
+
     let bundle_sha = hex::encode(Sha256::digest(&body));
     let bundle_size = body.len() as u64;
 
     let (target_generation, pruned) = match deploy_mode.as_str() {
         "live" => {
             let staging = root_dir.with_extension(format!("staging.{}", rand_suffix()));
-            verify_and_extract(&body, &staging, &blocklist)?;
+            verify_and_extract(&body, &staging, &blocklist, decompressed_cap)?;
 
             // Atomic swap: rename old root aside, rename staging
             // to root. Best-effort cleanup of the previous dir.
@@ -84,7 +91,7 @@ pub async fn deploy(
         "managed" => {
             let gen_num = next_generation(&root_dir)?;
             let target_dir = root_dir.join(format!("gen-{gen_num}"));
-            verify_and_extract(&body, &target_dir, &blocklist)?;
+            verify_and_extract(&body, &target_dir, &blocklist, decompressed_cap)?;
             swap_current_symlink(&root_dir, gen_num)?;
             let pruned = prune_generations(&root_dir, keep)?;
             (gen_num, pruned)
