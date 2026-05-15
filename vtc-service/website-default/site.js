@@ -133,14 +133,25 @@ async function refresh() {
   // description shown in the header. `/v1/community/public-profile`
   // is the unauthenticated read endpoint exposing only the curated
   // public subset (name, description, public URL, mediator DID).
-  // On a fresh install the profile may not exist yet; the
-  // placeholder text from index.html stays in place.
+  // On a fresh install the profile row is initialised with empty
+  // name + description; operators populate them via the admin UX.
+  // Distinguish the cases so the visitor knows whether the daemon
+  // is silent (404) or just hasn't been named yet (empty fields).
   try {
     const profile = await fetchJson("/v1/community/public-profile");
     if (profile && typeof profile === "object") {
       if (profile.name) {
         setText("community-name", profile.name);
         document.title = profile.name;
+      } else {
+        // Profile exists but the operator hasn't set a name. Replace
+        // the install-time placeholder copy with something more
+        // honest so the page doesn't claim the profile is missing.
+        setText("community-name", "Verifiable Trust Community");
+        setText(
+          "community-description",
+          "The operator hasn't set a community name or description yet — they can do that from the admin console.",
+        );
       }
       if (profile.description) {
         setText("community-description", profile.description);
@@ -152,8 +163,12 @@ async function refresh() {
         showMediatorRow(profile.mediatorDid);
       }
     }
-  } catch {
-    // Silent — leave the placeholder text.
+  } catch (err) {
+    // The default landing page sits in front of every freshly-
+    // installed VTC. A 404 here means the profile keyspace is
+    // empty (pre-`vtc setup`). Anything else is unexpected — log
+    // it so an operator opening DevTools can see what went wrong.
+    console.warn("public-profile fetch failed", err);
   }
 }
 

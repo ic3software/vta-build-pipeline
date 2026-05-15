@@ -378,6 +378,43 @@ async fn put_does_not_accept_community_did_in_request() {
     assert_eq!(changed[0], "name");
 }
 
+// ──────────────────────── Public profile (unauth) ─────────────
+
+#[tokio::test]
+async fn public_profile_returns_curated_subset_unauthenticated() {
+    // Drives the default public website. Trust-Task-exempt and
+    // unauthenticated — neither header is set on the request.
+    let fix = build().await;
+    seed_profile(&fix).await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/community/public-profile")
+        .body(Body::empty())
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "Example Community");
+    assert_eq!(body["communityDid"], "did:webvh:vtc.example.com:abc");
+    assert_eq!(body["language"], "en");
+    // Curated subset — operational + opaque fields stay private.
+    assert!(body.get("registryStatus").is_none());
+    assert!(body.get("extensions").is_none());
+}
+
+#[tokio::test]
+async fn public_profile_returns_404_when_not_initialised() {
+    let fix = build().await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/community/public-profile")
+        .body(Body::empty())
+        .unwrap();
+    let resp = fix.router.clone().oneshot(req).await.unwrap();
+    let (status, _body) = body_value(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 // ──────────────────────── Trust-Task gate ────────────────────────
 
 #[tokio::test]

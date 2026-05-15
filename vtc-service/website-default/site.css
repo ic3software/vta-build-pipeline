@@ -108,7 +108,7 @@ body {
 }
 
 main {
-  max-width: 56rem;
+  max-width: 72rem;
   margin: 0 auto;
   padding: clamp(2rem, 4vw, 4rem) clamp(1.25rem, 4vw, 2.5rem) 4rem;
   display: flex;
@@ -262,12 +262,15 @@ h2 {
   font-size: 0.85rem;
   line-height: 1.45;
   color: var(--text);
-  /* DIDs are long opaque strings — wrap aggressively rather than
-   * scroll. `overflow-wrap: anywhere` lets the browser break at any
-   * point, but `break-all` would also break valid URL chars inside a
-   * delimiter. `anywhere` is the right tool for opaque tokens. */
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  /* DIDs are long opaque tokens with no good break points — mid-
+   * string wrapping looks like data corruption. Keep them on a
+   * single line and let the box scroll horizontally on narrow
+   * viewports instead. */
+  overflow-x: auto;
+  white-space: nowrap;
+  /* Subtle scrollbar styling so the scroll affordance is visible
+   * without being noisy. */
+  scrollbar-width: thin;
 }
 
 .copy-btn {
