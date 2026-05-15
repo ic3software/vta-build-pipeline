@@ -32,7 +32,7 @@ use crate::error::AppError;
 
 /// Multiplier applied to the operator's compressed-bundle cap to
 /// derive a decompressed-size ceiling. A real-world tar.gz of HTML
-/// + assets rarely exceeds 4× compression; 10× leaves comfortable
+/// and assets rarely exceeds 4x compression; 10x leaves comfortable
 /// headroom while still catching adversarial 1000:1 zip bombs.
 pub const DECOMPRESSION_EXPANSION_RATIO: u64 = 10;
 

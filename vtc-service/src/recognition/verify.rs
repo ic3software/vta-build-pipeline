@@ -431,10 +431,10 @@ impl HttpStatusListFetcher {
 
 /// Reject URLs that don't pass the SSRF allowlist. Returns `Ok(())`
 /// for safe URLs, `Err(RecognitionError::StatusListFailed)` for
-/// anything we don't want the recognise handler reaching out to —
-/// non-HTTPS schemes, IP-literal hosts (incl. RFC1918 + link-local
-/// + loopback + IPv4-mapped IPv6), and credentials/userinfo
-/// embedded in the authority.
+/// anything we don't want the recognise handler reaching out to:
+/// non-HTTPS schemes, IP-literal hosts (incl. RFC1918, link-local,
+/// loopback, IPv4-mapped IPv6), and credentials/userinfo embedded
+/// in the authority.
 ///
 /// `/v1/auth/recognise` is unauthenticated; the URL comes straight
 /// from an attacker-controlled foreign credential. Without this

@@ -110,13 +110,9 @@ async fn store_challenge(
     state: &AppState,
     challenge: &PersonhoodChallenge,
 ) -> Result<(), AppError> {
-    state
-        .passkey_ks
-        .insert(
-            String::from_utf8(challenge_key(challenge.id)).expect("ascii key"),
-            challenge,
-        )
-        .await
+    let key = String::from_utf8(challenge_key(challenge.id))
+        .map_err(|e| AppError::Internal(format!("personhood key encoding broke: {e}")))?;
+    state.passkey_ks.insert(key, challenge).await
 }
 
 async fn take_challenge(

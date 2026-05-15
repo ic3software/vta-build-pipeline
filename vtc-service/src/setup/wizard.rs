@@ -885,19 +885,31 @@ fn build_app_config(
     secrets: SecretsConfig,
     messaging: Option<MessagingConfig>,
 ) -> Result<AppConfig, AppError> {
-    let toml_skeleton = format!(
-        r#"
-vtc_did = "{vtc_did}"
-vta_did = "{vta_did}"
-public_url = "{public_url}"
-
-[store]
-data_dir = "{}"
-"#,
-        data_dir.display(),
+    // Build the minimal config bones via a TOML `Table` (not
+    // `format!`). The earlier `format!(r#"vtc_did = "{vtc_did}""#)`
+    // round-trip would have produced malformed TOML if any of
+    // `vtc_did` / `vta_did` / `public_url` / `data_dir` happened to
+    // contain a `"` or `\` — `toml::Value::String` handles escaping
+    // for us. `data_dir` is the only required field on `AppConfig`
+    // (every other top-level setting has a `#[serde(default)]`),
+    // so we seed `store.data_dir` and let serde fill the rest.
+    use toml::Value;
+    let mut store_table = toml::map::Map::new();
+    store_table.insert(
+        "data_dir".into(),
+        Value::String(data_dir.to_string_lossy().into_owned()),
     );
-    let mut config: AppConfig =
-        toml::from_str(&toml_skeleton).map_err(|e| AppError::Config(format!("config: {e}")))?;
+    let mut root = toml::map::Map::new();
+    root.insert("store".into(), Value::Table(store_table));
+    let mut config: AppConfig = Value::Table(root)
+        .try_into()
+        .map_err(|e| AppError::Config(format!("config: {e}")))?;
+    // The fields that are operator-controlled strings — fill from
+    // arguments rather than the TOML literal so the values can't
+    // affect parsing.
+    config.vtc_did = Some(vtc_did);
+    config.vta_did = Some(vta_did);
+    config.public_url = Some(public_url);
     config.secrets = secrets;
     config.messaging = messaging;
     config.auth = AuthConfig {

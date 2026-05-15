@@ -408,7 +408,15 @@ pub async fn run(
     // `GET /v1/community/profile` stops 404'ing in the admin UI.
     // `community_did` is immutable per spec §5.1, so we only heal
     // when `vtc_did` is actually configured.
-    if let Some(vtc_did) = state.config.read().await.vtc_did.clone()
+    //
+    // Snapshot the config once for the remainder of the boot path.
+    // The earlier `state.config.read().await` repeated six times
+    // through the boot section made it ambiguous which copy was
+    // canonical and added an awkward "did I drop the guard before
+    // the next await?" question to every change. One clone, read
+    // many times.
+    let boot_cfg = state.config.read().await.clone();
+    if let Some(vtc_did) = boot_cfg.vtc_did.clone()
         && crate::community::load_profile(&state.community_ks)
             .await
             .ok()
@@ -428,10 +436,9 @@ pub async fn run(
     // M3.2: boot-time health probe. Best-effort — daemon
     // proceeds regardless. Subsequent periodic probes track
     // the live state.
-    if let (Some(client), Some(vtc_did)) = (
-        state.registry_client.as_ref(),
-        state.config.read().await.vtc_did.clone(),
-    ) {
+    if let (Some(client), Some(vtc_did)) =
+        (state.registry_client.as_ref(), boot_cfg.vtc_did.clone())
+    {
         match client.health().await {
             Ok(()) => {
                 state
@@ -453,23 +460,19 @@ pub async fn run(
     // M3.2: periodic health probe. Each tick re-runs `health()`
     // + updates `registry_health`. Configurable via
     // `registry.health_probe_interval_seconds`; `0` disables.
-    let probe_interval_secs = state
-        .config
-        .read()
-        .await
-        .registry
-        .health_probe_interval_seconds;
-    if registry_client.is_some() && probe_interval_secs > 0 {
+    let probe_interval_secs = boot_cfg.registry.health_probe_interval_seconds;
+    // Skip the periodic probe entirely when `vtc_did` isn't yet set
+    // (pre-setup). The previous `unwrap_or("did:key:vtc-unknown")`
+    // fallback poisoned every health-probe audit envelope with a
+    // sentinel actor — operators couldn't tell a real "boot before
+    // setup" event from a misconfigured production daemon. The probe
+    // has nothing useful to do until setup completes anyway.
+    let probe_did_opt = boot_cfg.vtc_did.clone();
+    if registry_client.is_some() && probe_interval_secs > 0 && probe_did_opt.is_some() {
         let probe_client = registry_client.clone().expect("checked is_some");
         let probe_health = registry_health.clone();
         let probe_audit = state.audit_writer.clone();
-        let probe_did = state
-            .config
-            .read()
-            .await
-            .vtc_did
-            .clone()
-            .unwrap_or_else(|| "did:key:vtc-unknown".into());
+        let probe_did = probe_did_opt.clone().expect("checked is_some");
         let mut probe_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_secs(probe_interval_secs));
@@ -512,15 +515,15 @@ pub async fn run(
     // Only runs when a registry is configured — without
     // one, the queue grows visibly via /v1/health/diagnostics
     // but no dispatch happens.
-    if let Some(client) = state.registry_client.clone() {
-        let actor_did = state
-            .config
-            .read()
-            .await
-            .vtc_did
-            .clone()
-            .unwrap_or_else(|| "did:key:vtc-unknown".into());
-        let rtbf_batch_window_hours = state.config.read().await.registry.rtbf_batch_window_hours;
+    // Same discipline as the probe above — without a `vtc_did` the
+    // syncer's audit envelopes would carry the `vtc-unknown` sentinel
+    // and the queue can't usefully dispatch (no identity to sign
+    // outbound TRQP calls with).
+    let syncer_actor_did_opt = boot_cfg.vtc_did.clone();
+    if let (Some(client), Some(actor_did)) =
+        (state.registry_client.clone(), syncer_actor_did_opt.clone())
+    {
+        let rtbf_batch_window_hours = boot_cfg.registry.rtbf_batch_window_hours;
         let syncer = crate::registry::MembershipSyncer::new(
             state.audit_ks.clone(),
             state.sync_queue_ks.clone(),
@@ -579,8 +582,8 @@ pub async fn run(
     // AppState `move` into the REST thread. Both layers are fixed
     // at start-up; a future `POST /v1/admin/config/reload` can
     // swap them if operators demand live updates.
-    let rest_cors = state.config.read().await.cors.clone();
-    let rest_routing = state.config.read().await.routing.clone();
+    let rest_cors = boot_cfg.cors.clone();
+    let rest_routing = boot_cfg.routing.clone();
 
     // Phase 5 M5.7.2 — emit `AdminUiServed` audit envelope exactly
     // once at boot, after the audit writer is online. Captures the
@@ -588,7 +591,7 @@ pub async fn run(
     // who suspects a compromise can pin the running build.
     #[cfg(feature = "admin-ui")]
     if let Some(writer) = state.audit_writer.as_ref() {
-        let mode = state.config.read().await.admin_ui.mode.clone();
+        let mode = boot_cfg.admin_ui.mode.clone();
         let info = crate::admin_ui::AdminUiInfo::from_embedded(&mode);
         let _ = writer
             .write(
@@ -1157,15 +1160,24 @@ async fn init_auth(
             .build();
         match tdk_config {
             Ok(cfg) => match TDKSharedState::new(cfg).await {
-                Ok(tdk) => {
-                    match ATM::new(ATMConfig::builder().build().unwrap(), Arc::new(tdk)).await {
+                Ok(tdk) => match ATMConfig::builder().build() {
+                    Ok(atm_cfg) => match ATM::new(atm_cfg, Arc::new(tdk)).await {
                         Ok(a) => Some(a),
                         Err(e) => {
                             warn!("failed to create ATM for auth unpack: {e}");
                             None
                         }
+                    },
+                    Err(e) => {
+                        // Every other init branch in this block falls
+                        // back to `None` and lets the daemon boot
+                        // without DIDComm auth. The earlier `.unwrap()`
+                        // here would crash the entire process on what
+                        // is structurally an optional feature.
+                        warn!("failed to build ATMConfig: {e}");
+                        None
                     }
-                }
+                },
                 Err(e) => {
                     warn!("failed to create TDK shared state: {e}");
                     None

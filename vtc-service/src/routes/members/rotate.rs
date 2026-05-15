@@ -135,13 +135,9 @@ fn challenge_key(id: Uuid) -> Vec<u8> {
 }
 
 async fn store_challenge(state: &AppState, challenge: &RotationChallenge) -> Result<(), AppError> {
-    state
-        .passkey_ks
-        .insert(
-            String::from_utf8(challenge_key(challenge.id)).expect("ascii key"),
-            challenge,
-        )
-        .await
+    let key = String::from_utf8(challenge_key(challenge.id))
+        .map_err(|e| AppError::Internal(format!("rotation key encoding broke: {e}")))?;
+    state.passkey_ks.insert(key, challenge).await
 }
 
 async fn take_challenge(state: &AppState, id: Uuid) -> Result<Option<RotationChallenge>, AppError> {
