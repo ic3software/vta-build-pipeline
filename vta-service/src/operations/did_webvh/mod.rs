@@ -1099,7 +1099,7 @@ impl<'a> WebvhTransport<'a> {
             }
             Some(transport::ResolvedTransport::Rest { url }) => {
                 info!(server_did = %server.did, transport = "rest", %url, "resolved webvh server endpoint");
-                let mut client = WebvhClient::new(&url)?;
+                let mut client = WebvhClient::new(&url, &server.did)?;
                 if let Some(ref token) = server.access_token {
                     client.set_access_token(token.clone());
                 }

@@ -9246,6 +9246,7 @@ dependencies = [
  "vta-sdk 0.6.0",
  "vta-service",
  "vti-common",
+ "wiremock",
  "x25519-dalek",
  "zeroize",
 ]
