@@ -12,9 +12,9 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { Copy, Mail, Plus, ShieldCheck, X } from "lucide-react";
+import { Copy, Mail, Pencil, Plus, ShieldCheck, X } from "lucide-react";
 
-import { deleteJson, getJson, postJson } from "@/lib/api";
+import { deleteJson, getJson, patchJson, postJson } from "@/lib/api";
 import { useToast } from "@/lib/toast";
 
 const TRUST_TASK_MANAGE =
@@ -65,6 +65,17 @@ async function deleteAcl(did: string): Promise<void> {
   await deleteJson<unknown>(`/v1/acl/${encodeURIComponent(did)}`, {
     trustTask: TRUST_TASK_ENTRY,
   });
+}
+
+async function patchAclLabel(args: {
+  did: string;
+  label: string;
+}): Promise<AclEntry> {
+  return patchJson<AclEntry>(
+    `/v1/acl/${encodeURIComponent(args.did)}`,
+    { label: args.label },
+    { trustTask: TRUST_TASK_ENTRY },
+  );
 }
 
 // ── Admin invites ────────────────────────────────────────────
@@ -235,7 +246,9 @@ export function Acl() {
                 <td>
                   <code>{e.role}</code>
                 </td>
-                <td>{e.label ?? "—"}</td>
+                <td>
+                  <EditableLabelCell did={e.did} label={e.label} />
+                </td>
                 <td>
                   {e.allowed_contexts.length === 0 ? (
                     <span className="muted">all</span>
@@ -339,15 +352,7 @@ function InvitesPanel() {
       </section>
 
       {showCreate && (
-        <CreateInviteForm
-          onSuccess={() => {
-            setShowCreate(false);
-            void queryClient.invalidateQueries({ queryKey: ["admin-invites"] });
-            // The invite always ensures an ACL grant exists, so
-            // refresh the ACL table too.
-            void queryClient.invalidateQueries({ queryKey: ["acl"] });
-          }}
-        />
+        <CreateInviteForm onClose={() => setShowCreate(false)} />
       )}
 
       {query.error && (
@@ -443,16 +448,24 @@ function InvitesPanel() {
   );
 }
 
-function CreateInviteForm({ onSuccess }: { onSuccess: () => void }) {
+function CreateInviteForm({ onClose }: { onClose: () => void }) {
   const [did, setDid] = useState("");
   const [label, setLabel] = useState("");
   const [ttlMinutes, setTtlMinutes] = useState("15");
   const [issued, setIssued] = useState<CreateInviteResponse | null>(null);
   const toast = useToast();
+  const queryClient = useQueryClient();
 
   const mutation = useMutation({
     mutationFn: createInvite,
     onSuccess: (resp) => {
+      // Refresh the list + ACL tables in the background so the new
+      // row shows up after the operator dismisses the success card.
+      // Do NOT close the form here — the install URL + claim code
+      // are returned exactly once and must remain on screen until
+      // the operator copies them.
+      void queryClient.invalidateQueries({ queryKey: ["admin-invites"] });
+      void queryClient.invalidateQueries({ queryKey: ["acl"] });
       setIssued(resp);
       toast.push(
         "success",
@@ -460,7 +473,6 @@ function CreateInviteForm({ onSuccess }: { onSuccess: () => void }) {
           ? `Invited ${did} (ACL admin grant created)`
           : `Invited ${did} (ACL already had admin grant)`,
       );
-      onSuccess();
     },
     onError: (err) => toast.pushFromError(err, "Invite failed"),
   });
@@ -523,6 +535,9 @@ function CreateInviteForm({ onSuccess }: { onSuccess: () => void }) {
             onClick={() => setIssued(null)}
           >
             Mint another
+          </button>
+          <button type="button" className="secondary" onClick={onClose}>
+            Done
           </button>
         </div>
       </section>
@@ -706,4 +721,100 @@ function formatEpoch(epoch: number): string {
   } catch {
     return String(epoch);
   }
+}
+
+function EditableLabelCell({
+  did,
+  label,
+}: {
+  did: string;
+  label: string | null;
+}) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(label ?? "");
+
+  const mutation = useMutation({
+    mutationFn: patchAclLabel,
+    onSuccess: () => {
+      toast.push("success", "Label updated");
+      void queryClient.invalidateQueries({ queryKey: ["acl"] });
+      setEditing(false);
+    },
+    onError: (err) => {
+      toast.pushFromError(err, "Label update failed");
+      // Stay in edit mode so the operator can fix and retry.
+    },
+  });
+
+  // Seed the draft whenever the prop changes from below (e.g.
+  // another browser updated the entry) — but only when not
+  // actively editing, so we don't clobber the operator's typing.
+  if (!editing && draft !== (label ?? "")) {
+    setDraft(label ?? "");
+  }
+
+  const commit = () => {
+    const next = draft.trim();
+    // No-op on unchanged value.
+    if (next === (label ?? "")) {
+      setEditing(false);
+      return;
+    }
+    mutation.mutate({ did, label: next });
+  };
+
+  const cancel = () => {
+    setDraft(label ?? "");
+    setEditing(false);
+    mutation.reset();
+  };
+
+  if (editing) {
+    return (
+      <input
+        type="text"
+        value={draft}
+        autoFocus
+        disabled={mutation.isPending}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            cancel();
+          }
+        }}
+        // Inline edit shouldn't take the full default 36px height
+        // — match the surrounding row.
+        style={{ height: 28, padding: "0 8px" }}
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      title="Click to edit label"
+      // Reuse `button.link` styling so it blends with the row;
+      // a normal button would render as a chunky default button.
+      className="link"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        color: label ? "inherit" : "var(--text-muted)",
+        textAlign: "left",
+        font: "inherit",
+      }}
+    >
+      {label ?? <em>add label</em>}
+      <Pencil size={12} aria-hidden="true" style={{ opacity: 0.5 }} />
+    </button>
+  );
 }
