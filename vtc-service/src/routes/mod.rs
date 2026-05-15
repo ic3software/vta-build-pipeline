@@ -176,6 +176,17 @@ fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
     let admin_passkeys_revoke =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/passkeys/revoke/1.0")
             .expect("static Trust-Task URL");
+    // Admin invites — REST surface for `vtc admin invite`. Single
+    // Trust Task covers GET + POST on `/admin/invites` (same Phase-0
+    // workaround community/profile + admin/config use); DELETE on
+    // `/admin/invites/{jti}` has its own Trust Task since it's on a
+    // distinct mount.
+    let admin_invites_manage =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/invites/manage/1.0")
+            .expect("static Trust-Task URL");
+    let admin_invites_revoke =
+        TrustTask::new("https://trusttasks.org/openvtc/vtc/admin/invites/revoke/1.0")
+            .expect("static Trust-Task URL");
     let members_list = TrustTask::new("https://trusttasks.org/openvtc/vtc/members/list/1.0")
         .expect("static Trust-Task URL");
     let members_show = TrustTask::new("https://trusttasks.org/openvtc/vtc/members/show/1.0")
@@ -448,6 +459,20 @@ fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
             "/admin/passkeys/revoke/finish",
             post(admin::passkeys::revoke_finish),
             admin_passkeys_revoke,
+        )
+        // Admin invites — REST mirror of `vtc admin invite`. GET +
+        // POST share the same mount; DELETE on `/admin/invites/{jti}`
+        // revokes outstanding (Issued) invites. Consumed rows are
+        // immutable (audit history) — DELETE on those returns 409.
+        .route_with_task(
+            "/admin/invites",
+            get(admin::invites::list_invites).post(admin::invites::create_invite),
+            admin_invites_manage,
+        )
+        .route_with_task(
+            "/admin/invites/{jti}",
+            axum::routing::delete(admin::invites::revoke_invite),
+            admin_invites_revoke,
         )
         // Members (Phase 1 M1.4–M1.6).
         .route_with_task("/members", get(members::read::list_members), members_list)

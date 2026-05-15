@@ -312,6 +312,57 @@ impl InstallTokenStore {
         }
         Ok(value)
     }
+
+    /// List every persisted install-token state row keyed by `jti`.
+    /// Used by the `/v1/admin/invites` list surface. Returns the
+    /// (jti, state) pairs; the handler derives status (Issued /
+    /// Consumed / Expired) and strips secret material before
+    /// emitting wire JSON.
+    pub async fn list_tokens(&self) -> Result<Vec<(Uuid, InstallTokenState)>, AppError> {
+        let raw = self.ks.prefix_iter_raw(TOKEN_KEY_PREFIX.to_vec()).await?;
+        let mut out = Vec::with_capacity(raw.len());
+        for (k, v) in raw {
+            let Some(suffix) = k.strip_prefix(TOKEN_KEY_PREFIX) else {
+                continue;
+            };
+            let Ok(jti_str) = std::str::from_utf8(suffix) else {
+                continue;
+            };
+            let Ok(jti) = jti_str.parse::<Uuid>() else {
+                continue;
+            };
+            match serde_json::from_slice::<InstallTokenState>(&v) {
+                Ok(state) => out.push((jti, state)),
+                Err(e) => {
+                    tracing::warn!(error = %e, %jti, "skipping unparseable install token state")
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Peek a token's state row without mutating it. Used by the
+    /// invite revoke surface to refuse `Consumed` rows before any
+    /// destructive call.
+    pub async fn get_token(&self, jti: &Uuid) -> Result<Option<InstallTokenState>, AppError> {
+        self.ks.get(token_key(jti)).await
+    }
+
+    /// Delete a token's state row. Used by the invite revoke
+    /// surface after a [`Self::get_token`] check has confirmed
+    /// the row is not `Consumed`. Returns `true` if a row was
+    /// removed.
+    pub async fn delete_token(&self, jti: &Uuid) -> Result<bool, AppError> {
+        let _guard = INSTALL_CARVEOUT_LOCK.lock().await;
+        let key = token_key(jti);
+        let existed: Option<InstallTokenState> = self.ks.get(key.clone()).await?;
+        if existed.is_some() {
+            self.ks.remove(key).await?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 /// State persisted to `install:emergency_pending` by the
