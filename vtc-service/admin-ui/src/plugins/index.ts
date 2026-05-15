@@ -17,6 +17,7 @@ import { Dashboard } from "@/plugins/dashboard";
 import { JoinRequests } from "@/plugins/joinRequests";
 import { Members } from "@/plugins/members";
 import { MyPasskeys } from "@/plugins/myPasskeys";
+import { Policies } from "@/plugins/policies";
 import { Profile } from "@/plugins/profile";
 
 export function registerBuiltinPlugins(): void {
@@ -50,6 +51,14 @@ export function registerBuiltinPlugins(): void {
     path: "/acl",
     icon: "🔐",
     reactComponent: Acl,
+  });
+
+  registerPlugin({
+    id: "policies",
+    label: "Policies",
+    path: "/policies",
+    icon: "📜",
+    reactComponent: Policies,
   });
 
   registerPlugin({

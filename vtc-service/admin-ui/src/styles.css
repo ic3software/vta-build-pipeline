@@ -401,3 +401,11 @@ button.secondary.destructive:hover:not(:disabled) {
   font-size: 0.85em;
   background: var(--bg);
 }
+
+.rego-source {
+  /* Slightly larger pre for source dumps — the read view of a
+     policy is the operator's primary diff tool until we wire an
+     in-browser editor. */
+  max-height: 32rem;
+  overflow: auto;
+}

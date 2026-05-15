@@ -73,63 +73,90 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
+// Every `/v1/*` route is gated by `TrustTaskRouter::
+// route_with_task(path, handler, trust_task)`, which requires an
+// exact-match `Trust-Task` header. Forgetting it means a runtime
+// `TrustTaskMissing` rejection, not a compile error — a regression
+// class we hit once already. Making `trustTask` a required field
+// here forces every caller to pick the right task URL up front;
+// endpoints that genuinely don't need one (the daemon's
+// Trust-Task-exempt routes — `/health`, `/admin/*`) use the
+// `*Exempt` variants below.
+
+export interface TrustTaskOpts {
+  trustTask: string;
+}
+
 export const getJson = <T>(
   path: string,
-  extra: { trustTask?: string } = {},
+  extra: TrustTaskOpts,
 ): Promise<T> =>
   request<T>(path, {
     method: "GET",
-    headers: extra.trustTask ? { "Trust-Task": extra.trustTask } : undefined,
+    headers: { "Trust-Task": extra.trustTask },
   });
 
 export const postJson = <T>(
   path: string,
   body: unknown,
-  extra: { trustTask?: string } = {},
+  extra: TrustTaskOpts,
 ): Promise<T> =>
   request<T>(path, {
     method: "POST",
     body: body === undefined ? undefined : JSON.stringify(body),
-    headers: extra.trustTask ? { "Trust-Task": extra.trustTask } : undefined,
+    headers: { "Trust-Task": extra.trustTask },
   });
 
 export const putJson = <T>(
   path: string,
   body: unknown,
-  extra: { trustTask?: string } = {},
+  extra: TrustTaskOpts,
 ): Promise<T> =>
   request<T>(path, {
     method: "PUT",
     body: body === undefined ? undefined : JSON.stringify(body),
-    headers: extra.trustTask ? { "Trust-Task": extra.trustTask } : undefined,
+    headers: { "Trust-Task": extra.trustTask },
   });
 
 export const patchJson = <T>(
   path: string,
   body: unknown,
-  extra: { trustTask?: string } = {},
+  extra: TrustTaskOpts,
 ): Promise<T> =>
   request<T>(path, {
     method: "PATCH",
     body: body === undefined ? undefined : JSON.stringify(body),
-    headers: extra.trustTask ? { "Trust-Task": extra.trustTask } : undefined,
+    headers: { "Trust-Task": extra.trustTask },
   });
 
 export const deleteJson = <T>(
   path: string,
-  extra: { trustTask?: string; body?: unknown } = {},
+  extra: TrustTaskOpts & { body?: unknown },
 ): Promise<T> =>
   request<T>(path, {
     method: "DELETE",
     body: extra.body === undefined ? undefined : JSON.stringify(extra.body),
-    headers: extra.trustTask ? { "Trust-Task": extra.trustTask } : undefined,
+    headers: { "Trust-Task": extra.trustTask },
   });
 
+// ---------------------------------------------------------------------------
+// Exempt helpers — for `/health`, `/admin/build-info.json`,
+// `/admin/plugins.json`, and any future route that's outside the
+// `TrustTaskRouter`. Spelling the carve-out explicitly at the call
+// site is the whole point: a `getJsonExempt` in a plugin is a smell.
+// ---------------------------------------------------------------------------
+
+export const getJsonExempt = <T>(path: string): Promise<T> =>
+  request<T>(path, { method: "GET" });
+
+// `/health` is the daemon's single Trust-Task-exempt endpoint.
+// `/admin/build-info.json` lives on the admin router (not the
+// TrustTaskRouter). Both are header-less by design.
 export const fetchHealth = (): Promise<HealthResponse> =>
-  getJson<HealthResponse>("/health");
+  getJsonExempt<HealthResponse>("/health");
 
 export const fetchBuildInfo = (): Promise<BuildInfo> =>
-  getJson<BuildInfo>("/admin/build-info.json");
+  getJsonExempt<BuildInfo>("/admin/build-info.json");
 
 /** Probe: returns true if the current cookie session is valid. */
 export async function isSignedIn(): Promise<boolean> {
