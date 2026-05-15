@@ -206,10 +206,11 @@ async fn authenticate_and_mint(
 /// the admin SPA can drive subsequent requests via the cookie
 /// session:
 ///
-/// - `vtc_admin_session=<jwt>; Path=/admin; SameSite=Strict;
-///   Secure; HttpOnly` — the access token JWT, scoped to the
-///   admin UX path so public-website JS on the same origin can't
-///   read it.
+/// - `vtc_admin_session=<jwt>; Path=/; SameSite=Strict; Secure;
+///   HttpOnly` — the access token JWT, scoped to the daemon's
+///   whole origin so the browser sends it on `/v1/*` API calls.
+///   `HttpOnly` keeps JS from reading it; `SameSite=Strict`
+///   prevents cross-site CSRF.
 /// - `csrf=<random>; Path=/; SameSite=Strict; Secure` (HttpOnly:
 ///   **false** so SPA JS can mirror the value to the
 ///   `X-CSRF-Token` header for the double-submit check in
@@ -451,13 +452,19 @@ pub async fn passkey_login_finish(
     Ok(response)
 }
 
-/// Build the `vtc_admin_session` cookie value. Exposed as a pure
-/// helper so cookie-isolation invariants (Path=/admin,
-/// SameSite=Strict, Secure, HttpOnly) can be unit-tested
-/// without standing up the full DIDComm authenticate flow.
+/// Build the `vtc_admin_session` cookie value.
+///
+/// `Path=/` (not `/admin`) so the browser sends the cookie on
+/// requests to `/v1/*` — the admin SPA needs the cookie on every
+/// authenticated API call, and the API doesn't live under `/admin`.
+/// The earlier M5.3.1 design used `Path=/admin` to keep the cookie
+/// scoped, but `HttpOnly` already blocks JS exfiltration on any
+/// path and `SameSite=Strict` prevents cross-site CSRF — the Path
+/// restriction added no security in exchange for breaking the
+/// cookie-based SPA-→-API path entirely.
 fn build_session_cookie(access_token: &str, max_age: u64) -> String {
     format!(
-        "{name}={access_token}; Path=/admin; Max-Age={max_age}; SameSite=Strict; Secure; HttpOnly",
+        "{name}={access_token}; Path=/; Max-Age={max_age}; SameSite=Strict; Secure; HttpOnly",
         name = vti_common::auth::extractor::ADMIN_SESSION_COOKIE,
     )
 }
@@ -474,14 +481,17 @@ fn build_csrf_cookie(csrf: &str, max_age: u64) -> String {
 mod cookie_format_tests {
     use super::*;
 
-    /// Phase 5 M5.3.1 cookie-scope isolation invariant — the
-    /// admin session cookie MUST carry `Path=/admin` so public-
-    /// website JS on the same origin cannot read it.
+    /// The session cookie is `Path=/` so the browser sends it on
+    /// every same-origin request — `/v1/*` (API) and `/admin/*`
+    /// (SPA). HttpOnly + SameSite=Strict are what actually
+    /// constrain the cookie's reachability; an earlier
+    /// `Path=/admin` scoping broke the cookie-based SPA-→-API
+    /// path without adding security (HttpOnly already prevents JS
+    /// exfiltration on any path).
     #[test]
-    fn session_cookie_path_is_admin() {
+    fn session_cookie_path_is_root() {
         let c = build_session_cookie("jwt.token.value", 900);
-        assert!(c.contains("Path=/admin"), "got {c}");
-        assert!(!c.contains("Path=/;"), "must not be root-scoped: {c}");
+        assert!(c.contains("Path=/;"), "got {c}");
     }
 
     #[test]

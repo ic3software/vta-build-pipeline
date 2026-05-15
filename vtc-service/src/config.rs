@@ -76,6 +76,16 @@ pub struct AdminUiConfig {
     /// base domain).
     #[serde(default)]
     pub rp_id: Option<String>,
+    /// Directory the daemon scans for third-party plugins. Each
+    /// subdirectory is one plugin: `<plugin_dir>/<id>/manifest.json`
+    /// declares the manifest; the daemon serves the directory's
+    /// static files under `/admin/plugins/<id>/`. `None` (default)
+    /// → only built-in plugins, no third-party scan.
+    ///
+    /// Plugin IDs must match `^[a-z][a-z0-9-]*$` — anything else
+    /// is dropped from the manifest endpoint with a `warn!`.
+    #[serde(default)]
+    pub plugin_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for AdminUiConfig {
@@ -84,6 +94,7 @@ impl Default for AdminUiConfig {
             mode: default_admin_ui_mode(),
             external_origin: None,
             rp_id: None,
+            plugin_dir: None,
         }
     }
 }

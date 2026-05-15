@@ -70,11 +70,14 @@ enum AdminCommands {
     },
     /// Mint a fresh single-use install URL for `--did`.
     ///
-    /// Run on a **stopped** daemon (fjall lock). Non-destructive —
-    /// existing admins and passkeys are untouched. The URL is
-    /// claimed in a browser the same way the wizard's initial URL
-    /// is: the operator opens it, registers a passkey, and the
-    /// passkey gets attached to the admin DID supplied here.
+    /// Run on a **stopped** daemon (fjall lock). Non-destructive
+    /// to existing admins and passkeys, but DOES grant the
+    /// supplied `--did` an admin ACL entry if one doesn't already
+    /// exist — otherwise the new passkey would attach to a DID
+    /// with no role and login would 403. Operators who want to
+    /// invite an existing admin pass the same `--did` they already
+    /// granted via `pnm acl create` (or the upgrade path); this is
+    /// idempotent.
     ///
     /// Pairs with the install ceremony's separation of admin DID
     /// from passkey: operators can issue invites for any DID they
@@ -257,10 +260,11 @@ async fn run_emergency_bootstrap_cli(
 }
 
 /// `vtc admin invite --did <did>` — mint a fresh single-use install
-/// URL for an existing admin DID. Runs on a stopped daemon (fjall
-/// lock) and is non-destructive: existing admins and passkeys are
-/// untouched. Records the issued token in the install keyspace so
-/// the next claim/start finds it.
+/// URL for an admin DID. Runs on a stopped daemon (fjall lock) and
+/// is non-destructive to existing admins and passkeys, but DOES
+/// grant the supplied `--did` an Admin ACL entry if one doesn't
+/// already exist — otherwise the new passkey would attach to a DID
+/// with no role and the operator would 403 on their first login.
 #[cfg(feature = "setup")]
 async fn run_invite_cli(
     config_path: Option<std::path::PathBuf>,
@@ -268,6 +272,8 @@ async fn run_invite_cli(
     ttl_seconds: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use chrono::{Duration as ChronoDuration, Utc};
+    use vtc_service::acl::{VtcAclEntry, VtcRole, get_acl_entry, store_acl_entry};
+    use vtc_service::auth::session::now_epoch;
     use vtc_service::install::{InstallTokenSigner, InstallTokenStore, mint_install_token};
     use vtc_service::keys::seed_store::create_secret_store;
     use vtc_service::setup::VtcKeyBundle;
@@ -297,12 +303,33 @@ async fn run_invite_cli(
     let ed25519 = bundle.ed25519_private_bytes()?;
     let signer = InstallTokenSigner::from_master_seed(&*ed25519)?;
 
-    // Open the install keyspace directly. The daemon must be stopped
-    // — fjall does not allow concurrent processes on the same data
-    // dir.
+    // Open the install + ACL keyspaces directly. The daemon must
+    // be stopped — fjall does not allow concurrent processes on
+    // the same data dir.
     let store = VtiStore::open(&config.store)?;
     let install_ks = store.keyspace("install")?;
     let install_store = InstallTokenStore::new(install_ks);
+    let acl_ks = store.keyspace("acl")?;
+
+    // Ensure the ACL entry exists with Admin role. The post-login
+    // flow gates on `check_acl(acl_ks, &user.did)`, so a DID
+    // without an entry yields a `forbidden` once the passkey
+    // ceremony completes. Creating the entry up-front closes that
+    // gap and makes `vtc admin invite` the operator's one-shot
+    // way to onboard a new admin.
+    let acl_already_present = get_acl_entry(&acl_ks, &admin_did).await?.is_some();
+    if !acl_already_present {
+        let entry = VtcAclEntry {
+            did: admin_did.clone(),
+            role: VtcRole::Admin,
+            label: Some("vtc admin invite".into()),
+            allowed_contexts: vec![],
+            created_at: now_epoch(),
+            created_by: format!("vtc-cli/{}", env!("CARGO_PKG_VERSION")),
+            expires_at: None,
+        };
+        store_acl_entry(&acl_ks, &entry).await?;
+    }
 
     let minted = mint_install_token(&signer, &vtc_did, &admin_did, ttl_seconds)?;
     let exp = Utc::now() + ChronoDuration::seconds(ttl_seconds as i64);
@@ -323,8 +350,16 @@ async fn run_invite_cli(
 
     eprintln!();
     eprintln!("✅ install URL minted");
-    eprintln!("   Admin DID: {admin_did}");
-    eprintln!("   TTL:       {ttl_seconds}s");
+    eprintln!("   Admin DID:   {admin_did}");
+    eprintln!(
+        "   ACL entry:   {}",
+        if acl_already_present {
+            "pre-existing (left untouched)"
+        } else {
+            "created (role=admin)"
+        }
+    );
+    eprintln!("   TTL:         {ttl_seconds}s");
     eprintln!();
     eprintln!("Install URL (one-shot):");
     eprintln!("   {install_url}");

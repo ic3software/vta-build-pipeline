@@ -34,11 +34,13 @@ pub struct AuthClaims {
 }
 
 /// Name of the admin UX session cookie set by the VTC's
-/// `POST /v1/auth/admin-login` flow (Phase 5 M5.2.3). When the
-/// `Authorization: Bearer` header is absent, [`AuthClaims`]
-/// falls back to reading a JWT out of this cookie. The cookie
-/// is set with `Path=/admin; SameSite=Strict; Secure; HttpOnly`
-/// so the public-website origin can't read it.
+/// `POST /v1/auth/admin-login` + `POST /v1/auth/passkey-login/finish`
+/// flows. When the `Authorization: Bearer` header is absent,
+/// [`AuthClaims`] falls back to reading a JWT out of this cookie.
+/// The cookie is set with `Path=/; SameSite=Strict; Secure; HttpOnly`
+/// so the browser sends it on `/v1/*` API calls; `HttpOnly` keeps
+/// JS on any path from reading it, and `SameSite=Strict` blocks
+/// cross-site CSRF.
 pub const ADMIN_SESSION_COOKIE: &str = "vtc_admin_session";
 
 impl<S: AuthState> FromRequestParts<S> for AuthClaims {
