@@ -69,9 +69,11 @@ export function Login() {
       );
 
       // Success — the daemon set the cookies. Invalidate the
-      // session probe so the shell re-renders the authenticated
-      // tree.
-      await queryClient.invalidateQueries({ queryKey: ["session-probe"] });
+      // whoami probe (the same key App.tsx uses) so the shell
+      // re-renders into the authenticated tree without a manual
+      // reload. The previous "session-probe" key didn't match any
+      // live query, so the shell stayed stuck on this page.
+      await queryClient.invalidateQueries({ queryKey: ["whoami"] });
     } catch (err) {
       const e = err as { status?: number; message?: string };
       let hint: string | undefined;

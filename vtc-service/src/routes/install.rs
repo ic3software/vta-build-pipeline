@@ -49,6 +49,7 @@ use vti_common::auth::passkey::store::{
 use vti_common::error::AppError;
 use webauthn_rs::prelude::{CreationChallengeResponse, RegisterPublicKeyCredential, Webauthn};
 
+use crate::acl::admin::{AdminEntry, RegisteredPasskey, get_admin_entry, store_admin_entry};
 use crate::install::{
     INSTALL_SESSION_DEFAULT_TTL_SECS, InstallTokenSigner, mint_install_session_token,
     parse_install_token,
@@ -201,6 +202,42 @@ pub async fn claim_finish(
     store_passkey_user(&state.passkey_ks, &user).await?;
     let cred_id_hex = hex::encode(passkey.cred_id().as_ref() as &[u8]);
     store_credential_mapping(&state.passkey_ks, &cred_id_hex, user_uuid).await?;
+
+    // Create or append to the AdminEntry so `GET /v1/admin/passkeys`
+    // can list the just-registered device. The first-admin install
+    // flow then takes the same AdminEntry through `/v1/admin/bootstrap`;
+    // the `vtc admin invite` flow never reaches bootstrap (carve-out
+    // already closed by the first admin), so this write is the only
+    // place the AdminEntry is populated for invited admins.
+    let now = chrono::Utc::now();
+    let registered = RegisteredPasskey {
+        credential_id: cred_id_hex.clone(),
+        label: "install".into(),
+        transports: Vec::new(),
+        registered_at: now,
+        last_used_at: None,
+    };
+    let admin_entry = match get_admin_entry(&state.passkey_ks, &admin_did).await? {
+        Some(mut existing) => {
+            // Dedupe by credential_id — a retry of the same ceremony
+            // must not double-list the device.
+            if !existing
+                .passkeys
+                .iter()
+                .any(|p| p.credential_id == cred_id_hex)
+            {
+                existing.passkeys.push(registered);
+            }
+            existing
+        }
+        None => AdminEntry {
+            did: admin_did.clone(),
+            passkeys: vec![registered],
+            extensions: serde_json::Value::Null,
+            created_at: now,
+        },
+    };
+    store_admin_entry(&state.passkey_ks, &admin_entry).await?;
 
     let issuer_did = state
         .config

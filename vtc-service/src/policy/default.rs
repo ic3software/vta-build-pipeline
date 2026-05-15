@@ -41,7 +41,10 @@ use super::storage::{get_active_policy_id, new_policy, set_active_policy_id, sto
 /// Pseudo-DID stamped on every default policy's `author_did`
 /// field. Not a resolvable DID — purely a marker so operators
 /// see "this came from the workspace, not from a human admin".
-pub const DEFAULTS_AUTHOR: &str = "did:key:vtc-defaults";
+/// Uses the `did:example` method (RFC reserved for non-resolvable
+/// illustrative DIDs) rather than `did:key`, which implies a real
+/// keypair the daemon can prove control of.
+pub const DEFAULTS_AUTHOR: &str = "did:example:vtc-defaults";
 
 /// Embedded source for each default policy, in [`PolicyPurpose::ALL`]
 /// order. Compile-time-included so the binary is self-contained.

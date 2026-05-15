@@ -86,26 +86,35 @@ pub async fn bootstrap(
     })?;
     let cred_id_hex = hex::encode(<_ as AsRef<[u8]>>::as_ref(first_cred.cred_id()));
 
+    // claim_finish already wrote the AdminEntry for the install
+    // credential. Only fall back to building one here if it's
+    // somehow missing — recovery against a partial install where
+    // the AdminEntry write failed but the PasskeyUser succeeded.
     let now = Utc::now();
-    let registered = RegisteredPasskey {
-        credential_id: cred_id_hex,
-        // The install ceremony has no operator label channel; the
-        // operator labels their device later via
-        // `PATCH /v1/admin/passkeys/{id}` (M0.6.3). Until then we
-        // ship a placeholder rather than an empty string so admin
-        // UIs don't render blank.
-        label: "install".into(),
-        transports: Vec::new(),
-        registered_at: now,
-        last_used_at: None,
-    };
-    let admin_entry = AdminEntry {
-        did: admin_did.clone(),
-        passkeys: vec![registered],
-        extensions: serde_json::Value::Null,
-        created_at: now,
-    };
-    store_admin_entry(&state.passkey_ks, &admin_entry).await?;
+    if crate::acl::admin::get_admin_entry(&state.passkey_ks, &admin_did)
+        .await?
+        .is_none()
+    {
+        let registered = RegisteredPasskey {
+            credential_id: cred_id_hex,
+            // The install ceremony has no operator label channel;
+            // the operator relabels their device later via
+            // `PATCH /v1/admin/passkeys/{id}` (M0.6.3). Until then
+            // we ship a placeholder rather than an empty string so
+            // admin UIs don't render blank.
+            label: "install".into(),
+            transports: Vec::new(),
+            registered_at: now,
+            last_used_at: None,
+        };
+        let admin_entry = AdminEntry {
+            did: admin_did.clone(),
+            passkeys: vec![registered],
+            extensions: serde_json::Value::Null,
+            created_at: now,
+        };
+        store_admin_entry(&state.passkey_ks, &admin_entry).await?;
+    }
 
     let acl_entry = VtcAclEntry {
         did: admin_did.clone(),

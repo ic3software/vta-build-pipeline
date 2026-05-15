@@ -9,11 +9,14 @@
 //!
 //! - `X-Content-Type-Options: nosniff` — refuses browser MIME
 //!   sniffing. Always on.
-//! - `Content-Security-Policy` — default `default-src 'self';
-//!   script-src 'self'; object-src 'none'; base-uri 'self'`. Spec
-//!   §12.1 lets operators relax this per-site for SPA needs once
-//!   the website handler (M5.4) reads a `.vtc-website.toml`
-//!   override.
+//! - `Content-Security-Policy` — default policy below. Spec §12.1
+//!   lets operators relax this per-site for SPA needs once the
+//!   website handler (M5.4) reads a `.vtc-website.toml` override.
+//!   `font-src 'self' data:` accommodates the @fontsource-variable
+//!   subsets that Vite inlines under its 4 KiB asset threshold;
+//!   `style-src 'unsafe-inline'` covers React's `style={{...}}`
+//!   prop usage. Neither widens the attack surface beyond what a
+//!   typical SPA already accepts.
 //!
 //! When the response already carries one of these headers (e.g. a
 //! handler wants a stricter `Cache-Control: no-store` and bundled
@@ -27,8 +30,13 @@ use axum::middleware::Next;
 use axum::response::Response;
 
 /// Default CSP attached to admin UX + website responses.
-pub const DEFAULT_CSP: &str =
-    "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'";
+pub const DEFAULT_CSP: &str = "default-src 'self'; \
+     script-src 'self'; \
+     style-src 'self' 'unsafe-inline'; \
+     font-src 'self' data:; \
+     img-src 'self' data:; \
+     object-src 'none'; \
+     base-uri 'self'";
 
 /// Tower middleware function. Wire via
 /// `axum::middleware::from_fn(security_headers)` on the admin UX

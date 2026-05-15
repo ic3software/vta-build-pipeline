@@ -391,6 +391,16 @@ pub async fn run(
         supervisor: detect_supervisor(),
     };
 
+    // Heal missing AdminEntries: any DID with an Admin ACL grant +
+    // a PasskeyUser but no AdminEntry gets the AdminEntry synthesised
+    // from the PasskeyUser's credentials. Covers daemons where
+    // `vtc admin invite` ran before `claim_finish` started writing
+    // the AdminEntry — without this, `GET /v1/admin/passkeys` 404s
+    // permanently because list reads AdminEntry, not PasskeyUser.
+    if let Err(e) = heal_missing_admin_entries(&state).await {
+        warn!(error = %e, "admin-entry heal scan failed");
+    }
+
     // One-shot heal for daemons bootstrapped before the install
     // ceremony initialised the community profile. New installs land
     // here as a no-op because `POST /v1/admin/bootstrap` now writes
@@ -691,6 +701,72 @@ pub async fn run(
     }
 
     info!("server shut down");
+    Ok(())
+}
+
+/// Walk the ACL keyspace for `Admin` entries; for each, if a
+/// `PasskeyUser` exists for the DID but no `AdminEntry` does,
+/// synthesise the `AdminEntry` from the user's registered
+/// credentials. Idempotent — no-op once every Admin DID has its
+/// entry. Used to repair daemons where the AdminEntry was never
+/// written (pre-fix `vtc admin invite` + claim flow, or a partial
+/// bootstrap that crashed between PasskeyUser and AdminEntry).
+async fn heal_missing_admin_entries(state: &AppState) -> Result<(), AppError> {
+    use chrono::Utc;
+    use vti_common::acl::list_acl_entries;
+    use vti_common::auth::passkey::store::get_passkey_user_by_did;
+
+    use crate::acl::admin::{AdminEntry, RegisteredPasskey, get_admin_entry, store_admin_entry};
+
+    let admins = list_acl_entries(&state.acl_ks).await?;
+    let mut healed = 0usize;
+    for acl_entry in admins {
+        if acl_entry.role != vti_common::acl::Role::Admin {
+            continue;
+        }
+        if get_admin_entry(&state.passkey_ks, &acl_entry.did)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+        let Some(pk_user) = get_passkey_user_by_did(&state.passkey_ks, &acl_entry.did).await?
+        else {
+            // Admin DID with no passkey yet — login is impossible
+            // anyway. Leave alone; nothing to heal from.
+            continue;
+        };
+        let now = Utc::now();
+        let passkeys: Vec<RegisteredPasskey> = pk_user
+            .credentials
+            .iter()
+            .map(|cred| {
+                let cred_id_hex = hex::encode(<_ as AsRef<[u8]>>::as_ref(cred.cred_id()));
+                RegisteredPasskey {
+                    credential_id: cred_id_hex,
+                    label: "install".into(),
+                    transports: Vec::new(),
+                    registered_at: now,
+                    last_used_at: None,
+                }
+            })
+            .collect();
+        if passkeys.is_empty() {
+            continue;
+        }
+        let entry = AdminEntry {
+            did: acl_entry.did.clone(),
+            passkeys,
+            extensions: serde_json::Value::Null,
+            created_at: now,
+        };
+        store_admin_entry(&state.passkey_ks, &entry).await?;
+        info!(did = %acl_entry.did, "synthesised missing AdminEntry from PasskeyUser (heal)");
+        healed += 1;
+    }
+    if healed > 0 {
+        info!(count = healed, "admin-entry heal scan completed");
+    }
     Ok(())
 }
 
