@@ -11,6 +11,7 @@ mod document;
 mod lifecycle;
 mod register_server;
 mod servers;
+mod transport;
 mod update;
 mod webvh_keys;
 
@@ -1073,7 +1074,12 @@ pub(super) enum WebvhTransport<'a> {
 impl<'a> WebvhTransport<'a> {
     /// Resolve the server DID and construct the appropriate transport.
     ///
-    /// Prefers `DIDCommMessaging` and falls back to `WebVHHostingService`.
+    /// Transport selection is delegated to the pure
+    /// [`transport::resolve_server_transport`] helper — DIDComm wins
+    /// over REST regardless of service[] ordering, and both
+    /// `WebVHHosting` (current) and `WebVHHostingService` (legacy
+    /// alias) are accepted on read. See [`transport`] for the
+    /// canonical set of types we emit vs. accept.
     pub(super) async fn from_server(
         server: &WebvhServerRecord,
         did_resolver: &DIDCacheClient,
@@ -1083,39 +1089,28 @@ impl<'a> WebvhTransport<'a> {
             AppError::Internal(format!("failed to resolve server DID {}: {e}", server.did))
         })?;
 
-        // Check for DIDCommMessaging first
-        let has_didcomm = resolved
-            .doc
-            .service
-            .iter()
-            .any(|svc| svc.type_.iter().any(|t| t == "DIDCommMessaging"));
-        if has_didcomm {
-            info!(server_did = %server.did, transport = "didcomm", "resolved webvh server endpoint");
-            return Ok(Self::DIDComm {
-                bridge: didcomm_bridge,
-                server_did: server.did.clone(),
-            });
-        }
-
-        // Fall back to WebVHHostingService
-        for svc in &resolved.doc.service {
-            if svc.type_.iter().any(|t| t == "WebVHHostingService")
-                && let Some(url) = svc.service_endpoint.get_uri()
-            {
-                let url = url.trim_matches('"').trim_end_matches('/').to_string();
+        match transport::resolve_server_transport(&resolved.doc.service) {
+            Some(transport::ResolvedTransport::DIDComm) => {
+                info!(server_did = %server.did, transport = "didcomm", "resolved webvh server endpoint");
+                Ok(Self::DIDComm {
+                    bridge: didcomm_bridge,
+                    server_did: server.did.clone(),
+                })
+            }
+            Some(transport::ResolvedTransport::Rest { url }) => {
                 info!(server_did = %server.did, transport = "rest", %url, "resolved webvh server endpoint");
                 let mut client = WebvhClient::new(&url);
                 if let Some(ref token) = server.access_token {
                     client.set_access_token(token.clone());
                 }
-                return Ok(Self::Rest(client));
+                Ok(Self::Rest(client))
             }
+            None => Err(AppError::Validation(format!(
+                "server DID {} has no supported webvh endpoint (expected: {})",
+                server.did,
+                transport::SUPPORTED_TYPES_HUMAN,
+            ))),
         }
-
-        Err(AppError::Internal(format!(
-            "server DID {} has no DIDCommMessaging or WebVHHostingService endpoint",
-            server.did,
-        )))
     }
 
     async fn request_uri(&self, path: Option<&str>) -> Result<RequestUriResponse, AppError> {
