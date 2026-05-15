@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { Menu, RefreshCw, X } from "lucide-react";
@@ -28,12 +28,42 @@ export default function App() {
   const allPlugins = usePlugins();
   const { pathname } = useLocation();
   const [navOpen, setNavOpen] = useState(false);
+  const qc = useQueryClient();
+  const toast = useToast();
+  // De-dupe back-to-back expiry events: one expired session can fire
+  // 401s on every in-flight query in parallel. The ref clears once
+  // the whoami probe has flipped to null so a fresh sign-in can be
+  // detected again on its next expiry.
+  const expiryNotifiedRef = useRef(false);
 
   // Auto-close the mobile nav on route change — operators expect the
   // sheet to dismiss after they pick a destination.
   useEffect(() => {
     setNavOpen(false);
   }, [pathname]);
+
+  // Global session-expiry handler. `lib/api` dispatches
+  // `vtc-session-expired` whenever any authenticated request returns
+  // 401/403; when there's actually a cached whoami payload (i.e. the
+  // operator *was* signed in), we invalidate it so App re-renders
+  // into <Login> and show a friendly toast. The check on
+  // `getQueryData(["whoami"])` filters out 401s emitted during the
+  // login ceremony itself (no session present yet).
+  useEffect(() => {
+    const onExpired = () => {
+      const current = qc.getQueryData(["whoami"]);
+      if (!current) return;
+      if (expiryNotifiedRef.current) return;
+      expiryNotifiedRef.current = true;
+      toast.push("info", "Your session expired. Sign in again to continue.");
+      qc.setQueryData(["whoami"], null);
+      void qc.invalidateQueries({ queryKey: ["whoami"] });
+    };
+    window.addEventListener("vtc-session-expired", onExpired);
+    return () => {
+      window.removeEventListener("vtc-session-expired", onExpired);
+    };
+  }, [qc, toast]);
 
   // `/install` is the unauthenticated install-claim ceremony. It
   // renders standalone (no nav, no plugins) because the operator
@@ -51,6 +81,15 @@ export default function App() {
     staleTime: 30_000,
     retry: false,
   });
+
+  // Re-arm the session-expiry guard whenever a fresh session lands.
+  // Without this, a second expiry inside the same browser tab would
+  // be silently ignored.
+  useEffect(() => {
+    if (probe.data) {
+      expiryNotifiedRef.current = false;
+    }
+  }, [probe.data]);
 
   // Once the operator is signed in, watch for new plugins:
   // - On window focus (operator alt-tabs back after dropping a

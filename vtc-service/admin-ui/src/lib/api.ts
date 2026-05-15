@@ -64,6 +64,25 @@ async function request<T>(
     } catch {
       /* non-JSON body */
     }
+    // 401/403 on a request issued *while authenticated* means the
+    // session has expired (cookie cleared server-side, JWT past
+    // `exp`, or admin role revoked). Dispatch a window event so the
+    // shell can re-probe whoami and flip to Login — but only when a
+    // session was actually present. The Login page itself triggers
+    // 401s during its own ceremony; the listener filters those out
+    // by checking the current whoami cache.
+    if (res.status === 401 || res.status === 403) {
+      try {
+        window.dispatchEvent(
+          new CustomEvent("vtc-session-expired", {
+            detail: { path, status: res.status },
+          }),
+        );
+      } catch {
+        /* event dispatch never fails in browsers; the guard keeps
+         * SSR / non-DOM callers safe. */
+      }
+    }
     const err: ApiError = { status: res.status, message };
     throw err;
   }
