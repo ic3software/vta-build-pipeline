@@ -188,9 +188,11 @@ impl WebvhClient {
     /// Errors map to typed `AppError` variants so the route /
     /// operation layer can surface the right hint to the operator:
     ///
-    /// - daemon 401 on `/api/auth/` → `Authentication` (caller's
-    ///   VTA DID is probably not in the daemon's ACL),
-    /// - daemon 4xx other than 401 → `Validation`,
+    /// - daemon 401 → `Authentication` (signature / session /
+    ///   challenge invalid; likely clock skew or kid mismatch),
+    /// - daemon 403 → `Forbidden` (signature valid, VTA DID not in
+    ///   daemon ACL — corrective action is daemon-side),
+    /// - daemon 4xx other → `Validation`,
     /// - daemon 5xx → `Internal`,
     /// - network/parse failures → `Internal`.
     pub async fn authenticate(
@@ -304,15 +306,37 @@ impl WebvhClient {
     }
 
     /// Map a non-2xx response from `/api/auth/` to a typed `AppError`.
-    /// 401 specifically usually means the VTA's DID isn't in the
-    /// daemon's ACL — surface that hint so the operator doesn't see
-    /// a flat "internal error".
+    ///
+    /// The daemon distinguishes:
+    ///
+    /// - **401 Unauthorized** — signature / session / challenge
+    ///   verification failed. Common causes: clock skew between VTA
+    ///   and daemon (daemon accepts a ±5min window), the challenge
+    ///   expired before redemption, or the signing-key fragment on
+    ///   the VTA doesn't match a verification method in its DID
+    ///   document.
+    /// - **403 Forbidden** — signature was valid, but the VTA's
+    ///   DID is not in the daemon's ACL. Corrective action is on
+    ///   the daemon side.
+    ///
+    /// Two distinct hints so the CLI can guide the operator to the
+    /// *actually* broken thing. (Earlier on this branch the ACL hint
+    /// was attached to the 401 arm — caught by the audit.)
     fn map_auth_failure(&self, status: reqwest::StatusCode, body: &str, vta_did: &str) -> AppError {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return AppError::Authentication(format!(
-                "webvh-server {server_did} rejected authentication for VTA DID `{vta_did}`. \
-                 The most likely cause is that the VTA's DID is not in the daemon's ACL — \
-                 ensure `{vta_did}` is granted access on the daemon. Daemon response: {body}",
+                "webvh-server {server_did} rejected authentication signature for VTA DID `{vta_did}`. \
+                 Likely causes: clock skew between VTA and daemon (daemon accepts a ±5min window), \
+                 expired challenge, or a signing-key fragment that doesn't match a verification method \
+                 in the VTA's DID document. Daemon response: {body}",
+                server_did = self.server_did,
+            ));
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return AppError::Forbidden(format!(
+                "webvh-server {server_did} accepted the signature for VTA DID `{vta_did}` but the \
+                 DID is not in the daemon's ACL. The corrective action is daemon-side: grant the \
+                 VTA's DID access on the daemon. Daemon response: {body}",
                 server_did = self.server_did,
             ));
         }
@@ -346,13 +370,17 @@ impl WebvhClient {
             .send()
             .await
             .map_err(|e| AppError::Internal(format!("webvh-server request failed: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(AppError::Internal(format!(
                 "webvh-server {context} failed ({status}): {text}"
             )));
         }
+        debug!(
+            status = status.as_u16(),
+            context, "webvh: received via rest"
+        );
         Ok(resp)
     }
 
@@ -366,7 +394,6 @@ impl WebvhClient {
         };
         let req = self.with_auth(self.http.post(&url)).json(&body);
         let resp = self.send(req, "POST /api/dids").await?;
-        debug!(method = "POST", status = 200, "webvh: received via rest");
         resp.json()
             .await
             .map_err(|e| AppError::Internal(format!("webvh-server response parse error: {e}")))
@@ -400,7 +427,6 @@ impl WebvhClient {
                 "force": force,
             }));
         let resp = self.send(req, "POST /api/dids/register").await?;
-        debug!(method = "POST", status = 200, "webvh: received via rest");
         resp.json()
             .await
             .map_err(|e| AppError::Internal(format!("webvh-server response parse error: {e}")))
@@ -415,7 +441,6 @@ impl WebvhClient {
             .header("Content-Type", "application/jsonl")
             .body(log_content.to_string());
         self.send(req, &format!("PUT /api/dids/{mnemonic}")).await?;
-        debug!(method = "PUT", status = 200, "webvh: received via rest");
         Ok(())
     }
 
@@ -426,7 +451,6 @@ impl WebvhClient {
         let req = self.with_auth(self.http.delete(&url));
         self.send(req, &format!("DELETE /api/dids/{mnemonic}"))
             .await?;
-        debug!(method = "DELETE", status = 200, "webvh: received via rest");
         Ok(())
     }
 
@@ -657,11 +681,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticate_401_yields_typed_auth_error_with_acl_hint() {
-        // Operator footgun: daemon's ACL doesn't include the VTA DID.
-        // The CLI should print a corrective hint rather than a generic
-        // "internal error". We assert the typed variant + the hint
-        // substring.
+    async fn authenticate_401_surfaces_signature_freshness_hint() {
+        // 401 from the daemon means signature/session/challenge
+        // verification failed — typically clock skew, expired
+        // challenge, or a kid that doesn't match a verification
+        // method. The hint must NOT misdirect the operator toward
+        // ACL edits (that's the 403 case below).
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/auth/challenge"))
@@ -670,7 +695,7 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/auth/"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("ACL denied"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("invalid signature"))
             .mount(&server)
             .await;
 
@@ -686,15 +711,58 @@ mod tests {
         match err {
             AppError::Authentication(msg) => {
                 assert!(
-                    msg.contains("not in the daemon's ACL"),
-                    "auth error should suggest the fix; got: {msg}"
+                    msg.contains("clock skew") || msg.contains("expired challenge"),
+                    "401 must hint at signature/freshness failures, not ACL: {msg}"
                 );
                 assert!(
-                    msg.contains(&vta_did),
-                    "should name the VTA DID; got: {msg}"
+                    !msg.contains("not in the daemon's ACL"),
+                    "401 must NOT suggest ACL change (that's the 403 case): {msg}"
                 );
             }
             other => panic!("expected Authentication, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_403_surfaces_acl_hint() {
+        // 403 from the daemon means signature was valid but the VTA
+        // DID is not in the ACL. The CLI must direct the operator
+        // toward the daemon-side fix (grant ACL access), not toward
+        // re-checking signatures.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/challenge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(challenge_response_json()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("DID not in ACL"))
+            .mount(&server)
+            .await;
+
+        let (private, vta_did, kid) = signing_identity();
+        let client = WebvhClient::new(&server.uri(), "did:web:daemon-mock.example").unwrap();
+        let identity = VtaSigningIdentity {
+            vta_did: &vta_did,
+            signing_kid: &kid,
+            private_key: &private,
+        };
+
+        let err = client.authenticate(&identity).await.unwrap_err();
+        match err {
+            AppError::Forbidden(msg) => {
+                assert!(
+                    msg.contains("not in the daemon's ACL"),
+                    "403 must surface the ACL hint: {msg}"
+                );
+                assert!(msg.contains(&vta_did), "should name the VTA DID: {msg}");
+                assert!(
+                    msg.contains("daemon-side"),
+                    "should point at the daemon as the fix location: {msg}"
+                );
+            }
+            other => panic!("expected Forbidden, got {other:?}"),
         }
     }
 

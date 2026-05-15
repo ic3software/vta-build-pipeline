@@ -1,3 +1,38 @@
+//! DIDComm transport for webvh server operations.
+//!
+//! ## Why this is *not* a mirror of `webvh_client.rs`
+//!
+//! The REST sibling (`crate::webvh_client::WebvhClient`) carries:
+//! - explicit signing identity for the daemon challenge/response flow,
+//! - typed errors with operator-facing hints (401 vs 403 split),
+//! - HTTPS enforcement on the dialed URL,
+//! - audience binding via the DIDComm `to:` field.
+//!
+//! This module deliberately carries none of those. It's not an
+//! oversight — DIDComm authcrypt already gives us the equivalents
+//! at the envelope layer:
+//!
+//! - **Signing identity** — the `DIDCommBridge` packs every outbound
+//!   message with the VTA's existing DIDComm sender key; the daemon
+//!   verifies it via `unpack_signed` exactly the same way it verifies
+//!   the JWS-over-REST envelope.
+//! - **Audience binding** — DIDComm messages are addressed to a
+//!   specific `to:` DID intrinsically; replay against a different
+//!   daemon fails because the message is encrypted to *this* daemon's
+//!   key-agreement key.
+//! - **Typed errors** — DIDComm replies carry `e.p.msg.*`
+//!   problem-report codes which the SDK maps to typed `VtaError`
+//!   variants via `VtaError::from_problem_report`. The CLI surfaces
+//!   them with the same hint discipline as the REST path.
+//! - **Transport security** — DIDComm over the mediator is
+//!   end-to-end encrypted regardless of the underlying socket; there
+//!   is no plaintext-leak surface to defend at this layer.
+//!
+//! **Do not "add parity" by porting the JWS-flow primitives into
+//! this module.** They would duplicate what authcrypt already
+//! provides, and the duplicate would drift out of sync with the
+//! envelope-layer guarantees.
+
 use crate::didcomm_bridge::DIDCommBridge;
 use crate::error::AppError;
 use crate::webvh_client::RequestUriResponse;

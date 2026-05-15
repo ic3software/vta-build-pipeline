@@ -27,6 +27,7 @@ use crate::auth::AuthClaims;
 use crate::didcomm_bridge::DIDCommBridge;
 use crate::keys::seed_store::SeedStore;
 use crate::operations::did_webvh::WebvhTransport;
+use crate::operations::did_webvh::concurrency::RecordSnapshot;
 use crate::operations::did_webvh::webvh_keys::{self, WebvhKeyHandle, WebvhKeyRole};
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
@@ -46,11 +47,20 @@ pub async fn update_did_webvh(
     didcomm_bridge: &Arc<DIDCommBridge>,
     channel: &str,
 ) -> Result<UpdateDidWebvhResult, UpdateDidWebvhError> {
-    // 1. Resolve SCID → record.
+    // 1. Resolve SCID → record. Snapshot the version-vector fields
+    //    immediately. The snapshot is consulted just before the
+    //    final store (step 11) to catch any concurrent record
+    //    mutation — not just log_entry_count changes (which this
+    //    op makes itself) but `server_id` / `updated_at` changes
+    //    too, since a concurrent `register_did_with_server` flipping
+    //    `server_id` from `serverless` → `webvh-prod` is a real
+    //    race that the previous ad-hoc `log_entry_count` check
+    //    silently missed.
     let mut record = find_record_by_scid(webvh_ks, scid)
         .await?
         .ok_or_else(|| UpdateDidWebvhError::NotFound(format!("SCID {scid} not found")))?;
     let initial_log_entry_count = record.log_entry_count;
+    let snapshot = RecordSnapshot::capture(&record);
 
     // 2. Auth gate. Forbidden + NotFound both surface as 404 at the
     //    wire boundary — see `From<UpdateDidWebvhError> for AppError`.
@@ -246,19 +256,24 @@ pub async fn update_did_webvh(
     let new_log_entry_str = serde_json::to_string(new_log_entry)
         .map_err(|e| UpdateDidWebvhError::Persistence(format!("serialize new entry: {e}")))?;
 
-    // 11. Optimistic concurrency check before persisting.
+    // 11. Optimistic concurrency check before persisting. Uses the
+    //     shared `RecordSnapshot` machinery so we catch *every* kind
+    //     of concurrent mutation (log_entry_count, updated_at, AND
+    //     server_id) rather than just log_entry_count growth. The
+    //     server_id case is the one the ad-hoc check missed:
+    //     `register_did_with_server` flipping `server_id` from
+    //     `serverless` → `webvh-prod` between step 1 and here used
+    //     to slip past unchallenged, then step 12 would clobber the
+    //     newer record with our stale `serverless` value.
     let current = webvh_store::get_did(webvh_ks, &record.did)
         .await
         .map_err(|e| UpdateDidWebvhError::Persistence(format!("get_did: {e}")))?
         .ok_or_else(|| {
             UpdateDidWebvhError::NotFound(format!("DID {} disappeared mid-update", record.did))
         })?;
-    if current.log_entry_count != initial_log_entry_count {
-        return Err(UpdateDidWebvhError::Conflict(format!(
-            "DID {} was updated concurrently (expected log_entry_count {}, got {})",
-            record.did, initial_log_entry_count, current.log_entry_count
-        )));
-    }
+    snapshot
+        .assert_unchanged(&current)
+        .map_err(|race| UpdateDidWebvhError::Conflict(race.to_string()))?;
 
     // 12. Persist new log + new key handles + updated record.
     let new_log_jsonl = state_to_jsonl(result.state())?;
