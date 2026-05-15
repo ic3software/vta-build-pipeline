@@ -1099,10 +1099,13 @@ impl<'a> WebvhTransport<'a> {
             }
             Some(transport::ResolvedTransport::Rest { url }) => {
                 info!(server_did = %server.did, transport = "rest", %url, "resolved webvh server endpoint");
-                let mut client = WebvhClient::new(&url, &server.did)?;
-                if let Some(ref token) = server.access_token {
-                    client.set_access_token(token.clone());
-                }
+                // The access token (if any) is now loaded from
+                // `server-auth:{id}` by the auth-cache layer rather
+                // than embedded on the public `WebvhServerRecord`.
+                // Construction here is unauthenticated; callers that
+                // need an authenticated request set the token via
+                // `set_access_token` after consulting the auth cache.
+                let client = WebvhClient::new(&url, &server.did)?;
                 Ok(Self::Rest(client))
             }
             None => Err(AppError::Validation(format!(

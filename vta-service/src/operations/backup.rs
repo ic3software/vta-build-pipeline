@@ -377,7 +377,18 @@ pub async fn apply_import(
     clear_keyspace(audit_ks, &["log:"]).await?;
     clear_keyspace(imported_ks, &["secret:"]).await?;
     #[cfg(feature = "webvh")]
-    clear_keyspace(webvh_ks, &["server:", "did:", "log:"]).await?;
+    clear_keyspace(
+        webvh_ks,
+        // `server-auth:` is explicitly included so that a restore
+        // wipes any cached daemon-REST tokens before installing the
+        // backed-up server registry. Tokens never travel in the
+        // backup payload itself (the export path scans `server:`
+        // only — `server-auth:` is service-local secret material),
+        // so a fresh import correctly leaves us un-authenticated to
+        // every daemon and forces a re-authenticate on first use.
+        &["server:", "server-auth:", "did:", "log:"],
+    )
+    .await?;
 
     // Also remove counters
     let _ = keys_ks.remove("active_seed_id").await;
@@ -739,6 +750,53 @@ async fn clear_keyspace(ks: &KeyspaceHandle, prefixes: &[&str]) -> Result<(), Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Store;
+    use crate::webvh_store::{WebvhServerAuthRecord, store_server_auth};
+    use vti_common::config::StoreConfig as VtiStoreConfig;
+
+    /// Pre-existing daemon REST auth-cache records must be wiped by
+    /// the restore path. Otherwise a backup imported on a different
+    /// VTA (or a fresh install before re-onboarding the daemons)
+    /// would inherit tokens that, if still un-expired, could be used
+    /// against daemons the operator no longer controls. The import
+    /// path does not carry tokens *forward* (the export filter only
+    /// touches `server:` keys, not `server-auth:`), so what matters
+    /// is that the wipe step explicitly includes our prefix.
+    #[tokio::test]
+    async fn restore_clears_pre_existing_webvh_auth_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&VtiStoreConfig {
+            data_dir: dir.path().into(),
+        })
+        .unwrap();
+        let webvh_ks = store.keyspace("webvh").unwrap();
+
+        // Plant a stale auth record (as if a previous VTA installation
+        // had cached daemon REST tokens here).
+        let stale = WebvhServerAuthRecord {
+            server_id: "prod".into(),
+            access_token: "stale-access".into(),
+            access_expires_at: 9_999_999_999,
+            refresh_token: "stale-refresh".into(),
+            refresh_expires_at: 9_999_999_999,
+        };
+        store_server_auth(&webvh_ks, &stale).await.unwrap();
+
+        // Run the same wipe-prefixes call `apply_import` uses on the
+        // webvh keyspace.
+        clear_keyspace(&webvh_ks, &["server:", "server-auth:", "did:", "log:"])
+            .await
+            .unwrap();
+
+        // The stale auth record must be gone.
+        let remaining = crate::webvh_store::get_server_auth(&webvh_ks, "prod")
+            .await
+            .unwrap();
+        assert!(
+            remaining.is_none(),
+            "server-auth: prefix must be cleared on import; otherwise stale tokens leak across installations"
+        );
+    }
 
     fn test_payload() -> BackupPayload {
         BackupPayload {

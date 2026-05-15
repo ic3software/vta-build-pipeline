@@ -46,9 +46,6 @@ pub async fn add_webvh_server(
         id: id.to_string(),
         did: server_did.to_string(),
         label,
-        access_token: None,
-        access_expires_at: None,
-        refresh_token: None,
         created_at: now,
         updated_at: now,
     };

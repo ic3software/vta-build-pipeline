@@ -1,18 +1,32 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Operator-visible metadata for a registered webvh hosting server.
+///
+/// **Public surface — never carry secret material.** Bearer tokens,
+/// refresh tokens, and token-expiry timestamps for the daemon REST
+/// auth flow live in a separate service-internal record
+/// (`vta_service::webvh_store::WebvhServerAuthRecord`, keyspace prefix
+/// `server-auth:`), not on this type. The split keeps tokens out of:
+///
+/// - REST `GET /webvh/servers` list responses,
+/// - DIDComm `webvh.servers.list` results,
+/// - Backup export payloads,
+/// - Any future SDK consumer that reads `WebvhServerRecord`.
+///
+/// Legacy records on disk may still carry `access_token` /
+/// `access_expires_at` / `refresh_token` fields embedded inline.
+/// Serde's default behaviour ignores unknown fields, so those
+/// legacy records deserialize cleanly into the new shape — the
+/// embedded tokens are silently dropped on read. The VTA's restore
+/// path explicitly wipes the `server-auth:` keyspace so a backup
+/// from another VTA can't replay stale tokens here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebvhServerRecord {
     pub id: String,
     pub did: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_expires_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refresh_token: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -51,6 +65,67 @@ fn default_next_fragment_id() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `WebvhServerRecord` must never serialise token material on the
+    /// wire, even if somehow given a record with those fields populated.
+    /// We removed the fields from the struct entirely so the type
+    /// system itself enforces this — pin the invariant.
+    #[test]
+    fn server_record_round_trips_without_token_fields() {
+        let now = Utc::now();
+        let r = WebvhServerRecord {
+            id: "prod".into(),
+            did: "did:web:daemon.example".into(),
+            label: Some("prod hosting".into()),
+            created_at: now,
+            updated_at: now,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains("access_token"),
+            "access_token must not appear in serialised form: {json}"
+        );
+        assert!(
+            !json.contains("refresh_token"),
+            "refresh_token must not appear: {json}"
+        );
+        assert!(
+            !json.contains("access_expires_at"),
+            "access_expires_at must not appear: {json}"
+        );
+    }
+
+    /// Legacy on-disk records (and legacy backups) may have embedded
+    /// token fields. Serde's default behaviour ignores unknown fields,
+    /// so the load path drops them silently — the new shape doesn't
+    /// hold those values. Pin the invariant so a future
+    /// `#[serde(deny_unknown_fields)]` doesn't reintroduce the leak.
+    #[test]
+    fn legacy_server_record_with_embedded_tokens_deserializes_cleanly() {
+        let json = r#"{
+            "id": "prod",
+            "did": "did:web:daemon.example",
+            "label": "prod",
+            "access_token": "leaky-access-token",
+            "access_expires_at": 9999999999,
+            "refresh_token": "leaky-refresh-token",
+            "created_at": "2026-05-01T00:00:00Z",
+            "updated_at": "2026-05-01T00:00:00Z"
+        }"#;
+        let r: WebvhServerRecord = serde_json::from_str(json).expect("must accept legacy fields");
+        assert_eq!(r.id, "prod");
+        assert_eq!(r.did, "did:web:daemon.example");
+        // Round-tripping the deserialised form drops the legacy fields.
+        let reserialised = serde_json::to_string(&r).unwrap();
+        assert!(
+            !reserialised.contains("access_token"),
+            "legacy fields must be dropped on re-serialise: {reserialised}"
+        );
+        assert!(
+            !reserialised.contains("refresh_token"),
+            "legacy fields must be dropped: {reserialised}"
+        );
+    }
 
     #[test]
     fn legacy_record_loads_with_default_pre_rotation_and_fragment_id() {

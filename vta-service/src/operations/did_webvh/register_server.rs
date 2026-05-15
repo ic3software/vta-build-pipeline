@@ -290,9 +290,6 @@ mod tests {
             id: id.into(),
             did: format!("did:web:{id}.example"),
             label: None,
-            access_token: None,
-            access_expires_at: None,
-            refresh_token: None,
             created_at: now,
             updated_at: now,
         }
