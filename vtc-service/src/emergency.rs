@@ -314,6 +314,7 @@ pub async fn run_emergency_bootstrap_with_store(
             *minted.ephemeral_signing_key,
             exp,
             Some(claim_code_hash),
+            Some(setup_key.did.clone()),
         )
         .await?;
 

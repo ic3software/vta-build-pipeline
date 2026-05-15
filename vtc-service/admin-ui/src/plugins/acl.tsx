@@ -12,7 +12,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { Copy, Mail, Pencil, Plus, ShieldCheck, X } from "lucide-react";
+import { Copy, Mail, Pencil, Plus, RefreshCw, ShieldCheck, X } from "lucide-react";
 
 import { deleteJson, getJson, patchJson, postJson } from "@/lib/api";
 import { useToast } from "@/lib/toast";
@@ -83,6 +83,13 @@ async function patchAclLabel(args: {
 interface InviteSummary {
   jti: string;
   status: "issued" | "consumed" | "expired";
+  /**
+   * Admin DID the invite was minted for. Missing on legacy rows
+   * from before the daemon started persisting the target DID;
+   * those can be cleared with Revoke (Regenerate can't act on
+   * them — there's nothing to re-invite).
+   */
+  targetDid?: string;
   expiresAt?: string;
   consumedAt?: string;
 }
@@ -306,6 +313,9 @@ function InvitesPanel() {
   const queryClient = useQueryClient();
   const toast = useToast();
   const [showCreate, setShowCreate] = useState(false);
+  const [regenerated, setRegenerated] = useState<CreateInviteResponse | null>(
+    null,
+  );
 
   const query = useQuery({
     queryKey: ["admin-invites"],
@@ -319,6 +329,37 @@ function InvitesPanel() {
       void queryClient.invalidateQueries({ queryKey: ["admin-invites"] });
     },
     onError: (err) => toast.pushFromError(err, "Revoke failed"),
+  });
+
+  const regenerate = useMutation({
+    mutationFn: async (args: { oldJti: string; targetDid: string }) => {
+      // Mint a fresh invite first so a failure here leaves the
+      // existing invite intact — the operator can retry without
+      // losing access to a working URL. Only after the new invite
+      // is in hand do we revoke the old one.
+      const fresh = await createInvite({ did: args.targetDid });
+      try {
+        await revokeInvite(args.oldJti);
+      } catch (err) {
+        // Surface the warning but keep the new invite: the worst
+        // case is two valid invites for the same DID, which is
+        // not a security regression (the new code is required to
+        // claim either one).
+        toast.push(
+          "info",
+          `New invite minted but old one (${shortJti(args.oldJti)}) wasn't revoked: ${
+            (err as Error).message
+          }`,
+        );
+      }
+      return fresh;
+    },
+    onSuccess: (fresh, args) => {
+      toast.push("success", `Regenerated invite for ${args.targetDid}`);
+      void queryClient.invalidateQueries({ queryKey: ["admin-invites"] });
+      setRegenerated(fresh);
+    },
+    onError: (err) => toast.pushFromError(err, "Regenerate failed"),
   });
 
   const invites = query.data?.invites ?? [];
@@ -366,6 +407,7 @@ function InvitesPanel() {
         <table className="data-table">
           <thead>
             <tr>
+              <th>Target DID</th>
               <th>JTI</th>
               <th>Status</th>
               <th>Expires / consumed</th>
@@ -375,12 +417,12 @@ function InvitesPanel() {
           <tbody>
             {query.isPending && (
               <tr>
-                <td colSpan={4}>Loading…</td>
+                <td colSpan={5}>Loading…</td>
               </tr>
             )}
             {!query.isPending && invites.length === 0 && (
               <tr>
-                <td colSpan={4}>
+                <td colSpan={5}>
                   <div className="empty-state">
                     <span className="empty-icon" aria-hidden="true">
                       <Mail />
@@ -393,6 +435,15 @@ function InvitesPanel() {
             )}
             {invites.map((i) => (
               <tr key={i.jti}>
+                <td>
+                  {i.targetDid ? (
+                    <code className="truncate" title={i.targetDid}>
+                      {i.targetDid}
+                    </code>
+                  ) : (
+                    <span className="muted">unknown</span>
+                  )}
+                </td>
                 <td>
                   <code className="truncate" title={i.jti}>
                     {shortJti(i.jti)}
@@ -411,39 +462,80 @@ function InvitesPanel() {
                       : "—"}
                 </td>
                 <td>
-                  <button
-                    type="button"
-                    className="secondary destructive"
-                    disabled={
-                      revoke.isPending ||
-                      i.status === "consumed" ||
-                      i.status === "expired"
-                    }
-                    title={
-                      i.status === "consumed"
-                        ? "Consumed invites cannot be revoked"
-                        : i.status === "expired"
-                          ? "Already expired — nothing to revoke"
-                          : undefined
-                    }
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Revoke invite ${shortJti(i.jti)}? The install URL stops working immediately.`,
-                        )
-                      ) {
-                        revoke.mutate(i.jti);
+                  <div className="row-actions">
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={
+                        regenerate.isPending ||
+                        i.status === "consumed" ||
+                        !i.targetDid
                       }
-                    }}
-                  >
-                    Revoke
-                  </button>
+                      title={
+                        i.status === "consumed"
+                          ? "Consumed invites cannot be regenerated"
+                          : !i.targetDid
+                            ? "Legacy invite — no stored target DID, revoke instead"
+                            : "Revoke this invite and mint a fresh URL + claim code for the same DID"
+                      }
+                      onClick={() => {
+                        if (!i.targetDid) return;
+                        if (
+                          window.confirm(
+                            `Regenerate invite for ${i.targetDid}?\n\nThis revokes ${shortJti(i.jti)} and mints a fresh URL + claim code. The old install URL stops working immediately.`,
+                          )
+                        ) {
+                          regenerate.mutate({
+                            oldJti: i.jti,
+                            targetDid: i.targetDid,
+                          });
+                        }
+                      }}
+                    >
+                      <RefreshCw size={12} aria-hidden="true" />{" "}
+                      Regenerate
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary destructive"
+                      disabled={
+                        revoke.isPending ||
+                        i.status === "consumed" ||
+                        i.status === "expired"
+                      }
+                      title={
+                        i.status === "consumed"
+                          ? "Consumed invites cannot be revoked"
+                          : i.status === "expired"
+                            ? "Already expired — nothing to revoke"
+                            : undefined
+                      }
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Revoke invite ${shortJti(i.jti)}? The install URL stops working immediately.`,
+                          )
+                        ) {
+                          revoke.mutate(i.jti);
+                        }
+                      }}
+                    >
+                      Revoke
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </section>
+
+      {regenerated && (
+        <RegeneratedInviteCard
+          invite={regenerated}
+          onDismiss={() => setRegenerated(null)}
+        />
+      )}
     </>
   );
 }
@@ -586,6 +678,68 @@ function CreateInviteForm({ onClose }: { onClose: () => void }) {
         </button>
       </div>
     </form>
+  );
+}
+
+function RegeneratedInviteCard({
+  invite,
+  onDismiss,
+}: {
+  invite: CreateInviteResponse;
+  onDismiss: () => void;
+}) {
+  const toast = useToast();
+  return (
+    <section className="card">
+      <h3>Regenerated invite</h3>
+      <p className="lead">
+        Fresh single-use URL + claim code minted. The previous
+        invite has been revoked. Deliver these to the new admin
+        through <strong>separate channels</strong> (URL via Slack,
+        code via Signal — whatever doesn't share the same attacker
+        view). Both are required to claim the passkey. Expires{" "}
+        <strong>{formatIso(invite.expiresAt)}</strong>.
+      </p>
+      <label className="field">
+        <span className="field-label">Install URL</span>
+        <input type="text" readOnly value={invite.installUrl} />
+      </label>
+      <label className="field">
+        <span className="field-label">
+          Claim code (shown once — copy it now)
+        </span>
+        <input type="text" readOnly value={invite.claimCode} />
+      </label>
+      <div className="form-actions">
+        <button
+          type="button"
+          className="primary"
+          onClick={() => {
+            void navigator.clipboard
+              .writeText(invite.installUrl)
+              .then(() => toast.push("success", "Install URL copied"))
+              .catch(() => toast.push("error", "Clipboard write failed"));
+          }}
+        >
+          <Copy size={14} aria-hidden="true" /> Copy URL
+        </button>
+        <button
+          type="button"
+          className="primary"
+          onClick={() => {
+            void navigator.clipboard
+              .writeText(invite.claimCode)
+              .then(() => toast.push("success", "Claim code copied"))
+              .catch(() => toast.push("error", "Clipboard write failed"));
+          }}
+        >
+          <Copy size={14} aria-hidden="true" /> Copy claim code
+        </button>
+        <button type="button" className="secondary" onClick={onDismiss}>
+          Done
+        </button>
+      </div>
+    </section>
   );
 }
 

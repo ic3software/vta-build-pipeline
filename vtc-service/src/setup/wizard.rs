@@ -991,6 +991,7 @@ async fn mint_initial_install_token(
             *minted.ephemeral_signing_key,
             exp,
             Some(claim_code_hash),
+            Some(admin_did.to_string()),
         )
         .await?;
 

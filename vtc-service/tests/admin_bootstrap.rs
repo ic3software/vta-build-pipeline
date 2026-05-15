@@ -183,6 +183,7 @@ async fn mint_token_and_record(fix: &Fixture, ttl_seconds: u64) -> String {
             *minted.ephemeral_signing_key,
             exp,
             None,
+            None,
         )
         .await
         .unwrap();

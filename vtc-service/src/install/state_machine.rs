@@ -92,6 +92,13 @@ pub enum InstallTokenState {
         /// this. See `super::claim_secret`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claim_secret_hash: Option<String>,
+        /// Target admin DID the invite was minted for. Mirrors
+        /// the JWT's `admin_did` claim so the daemon can surface
+        /// it on the invites list without decoding the (gone)
+        /// install URL. `None` for legacy rows persisted before
+        /// this field landed. New invites always set it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admin_did: Option<String>,
     },
     /// Ceremony succeeded — token is permanently spent. Retained for
     /// idempotency / audit; a later `start_claim` for the same JTI
@@ -157,6 +164,12 @@ impl InstallTokenStore {
     /// the legacy first-admin path and tests; new code paths
     /// always supply a hash.
     ///
+    /// `admin_did` is the target DID the invite is for. Mirrors
+    /// the JWT's `admin_did` claim so the daemon can surface it
+    /// on the invites list. `None` is accepted for backwards
+    /// compatibility with tests that didn't track the DID; the
+    /// production mint paths always pass it.
+    ///
     /// Caller must hold no other lock on the install keyspace; we
     /// take [`INSTALL_TOKEN_LOCK`] internally for the write so
     /// concurrent mints + transitions on the same JTI serialise.
@@ -167,6 +180,7 @@ impl InstallTokenStore {
         ephemeral_signing_key: [u8; 32],
         exp: DateTime<Utc>,
         claim_secret_hash: Option<String>,
+        admin_did: Option<String>,
     ) -> Result<(), AppError> {
         let _guard = INSTALL_TOKEN_LOCK.lock().await;
         let state = InstallTokenState::Issued {
@@ -175,6 +189,7 @@ impl InstallTokenStore {
             ephemeral_signing_key,
             claimed_at: None,
             claim_secret_hash,
+            admin_did,
         };
         self.ks.insert(token_key(jti), &state).await
     }
@@ -211,6 +226,7 @@ impl InstallTokenStore {
                 ephemeral_signing_key,
                 claimed_at,
                 claim_secret_hash,
+                admin_did,
             } => {
                 let now = Utc::now();
                 if now >= exp {
@@ -230,6 +246,7 @@ impl InstallTokenStore {
                     ephemeral_signing_key,
                     claimed_at: Some(now),
                     claim_secret_hash: claim_secret_hash.clone(),
+                    admin_did,
                 };
                 self.ks.insert(key, &next).await?;
                 Ok(StartClaimOutcome {
@@ -392,7 +409,14 @@ mod tests {
         let jti = Uuid::new_v4();
         let exp = Utc::now() + Duration::seconds(ttl);
         store
-            .record_issued(&jti, [0xAB; 32], [0xCD; 32], exp, claim_secret_hash)
+            .record_issued(
+                &jti,
+                [0xAB; 32],
+                [0xCD; 32],
+                exp,
+                claim_secret_hash,
+                Some("did:key:zTestAdmin".to_string()),
+            )
             .await
             .unwrap();
         jti
@@ -509,6 +533,7 @@ mod tests {
             ephemeral_signing_key: [0xCD; 32],
             claimed_at: Some(Utc::now()),
             claim_secret_hash: Some("$argon2id$stub".into()),
+            admin_did: Some("did:key:zSerdeRoundTrip".into()),
         };
         let s = serde_json::to_string(&state).unwrap();
         let back: InstallTokenState = serde_json::from_str(&s).unwrap();

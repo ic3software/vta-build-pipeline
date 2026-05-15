@@ -198,6 +198,7 @@ async fn mint_install(fix: &Fixture) -> String {
             *minted.ephemeral_signing_key,
             exp,
             None,
+            None,
         )
         .await
         .unwrap();

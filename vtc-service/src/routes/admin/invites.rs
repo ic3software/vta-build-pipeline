@@ -88,6 +88,11 @@ pub struct CreateInviteResponse {
 pub struct InviteSummary {
     pub jti: String,
     pub status: InviteStatus,
+    /// Admin DID the invite was minted for. `None` only on
+    /// legacy rows persisted before the field landed (those are
+    /// safe to clean up via revoke). New invites always carry it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_did: Option<String>,
     /// `Issued` token expiry. `None` for `Consumed` rows (the
     /// state machine clears the timing data on transition).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,6 +196,7 @@ pub async fn create_invite(
             *minted.ephemeral_signing_key,
             expires_at,
             Some(claim_code_hash),
+            Some(req.did.clone()),
         )
         .await?;
 
@@ -294,7 +300,7 @@ pub async fn revoke_invite(
 
 fn summarise(jti: Uuid, state: InstallTokenState, now: DateTime<Utc>) -> InviteSummary {
     match state {
-        InstallTokenState::Issued { exp, .. } => {
+        InstallTokenState::Issued { exp, admin_did, .. } => {
             let status = if exp < now {
                 InviteStatus::Expired
             } else {
@@ -303,6 +309,7 @@ fn summarise(jti: Uuid, state: InstallTokenState, now: DateTime<Utc>) -> InviteS
             InviteSummary {
                 jti: jti.to_string(),
                 status,
+                target_did: admin_did,
                 expires_at: Some(exp),
                 consumed_at: None,
             }
@@ -310,6 +317,12 @@ fn summarise(jti: Uuid, state: InstallTokenState, now: DateTime<Utc>) -> InviteS
         InstallTokenState::Consumed { at } => InviteSummary {
             jti: jti.to_string(),
             status: InviteStatus::Consumed,
+            // Storage doesn't preserve the target DID across the
+            // `Issued` → `Consumed` transition (the row is
+            // overwritten). Operators investigating a consumed
+            // invite can cross-reference via the ACL or the
+            // `CommunityInstalled` audit envelope's `install_token_jti`.
+            target_did: None,
             expires_at: None,
             consumed_at: Some(at),
         },

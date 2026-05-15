@@ -345,6 +345,7 @@ async fn run_invite_cli(
             *minted.ephemeral_signing_key,
             exp,
             Some(claim_code_hash),
+            Some(admin_did.clone()),
         )
         .await?;
 

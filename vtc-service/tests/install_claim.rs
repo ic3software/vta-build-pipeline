@@ -174,6 +174,7 @@ async fn mint_token_and_record_with_secret(
             *minted.ephemeral_signing_key,
             exp,
             claim_secret_hash,
+            Some("did:key:z6MkAdmin".into()),
         )
         .await
         .expect("record_issued");
