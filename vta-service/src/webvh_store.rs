@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use vta_sdk::webvh::{WebvhDidRecord, WebvhServerRecord};
+use zeroize::ZeroizeOnDrop;
 
 use crate::error::AppError;
 use crate::store::KeyspaceHandle;
@@ -26,9 +27,23 @@ fn log_key(did: &str) -> String {
 /// to REST `list` endpoints, DIDComm `list` responses, SDK consumers,
 /// or backup exports.
 ///
-/// `redacted` `Debug` is manually implemented below so accidental
-/// `tracing::info!(?record, …)` calls don't dump tokens to logs.
-#[derive(Clone, Serialize, Deserialize)]
+/// Three hygiene measures on this type, in increasing strength:
+///
+/// 1. **Storage isolation** — service-private keyspace prefix, never
+///    serialised on a public wire surface (see module-level doc).
+/// 2. **Redacted `Debug`** — manual impl below so accidental
+///    `tracing::info!(?record, …)` doesn't dump tokens to logs.
+/// 3. **`ZeroizeOnDrop`** — when an instance falls out of scope the
+///    token bytes are overwritten with zeros before the allocation
+///    is freed. Helps against post-drop forensics and accidental
+///    memory reuse; doesn't help against an attacker with concurrent
+///    read access (in which case tokens leak regardless of disposal
+///    semantics).
+///
+/// `Clone` is intentionally kept — operations occasionally need to
+/// fan out a working copy. Each clone is independently zeroised on
+/// drop, so the lifetime semantics stay correct.
+#[derive(Clone, Serialize, Deserialize, ZeroizeOnDrop)]
 pub struct WebvhServerAuthRecord {
     /// Server id this auth state is for. Redundant with the
     /// keyspace key but kept on the record for self-description in

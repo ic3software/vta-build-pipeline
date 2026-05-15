@@ -91,13 +91,31 @@ pub struct CheckPathResponse {
 /// use, so a `TokenData` returned from `refresh()` carries a
 /// different `refresh_token` from the one supplied as input —
 /// callers must persist the new value.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// Hygiene:
+/// - `ZeroizeOnDrop` overwrites the token bytes when the instance
+///   falls out of scope.
+/// - `Debug` is manually implemented to redact the token strings —
+///   accidental `tracing::error!(?tokens, ...)` then logs
+///   `<redacted>` instead of the secret.
+#[derive(Clone, Deserialize, zeroize::ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenData {
     pub access_token: String,
     pub access_expires_at: u64,
     pub refresh_token: String,
     pub refresh_expires_at: u64,
+}
+
+impl std::fmt::Debug for TokenData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenData")
+            .field("access_token", &"<redacted>")
+            .field("access_expires_at", &self.access_expires_at)
+            .field("refresh_token", &"<redacted>")
+            .field("refresh_expires_at", &self.refresh_expires_at)
+            .finish()
+    }
 }
 
 /// Wire shape of `/api/auth/` and `/api/auth/refresh` responses.
@@ -781,6 +799,26 @@ mod tests {
             matches!(err, AppError::Authentication(_)),
             "expired refresh must map to Authentication, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn token_data_debug_redacts_secret_fields() {
+        // Same protection as `WebvhServerAuthRecord` — accidental
+        // `tracing::error!(?tokens)` must not log the access or
+        // refresh token bytes. Expiry timestamps stay visible (not
+        // secret, useful for freshness diagnostics).
+        let td = TokenData {
+            access_token: "should-not-appear-XXXX".into(),
+            access_expires_at: 1234,
+            refresh_token: "also-secret-YYYY".into(),
+            refresh_expires_at: 5678,
+        };
+        let dbg = format!("{td:?}");
+        assert!(!dbg.contains("XXXX"), "access_token must not leak: {dbg}");
+        assert!(!dbg.contains("YYYY"), "refresh_token must not leak: {dbg}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(dbg.contains("1234"));
+        assert!(dbg.contains("5678"));
     }
 
     #[tokio::test]
