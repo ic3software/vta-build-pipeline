@@ -20,6 +20,16 @@ function setText(id, text) {
   }
 }
 
+function setStatus(state, label) {
+  const dot = document.getElementById("status-dot");
+  const text = document.getElementById("status-label");
+  if (dot) {
+    dot.classList.remove("ok", "warn", "err");
+    if (state) dot.classList.add(state);
+  }
+  if (text) text.textContent = label;
+}
+
 async function refresh() {
   // Health probe — small + unauthenticated so it works on a
   // freshly-installed daemon with no auth keys yet. Also the
@@ -33,9 +43,12 @@ async function refresh() {
     } else {
       setText("community-did", "(not yet provisioned — run `vtc setup`)");
     }
+    const state = healthJson.status === "ok" ? "ok" : "warn";
+    setStatus(state, state === "ok" ? "Service online" : "Degraded");
   } catch (err) {
     setText("health-status", `error: ${err.message}`);
     setText("community-did", `error: ${err.message}`);
+    setStatus("err", "Service unreachable");
   }
 
   // Community profile — best-effort, for the friendly name +

@@ -4,55 +4,203 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Verifiable Trust Community</title>
+    <meta
+      name="description"
+      content="A Verifiable Trust Community service powered by the Verifiable Trust Infrastructure."
+    />
     <link rel="stylesheet" href="/site.css" />
   </head>
   <body>
+    <div class="bg-accent" aria-hidden="true"></div>
+
     <main>
-      <header>
+      <header class="hero">
+        <span class="eyebrow">
+          <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+          <span id="status-label">Verifiable Trust Community</span>
+        </span>
         <h1 id="community-name">Verifiable Trust Community</h1>
         <p class="lead" id="community-description">
           A Verifiable Trust Community service is live at this endpoint.
+          Once the operator publishes a community profile, its name and
+          description will appear here.
         </p>
       </header>
 
-      <section class="status">
-        <h2>Daemon</h2>
+      <section class="status-card" aria-labelledby="status-heading">
+        <h2 id="status-heading">Daemon</h2>
         <dl>
-          <dt>Health</dt>
-          <dd><code id="health-status">…</code></dd>
-          <dt>DID</dt>
-          <dd><code id="community-did">…</code></dd>
+          <div class="status-row">
+            <dt>Health</dt>
+            <dd><code id="health-status">…</code></dd>
+          </div>
+          <div class="status-row">
+            <dt>Community DID</dt>
+            <dd><code id="community-did">…</code></dd>
+          </div>
         </dl>
       </section>
 
-      <section class="cta">
-        <h2>What lives here</h2>
-        <p>
-          This is the default landing page. The operator hasn't configured
-          a public website yet (<code>website.root_dir</code> is unset).
-        </p>
+      <section class="resource-grid" aria-labelledby="resources-heading">
+        <h2 id="resources-heading">Learn more</h2>
         <ul>
           <li>
-            <strong>Operators</strong> point
-            <a href="/admin/"><code>/admin/</code></a>
-            at the admin UX to manage the community.
+            <a
+              href="https://www.firstperson.network/white-paper"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="resource"
+            >
+              <span class="resource-icon" aria-hidden="true">
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.75"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="9" y1="13" x2="15" y2="13" />
+                  <line x1="9" y1="17" x2="15" y2="17" />
+                </svg>
+              </span>
+              <span class="resource-body">
+                <span class="resource-title">First Person Project whitepaper</span>
+                <span class="resource-sub">
+                  The vision and design principles behind the
+                  First Person Network.
+                </span>
+              </span>
+              <span class="resource-arrow" aria-hidden="true">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.75"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <line x1="7" y1="17" x2="17" y2="7" />
+                  <polyline points="7 7 17 7 17 17" />
+                </svg>
+              </span>
+            </a>
           </li>
           <li>
-            <strong>Members</strong> apply via the join flow on the API at
-            <code>POST /v1/join-requests</code>.
+            <a
+              href="https://github.com/OpenVTC/verifiable-trust-infrastructure"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="resource"
+            >
+              <span class="resource-icon" aria-hidden="true">
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.75"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path
+                    d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"
+                  />
+                </svg>
+              </span>
+              <span class="resource-body">
+                <span class="resource-title">Verifiable Trust Infrastructure</span>
+                <span class="resource-sub">
+                  Open-source source code, design notes, and the
+                  technical specification on GitHub.
+                </span>
+              </span>
+              <span class="resource-arrow" aria-hidden="true">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.75"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <line x1="7" y1="17" x2="17" y2="7" />
+                  <polyline points="7 7 17 7 17 17" />
+                </svg>
+              </span>
+            </a>
           </li>
           <li>
-            <strong>Developers</strong> hit the JSON API under
-            <code>/v1/*</code>.
+            <a href="/admin/" class="resource resource-internal">
+              <span class="resource-icon" aria-hidden="true">
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.75"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <circle cx="12" cy="12" r="3" />
+                  <path
+                    d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9 1.65 1.65 0 0 0 4.27 7.18l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+                  />
+                </svg>
+              </span>
+              <span class="resource-body">
+                <span class="resource-title">Operator console</span>
+                <span class="resource-sub">
+                  Sign in to manage members, policies, and access
+                  control.
+                </span>
+              </span>
+              <span class="resource-arrow" aria-hidden="true">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.75"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                  <polyline points="12 5 19 12 12 19" />
+                </svg>
+              </span>
+            </a>
           </li>
         </ul>
       </section>
 
       <footer>
         <p>
-          Replace this page by setting <code>website.root_dir</code> in
-          the daemon config and populating the directory, or by uploading
-          a bundle via <code>POST /v1/website/deploy</code>.
+          This is the default landing page for a Verifiable Trust
+          Community. Operators replace it by setting
+          <code>website.root_dir</code> in the daemon config, or by
+          uploading a bundle via
+          <code>POST /v1/website/deploy</code>.
+        </p>
+        <p class="footer-meta">
+          Powered by the open-source
+          <a
+            href="https://github.com/OpenVTC/verifiable-trust-infrastructure"
+            target="_blank"
+            rel="noopener noreferrer"
+            >Verifiable Trust Infrastructure</a
+          >.
         </p>
       </footer>
     </main>
