@@ -123,6 +123,9 @@ How to operate and integrate against a VTC.
 - **[Website + admin UX](03-vtc/website-and-admin.md)** — public
   community website (live + managed modes), embedded admin SPA,
   routing modes.
+- **[Admin UX plugins](03-vtc/admin-ui-plugins.md)** — third-party
+  plugin contract: on-disk layout, manifest schema, scope filters,
+  and the daemon's `admin_ui.plugin_dir` scan + serve.
 - **[Feature flags](03-vtc/feature-flags.md)** — VTC Cargo feature
   reference.
 

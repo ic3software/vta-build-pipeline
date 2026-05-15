@@ -163,31 +163,43 @@ takes over and the default is unreachable.
 
 ```mermaid
 graph LR
-    src[vtc-service/admin-ui/<br/>index.html · app.css · app.js]
+    src[vtc-service/admin-ui/<br/>React + TS + Vite source]
+    dist[admin-ui/dist/<br/>index.html · hashed JS · hashed CSS · Inter & JetBrains Mono fonts]
     binary[vtc binary]
     routes[/admin/* handler]
     info[/admin/build-info.json]
 
-    src -- "include_dir!<br/>at compile time" --> binary
+    src -- "build.rs runs<br/>npm run build" --> dist
+    dist -- "include_dir!<br/>at compile time" --> binary
     binary --> routes
     binary --> info
 ```
 
-The admin SPA source is **in-tree**. Per Phase 5 D1 the user chose
-this over a sibling `OpenVTC/vtc-admin-ui` repo + signed-tarball
-fetch:
+The admin SPA source is **in-tree** (Phase 5 D1, refined after the
+initial Phase-5 deviation note in `docs/05-design-notes/vtc-mvp.md`
+§12.2): React + TypeScript + Vite source under
+`vtc-service/admin-ui/`, with `build.rs` invoking
+`npm install && npm run build` to produce `dist/` which
+`include_dir!` bakes into the binary. The end-to-end source-to-
+binary path stays a single `cargo build`; operators on air-gapped
+hosts opt out of the npm step with `VTC_SKIP_ADMIN_UI_BUILD=1` and
+ship a pre-built `dist/` instead.
 
-- **Pros**: `cargo build` is self-contained — no npm, no node, no
-  network, no release-signing infrastructure.
-- **Cons**: Rich SPA tooling (TypeScript, React, Vite) can't live
-  here without dragging node into the build path. The MVP shell is
-  plain HTML/CSS/JS.
+Why in-tree React rather than the original "plain HTML/CSS/JS
+placeholder":
 
-Operators wanting a richer UX replace the files in
-`vtc-service/admin-ui/` and rebuild. The `admin_ui.mode = "external"`
-config knob skips the embedded SPA and adds the operator-supplied
-origin to `cors.allowed_origins` so an externally-hosted SPA can
-drive the API.
+- **Plugin API** (in-tree React + framework-agnostic custom
+  elements for third-party plugins, see
+  `docs/03-vtc/admin-ui-plugins.md`) outgrew the placeholder.
+- **Design language**
+  (`docs/05-design-notes/admin-ui-design-language.md`) needed a
+  component model the placeholder couldn't carry — toasts,
+  modals, sortable tables, a session-expiry redirect.
+
+Operators wanting a different UX point `admin_ui.mode = "external"`
+at their own origin; that knob skips the embedded SPA and adds the
+operator-supplied origin to `cors.allowed_origins` so an
+externally-hosted SPA can drive the API.
 
 ### `/admin/build-info.json`
 

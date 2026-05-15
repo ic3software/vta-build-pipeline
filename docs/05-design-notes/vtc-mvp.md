@@ -1,8 +1,11 @@
 # Spec: Verifiable Trust Community (VTC) — MVP
 
-Status: **Draft**
+Status: **Reference** — Phases 0–5 shipped. Section bodies retain
+"in Phase X this happens" wording for context; the actual code +
+operator behaviour is what's documented in `docs/03-vtc/`.
 Owner: Glenn Gore
-Last updated: 2026-05-11
+Last updated: 2026-05-11 (spec)
+Last reconciled: 2026-05-15 (this header)
 
 ## 1. Objective
 
@@ -744,7 +747,8 @@ core MVP spec.
 
 ```
 # Install + admin
-POST   /v1/install/claim
+POST   /v1/install/claim/start
+POST   /v1/install/claim/finish
 POST   /v1/admin/bootstrap
 POST   /v1/admin/passkeys/register
 DELETE /v1/admin/passkeys/{credential_id}
@@ -1054,19 +1058,28 @@ front. Live-mode file-descriptor cache TTL configurable
 
 ### 12.2 Admin UX (`admin-ui` feature)
 
-The admin UX is a static SPA whose source lives **in-tree** at
-`vtc-service/admin-ui/`. The `include_dir!` macro bakes the
-directory at compile time; there is no out-of-tree dependency,
-no signed-tarball fetch, no `build.rs`, no `VTC_OFFLINE_BUILD=1`
-environment variable. `cargo build` produces a self-contained
-binary including the admin SPA.
+> **Amended (post-Phase 5):** the in-tree-React + `build.rs`
+> outcome captured in `vtc-service/admin-ui/README.md` is the
+> shipped reality. The original placeholder design + the Phase 5
+> deviation note below are retained for context; the live wire
+> shape is React + TypeScript + Vite, baked via `include_dir!`
+> from `vtc-service/admin-ui/dist/` after `build.rs` runs
+> `npm install && npm run build`. Air-gapped operators ship a
+> pre-built `dist/` and set `VTC_SKIP_ADMIN_UI_BUILD=1`.
 
-The Phase 5 MVP ships a plain HTML/CSS/JS placeholder (status
-panel + build-info readout). Operators wanting a richer UX
-replace the files under `vtc-service/admin-ui/` and rebuild —
-this trades the build-time `node` dependency for in-tree
-ownership of the SPA toolchain. See
-`vtc-service/admin-ui/README.md` for the contract.
+The admin UX is a SPA whose source lives **in-tree** at
+`vtc-service/admin-ui/`. The `include_dir!` macro bakes the
+directory at compile time; there is no out-of-tree dependency
+and no signed-tarball fetch. `cargo build` runs the SPA build via
+`build.rs` and produces a self-contained binary including the
+compiled SPA.
+
+The Phase 5 MVP started as a plain HTML/CSS/JS placeholder
+(status panel + build-info readout) but outgrew it during Phase 5
+itself as the plugin API + design-language pass landed. Operators
+wanting a different UX point `admin_ui.mode = "external"` at
+their own origin. See `vtc-service/admin-ui/README.md` for the
+contract.
 
 `admin_ui.mode = "embedded"` (default) serves the baked SPA at
 `routing.admin_ui.mount`. `mode = "external"` skips embedding;

@@ -119,9 +119,11 @@ route is active.
 }
 ```
 
-Today the endpoint returns an empty list — the daemon doesn't yet
-read installed plugins from disk. The shape is stable so third-
-party plugins can target it.
+The daemon scans `admin_ui.plugin_dir` on every fetch and emits
+this manifest from whatever it finds on disk. See
+[`docs/03-vtc/admin-ui-plugins.md`](../../docs/03-vtc/admin-ui-plugins.md)
+for the canonical on-disk layout, scoping rules, and the
+serve route's caching contract.
 
 ### Plugin module shape
 
@@ -153,9 +155,9 @@ The plugin owns everything inside that element.
 
 ### Distributing a plugin
 
-Until the daemon-side plugin directory lands, plugin distribution
-is operator-managed: drop your built JS bundle somewhere the
-daemon already serves (or behind a reverse proxy), and pre-seed
-`/admin/plugins.json` via a forthcoming `admin_ui.plugin_dir`
-config knob. Until then, in-tree plugins (above) are the
-sanctioned path.
+Drop a `<id>/` directory under the daemon's
+`admin_ui.plugin_dir` (a `manifest.json` + entry JS). The daemon
+serves the bundle at `/admin/plugins/<id>/...`, surfaces it in
+`/admin/plugins.json`, and the shell dynamically `import()`s the
+entry. Full layout + manifest schema in
+[`docs/03-vtc/admin-ui-plugins.md`](../../docs/03-vtc/admin-ui-plugins.md).

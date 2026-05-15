@@ -4,29 +4,68 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Rust workspace for **Verifiable Trust Communities (VTC)**. A VTC manages a community of Verifiable Trust Agents. Unlike the VTA (which manages keys), the VTC handles community management, ACL, and DIDComm messaging. Part of the [First Person Network](https://www.firstperson.network/white-paper) project.
+Rust workspace for **Verifiable Trust Communities (VTC)**. A VTC manages a community of Verifiable Trust Agents. Unlike the VTA (which manages keys), the VTC handles community management, ACL, audit, policy (Rego), credentials, status lists, trust-registry sync, cross-community recognition, member relationships, endorsements, the public website, and the admin SPA. Part of the [First Person Network](https://www.firstperson.network/white-paper) project.
 
 ## Workspace Structure
 
-This repo lives at `vtc-vta-rs/vtc-service/` within a multi-crate workspace:
+`vtc-service` sits inside the wider workspace at the repo root. Key sibling crates:
 
-- **vti-common** (`../vti-common/`) — Shared library: auth, ACL, store (local + vsock), error types, config
-- **vta-sdk** (`../vta-sdk/`) — Shared SDK: types, VTA HTTP client, session/auth logic, and protocol constants
-- **vta-service** (`../vta-service/`) — VTA library + local/dev binary (key management, audit logging)
-- **vta-enclave** (`../vta-enclave/`) — VTA binary for Nitro Enclaves (TEE bootstrap, KMS, vsock-store)
-- **vtc-service** (this crate) — VTC binary service (community management, no key management)
+- **vti-common** (`../vti-common/`) — Shared library: auth (JWT, passkey), ACL, store (local fjall + vsock), audit writer + HMAC key store, error types, config, pagination cursors.
+- **vta-sdk** (`../vta-sdk/`) — Shared SDK: types, VTA HTTP client, DIDComm protocol surfaces, `sealed_transfer`, provision-integration.
+- **vta-service** (`../vta-service/`) — VTA library + local/dev binary (key management, did:webvh, mediator).
+- **vtc-service** (this crate) — VTC binary service. Community management, policy, audit, public website, admin SPA.
 
-All crates share configuration via `workspace.package` in the root `Cargo.toml`.
+`vti-common` is the canonical home for cross-crate types; VTC-specific business logic lives here.
 
 ## Key Differences from VTA
 
-- **No key management** — no `keys/mod.rs`, `keys/paths.rs`, or `/keys/*` routes
-- **No contexts** — no `contexts/` module or `/contexts/*` routes
-- **Only 2 keyspaces** — `sessions` and `acl` (no `keys`, `contexts`)
-- **VTC_ env prefix** — all environment variables use `VTC_` instead of `VTA_`
-- **JWT audience** — `"VTC"` instead of `"VTA"`
-- **Default port** — 8200 (VTA uses 8100)
-- **No BIP-32** — VTC receives key material from the VTA (no local key derivation)
+- **VTC isn't the key authority.** The VTA mints the integration DID + signing keys; the VTC stores the bundle in `secrets` and signs locally for VMC / VEC / status-list issuance (cached-locally pattern). No BIP-32 here.
+- **Audience-isolated JWTs.** `aud = "VTC"`; cross-audience tokens are rejected.
+- **Default port** 8200 (VTA uses 8100).
+- **Twenty-odd keyspaces**, not the original two: `acl`, `sessions`, `members`, `community`, `policies`, `active_policies`, `audit`, `audit_key`, `install`, `passkey`, `status_lists`, `relationships`, `relationships_by_did`, `endorsement_types`, `endorsements`, `join_requests`, `sync_queue`, `sync_cursor`, `registry_records`, `config`, plus the website filesystem. The full live list is the keyspace fields on `AppState` in `src/server.rs`.
+- **VTC never targets TEE.** Permanent non-goal (only the VTA runs in Nitro Enclave).
+
+## Source layout (high-level)
+
+```
+src/
+├── acl/                ACL storage + role types (VtcRole)
+├── audit/              (re-exports from vti-common::audit)
+├── auth/               session, AuthClaims/AdminAuth/SuperAdminAuth extractors
+├── community/          CommunityProfile storage
+├── credentials/        LocalSigner, VMC + role VEC + status-list builders
+├── endorsement_types/  Operator-registered endorsement-type registry
+├── endorsements/       Custom VEC + status-list flip
+├── install/            Install-token state machine + claim secret
+├── join/               Join-request lifecycle
+├── members/            Member storage + lifecycle helpers
+├── policy/             regorus engine, default policy bundle, evaluators
+├── recognition/        Foreign-VEC verification (Phase 3 cross-community)
+├── registry/           Trust-registry client + syncer + audit-log tail
+├── relationships/      VRC publish/revoke
+├── routes/             Every HTTP route handler, sub-mounted by feature
+├── routing/            Security headers, CSRF, body cap, governor middleware
+├── setup/              `vtc setup` wizard (interactive + from-TOML)
+├── status_list/        Bitstring status list allocator + storage + serve route
+├── store/              Re-export of vti-common's keyspace abstractions
+└── website/            Public website handler, bundle + deploy, default site
+```
+
+The admin SPA lives at `admin-ui/` (React + TS + Vite, baked into the binary at compile time by `build.rs` + `include_dir!`). The fallback public landing page lives at `website-default/` (plain HTML / CSS / JS, no build step).
+
+## Operator docs
+
+The reader-facing operator guides live under `/docs/03-vtc/`. Start there before touching code:
+
+- `getting-started.md` — first-install walkthrough.
+- `architecture.md` — keyspace + module map.
+- `policy.md` — Rego authoring + activation discipline.
+- `audit.md` — envelope shape, HMAC actor hashing, rotation.
+- `cross-community.md` — Phase 3 recognition + trust-registry sync.
+- `website-and-admin.md` — public website + admin SPA deployment.
+- `admin-ui-plugins.md` — third-party plugin loader contract.
+
+The Phase 0-5 spec is at `/docs/05-design-notes/vtc-mvp.md` — pinned decisions in §3, security invariants in §14. Section status notes flag which phase shipped each component.
 
 ## Build Commands
 
@@ -39,6 +78,9 @@ cargo check
 
 # Run the service
 cargo run --package vtc-service
+
+# Skip the admin-UI npm build during cargo invocations (faster dev loop)
+VTC_SKIP_ADMIN_UI_BUILD=1 cargo build -p vtc-service
 
 # Run all tests
 cargo test

@@ -59,7 +59,7 @@ sequenceDiagram
     participant VTC as vtc daemon
 
     Op->>CLI: vtc setup
-    CLI->>Op: Prompt config path<br/>VTC URL<br/>admin UX URL<br/>VTA URL + DID<br/>context name
+    CLI->>Op: Prompt config path<br/>VTC base URL<br/>VTA DID<br/>context<br/>webvh path<br/>secrets backend
     Op->>CLI: Confirm
     CLI->>CLI: Mint ephemeral did:key<br/>(round-trip identity)
     CLI->>Op: Print ephemeral DID
@@ -86,12 +86,11 @@ The wizard prompts:
 | # | Prompt | Notes |
 |---|---|---|
 | 1 | Config path | Default `config.toml` |
-| 2 | VTC URL | The base URL the daemon will publish (e.g. `https://community.example.com`) |
-| 3 | Admin UX URL | Optional — the admin SPA's origin if you host it externally; press Enter to use the embedded one |
-| 4 | VTA URL | Where to call `provision-integration` |
-| 5 | VTA DID | The VTA's `did:webvh:...` identifier |
-| 6 | Context name | The context inside the VTA that will own this VTC (created via `cnm contexts create` if it doesn't already exist) |
-| 7 | Secrets backend | `keyring` (default) / `aws` / `gcp` / `azure` / `inline` / `plaintext` |
+| 2 | VTC base URL | The URL the daemon will publish (e.g. `https://community.example.com`) |
+| 3 | VTA DID | The VTA's `did:webvh:...` identifier. Transport endpoints are resolved from the DID document — no separate VTA URL prompt |
+| 4 | Context name | The context inside the VTA that will own this VTC (created via `cnm contexts create` if it doesn't already exist) |
+| 5 | WebVH path | Optional. Blank lets the WebVH server auto-assign |
+| 6 | Secrets backend | `keyring` (default) / `aws` / `gcp` / `azure` / `inline` / `plaintext` |
 
 The wizard prints an ephemeral `did:key` and pauses. **Authorise it
 on the VTA** (this is the operator's choice — it's how you prove
