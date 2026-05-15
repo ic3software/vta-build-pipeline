@@ -13,18 +13,20 @@ import { getJson, putJson } from "@/lib/api";
 const TRUST_TASK =
   "https://trusttasks.org/openvtc/vtc/community/profile/manage/1.0";
 
+// GET /v1/community/profile wire shape: the persisted profile fields
+// are flattened at the top level (server uses `#[serde(flatten)]`),
+// alongside the live `registryStatus`. Do not look for a nested
+// `profile` object — there isn't one.
 interface ProfileResponse {
-  profile: {
-    communityDid: string;
-    name: string;
-    description: string;
-    logoUrl: string | null;
-    publicUrl: string | null;
-    contactEmail: string | null;
-    language: string;
-    createdAt: string;
-    extensions: unknown;
-  };
+  communityDid: string;
+  name: string;
+  description: string;
+  logoUrl: string | null;
+  publicUrl: string | null;
+  contactEmail: string | null;
+  language: string;
+  createdAt: string;
+  extensions: unknown;
   registryStatus: string;
 }
 
@@ -43,8 +45,11 @@ async function getProfile(): Promise<ProfileResponse> {
   });
 }
 
-async function putProfile(body: ProfileUpdateRequest): Promise<ProfileResponse> {
-  return putJson<ProfileResponse>("/v1/community/profile", body, {
+async function putProfile(body: ProfileUpdateRequest): Promise<unknown> {
+  // PUT returns `{ profile, fieldsChanged }` (nested). We don't read
+  // it — `onSuccess` invalidates the query, which refetches via
+  // `getProfile` and seeds the form from the flat GET shape.
+  return putJson<unknown>("/v1/community/profile", body, {
     trustTask: TRUST_TASK,
   });
 }
@@ -66,12 +71,12 @@ export function Profile() {
     if (!query.data) return;
     if (draft !== null) return;
     setDraft({
-      name: query.data.profile.name,
-      description: query.data.profile.description,
-      logoUrl: query.data.profile.logoUrl ?? "",
-      publicUrl: query.data.profile.publicUrl ?? "",
-      contactEmail: query.data.profile.contactEmail ?? "",
-      language: query.data.profile.language,
+      name: query.data.name,
+      description: query.data.description,
+      logoUrl: query.data.logoUrl ?? "",
+      publicUrl: query.data.publicUrl ?? "",
+      contactEmail: query.data.contactEmail ?? "",
+      language: query.data.language,
     });
   }, [query.data, draft]);
 
@@ -108,7 +113,7 @@ export function Profile() {
     return null;
   }
 
-  const original = query.data.profile;
+  const original = query.data;
   const dirty = isDirty(original, draft);
 
   const onSubmit = (e: React.FormEvent) => {
@@ -240,7 +245,7 @@ interface EditableFields {
 }
 
 function isDirty(
-  original: ProfileResponse["profile"],
+  original: ProfileResponse,
   draft: EditableFields,
 ): boolean {
   if (original.name !== draft.name) return true;
@@ -253,7 +258,7 @@ function isDirty(
 }
 
 function buildPatch(
-  original: ProfileResponse["profile"],
+  original: ProfileResponse,
   draft: EditableFields,
 ): ProfileUpdateRequest {
   const patch: ProfileUpdateRequest = {};
