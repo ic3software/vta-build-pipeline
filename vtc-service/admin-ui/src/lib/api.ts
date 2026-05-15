@@ -73,8 +73,14 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
-export const getJson = <T>(path: string): Promise<T> =>
-  request<T>(path, { method: "GET" });
+export const getJson = <T>(
+  path: string,
+  extra: { trustTask?: string } = {},
+): Promise<T> =>
+  request<T>(path, {
+    method: "GET",
+    headers: extra.trustTask ? { "Trust-Task": extra.trustTask } : undefined,
+  });
 
 export const postJson = <T>(
   path: string,
@@ -128,13 +134,15 @@ export const fetchBuildInfo = (): Promise<BuildInfo> =>
 /** Probe: returns true if the current cookie session is valid. */
 export async function isSignedIn(): Promise<boolean> {
   try {
-    await getJson<unknown>("/v1/community/profile");
+    await getJson<unknown>("/v1/community/profile", {
+      trustTask: "https://trusttasks.org/openvtc/vtc/community/profile/manage/1.0",
+    });
     return true;
   } catch (e) {
     const err = e as ApiError;
     if (err.status === 401 || err.status === 403) return false;
     // Anything else (e.g. 404 "profile not initialised") still means
     // the auth layer let us through. Treat as signed-in.
-    return err.status !== 404 ? true : true;
+    return true;
   }
 }

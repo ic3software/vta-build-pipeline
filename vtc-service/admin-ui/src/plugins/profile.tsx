@@ -38,7 +38,9 @@ interface ProfileUpdateRequest {
 }
 
 async function getProfile(): Promise<ProfileResponse> {
-  return getJson<ProfileResponse>("/v1/community/profile");
+  return getJson<ProfileResponse>("/v1/community/profile", {
+    trustTask: TRUST_TASK,
+  });
 }
 
 async function putProfile(body: ProfileUpdateRequest): Promise<ProfileResponse> {

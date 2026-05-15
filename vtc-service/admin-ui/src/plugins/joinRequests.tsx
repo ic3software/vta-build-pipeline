@@ -60,14 +60,18 @@ async function fetchJoinRequests(params: {
   q.set("status", params.status);
   if (params.cursor) q.set("cursor", params.cursor);
   q.set("limit", String(params.limit));
-  return getJson<JoinRequestsPage>(`/v1/join-requests?${q.toString()}`);
+  // POST + GET share the same router mount; the registered task is
+  // `submit/1.0` (TrustTaskRouter per-method selectors land later).
+  // GET works against the same header.
+  return getJson<JoinRequestsPage>(`/v1/join-requests?${q.toString()}`, {
+    trustTask: TRUST_TASK_SUBMIT,
+  });
 }
 
 async function fetchJoinRequest(id: string): Promise<JoinRequestRow> {
-  // List + show share their Trust-Task at the router layer because
-  // `TrustTaskRouter` doesn't yet support per-method selectors —
-  // the `submit/1.0` tag is what GETs travel under in practice.
-  return getJson<JoinRequestRow>(`/v1/join-requests/${id}`);
+  return getJson<JoinRequestRow>(`/v1/join-requests/${id}`, {
+    trustTask: TRUST_TASK_SHOW,
+  });
 }
 
 async function approve(id: string): Promise<DecideResponse> {
@@ -89,11 +93,6 @@ async function reject(args: {
   );
 }
 
-// Trust-Task tags exist on disk + in index.json for the soft-gate
-// surface even when not used directly by client calls; reference
-// them once here so future refactors keep the symbol live.
-void TRUST_TASK_SUBMIT;
-void TRUST_TASK_SHOW;
 
 export function JoinRequests() {
   return (

@@ -19,16 +19,18 @@ import {
   serializeAssertion,
 } from "@/lib/webauthn";
 
-const TRUST_TASK_PROMOTE =
-  "https://trusttasks.org/openvtc/vtc/members/promote-to-admin/1.0";
-const TRUST_TASK_ADMIN_REMOVE =
-  "https://trusttasks.org/openvtc/vtc/members/admin-remove/1.0";
+const TRUST_TASK_LIST =
+  "https://trusttasks.org/openvtc/vtc/members/list/1.0";
 // `members/show/1.0` covers GET + PATCH + DELETE on `/members/{did}`
 // today (TrustTaskRouter limitation). Server-side resolves the
 // actual operation by method; the header just needs to match the
 // router's registered task.
 const TRUST_TASK_SHOW =
   "https://trusttasks.org/openvtc/vtc/members/show/1.0";
+const TRUST_TASK_PROMOTE =
+  "https://trusttasks.org/openvtc/vtc/members/promote-to-admin/1.0";
+const TRUST_TASK_ADMIN_REMOVE =
+  "https://trusttasks.org/openvtc/vtc/members/admin-remove/1.0";
 
 interface MemberRow {
   did: string;
@@ -60,11 +62,15 @@ async function fetchMembers(params: {
   if (params.cursor) q.set("cursor", params.cursor);
   if (params.role) q.set("role", params.role);
   q.set("limit", String(params.limit));
-  return getJson<MembersPage>(`/v1/members?${q.toString()}`);
+  return getJson<MembersPage>(`/v1/members?${q.toString()}`, {
+    trustTask: TRUST_TASK_LIST,
+  });
 }
 
 async function fetchMember(did: string): Promise<MemberRow> {
-  return getJson<MemberRow>(`/v1/members/${encodeURIComponent(did)}`);
+  return getJson<MemberRow>(`/v1/members/${encodeURIComponent(did)}`, {
+    trustTask: TRUST_TASK_SHOW,
+  });
 }
 
 interface PromoteStartResponse {
@@ -112,12 +118,6 @@ async function adminRemove(args: {
   });
 }
 
-// Soft-gate Trust-Task tag exists on disk + in index.json even
-// though we don't reach for it directly from the client (GET /v1/
-// members/{did} uses the `members/show/1.0` tag the
-// `route_with_task` registration provides). Reference once so a
-// future refactor can't dead-strip the constant by accident.
-void TRUST_TASK_SHOW;
 
 export function Members() {
   return (

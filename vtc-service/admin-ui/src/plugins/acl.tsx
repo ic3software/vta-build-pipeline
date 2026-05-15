@@ -46,7 +46,9 @@ async function fetchAcl(context: string | null): Promise<AclListResponse> {
   const q = new URLSearchParams();
   if (context) q.set("context", context);
   const suffix = q.toString();
-  return getJson<AclListResponse>(`/v1/acl${suffix ? `?${suffix}` : ""}`);
+  return getJson<AclListResponse>(`/v1/acl${suffix ? `?${suffix}` : ""}`, {
+    trustTask: TRUST_TASK_MANAGE,
+  });
 }
 
 async function createAcl(req: CreateAclRequest): Promise<AclEntry> {

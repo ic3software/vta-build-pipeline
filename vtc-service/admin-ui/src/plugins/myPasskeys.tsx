@@ -26,7 +26,6 @@ const TRUST_TASK_REGISTER =
 const TRUST_TASK_REVOKE =
   "https://trusttasks.org/openvtc/vtc/admin/passkeys/revoke/1.0";
 
-void TRUST_TASK_LIST; // GET is auto-tagged by the route layer.
 
 interface RegisteredPasskey {
   credentialId: string;
@@ -52,7 +51,9 @@ interface RevokeStartResponse {
 }
 
 async function fetchPasskeys(): Promise<ListResponse> {
-  return getJson<ListResponse>("/v1/admin/passkeys");
+  return getJson<ListResponse>("/v1/admin/passkeys", {
+    trustTask: TRUST_TASK_LIST,
+  });
 }
 
 async function registerPasskey(args: {
