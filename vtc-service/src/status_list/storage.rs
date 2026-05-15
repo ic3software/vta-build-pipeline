@@ -327,4 +327,87 @@ mod tests {
         let back: StatusListState = serde_json::from_str(&s).unwrap();
         assert_eq!(back.assigned, state.assigned);
     }
+
+    /// Spec §6.2: a status-list bit that's been flipped (revocation
+    /// or suspension) is never reallocated to a new member.
+    /// Otherwise the new holder's status would alias the departed
+    /// one — an external observer with both DIDs could correlate
+    /// them on the bitstring.
+    ///
+    /// The `assigned` mask is the invariant's enforcement
+    /// mechanism: the allocator filters on `!state.assigned[i]`
+    /// (`allocator.rs:38`) and `flip` deliberately leaves
+    /// `assigned[i] = true` (`allocator.rs:71-73`). This test
+    /// covers the boundary the prior unit test missed — the mask
+    /// survives a `store_state` / `get_state` round-trip and
+    /// continues to lock the slot out of future allocations.
+    #[tokio::test]
+    async fn revoked_index_survives_restart_and_is_not_reallocated() {
+        use crate::status_list::allocator::{allocate, flip};
+
+        let (ks, _dir) = temp_ks().await;
+        let mut state = StatusListState::new(
+            StatusPurpose::Revocation,
+            "https://vtc.example.com/v1/status-lists/revocation".into(),
+        );
+        // The production-default 131_072-bit capacity would make
+        // the drain loop below O(N²) and take ~5 minutes on CI.
+        // Shrink to 256 slots — still proves the invariant, runs
+        // in milliseconds. Re-size both backing vecs so the
+        // allocator's `assigned.len() == capacity` precondition
+        // still holds.
+        state.capacity = 256;
+        state.bits = vec![0u8; state.capacity.div_ceil(8)];
+        state.assigned = vec![false; state.capacity];
+
+        // Allocate one slot, flip it (revoke), persist + reload.
+        let revoked = allocate(&mut state).expect("first allocate");
+        flip(&mut state, revoked, true).expect("flip");
+        store_state(&ks, &state).await.unwrap();
+
+        // Simulate restart — read the row from disk into a fresh
+        // state value. The in-memory `state` from before would
+        // already remember the assigned mask; reloading proves
+        // the mask is preserved across persistence.
+        let mut reloaded = get_state(&ks, StatusPurpose::Revocation)
+            .await
+            .unwrap()
+            .unwrap();
+        let revoked_idx = revoked as usize;
+        assert!(
+            reloaded.assigned[revoked_idx],
+            "reloaded state lost the assigned mark for revoked slot"
+        );
+        let byte = revoked_idx / 8;
+        let bit = 7 - (revoked_idx % 8);
+        assert!(
+            reloaded.bits[byte] & (1 << bit) != 0,
+            "reloaded state lost the flipped revocation bit"
+        );
+
+        // Drain every remaining slot. The allocator must never
+        // hand back `revoked` — even with random selection, after
+        // capacity-1 more `allocate` calls the unassigned set is
+        // empty and the next call returns `None`. If `revoked`
+        // ever surfaces, the test fails immediately.
+        let mut handed_out = Vec::with_capacity(reloaded.capacity);
+        while let Some(idx) = allocate(&mut reloaded) {
+            assert_ne!(
+                idx, revoked,
+                "allocator reallocated the revoked slot — invariant broken"
+            );
+            handed_out.push(idx);
+        }
+        assert_eq!(
+            handed_out.len(),
+            reloaded.capacity - 1,
+            "expected to fill every slot except the revoked one"
+        );
+
+        // Bit is still set after the drain.
+        assert!(
+            reloaded.bits[byte] & (1 << bit) != 0,
+            "revocation bit was cleared during reallocation drain"
+        );
+    }
 }

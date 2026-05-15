@@ -428,6 +428,12 @@ async fn self_remove_with_historical_keeps_row_verbatim() {
 async fn self_remove_refused_for_sole_admin() {
     let fix = build_fixture().await;
     // The fixture's sole admin is ADMIN_DID — try to remove them.
+    // No-last-admin invariant guards this case in
+    // `remove_inner` (`routes/members/remove.rs:215-226`): the
+    // 409 is the only way a caller could end up with zero
+    // admins, and the audit + admin UX rely on the message
+    // pointing at "last admin" so the operator knows to promote
+    // someone first.
     let (status, body) = send(
         &fix.router,
         "DELETE",
@@ -438,11 +444,31 @@ async fn self_remove_refused_for_sole_admin() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "got {body}");
+    let message = body["error"]
+        .as_str()
+        .or_else(|| body["message"].as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(
+        message.contains("last admin"),
+        "expected error to name the last-admin invariant; got {body}"
+    );
+    // Both ACL and member rows must survive the refused
+    // removal — the operator needs to be able to retry after
+    // promoting another admin.
     assert!(
         get_acl_entry(&fix.acl_ks, ADMIN_DID)
             .await
             .unwrap()
-            .is_some()
+            .is_some(),
+        "ACL row was deleted despite the 409"
+    );
+    assert!(
+        get_member(&fix.members_ks, ADMIN_DID)
+            .await
+            .unwrap()
+            .is_some(),
+        "member row was deleted despite the 409"
     );
 }
 

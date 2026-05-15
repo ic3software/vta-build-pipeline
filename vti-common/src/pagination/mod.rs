@@ -344,6 +344,25 @@ mod tests {
         assert!(matches!(err, AppError::InvalidCursor));
     }
 
+    /// End-to-end mapping: a cursor minted under one community's
+    /// audit key (or under a community's pre-rotation key) MUST
+    /// produce HTTP 400 when handed to a route running with a
+    /// different active key. The unit test above proves the
+    /// `Cursor::decode` arithmetic; this one nails the wire layer
+    /// by walking through the `IntoResponse` impl so a future
+    /// regression in `AppError`'s status mapping (or a misguided
+    /// "treat invalid cursor as empty page" refactor) fails here.
+    #[test]
+    fn foreign_audit_key_cursor_maps_to_http_400() {
+        use axum::response::IntoResponse;
+
+        let c = Cursor::new(b"member:did:key:zAttacker".to_vec(), 17);
+        let wire = c.encode(&KEY_A);
+        let err = Cursor::decode(&wire, &KEY_B).expect_err("must reject");
+        let response = err.into_response();
+        assert_eq!(response.status(), 400);
+    }
+
     #[test]
     fn cursor_with_tampered_payload_is_rejected() {
         let c = Cursor::new(b"safe-key".to_vec(), 1);
