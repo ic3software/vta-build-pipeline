@@ -111,10 +111,11 @@ export const patchJson = <T>(
 
 export const deleteJson = <T>(
   path: string,
-  extra: { trustTask?: string } = {},
+  extra: { trustTask?: string; body?: unknown } = {},
 ): Promise<T> =>
   request<T>(path, {
     method: "DELETE",
+    body: extra.body === undefined ? undefined : JSON.stringify(extra.body),
     headers: extra.trustTask ? { "Trust-Task": extra.trustTask } : undefined,
   });
 

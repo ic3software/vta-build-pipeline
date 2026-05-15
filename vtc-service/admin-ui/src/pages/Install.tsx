@@ -14,6 +14,11 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import {
+  decodePublicKeyOptions,
+  serializeRegistration,
+} from "@/lib/webauthn";
+
 const TRUST_TASK_START =
   "https://trusttasks.org/openvtc/vtc/install/claim/start/1.0";
 const TRUST_TASK_FINISH =
@@ -24,33 +29,14 @@ type Phase =
   | { kind: "success"; adminDid: string; setupSessionToken: string }
   | { kind: "error"; title: string; message: string; hint?: string };
 
-function base64urlToBuffer(b64: string): ArrayBuffer {
-  const padded = b64.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
-function bufferToBase64url(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  for (const b of bytes) {
-    binary += String.fromCharCode(b);
-  }
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
 async function postJson(
   path: string,
   trustTask: string,
   body: unknown,
 ): Promise<{ status: number; body: unknown }> {
+  // Install ceremony is pre-session: no CSRF cookie yet, no
+  // credentials. Plain fetch by design — the regular
+  // `lib/api.ts::postJson` helper assumes a logged-in session.
   const res = await fetch(path, {
     method: "POST",
     headers: {
@@ -126,27 +112,13 @@ export function Install() {
 
       const startBody = start.body as {
         registrationId: string;
-        options: { publicKey: PublicKeyCredentialCreationOptionsJSON };
+        options: { publicKey: unknown };
       };
 
       // ── browser WebAuthn create ──
-      const publicKey = startBody.options
-        .publicKey as unknown as PublicKeyCredentialCreationOptions;
-      (publicKey as unknown as PublicKeyCredentialCreationOptionsJSON).challenge =
-        base64urlToBuffer(
-          startBody.options.publicKey.challenge as unknown as string,
-        ) as unknown as BufferSource;
-      (publicKey as unknown as PublicKeyCredentialCreationOptionsJSON).user.id =
-        base64urlToBuffer(
-          startBody.options.publicKey.user.id as unknown as string,
-        ) as unknown as BufferSource;
-      if (publicKey.excludeCredentials) {
-        for (const cred of publicKey.excludeCredentials) {
-          cred.id = base64urlToBuffer(
-            cred.id as unknown as string,
-          ) as unknown as BufferSource;
-        }
-      }
+      const publicKey = decodePublicKeyOptions(
+        (startBody.options as { publicKey: unknown }).publicKey,
+      );
 
       let credential: PublicKeyCredential | null = null;
       try {
@@ -175,18 +147,6 @@ export function Install() {
         return;
       }
 
-      const response =
-        credential.response as AuthenticatorAttestationResponse;
-      const webauthnResponse = {
-        id: credential.id,
-        rawId: bufferToBase64url(credential.rawId),
-        type: credential.type,
-        response: {
-          attestationObject: bufferToBase64url(response.attestationObject),
-          clientDataJSON: bufferToBase64url(response.clientDataJSON),
-        },
-      };
-
       // ── claim/finish ──
       const finish = await postJson(
         "/v1/install/claim/finish",
@@ -194,7 +154,7 @@ export function Install() {
         {
           install_token: token,
           registration_id: startBody.registrationId,
-          webauthn_response: webauthnResponse,
+          webauthn_response: serializeRegistration(credential),
         },
       );
       if (cancelled) return;
@@ -293,12 +253,3 @@ export function Install() {
   );
 }
 
-// Minimal type sketch so TS lets us reach into the JSON shape the
-// server returns. webauthn-rs serialises ArrayBuffer fields as
-// base64url strings; we cast at the seam after converting.
-interface PublicKeyCredentialCreationOptionsJSON {
-  challenge: BufferSource;
-  user: { id: BufferSource } & Record<string, unknown>;
-  excludeCredentials?: ReadonlyArray<{ id: BufferSource } & Record<string, unknown>>;
-  [k: string]: unknown;
-}
