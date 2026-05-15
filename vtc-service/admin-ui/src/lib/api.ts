@@ -9,6 +9,7 @@ export interface HealthResponse {
   status: string;
   version: string;
   vtc_did?: string;
+  vta_did?: string;
   mediator_url?: string;
   mediator_did?: string;
 }

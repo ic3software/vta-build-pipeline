@@ -180,43 +180,45 @@ export function Sessions() {
                         <span className="muted">—</span>
                       )}
                     </td>
-                    <td className="row-actions">
-                      <button
-                        type="button"
-                        className="secondary destructive"
-                        disabled={revokeOne.isPending}
-                        aria-busy={revokeOne.isPending}
-                        onClick={() => {
-                          const msg = isMine
-                            ? "Revoke YOUR session? You'll be signed out of this tab."
-                            : `Revoke session ${shortId(s.sessionId)} for ${s.did}?`;
-                          if (window.confirm(msg)) {
-                            revokeOne.mutate(s.sessionId);
-                          }
-                        }}
-                      >
-                        Revoke
-                      </button>
-                      {showBulk && sameDidCount > 1 && (
+                    <td>
+                      <div className="row-actions">
                         <button
                           type="button"
                           className="secondary destructive"
-                          disabled={revokeMany.isPending}
-                          aria-busy={revokeMany.isPending}
-                          title={`Revoke all ${sameDidCount} sessions for ${s.did}`}
+                          disabled={revokeOne.isPending}
+                          aria-busy={revokeOne.isPending}
                           onClick={() => {
-                            if (
-                              window.confirm(
-                                `Revoke ALL ${sameDidCount} sessions for ${s.did}?`,
-                              )
-                            ) {
-                              revokeMany.mutate(s.did);
+                            const msg = isMine
+                              ? "Revoke YOUR session? You'll be signed out of this tab."
+                              : `Revoke session ${shortId(s.sessionId)} for ${s.did}?`;
+                            if (window.confirm(msg)) {
+                              revokeOne.mutate(s.sessionId);
                             }
                           }}
                         >
-                          Revoke all for DID
+                          Revoke
                         </button>
-                      )}
+                        {showBulk && sameDidCount > 1 && (
+                          <button
+                            type="button"
+                            className="secondary destructive"
+                            disabled={revokeMany.isPending}
+                            aria-busy={revokeMany.isPending}
+                            title={`Revoke all ${sameDidCount} sessions for ${s.did}`}
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  `Revoke ALL ${sameDidCount} sessions for ${s.did}?`,
+                                )
+                              ) {
+                                revokeMany.mutate(s.did);
+                              }
+                            }}
+                          >
+                            Revoke all for DID
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );

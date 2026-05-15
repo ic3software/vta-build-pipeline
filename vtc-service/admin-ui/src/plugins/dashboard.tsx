@@ -12,6 +12,7 @@ export function Dashboard() {
 
   const status = health.data?.status;
   const mediatorDid = health.data?.mediator_did;
+  const vtaDid = health.data?.vta_did;
 
   return (
     <section className="page">
@@ -39,19 +40,20 @@ export function Dashboard() {
           mono
         />
         <StatTile
+          label="VTA"
+          value={vtaDid ? "Connected" : "Not set"}
+          foot={
+            vtaDid
+              ? "Key-management agent provisioned"
+              : "Run `vtc setup` to bind a VTA"
+          }
+          tone={vtaDid ? "ok" : "warn"}
+        />
+        <StatTile
           label="Mediator"
           value={mediatorDid ? "Configured" : "Not set"}
           foot={mediatorDid ? "DIDComm transport ready" : "REST-only deployment"}
           tone={mediatorDid ? "ok" : "neutral"}
-        />
-        <StatTile
-          label="Health endpoint"
-          value={
-            <a href="/health" target="_blank" rel="noreferrer">
-              GET /health <ExternalLink size={14} aria-hidden="true" />
-            </a>
-          }
-          mono
         />
       </div>
 
@@ -62,11 +64,22 @@ export function Dashboard() {
           <dd>
             <code>{health.data?.vtc_did ?? "…"}</code>
           </dd>
+          <dt>VTA DID</dt>
+          <dd>
+            <code>{health.data?.vta_did ?? "(not configured)"}</code>
+          </dd>
           <dt>Mediator DID</dt>
           <dd>
             <code>
               {health.data?.mediator_did ?? "(none configured)"}
             </code>
+          </dd>
+          <dt>Health endpoint</dt>
+          <dd>
+            <a href="/health" target="_blank" rel="noreferrer">
+              <code>GET /health</code>{" "}
+              <ExternalLink size={12} aria-hidden="true" />
+            </a>
           </dd>
         </dl>
       </section>

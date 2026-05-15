@@ -19,6 +19,11 @@ pub struct HealthResponse {
     /// it's the community's identity, not a secret.
     #[serde(skip_serializing_if = "Option::is_none")]
     vtc_did: Option<String>,
+    /// DID of the VTA the VTC was provisioned against. Public for
+    /// the same reason `vtc_did` is — operators + verifiers need
+    /// to know which key-management agent backs this community.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vta_did: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mediator_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,6 +34,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     debug!("health check");
     let config = state.config.read().await;
     let vtc_did = config.vtc_did.clone();
+    let vta_did = config.vta_did.clone();
     let (mediator_url, mediator_did) = config
         .messaging
         .as_ref()
@@ -38,6 +44,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         vtc_did,
+        vta_did,
         mediator_url,
         mediator_did,
     })
