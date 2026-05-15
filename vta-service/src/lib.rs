@@ -31,6 +31,8 @@ pub mod store;
 #[cfg(feature = "tee")]
 pub mod tee;
 #[cfg(feature = "webvh")]
+pub mod webvh_auth;
+#[cfg(feature = "webvh")]
 pub mod webvh_client;
 #[cfg(feature = "webvh")]
 pub mod webvh_didcomm;
