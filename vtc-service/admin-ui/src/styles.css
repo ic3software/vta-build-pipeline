@@ -883,6 +883,37 @@ select {
   text-transform: uppercase;
 }
 
+.sortable-th {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0;
+  margin: 0;
+  height: auto;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.sortable-th[aria-sort="ascending"],
+.sortable-th[aria-sort="descending"] {
+  color: var(--text);
+}
+
+.sortable-th:hover {
+  color: var(--text);
+}
+
+.sortable-th:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 .data-table tbody tr {
   transition: background var(--motion-fast);
 }

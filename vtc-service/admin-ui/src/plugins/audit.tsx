@@ -10,12 +10,72 @@
 // Refresh — we deliberately don't poll, because the audit log can
 // grow large and a poll would refetch the whole page each tick.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ClipboardList, RefreshCw } from "lucide-react";
 
 import { getJson } from "@/lib/api";
 import { useToast } from "@/lib/toast";
+
+// Human-readable label per event kind. Falls through to the
+// camelCase tag for variants we haven't catalogued yet (new event
+// types just show as raw kind until this map is updated, which is a
+// quieter failure mode than throwing).
+const EVENT_DESCRIPTIONS: Record<string, string> = {
+  AdminUiServed: "Admin UI bundle pinned at daemon boot",
+  CommunityInstalled: "Community installation completed",
+  EmergencyBootstrapInvoked: "Emergency bootstrap triggered",
+  AdminPasskeyRegistered: "Admin registered a passkey",
+  AdminPasskeyRevoked: "Admin revoked a passkey",
+  ConfigChanged: "Daemon configuration changed",
+  ConfigReloaded: "Daemon configuration reloaded",
+  RestartRequested: "Daemon restart requested",
+  CommunityProfileUpdated: "Community profile updated",
+  AuditKeyRotated: "Audit key rotated",
+  MemberUpdated: "Member record updated",
+  RoleChanged: "Member role changed",
+  AdminPromoted: "Member promoted to admin",
+  JoinRequestSubmitted: "Applicant submitted a join request",
+  JoinRequestApproved: "Join request approved",
+  JoinRequestRejected: "Join request rejected",
+  MemberAdded: "New member joined",
+  MemberRemoved: "Member removed from community",
+  PolicyUploaded: "Policy revision uploaded",
+  PolicyActivated: "Policy activated for a purpose",
+  VmcIssued: "Membership credential (VMC) issued",
+  VecIssued: "Role credential (VEC) issued",
+  MembershipRenewed: "Membership renewed",
+  StatusListFlipped: "Status-list bit flipped",
+  DidRotated: "Member rotated their DID",
+  RegistryStatusChanged: "Trust-registry reachability changed",
+  RegistrySyncSucceeded: "Trust-registry sync succeeded",
+  RegistrySyncFailed: "Trust-registry sync failed",
+  RegistryRecordPolicyOverride: "Registry record disposition overridden",
+  CrossCommunitySessionMinted: "Cross-community session issued",
+  VrcPublished: "Relationship credential (VRC) published",
+  VrcRevoked: "Relationship credential revoked",
+  PersonhoodAsserted: "Personhood asserted",
+  PersonhoodRevoked: "Personhood revoked",
+  CustomEndorsementIssued: "Custom endorsement issued",
+  CustomEndorsementRevoked: "Custom endorsement revoked",
+  EndorsementTypeRegistered: "Endorsement type registered",
+  EndorsementTypeDeleted: "Endorsement type deleted",
+  WebsiteFileWritten: "Public website file written",
+  WebsiteFileDeleted: "Public website file deleted",
+  WebsiteBundleDeployed: "Public website bundle deployed",
+  WebsiteGenerationRolledBack: "Public website rolled back",
+};
+
+// Events that fire on a schedule or at daemon-internal lifecycle
+// transitions, not in response to an operator/member action. The
+// audit log keeps them for security pinning + completeness, but the
+// default UI filters them so "who did what" reads cleanly.
+const SYSTEM_EVENT_KINDS = new Set([
+  "AdminUiServed",
+  "RegistryStatusChanged",
+  "RegistrySyncSucceeded",
+  "RegistrySyncFailed",
+]);
 
 const TRUST_TASK = "https://trusttasks.org/openvtc/vtc/audit/list/1.0";
 
@@ -54,6 +114,8 @@ export function Audit() {
   const [cursor, setCursor] = useState<string | null>(null);
   const [items, setItems] = useState<AuditEnvelope[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [showSystem, setShowSystem] = useState(false);
+  const [filterText, setFilterText] = useState("");
   const toast = useToast();
 
   const query = useQuery({
@@ -79,6 +141,31 @@ export function Audit() {
     if (query.error) toast.pushFromError(query.error, "Failed to load audit");
   }, [query.error, toast]);
 
+  // Visible items = the accumulated set minus system events (when
+  // hidden) minus rows that don't match the free-text filter.
+  // Filter matches against event kind, description, and either DID
+  // — case-insensitive substring so an operator pasting half a DID
+  // still finds the row.
+  const visibleItems = useMemo(() => {
+    const needle = filterText.trim().toLowerCase();
+    return items.filter((env) => {
+      const kind = eventKind(env.event);
+      if (!showSystem && SYSTEM_EVENT_KINDS.has(kind)) return false;
+      if (!needle) return true;
+      const haystack = [
+        kind,
+        EVENT_DESCRIPTIONS[kind] ?? "",
+        env.actor_did_plain ?? "",
+        env.target_did_plain ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [items, showSystem, filterText]);
+
+  const hiddenCount = items.length - visibleItems.length;
+
   return (
     <section className="page">
       <h2>Audit trail</h2>
@@ -90,9 +177,31 @@ export function Audit() {
 
       <section className="card">
         <div className="toolbar">
+          <label className="field inline">
+            <span className="field-label">Filter</span>
+            <input
+              type="search"
+              placeholder="kind, description, actor or target DID"
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+            />
+          </label>
+          <label
+            className="field inline"
+            style={{ flex: "0 0 auto", minWidth: 0 }}
+          >
+            <span className="field-label">Show system events</span>
+            <input
+              type="checkbox"
+              checked={showSystem}
+              onChange={(e) => setShowSystem(e.target.checked)}
+              style={{ width: "auto", height: "auto" }}
+            />
+          </label>
           <span className="muted">
-            {items.length} entr{items.length === 1 ? "y" : "ies"}
-            {nextCursor ? " (more available)" : ""}
+            {visibleItems.length} of {items.length}
+            {hiddenCount > 0 ? ` (${hiddenCount} filtered)` : ""}
+            {nextCursor ? ", more available" : ""}
           </span>
           <div className="spacer" />
           <button
@@ -138,17 +247,22 @@ export function Audit() {
             </tr>
           </thead>
           <tbody>
-            {items.length === 0 && !query.isPending && (
+            {visibleItems.length === 0 && !query.isPending && (
               <tr>
                 <td colSpan={5}>
                   <div className="empty-state">
                     <span className="empty-icon" aria-hidden="true">
                       <ClipboardList />
                     </span>
-                    <h4>No audit entries yet</h4>
+                    <h4>
+                      {items.length === 0
+                        ? "No audit entries yet"
+                        : "No entries match this filter"}
+                    </h4>
                     <p>
-                      Audit envelopes appear here once the community
-                      starts emitting events.
+                      {items.length === 0
+                        ? "Audit envelopes appear here once the community starts emitting events."
+                        : "Clear the search box or enable system events to widen the view."}
                     </p>
                   </div>
                 </td>
@@ -159,7 +273,7 @@ export function Audit() {
                 <td colSpan={5}>Loading…</td>
               </tr>
             )}
-            {items.map((env) => (
+            {visibleItems.map((env) => (
               <AuditRow key={env.event_id} env={env} />
             ))}
           </tbody>
@@ -185,12 +299,23 @@ export function Audit() {
 function AuditRow({ env }: { env: AuditEnvelope }) {
   const [open, setOpen] = useState(false);
   const kind = eventKind(env.event);
+  const description = EVENT_DESCRIPTIONS[kind];
   return (
     <>
       <tr>
         <td title={env.timestamp}>{formatIso(env.timestamp)}</td>
         <td>
-          <code>{kind}</code>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span>{description ?? kind}</span>
+            {description && (
+              <code
+                className="muted"
+                style={{ fontSize: "var(--text-xs)" }}
+              >
+                {kind}
+              </code>
+            )}
+          </div>
         </td>
         <td>
           {env.actor_did_plain ? (
