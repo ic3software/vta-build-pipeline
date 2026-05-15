@@ -384,6 +384,15 @@ fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
             get(community::profile::get_profile).put(community::profile::put_profile),
             community_profile,
         )
+        // Public read of the community profile. Trust-Task-exempt and
+        // unauthenticated — visitors landing on the default public
+        // website need the community's name + description + DIDs to
+        // render before any session exists. Curated subset only (no
+        // extensions, no registry status).
+        .route_exempt(
+            "/community/public-profile",
+            get(community::profile::get_public_profile),
+        )
         // Admin config (M0.8 — GET + PATCH share one task; will
         // split into admin/config/show/1.0 + patch/1.0 when
         // TrustTaskRouter gains per-method selectors).

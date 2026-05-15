@@ -16,6 +16,7 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::info;
 use vti_common::auth::{AdminAuth, AuthClaims};
@@ -43,6 +44,59 @@ pub struct CommunityProfileResponse {
     /// never ran, last probe failed, or `registry.url` is
     /// unset). Spec §8.1.
     pub registry_status: HealthStatus,
+}
+
+/// Public read shape — the curated subset of [`CommunityProfile`]
+/// exposed unauthenticated at `GET /v1/community/public-profile`.
+///
+/// Drops `extensions` (operator-defined JSON, not guaranteed
+/// public-safe) and `registryStatus` (operational telemetry that
+/// belongs behind admin auth). Adds `mediator_did` so the default
+/// landing page can render the community's full identity in one
+/// fetch.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicCommunityProfile {
+    pub community_did: String,
+    pub name: String,
+    pub description: String,
+    pub logo_url: Option<String>,
+    pub public_url: Option<String>,
+    pub contact_email: Option<String>,
+    pub language: String,
+    pub created_at: DateTime<Utc>,
+    /// The community's DIDComm mediator DID, if one is configured.
+    /// Sourced from the live daemon config (same as `/health`), not
+    /// the persisted profile row.
+    pub mediator_did: Option<String>,
+}
+
+/// Public GET handler. Trust-Task-exempt, no auth. Returns only the
+/// curated subset of profile fields a visitor's browser should see.
+pub async fn get_public_profile(
+    State(state): State<AppState>,
+) -> Result<Json<PublicCommunityProfile>, AppError> {
+    let profile = load_profile(&state.community_ks)
+        .await?
+        .ok_or_else(|| AppError::NotFound("community profile not initialised".into()))?;
+    let mediator_did = state
+        .config
+        .read()
+        .await
+        .messaging
+        .as_ref()
+        .map(|m| m.mediator_did.clone());
+    Ok(Json(PublicCommunityProfile {
+        community_did: profile.community_did,
+        name: profile.name,
+        description: profile.description,
+        logo_url: profile.logo_url,
+        public_url: profile.public_url,
+        contact_email: profile.contact_email,
+        language: profile.language,
+        created_at: profile.created_at,
+        mediator_did,
+    }))
 }
 
 /// GET handler. Returns the singleton profile + the live

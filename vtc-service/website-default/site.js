@@ -30,6 +30,81 @@ function setStatus(state, label) {
   if (text) text.textContent = label;
 }
 
+function showMediatorRow(did) {
+  const row = document.getElementById("mediator-row");
+  if (!row || !did) return;
+  setText("mediator-did", did);
+  row.hidden = false;
+}
+
+// ── Copy-to-clipboard wiring ───────────────────────────────
+//
+// Buttons carry `data-copy-target="<id>"`. On click, copy that
+// element's textContent, flip the button into a "copied" state for
+// COPY_FEEDBACK_MS, then revert. Uses the async Clipboard API where
+// available with a textarea-selection fallback for older browsers /
+// non-secure contexts.
+
+const COPY_FEEDBACK_MS = 1600;
+const copyTimers = new WeakMap();
+
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  // Fallback for http:// during local dev.
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
+
+function flashCopied(btn) {
+  const label = btn.querySelector(".copy-label");
+  const original = btn.dataset.originalLabel ?? (label ? label.textContent : "Copy");
+  if (!btn.dataset.originalLabel) {
+    btn.dataset.originalLabel = original;
+  }
+  btn.classList.add("copied");
+  if (label) label.textContent = "Copied!";
+  const prev = copyTimers.get(btn);
+  if (prev) clearTimeout(prev);
+  copyTimers.set(
+    btn,
+    setTimeout(() => {
+      btn.classList.remove("copied");
+      if (label) label.textContent = original;
+    }, COPY_FEEDBACK_MS),
+  );
+}
+
+function wireCopyButtons() {
+  for (const btn of document.querySelectorAll("[data-copy-target]")) {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.copyTarget;
+      if (!id) return;
+      const source = document.getElementById(id);
+      const text = source?.textContent?.trim();
+      if (!text || text === "…") return;
+      try {
+        await copyText(text);
+        flashCopied(btn);
+      } catch (err) {
+        console.warn("copy failed", err);
+      }
+    });
+  }
+}
+
 async function refresh() {
   // Health probe — small + unauthenticated so it works on a
   // freshly-installed daemon with no auth keys yet. Also the
@@ -43,6 +118,9 @@ async function refresh() {
     } else {
       setText("community-did", "(not yet provisioned — run `vtc setup`)");
     }
+    if (healthJson.mediator_did) {
+      showMediatorRow(healthJson.mediator_did);
+    }
     const state = healthJson.status === "ok" ? "ok" : "warn";
     setStatus(state, state === "ok" ? "Service online" : "Degraded");
   } catch (err) {
@@ -52,12 +130,13 @@ async function refresh() {
   }
 
   // Community profile — best-effort, for the friendly name +
-  // description shown in the header. The endpoint requires no
-  // auth for the public fields used here. On a fresh install the
-  // profile may not exist yet; the placeholder text from
-  // index.html stays in place.
+  // description shown in the header. `/v1/community/public-profile`
+  // is the unauthenticated read endpoint exposing only the curated
+  // public subset (name, description, public URL, mediator DID).
+  // On a fresh install the profile may not exist yet; the
+  // placeholder text from index.html stays in place.
   try {
-    const profile = await fetchJson("/v1/community/profile");
+    const profile = await fetchJson("/v1/community/public-profile");
     if (profile && typeof profile === "object") {
       if (profile.name) {
         setText("community-name", profile.name);
@@ -66,10 +145,17 @@ async function refresh() {
       if (profile.description) {
         setText("community-description", profile.description);
       }
+      // The public-profile endpoint also surfaces the mediator DID
+      // so a single fetch is enough; `/health` is a fallback for
+      // pre-bootstrap state where the profile isn't initialised yet.
+      if (profile.mediatorDid) {
+        showMediatorRow(profile.mediatorDid);
+      }
     }
   } catch {
     // Silent — leave the placeholder text.
   }
 }
 
+wireCopyButtons();
 refresh();
