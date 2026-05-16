@@ -539,6 +539,8 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         mediator_registry,
         #[cfg(feature = "webvh")]
         drain_sweeper,
+        #[cfg(feature = "webvh")]
+        webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks::new(),
         telemetry,
         wrapping_cache: crate::keys::wrapping::WrappingKeyCache::new(),
         config: config.clone(),

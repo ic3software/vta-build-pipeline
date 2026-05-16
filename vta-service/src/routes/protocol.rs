@@ -127,6 +127,7 @@ pub async fn enable_didcomm_handler(
     let result = enable_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -144,6 +145,7 @@ pub async fn enable_didcomm_handler(
             handshake_timeout: timeout,
         },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -382,6 +384,7 @@ pub async fn disable_didcomm_handler(
     let result = disable_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -399,6 +402,7 @@ pub async fn disable_didcomm_handler(
             transport: DisableTransport::Rest,
         },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -670,6 +674,7 @@ pub async fn update_didcomm_handler(
     let result = update_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -692,6 +697,7 @@ pub async fn update_didcomm_handler(
             transport: crate::operations::protocol::disable_didcomm::DisableTransport::Rest,
         },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1234,6 +1240,7 @@ pub async fn enable_rest_handler(
     let result = enable_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -1245,6 +1252,7 @@ pub async fn enable_rest_handler(
         &auth.0,
         EnableRestParams { url: req.url },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1275,6 +1283,7 @@ pub async fn update_rest_handler(
     let result = update_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -1286,6 +1295,7 @@ pub async fn update_rest_handler(
         &auth.0,
         UpdateRestParams { url: req.url },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1316,6 +1326,7 @@ pub async fn disable_rest_handler(
     let result = disable_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -1327,6 +1338,7 @@ pub async fn disable_rest_handler(
         &auth.0,
         DisableRestParams,
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1571,6 +1583,7 @@ pub async fn rollback_rest_handler(
     let result = rollback_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -1581,6 +1594,7 @@ pub async fn rollback_rest_handler(
         &state.telemetry,
         &auth.0,
         RollbackRestParams,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1634,6 +1648,7 @@ pub async fn rollback_didcomm_handler(
     let result = rollback_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -1651,6 +1666,7 @@ pub async fn rollback_didcomm_handler(
             drain_ttl,
             transport: DidcommTransport::Rest,
         },
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;

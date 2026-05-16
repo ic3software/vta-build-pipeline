@@ -95,11 +95,13 @@ async fn s1_rest_enable_returns_service_already_enabled() {
     let fx = setup_vta_in_state(ServiceState::S1).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
 
     let err = enable_rest(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -114,6 +116,7 @@ async fn s1_rest_enable_returns_service_already_enabled() {
             url: "https://x.example.com".into(),
         },
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -126,11 +129,13 @@ async fn s3_rest_enable_returns_service_already_enabled() {
     let fx = setup_vta_in_state(ServiceState::S3).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
 
     let err = enable_rest(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -145,6 +150,7 @@ async fn s3_rest_enable_returns_service_already_enabled() {
             url: "https://x.example.com".into(),
         },
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -159,11 +165,13 @@ async fn s2_rest_update_returns_service_not_present() {
     let fx = setup_vta_in_state(ServiceState::S2).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
 
     let err = update_rest(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -178,6 +186,7 @@ async fn s2_rest_update_returns_service_not_present() {
             url: "https://new.example.com".into(),
         },
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -192,11 +201,13 @@ async fn s1_rest_disable_returns_last_service_refused() {
     let fx = setup_vta_in_state(ServiceState::S1).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
 
     let err = disable_rest(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -209,6 +220,7 @@ async fn s1_rest_disable_returns_last_service_refused() {
         &super_admin(),
         DisableRestParams,
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -221,11 +233,13 @@ async fn s2_rest_disable_returns_service_not_present() {
     let fx = setup_vta_in_state(ServiceState::S2).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
 
     let err = disable_rest(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -238,6 +252,7 @@ async fn s2_rest_disable_returns_service_not_present() {
         &super_admin(),
         DisableRestParams,
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -252,6 +267,7 @@ async fn s2_didcomm_enable_returns_already_enabled() {
     let fx = setup_vta_in_state(ServiceState::S2).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
     let registry = vta_service::messaging::registry::MediatorListenerRegistry::new(Arc::new(
         vti_common::telemetry::RingBufferTelemetry::new(),
@@ -261,6 +277,7 @@ async fn s2_didcomm_enable_returns_already_enabled() {
     let err = enable_didcomm(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -279,6 +296,7 @@ async fn s2_didcomm_enable_returns_already_enabled() {
             handshake_timeout: std::time::Duration::from_secs(1),
         },
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -291,6 +309,7 @@ async fn s3_didcomm_enable_returns_already_enabled() {
     let fx = setup_vta_in_state(ServiceState::S3).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
     let registry = vta_service::messaging::registry::MediatorListenerRegistry::new(Arc::new(
         vti_common::telemetry::RingBufferTelemetry::new(),
@@ -300,6 +319,7 @@ async fn s3_didcomm_enable_returns_already_enabled() {
     let err = enable_didcomm(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -318,6 +338,7 @@ async fn s3_didcomm_enable_returns_already_enabled() {
             handshake_timeout: std::time::Duration::from_secs(1),
         },
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -332,6 +353,7 @@ async fn s1_didcomm_update_returns_didcomm_not_enabled() {
     let fx = setup_vta_in_state(ServiceState::S1).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
     let telemetry: vti_common::telemetry::SharedTelemetrySink =
         Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
@@ -349,6 +371,7 @@ async fn s1_didcomm_update_returns_didcomm_not_enabled() {
     let err = update_didcomm(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -371,6 +394,7 @@ async fn s1_didcomm_update_returns_didcomm_not_enabled() {
             transport: vta_service::operations::protocol::disable_didcomm::DisableTransport::Rest,
         },
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -385,6 +409,7 @@ async fn s1_didcomm_disable_returns_didcomm_not_enabled() {
     let fx = setup_vta_in_state(ServiceState::S1).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
     let telemetry: vti_common::telemetry::SharedTelemetrySink =
         Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
@@ -401,6 +426,7 @@ async fn s1_didcomm_disable_returns_didcomm_not_enabled() {
     let err = disable_didcomm(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -418,6 +444,7 @@ async fn s1_didcomm_disable_returns_didcomm_not_enabled() {
             transport: DisableTransport::Rest,
         },
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -430,6 +457,7 @@ async fn s2_didcomm_disable_returns_no_protocol_remaining() {
     let fx = setup_vta_in_state(ServiceState::S2).await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
     let telemetry: vti_common::telemetry::SharedTelemetrySink =
         Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
@@ -446,6 +474,7 @@ async fn s2_didcomm_disable_returns_no_protocol_remaining() {
     let err = disable_didcomm(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -463,6 +492,7 @@ async fn s2_didcomm_disable_returns_no_protocol_remaining() {
             transport: DisableTransport::Rest,
         },
         OpContext::Direct,
+        &locks,
         "test",
     )
     .await
@@ -481,11 +511,13 @@ async fn rollback_rest_with_empty_snapshot_returns_no_prior_mutation() {
         let fx = setup_vta_in_state(state).await;
         let resolver = build_resolver().await;
         let seed_store = dummy_seed_store(&fx);
+        let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
         let bridge = dummy_bridge();
 
         let err = rollback_rest(
             &fx.config,
             &fx.store.keys_ks,
+            &fx.store.imported_ks,
             &fx.store.contexts_ks,
             &fx.store.webvh_ks,
             &fx.store.audit_ks,
@@ -497,6 +529,7 @@ async fn rollback_rest_with_empty_snapshot_returns_no_prior_mutation() {
                 as vti_common::telemetry::SharedTelemetrySink),
             &super_admin(),
             RollbackRestParams,
+            &locks,
             "test",
         )
         .await
@@ -514,6 +547,7 @@ async fn rollback_didcomm_with_empty_snapshot_returns_no_prior_mutation() {
         let fx = setup_vta_in_state(state).await;
         let resolver = build_resolver().await;
         let seed_store = dummy_seed_store(&fx);
+        let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
         let bridge = dummy_bridge();
         let telemetry: vti_common::telemetry::SharedTelemetrySink =
             Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
@@ -531,6 +565,7 @@ async fn rollback_didcomm_with_empty_snapshot_returns_no_prior_mutation() {
         let err = rollback_didcomm(
             &fx.config,
             &fx.store.keys_ks,
+            &fx.store.imported_ks,
             &fx.store.contexts_ks,
             &fx.store.webvh_ks,
             &fx.store.audit_ks,
@@ -548,6 +583,7 @@ async fn rollback_didcomm_with_empty_snapshot_returns_no_prior_mutation() {
                 drain_ttl: std::time::Duration::from_secs(86_400),
                 transport: DisableTransport::Rest,
             },
+            &locks,
             "test",
         )
         .await

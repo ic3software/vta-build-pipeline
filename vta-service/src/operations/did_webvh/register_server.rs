@@ -34,7 +34,7 @@ use crate::error::AppError;
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
 
-use super::{RaceDetected, RecordSnapshot, WebvhTransport};
+use super::{RaceDetected, RecordSnapshot};
 
 /// `server_id` value stored on a DID record that has not yet been
 /// associated with a webvh hosting server. Mirrors the literal used
@@ -114,13 +114,19 @@ impl From<AppError> for RegisterDidWithServerError {
 /// server and flip the local record's `server_id` so future
 /// `update_did_webvh` calls (and therefore future `services`
 /// mutations) auto-publish there.
+#[allow(clippy::too_many_arguments)]
 pub async fn register_did_with_server(
     webvh_ks: &KeyspaceHandle,
+    keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
+    seed_store: &dyn crate::keys::seed_store::SeedStore,
     auth: &AuthClaims,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
     params: RegisterDidWithServerParams,
+    vta_did: Option<&str>,
+    auth_locks: &super::WebvhAuthLocks,
     channel: &str,
 ) -> Result<RegisterDidWithServerResult, RegisterDidWithServerError> {
     auth.require_super_admin()
@@ -157,24 +163,17 @@ pub async fn register_did_with_server(
         .await?
         .ok_or_else(|| RegisterDidWithServerError::LogMissing(params.did.clone()))?;
 
-    // 4. Build the transport for the target server (REST or DIDComm
-    //    depending on the server DID's advertised endpoints).
-    let transport = WebvhTransport::from_server(&server, did_resolver, didcomm_bridge)
-        .await
-        .map_err(|e| RegisterDidWithServerError::Transport(e.to_string()))?;
-
-    // 5. Atomic claim-and-publish on the host. One round-trip writes
-    //    slot allocation + log content + owner index in a single batch,
-    //    so any in-flight resolver hits either the prior content or the
-    //    new content — never the empty 404 window the older two-step
-    //    `request_uri` + `publish_did` flow had.
+    // 4. Atomic claim-and-publish on the host via the auth-cache
+    //    helper. Single round-trip equivalent of `request_uri` +
+    //    `publish_did`, batched on the daemon so any in-flight
+    //    resolver hits either prior or new content (no empty-404
+    //    window). The helper handles the daemon REST auth handshake
+    //    + 401 retry; falls through to plain DIDComm transport when
+    //    the server DID advertises that.
     //
     //    `WebVHURL::parse_did_url` returns `path` with leading and
     //    trailing slashes (`/glenn-vta/`). The host expects the path
-    //    without surrounding slashes. Empty or `.well-known` paths
-    //    aren't supported here — atomic-register requires an explicit
-    //    path on the host side; root-DID registration is a separate
-    //    admin-only flow.
+    //    without surrounding slashes.
     let parsed = WebVHURL::parse_did_url(&params.did).map_err(|e| {
         RegisterDidWithServerError::DidUrlParse {
             did: params.did.clone(),
@@ -183,10 +182,30 @@ pub async fn register_did_with_server(
     })?;
     let request_path = parsed.path.trim_matches('/').to_string();
 
-    let response = transport
-        .register_did_atomic(&request_path, &did_log, params.force)
-        .await
-        .map_err(|e| RegisterDidWithServerError::Publish(e.to_string()))?;
+    let vta_did_value = vta_did.ok_or_else(|| {
+        RegisterDidWithServerError::Transport(
+            "VTA DID is not configured — complete `vta setup` before registering a DID with a \
+             webvh hosting server."
+                .to_string(),
+        )
+    })?;
+    let response = super::register_did_atomic_on_server(
+        keys_ks,
+        imported_ks,
+        audit_ks,
+        webvh_ks,
+        seed_store,
+        did_resolver,
+        didcomm_bridge,
+        auth_locks,
+        vta_did_value,
+        &server,
+        &request_path,
+        &did_log,
+        params.force,
+    )
+    .await
+    .map_err(|e| RegisterDidWithServerError::Publish(e.to_string()))?;
 
     // 6. Optimistic-concurrency check. Re-load the record and assert
     //    nothing changed between the initial read and now (where we're
@@ -333,10 +352,15 @@ mod tests {
     async fn rejects_non_super_admin() {
         let (_dir, webvh_ks, audit_ks) = setup().await;
         let resolver = resolver().await;
+        let seed = crate::keys::seed_store::PlaintextSeedStore::new(_dir.path());
+        let auth_locks = super::super::WebvhAuthLocks::new();
         let bridge = bridge();
         let err = register_did_with_server(
             &webvh_ks,
+            &webvh_ks,
+            &webvh_ks,
             &audit_ks,
+            &seed,
             &other_user(),
             &resolver,
             &bridge,
@@ -345,6 +369,8 @@ mod tests {
                 server_id: "primary".into(),
                 force: false,
             },
+            None,
+            &auth_locks,
             "test",
         )
         .await
@@ -356,10 +382,15 @@ mod tests {
     async fn rejects_when_did_not_found() {
         let (_dir, webvh_ks, audit_ks) = setup().await;
         let resolver = resolver().await;
+        let seed = crate::keys::seed_store::PlaintextSeedStore::new(_dir.path());
+        let auth_locks = super::super::WebvhAuthLocks::new();
         let bridge = bridge();
         let err = register_did_with_server(
             &webvh_ks,
+            &webvh_ks,
+            &webvh_ks,
             &audit_ks,
+            &seed,
             &super_admin(),
             &resolver,
             &bridge,
@@ -368,6 +399,8 @@ mod tests {
                 server_id: "primary".into(),
                 force: false,
             },
+            None,
+            &auth_locks,
             "test",
         )
         .await
@@ -384,10 +417,15 @@ mod tests {
         webvh_store::store_did(&webvh_ks, &rec).await.unwrap();
 
         let resolver = resolver().await;
+        let seed = crate::keys::seed_store::PlaintextSeedStore::new(_dir.path());
+        let auth_locks = super::super::WebvhAuthLocks::new();
         let bridge = bridge();
         let err = register_did_with_server(
             &webvh_ks,
+            &webvh_ks,
+            &webvh_ks,
             &audit_ks,
+            &seed,
             &super_admin(),
             &resolver,
             &bridge,
@@ -396,6 +434,8 @@ mod tests {
                 server_id: "primary".into(),
                 force: false,
             },
+            None,
+            &auth_locks,
             "test",
         )
         .await
@@ -418,10 +458,15 @@ mod tests {
             .unwrap();
 
         let resolver = resolver().await;
+        let seed = crate::keys::seed_store::PlaintextSeedStore::new(_dir.path());
+        let auth_locks = super::super::WebvhAuthLocks::new();
         let bridge = bridge();
         let err = register_did_with_server(
             &webvh_ks,
+            &webvh_ks,
+            &webvh_ks,
             &audit_ks,
+            &seed,
             &super_admin(),
             &resolver,
             &bridge,
@@ -430,6 +475,8 @@ mod tests {
                 server_id: "missing-host".into(),
                 force: false,
             },
+            None,
+            &auth_locks,
             "test",
         )
         .await
@@ -450,10 +497,15 @@ mod tests {
         // Note: no `store_did_log` call.
 
         let resolver = resolver().await;
+        let seed = crate::keys::seed_store::PlaintextSeedStore::new(_dir.path());
+        let auth_locks = super::super::WebvhAuthLocks::new();
         let bridge = bridge();
         let err = register_did_with_server(
             &webvh_ks,
+            &webvh_ks,
+            &webvh_ks,
             &audit_ks,
+            &seed,
             &super_admin(),
             &resolver,
             &bridge,
@@ -462,6 +514,8 @@ mod tests {
                 server_id: "primary".into(),
                 force: false,
             },
+            None,
+            &auth_locks,
             "test",
         )
         .await

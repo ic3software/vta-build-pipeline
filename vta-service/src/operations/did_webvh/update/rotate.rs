@@ -27,6 +27,7 @@ use crate::webvh_store;
 #[allow(clippy::too_many_arguments)]
 pub async fn rotate_did_webvh_keys(
     keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
@@ -36,6 +37,8 @@ pub async fn rotate_did_webvh_keys(
     opts: RotateDidWebvhKeysOptions,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
+    vta_did: Option<&str>,
+    auth_locks: &super::super::WebvhAuthLocks,
     channel: &str,
 ) -> Result<UpdateDidWebvhResult, UpdateDidWebvhError> {
     // 1. Load record + log.
@@ -170,6 +173,7 @@ pub async fn rotate_did_webvh_keys(
         .or_else(|| Some(format!("rotate-keys for {}", record.did)));
     let result = update_did_webvh(
         keys_ks,
+        imported_ks,
         contexts_ks,
         webvh_ks,
         audit_ks,
@@ -190,6 +194,8 @@ pub async fn rotate_did_webvh_keys(
         },
         did_resolver,
         didcomm_bridge,
+        vta_did,
+        auth_locks,
         channel,
     )
     .await?;

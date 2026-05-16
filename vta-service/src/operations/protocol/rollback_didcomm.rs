@@ -183,6 +183,7 @@ impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
 pub async fn rollback_didcomm(
     config: &Arc<RwLock<AppConfig>>,
     keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
@@ -197,6 +198,7 @@ pub async fn rollback_didcomm(
     prover: &(dyn ListenerProver + Send + Sync),
     auth: &AuthClaims,
     params: RollbackDidcommParams,
+    webvh_auth_locks: &crate::operations::did_webvh::WebvhAuthLocks,
     channel: &str,
 ) -> Result<RollbackDidcommResult, RollbackDidcommError> {
     auth.require_super_admin()
@@ -233,6 +235,7 @@ pub async fn rollback_didcomm(
             let result = disable_didcomm(
                 config,
                 keys_ks,
+                imported_ks,
                 contexts_ks,
                 webvh_ks,
                 audit_ks,
@@ -250,6 +253,7 @@ pub async fn rollback_didcomm(
                     transport: params.transport,
                 },
                 OpContext::Rollback,
+                webvh_auth_locks,
                 channel,
             )
             .await?;
@@ -275,6 +279,7 @@ pub async fn rollback_didcomm(
             let result = enable_didcomm(
                 config,
                 keys_ks,
+                imported_ks,
                 contexts_ks,
                 webvh_ks,
                 audit_ks,
@@ -292,6 +297,7 @@ pub async fn rollback_didcomm(
                     handshake_timeout: DEFAULT_ROLLBACK_HANDSHAKE_TIMEOUT,
                 },
                 OpContext::Rollback,
+                webvh_auth_locks,
                 channel,
             )
             .await?;
@@ -317,6 +323,7 @@ pub async fn rollback_didcomm(
             let result = update_didcomm(
                 config,
                 keys_ks,
+                imported_ks,
                 contexts_ks,
                 webvh_ks,
                 audit_ks,
@@ -339,6 +346,7 @@ pub async fn rollback_didcomm(
                     transport: params.transport,
                 },
                 OpContext::Rollback,
+                webvh_auth_locks,
                 channel,
             )
             .await?;

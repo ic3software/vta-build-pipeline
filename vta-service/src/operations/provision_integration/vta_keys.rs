@@ -44,7 +44,7 @@ async fn load_vta_key_as_secret(
     let resp = crate::operations::keys::get_key_secret_internal(
         &state.keys_ks,
         &state.imported_ks,
-        &state.seed_store,
+        &*state.seed_store,
         &state.audit_ks,
         authority,
         &key_id,

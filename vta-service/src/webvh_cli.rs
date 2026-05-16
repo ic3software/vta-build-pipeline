@@ -269,6 +269,8 @@ pub async fn run_delete_did(
     let config = AppConfig::load(config_path)?;
     let store = Store::open(&config.store)?;
     let keys_ks = store.keyspace("keys")?;
+    let imported_ks = store.keyspace("imported_secrets")?;
+    let audit_ks = store.keyspace("audit")?;
     let webvh_ks = store.keyspace("webvh")?;
     let seed_store: Arc<dyn crate::keys::seed_store::SeedStore> =
         Arc::from(create_seed_store(&config)?);
@@ -276,15 +278,19 @@ pub async fn run_delete_did(
     let auth = cli_super_admin();
     let did_resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await?;
     let no_bridge: Arc<DIDCommBridge> = Arc::new(DIDCommBridge::placeholder());
+    let auth_locks = crate::operations::did_webvh::WebvhAuthLocks::new();
     operations::did_webvh::delete_did_webvh(
         &webvh_ks,
         &keys_ks,
+        &imported_ks,
+        &audit_ks,
         &*seed_store,
-        &config,
         &auth,
         &did,
         &did_resolver,
         &no_bridge,
+        config.vta_did.as_deref(),
+        &auth_locks,
         "cli",
     )
     .await?;
@@ -361,6 +367,7 @@ pub async fn run_edit_did(
     let store = Store::open(&config.store)?;
     let webvh_ks = store.keyspace("webvh")?;
     let keys_ks = store.keyspace("keys")?;
+    let imported_ks = store.keyspace("imported_secrets")?;
     let contexts_ks = store.keyspace("contexts")?;
     let audit_ks = store.keyspace("audit")?;
     let did_resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await?;
@@ -455,8 +462,11 @@ pub async fn run_edit_did(
     };
 
     let auth = cli_super_admin();
+    let vta_did = config.vta_did.clone();
+    let auth_locks = crate::operations::did_webvh::WebvhAuthLocks::new();
     let result = crate::operations::did_webvh::update_did_webvh(
         &keys_ks,
+        &imported_ks,
         &contexts_ks,
         &webvh_ks,
         &audit_ks,
@@ -466,6 +476,8 @@ pub async fn run_edit_did(
         opts,
         &did_resolver,
         &didcomm_bridge,
+        vta_did.as_deref(),
+        &auth_locks,
         "vta-cli-offline",
     )
     .await?;
@@ -493,14 +505,22 @@ pub async fn run_register_did(
     let config = AppConfig::load(config_path)?;
     let store = Store::open(&config.store)?;
     let webvh_ks = store.keyspace("webvh")?;
+    let keys_ks = store.keyspace("keys")?;
+    let imported_ks = store.keyspace("imported_secrets")?;
     let audit_ks = store.keyspace("audit")?;
     let did_resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await?;
     let didcomm_bridge: Arc<DIDCommBridge> = Arc::new(DIDCommBridge::placeholder());
+    let seed_store: Arc<dyn crate::keys::seed_store::SeedStore> =
+        Arc::from(create_seed_store(&config)?);
+    let auth_locks = crate::operations::did_webvh::WebvhAuthLocks::new();
 
     let auth = cli_super_admin();
     let result = operations::did_webvh::register_did_with_server(
         &webvh_ks,
+        &keys_ks,
+        &imported_ks,
         &audit_ks,
+        &*seed_store,
         &auth,
         &did_resolver,
         &didcomm_bridge,
@@ -509,6 +529,8 @@ pub async fn run_register_did(
             server_id: server,
             force,
         },
+        config.vta_did.as_deref(),
+        &auth_locks,
         "vta-cli-offline",
     )
     .await?;

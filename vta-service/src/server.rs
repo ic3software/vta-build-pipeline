@@ -99,6 +99,13 @@ pub struct AppState {
     /// active/drain state machine.
     #[cfg(feature = "webvh")]
     pub mediator_registry: Arc<crate::messaging::registry::MediatorListenerRegistry>,
+    /// Per-webvh-server async mutex registry for serializing
+    /// daemon-REST auth-cache read-modify-writes. Two concurrent
+    /// operations against the same server can't both refresh and
+    /// last-writer-wins; locks are keyed by server id so unrelated
+    /// servers don't contend.
+    #[cfg(feature = "webvh")]
+    pub webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks,
     /// Per-mediator TTL sweeper. Arms a `tokio::time::sleep_until`
     /// task per drain entry; on expiry, calls
     /// `record_expiries_persisted` and signals upstream listener
@@ -232,6 +239,8 @@ pub async fn build_app_state(
         mediator_registry,
         #[cfg(feature = "webvh")]
         drain_sweeper,
+        #[cfg(feature = "webvh")]
+        webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks::new(),
         telemetry,
         wrapping_cache: crate::keys::wrapping::WrappingKeyCache::new(),
         config: Arc::new(RwLock::new(config)),
@@ -435,6 +444,8 @@ pub async fn run(
                 mediator_registry: Arc::clone(&mediator_registry),
                 #[cfg(feature = "webvh")]
                 drain_sweeper: Arc::clone(&drain_sweeper),
+                #[cfg(feature = "webvh")]
+                webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks::new(),
                 telemetry: Arc::clone(&telemetry),
                 seed_store: seed_store.clone(),
                 config: Arc::new(RwLock::new(config.clone())),
@@ -478,6 +489,8 @@ pub async fn run(
                 mediator_registry: Arc::clone(&mediator_registry),
                 #[cfg(feature = "webvh")]
                 drain_sweeper: Arc::clone(&drain_sweeper),
+                #[cfg(feature = "webvh")]
+                webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks::new(),
                 telemetry: Arc::clone(&telemetry),
                 wrapping_cache,
                 config: Arc::new(RwLock::new(config.clone())),

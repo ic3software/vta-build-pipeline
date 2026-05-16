@@ -86,11 +86,13 @@ async fn rollback_rest_brick_attempt_surfaces_last_service_refused() {
         .await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
 
     let err = rollback_rest(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -102,6 +104,7 @@ async fn rollback_rest_brick_attempt_surfaces_last_service_refused() {
             as vti_common::telemetry::SharedTelemetrySink),
         &super_admin(),
         RollbackRestParams,
+        &locks,
         "test",
     )
     .await
@@ -150,6 +153,7 @@ async fn rollback_didcomm_brick_attempt_surfaces_last_service_refused() {
         .await;
     let resolver = build_resolver().await;
     let seed_store = dummy_seed_store(&fx);
+    let locks = vta_service::operations::did_webvh::WebvhAuthLocks::new();
     let bridge = dummy_bridge();
     let telemetry: vti_common::telemetry::SharedTelemetrySink =
         Arc::new(vti_common::telemetry::RingBufferTelemetry::new());
@@ -167,6 +171,7 @@ async fn rollback_didcomm_brick_attempt_surfaces_last_service_refused() {
     let err = rollback_didcomm(
         &fx.config,
         &fx.store.keys_ks,
+        &fx.store.imported_ks,
         &fx.store.contexts_ks,
         &fx.store.webvh_ks,
         &fx.store.audit_ks,
@@ -184,6 +189,7 @@ async fn rollback_didcomm_brick_attempt_surfaces_last_service_refused() {
             drain_ttl: std::time::Duration::from_secs(86_400),
             transport: DisableTransport::Rest,
         },
+        &locks,
         "test",
     )
     .await

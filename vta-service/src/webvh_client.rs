@@ -360,7 +360,18 @@ impl WebvhClient {
         req
     }
 
-    /// Send a request and check for success. Returns an error with context on failure.
+    /// Send a request and map non-2xx HTTP statuses to typed
+    /// `AppError` variants so the operation layer can switch on them:
+    ///
+    /// - 401 → `Unauthorized` (token rejected; caller should
+    ///   invalidate cache and re-authenticate),
+    /// - 403 → `Forbidden` (daemon ACL miss),
+    /// - 4xx other → `Validation` (request-shape rejection),
+    /// - 5xx → `Internal` (daemon-side fault),
+    /// - network failure → `Internal`.
+    ///
+    /// The error message names the daemon DID so operator-facing
+    /// errors don't need to thread the server identity separately.
     async fn send(
         &self,
         req: reqwest::RequestBuilder,
@@ -373,9 +384,16 @@ impl WebvhClient {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!(
-                "webvh-server {context} failed ({status}): {text}"
-            )));
+            let msg = format!(
+                "webvh-server {server} {context} failed ({status}): {text}",
+                server = self.server_did,
+            );
+            return Err(match status {
+                reqwest::StatusCode::UNAUTHORIZED => AppError::Unauthorized(msg),
+                reqwest::StatusCode::FORBIDDEN => AppError::Forbidden(msg),
+                s if s.is_client_error() => AppError::Validation(msg),
+                _ => AppError::Internal(msg),
+            });
         }
         debug!(
             status = status.as_u16(),

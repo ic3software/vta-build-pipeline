@@ -151,6 +151,7 @@ impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
 pub async fn disable_didcomm(
     config: &Arc<RwLock<AppConfig>>,
     keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
@@ -165,6 +166,7 @@ pub async fn disable_didcomm(
     auth: &AuthClaims,
     params: DisableDidcommParams,
     ctx: OpContext,
+    webvh_auth_locks: &crate::operations::did_webvh::WebvhAuthLocks,
     channel: &str,
 ) -> Result<DisableDidcommResult, DisableDidcommError> {
     auth.require_super_admin()
@@ -198,6 +200,7 @@ pub async fn disable_didcomm(
     // Publish via update_did_webvh.
     let update_result = update_did_webvh(
         keys_ks,
+        imported_ks,
         contexts_ks,
         webvh_ks,
         audit_ks,
@@ -210,6 +213,8 @@ pub async fn disable_didcomm(
         },
         did_resolver,
         didcomm_bridge,
+        Some(vta_did.as_str()),
+        webvh_auth_locks,
         channel,
     )
     .await?;
@@ -457,6 +462,7 @@ mod tests {
         );
         let (bridge, reg, sink) = registry();
         let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_dimp, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_d2, contexts_ks) = empty_keyspace("contexts").await;
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
@@ -468,6 +474,7 @@ mod tests {
         let err = disable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
@@ -482,6 +489,7 @@ mod tests {
             &super_admin(),
             rest_params(Duration::from_secs(3600)),
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -501,6 +509,7 @@ mod tests {
         );
         let (bridge, reg, sink) = registry();
         let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_dimp, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_d2, contexts_ks) = empty_keyspace("contexts").await;
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
@@ -512,6 +521,7 @@ mod tests {
         let err = disable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
@@ -526,6 +536,7 @@ mod tests {
             &super_admin(),
             rest_params(Duration::from_secs(3600)),
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -541,6 +552,7 @@ mod tests {
         let config = fresh_config(dir.path(), true, true);
         let (bridge, reg, sink) = registry();
         let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_dimp, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_d2, contexts_ks) = empty_keyspace("contexts").await;
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
@@ -553,6 +565,7 @@ mod tests {
         let err = disable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
@@ -567,6 +580,7 @@ mod tests {
             &super_admin(),
             didcomm_params(Duration::from_secs(1800)),
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -590,6 +604,7 @@ mod tests {
         let config = fresh_config(dir.path(), true, true);
         let (bridge, reg, sink) = registry();
         let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_dimp, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_d2, contexts_ks) = empty_keyspace("contexts").await;
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
@@ -602,6 +617,7 @@ mod tests {
         let err = disable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
@@ -616,6 +632,7 @@ mod tests {
             &super_admin(),
             rest_params(Duration::from_secs(31 * 86_400)),
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -636,6 +653,7 @@ mod tests {
         let config = fresh_config(dir.path(), true, true);
         let (bridge, reg, sink) = registry();
         let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_dimp, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_d2, contexts_ks) = empty_keyspace("contexts").await;
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
@@ -650,6 +668,7 @@ mod tests {
         let err = disable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
@@ -664,6 +683,7 @@ mod tests {
             &super_admin(),
             rest_params(Duration::from_secs(0)),
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -680,6 +700,7 @@ mod tests {
         let config = fresh_config(dir.path(), true, true);
         let (bridge, reg, sink) = registry();
         let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_dimp, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_d2, contexts_ks) = empty_keyspace("contexts").await;
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
@@ -691,6 +712,7 @@ mod tests {
         let err = disable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
@@ -705,6 +727,7 @@ mod tests {
             &super_admin(),
             didcomm_params(Duration::from_secs(3600)),
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await

@@ -735,6 +735,7 @@ mod pre_rotation_e2e_tests {
 
         let result = update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -747,6 +748,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -787,6 +790,7 @@ mod pre_rotation_e2e_tests {
 
         let result = update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -799,6 +803,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -841,6 +847,7 @@ mod pre_rotation_e2e_tests {
 
         update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -853,6 +860,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -861,6 +870,7 @@ mod pre_rotation_e2e_tests {
 
         let result2 = update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -873,6 +883,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -909,6 +921,7 @@ mod pre_rotation_e2e_tests {
 
         update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -921,6 +934,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -929,6 +944,7 @@ mod pre_rotation_e2e_tests {
 
         update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -941,6 +957,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -978,6 +996,7 @@ mod pre_rotation_e2e_tests {
         // Update 1: turn off pre-rotation.
         let r1 = update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -991,6 +1010,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -1001,6 +1022,7 @@ mod pre_rotation_e2e_tests {
         // Update 2: ordinary non-pre-rotation update.
         let r2 = update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -1013,6 +1035,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -1047,6 +1071,7 @@ mod pre_rotation_e2e_tests {
 
         let result = rotate_did_webvh_keys(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -1056,6 +1081,8 @@ mod pre_rotation_e2e_tests {
             RotateDidWebvhKeysOptions::default(),
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -1137,6 +1164,7 @@ mod pre_rotation_e2e_tests {
         // `load_pre_rotation_signing_key`.
         let result = update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -1149,6 +1177,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -1208,6 +1238,7 @@ mod pre_rotation_e2e_tests {
         sleep(VERSION_TIME_GAP).await;
         update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -1220,6 +1251,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -1229,6 +1262,7 @@ mod pre_rotation_e2e_tests {
         sleep(VERSION_TIME_GAP).await;
         let err = update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -1242,6 +1276,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -1478,6 +1514,7 @@ mod pre_rotation_e2e_tests {
         // guard didn't accidentally fail-closed in the happy case.
         let result = rotate_did_webvh_keys(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -1490,6 +1527,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -1538,6 +1577,7 @@ mod pre_rotation_e2e_tests {
         sleep(VERSION_TIME_GAP).await;
         let result = update_did_webvh(
             &ts.keys_ks,
+            &ts.imported_ks,
             &ts.contexts_ks,
             &ts.webvh_ks,
             &ts.audit_ks,
@@ -1551,6 +1591,8 @@ mod pre_rotation_e2e_tests {
             },
             &resolver,
             &bridge,
+            None,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await

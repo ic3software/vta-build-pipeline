@@ -761,21 +761,24 @@ pub async fn handle_delete_did_webvh(
     let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
     let body: vta_sdk::protocols::did_management::delete::DeleteDidWebvhBody =
         serde_json::from_value(message.body).map_err(handler_err)?;
-    let config = state.config.read().await;
     let did_resolver = state
         .did_resolver
         .as_ref()
         .ok_or_else(|| handler_err("DID resolver not available"))?;
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = app_try!(
         operations::did_webvh::delete_did_webvh(
             &state.webvh_ks,
             &state.keys_ks,
+            &state.imported_ks,
+            &state.audit_ks,
             &*state.seed_store,
-            &config,
             &auth,
             &body.did,
             did_resolver,
             &state.didcomm_bridge,
+            vta_did.as_deref(),
+            &state.webvh_auth_locks,
             "didcomm",
         )
         .await
@@ -894,10 +897,14 @@ pub async fn handle_register_did_with_server(
         .did_resolver
         .as_ref()
         .ok_or_else(|| handler_err("DID resolver not available"))?;
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = app_try!(
         operations::did_webvh::register_did_with_server(
             &state.webvh_ks,
+            &state.keys_ks,
+            &state.imported_ks,
             &state.audit_ks,
+            &*state.seed_store,
             &auth,
             did_resolver,
             &state.didcomm_bridge,
@@ -906,6 +913,8 @@ pub async fn handle_register_did_with_server(
                 server_id: body.server_id,
                 force: body.force,
             },
+            vta_did.as_deref(),
+            &state.webvh_auth_locks,
             "didcomm",
         )
         .await
@@ -1379,9 +1388,11 @@ pub async fn handle_update_did_webvh(
         expected_version_id: env.body.expected_version_id,
     };
 
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = app_try!(
         operations::did_webvh::update_did_webvh(
             &state.keys_ks,
+            &state.imported_ks,
             &state.contexts_ks,
             &state.webvh_ks,
             &state.audit_ks,
@@ -1391,6 +1402,8 @@ pub async fn handle_update_did_webvh(
             opts,
             did_resolver,
             &state.didcomm_bridge,
+            vta_did.as_deref(),
+            &state.webvh_auth_locks,
             "didcomm",
         )
         .await
@@ -1431,9 +1444,11 @@ pub async fn handle_rotate_did_webvh_keys(
         label: env.body.label,
     };
 
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = app_try!(
         operations::did_webvh::rotate_did_webvh_keys(
             &state.keys_ks,
+            &state.imported_ks,
             &state.contexts_ks,
             &state.webvh_ks,
             &state.audit_ks,
@@ -1443,6 +1458,8 @@ pub async fn handle_rotate_did_webvh_keys(
             opts,
             did_resolver,
             &state.didcomm_bridge,
+            vta_did.as_deref(),
+            &state.webvh_auth_locks,
             "didcomm",
         )
         .await

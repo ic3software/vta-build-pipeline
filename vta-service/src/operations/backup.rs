@@ -450,17 +450,46 @@ pub async fn apply_import(
         acl_ks.insert("vta:sealed", &record).await?;
     }
 
-    // 9. Write WebVH records
+    // 9. Write WebVH records.
+    //
+    // Cross-VTA disaster recovery (audit H3): if we're importing
+    // someone else's backup (running_did present and != backup_did,
+    // *or* backup carries no vta_did), strip `server_id`/`mnemonic`
+    // off every imported `WebvhDidRecord` before persisting. The
+    // imported daemon registrations still belong to the source VTA;
+    // re-publishing from this VTA would clobber the source's slot.
+    // Operator must explicitly re-`register_did_with_server` per
+    // imported DID. See `docs/05-design-notes/webvh-rest-auth-audit.md`
+    // §H3.
     #[cfg(feature = "webvh")]
     {
+        let backup_vta_did = payload.config.vta_did.as_deref();
+        let running_vta_did = config.read().await.vta_did.clone();
+        let cross_vta_restore = match (running_vta_did.as_deref(), backup_vta_did) {
+            (None, _) => false,      // fresh install — backup is authoritative
+            (Some(_), None) => true, // running but backup missing identity
+            (Some(running), Some(backup)) => running != backup, // operator-confirmed swap
+        };
+
         for server in &payload.webvh_servers {
             webvh_ks
                 .insert(format!("server:{}", server.id), server)
                 .await?;
         }
         for did_rec in &payload.webvh_dids {
+            let mut record = did_rec.clone();
+            if cross_vta_restore && record.server_id != "serverless" {
+                tracing::warn!(
+                    did = %record.did,
+                    original_server = %record.server_id,
+                    "cross-VTA restore: stripping server_id/mnemonic from imported WebvhDidRecord; \
+                     operator must `register_did_with_server` to re-attach to this VTA",
+                );
+                record.server_id = "serverless".to_string();
+                record.mnemonic = String::new();
+            }
             webvh_ks
-                .insert(format!("did:{}", did_rec.did), did_rec)
+                .insert(format!("did:{}", record.did), &record)
                 .await?;
         }
         for log in &payload.webvh_logs {

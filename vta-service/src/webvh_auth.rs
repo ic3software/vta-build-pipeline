@@ -50,6 +50,7 @@
 
 use affinidi_tdk::didcomm::Message;
 use serde_json::json;
+use zeroize::Zeroizing;
 
 use crate::error::AppError;
 
@@ -111,6 +112,40 @@ pub fn build_authenticate_message(
         identity.private_key,
     )
     .map_err(|e| AppError::Internal(format!("failed to sign webvh authenticate message: {e}")))
+}
+
+/// Owned counterpart to [`VtaSigningIdentity`] — loads from the
+/// VTA's key store and holds the 32-byte signing seed in a
+/// `Zeroizing` wrapper so the bytes are wiped on drop.
+///
+/// Use [`as_ref`](Self::as_ref) to borrow into the lifetime-bound
+/// [`VtaSigningIdentity`] view that the message builders take.
+pub struct VtaSigningIdentityOwned {
+    pub vta_did: String,
+    pub signing_kid: String,
+    pub private_key: Zeroizing<[u8; 32]>,
+}
+
+impl VtaSigningIdentityOwned {
+    pub fn as_ref(&self) -> VtaSigningIdentity<'_> {
+        VtaSigningIdentity {
+            vta_did: &self.vta_did,
+            signing_kid: &self.signing_kid,
+            private_key: &self.private_key,
+        }
+    }
+}
+
+impl std::fmt::Debug for VtaSigningIdentityOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the private key bytes — same hygiene as
+        // `TokenData` / `WebvhServerAuthRecord`.
+        f.debug_struct("VtaSigningIdentityOwned")
+            .field("vta_did", &self.vta_did)
+            .field("signing_kid", &self.signing_kid)
+            .field("private_key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Build the JWS-signed body for `POST /api/auth/refresh`.

@@ -69,6 +69,11 @@ pub struct VtaState {
     /// Per-mediator TTL sweeper.
     #[cfg(feature = "webvh")]
     pub drain_sweeper: Arc<crate::messaging::drain_sweeper::DrainSweeper>,
+    /// Per-webvh-server async mutex registry. Mirrored from
+    /// `AppState` so DIDComm-transport handlers serialise the same
+    /// daemon-REST auth-cache reads as REST handlers.
+    #[cfg(feature = "webvh")]
+    pub webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks,
     /// Pluggable telemetry sink — driven by both REST and DIDComm
     /// transport handlers so `mediator report` is consistent
     /// regardless of which transport posted the inbound event.

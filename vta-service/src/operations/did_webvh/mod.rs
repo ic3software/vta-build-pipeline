@@ -6,6 +6,7 @@
 //! - `lifecycle` — read ops on stored DID records (`get`, `list`, log)
 //! - `servers` — webvh hosting-server CRUD + DID validation
 
+pub(crate) mod auth_cache;
 mod concurrency;
 mod document;
 mod lifecycle;
@@ -14,6 +15,11 @@ mod servers;
 mod transport;
 mod update;
 mod webvh_keys;
+
+pub use auth_cache::WebvhAuthLocks;
+pub(crate) use auth_cache::{
+    delete_log_on_server, publish_log_to_server, register_did_atomic_on_server,
+};
 
 pub(crate) use concurrency::{RaceDetected, RecordSnapshot};
 
@@ -1002,12 +1008,15 @@ pub async fn create_did_webvh(
 pub async fn delete_did_webvh(
     webvh_ks: &KeyspaceHandle,
     keys_ks: &KeyspaceHandle,
-    _seed_store: &dyn SeedStore,
-    _config: &AppConfig,
+    imported_ks: &KeyspaceHandle,
+    audit_ks: &KeyspaceHandle,
+    seed_store: &dyn SeedStore,
     auth: &AuthClaims,
     did: &str,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
+    vta_did: Option<&str>,
+    auth_locks: &WebvhAuthLocks,
     channel: &str,
 ) -> Result<DeleteDidWebvhResultBody, AppError> {
     auth.require_admin()?;
@@ -1016,18 +1025,51 @@ pub async fn delete_did_webvh(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("webvh DID not found: {did}")))?;
 
-    // Resolve server for remote deletion
+    // Resolve server for remote deletion. Track the outcome so the
+    // operator can act on a daemon-side orphan rather than seeing
+    // local cleanup succeed silently. (Spec / audit H4: surface the
+    // failure on the result body.)
+    let mut daemon_cleanup_error: Option<String> = None;
     let server = webvh_store::get_server(webvh_ks, &record.server_id).await?;
-
     if let Some(server) = server {
-        match WebvhTransport::from_server(&server, did_resolver, didcomm_bridge).await {
-            Ok(transport) => {
-                if let Err(e) = transport.delete_did(&record.mnemonic).await {
-                    tracing::warn!(did = %did, error = %e, "failed to delete DID from webvh-server (continuing local cleanup)");
+        match vta_did {
+            Some(vta_did_value) => {
+                if let Err(e) = delete_log_on_server(
+                    keys_ks,
+                    imported_ks,
+                    audit_ks,
+                    webvh_ks,
+                    seed_store,
+                    did_resolver,
+                    didcomm_bridge,
+                    auth_locks,
+                    vta_did_value,
+                    &server,
+                    &record.mnemonic,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        did = %did,
+                        server_id = %server.id,
+                        error = %e,
+                        "webvh-daemon delete_did failed; continuing local cleanup but DID is now orphaned on the daemon"
+                    );
+                    daemon_cleanup_error = Some(format!(
+                        "daemon `{}` rejected delete: {e} — DID is orphaned on the daemon and \
+                         must be cleaned up out-of-band",
+                        server.id
+                    ));
                 }
             }
-            Err(e) => {
-                tracing::warn!(did = %did, error = %e, "failed to resolve server endpoint (continuing local cleanup)");
+            None => {
+                let msg = format!(
+                    "VTA DID is not configured — skipping daemon-side delete on server `{}`. \
+                     Local record removed, but the daemon entry is now orphaned.",
+                    server.id
+                );
+                tracing::warn!(did = %did, "{msg}");
+                daemon_cleanup_error = Some(msg);
             }
         }
     }
@@ -1039,8 +1081,11 @@ pub async fn delete_did_webvh(
     for key_id in &[format!("{did}#key-0"), format!("{did}#key-1")] {
         let _ = keys_ks.remove(keys::store_key(key_id)).await;
     }
-    // Clean up pre-rotation key records
-    for i in 0..100u32 {
+    // Clean up pre-rotation key records (M4: bound to the record's
+    // declared count so a DID created with a high pre_rotation_count
+    // doesn't leak entries).
+    let pre_rotation_bound = std::cmp::max(record.pre_rotation_count, 32);
+    for i in 0..pre_rotation_bound {
         let key_id = format!("{did}#pre-rotation-{i}");
         let store_key = keys::store_key(&key_id);
         if keys_ks.get_raw(store_key.clone()).await?.is_none() {
@@ -1053,6 +1098,7 @@ pub async fn delete_did_webvh(
     Ok(DeleteDidWebvhResultBody {
         did: did.to_string(),
         deleted: true,
+        daemon_cleanup_error,
     })
 }
 
@@ -1143,31 +1189,135 @@ impl<'a> WebvhTransport<'a> {
     }
 
     /// Atomic claim-and-publish — single round-trip alternative to
-    /// `request_uri` + `publish_did`. The server commits slot
-    /// allocation, log content, and owner index in one batch, so
-    /// resolvers never see the slot empty.
-    pub(super) async fn register_did_atomic(
-        &self,
-        path: &str,
-        did_log: &str,
-        force: bool,
-    ) -> Result<RequestUriResponse, AppError> {
+    // The unauthenticated `register_did_atomic` and `delete_did`
+    // methods that used to live here have been removed — every call
+    // site now goes through the auth-cache helpers
+    // (`auth_cache::publish_log_to_server`, `delete_log_on_server`,
+    // `register_did_atomic_on_server`) which use the
+    // `_authenticated` variants below.
+
+    // ── Authenticated transport + 401-retry wrappers ──────────────
+    //
+    // The methods above keep the original "dumb transport" API for
+    // call sites that don't authenticate (e.g. read-only resolution
+    // tests). Mutating operations against an ACL-protected daemon
+    // go through the wrappers below, which:
+    //
+    // 1. Ensure the REST client carries a fresh bearer token (loaded
+    //    via `auth_cache::ensure_fresh_access_token` under the
+    //    per-server async mutex), and
+    // 2. On `Unauthorized` from the daemon mid-window — meaning the
+    //    daemon revoked the token between the cache check and the
+    //    call — invalidate the cache, re-authenticate, retry once.
+    //
+    // DIDComm transports are pass-through: there's no auth-cache
+    // state, and authcrypt handles the equivalent at the envelope
+    // layer.
+
+    /// Build a transport with a freshly-validated access token
+    /// already applied (REST only). For DIDComm transports this
+    /// behaves identically to [`Self::from_server`] since DIDComm
+    /// authentication lives at the envelope layer.
+    pub(super) async fn from_server_authenticated(
+        server: &WebvhServerRecord,
+        did_resolver: &DIDCacheClient,
+        didcomm_bridge: &'a Arc<DIDCommBridge>,
+        auth_ctx: &auth_cache::AuthContext<'_>,
+    ) -> Result<Self, AppError> {
+        let mut transport = Self::from_server(server, did_resolver, didcomm_bridge).await?;
+        if let Self::Rest(ref mut client) = transport {
+            auth_cache::ensure_fresh_access_token(auth_ctx, server, client).await?;
+        }
+        Ok(transport)
+    }
+
+    /// `publish_did` with one-shot 401 retry. If the daemon returns
+    /// 401 mid-window (token revoked), invalidate the cache,
+    /// re-authenticate, and retry exactly once.
+    pub(super) async fn publish_did_authenticated(
+        &mut self,
+        mnemonic: &str,
+        log_content: &str,
+        auth_ctx: &auth_cache::AuthContext<'_>,
+        server: &WebvhServerRecord,
+    ) -> Result<(), AppError> {
         match self {
-            Self::Rest(c) => c.register_did_atomic(path, did_log, force).await,
+            Self::Rest(c) => match c.publish_did(mnemonic, log_content).await {
+                Ok(()) => Ok(()),
+                Err(AppError::Unauthorized(_)) => {
+                    info!(
+                        server_id = %server.id,
+                        "webvh publish_did got 401; invalidating cache and retrying"
+                    );
+                    auth_cache::invalidate_cached_token(auth_ctx.webvh_ks, &server.id).await?;
+                    auth_cache::ensure_fresh_access_token(auth_ctx, server, c).await?;
+                    c.publish_did(mnemonic, log_content).await
+                }
+                Err(e) => Err(e),
+            },
             Self::DIDComm { bridge, server_did } => {
                 WebvhDIDCommClient::new(bridge, server_did)
-                    .register_did_atomic(path, did_log, force)
+                    .publish_did(mnemonic, log_content)
                     .await
             }
         }
     }
 
-    async fn delete_did(&self, mnemonic: &str) -> Result<(), AppError> {
+    /// `delete_did` with one-shot 401 retry.
+    pub(super) async fn delete_did_authenticated(
+        &mut self,
+        mnemonic: &str,
+        auth_ctx: &auth_cache::AuthContext<'_>,
+        server: &WebvhServerRecord,
+    ) -> Result<(), AppError> {
         match self {
-            Self::Rest(c) => c.delete_did(mnemonic).await,
+            Self::Rest(c) => match c.delete_did(mnemonic).await {
+                Ok(()) => Ok(()),
+                Err(AppError::Unauthorized(_)) => {
+                    info!(
+                        server_id = %server.id,
+                        "webvh delete_did got 401; invalidating cache and retrying"
+                    );
+                    auth_cache::invalidate_cached_token(auth_ctx.webvh_ks, &server.id).await?;
+                    auth_cache::ensure_fresh_access_token(auth_ctx, server, c).await?;
+                    c.delete_did(mnemonic).await
+                }
+                Err(e) => Err(e),
+            },
             Self::DIDComm { bridge, server_did } => {
                 WebvhDIDCommClient::new(bridge, server_did)
                     .delete_did(mnemonic)
+                    .await
+            }
+        }
+    }
+
+    /// `register_did_atomic` with one-shot 401 retry.
+    pub(super) async fn register_did_atomic_authenticated(
+        &mut self,
+        path: &str,
+        did_log: &str,
+        force: bool,
+        auth_ctx: &auth_cache::AuthContext<'_>,
+        server: &WebvhServerRecord,
+    ) -> Result<RequestUriResponse, AppError> {
+        match self {
+            Self::Rest(c) => match c.register_did_atomic(path, did_log, force).await {
+                Ok(r) => Ok(r),
+                Err(AppError::Unauthorized(_)) => {
+                    info!(
+                        server_id = %server.id,
+                        "webvh register_did_atomic got 401; invalidating cache and retrying"
+                    );
+                    auth_cache::invalidate_cached_token(auth_ctx.webvh_ks, &server.id).await?;
+                    auth_cache::ensure_fresh_access_token(auth_ctx, server, c).await?;
+                    c.register_did_atomic(path, did_log, force).await
+                }
+                Err(e) => Err(e),
+            },
+            Self::DIDComm { bridge, server_did } => {
+                WebvhDIDCommClient::new(bridge, server_did)
+                    .register_did_atomic(path, did_log, force)
                     .await
             }
         }
