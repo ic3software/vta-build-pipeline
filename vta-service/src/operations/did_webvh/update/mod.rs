@@ -45,6 +45,15 @@ pub use options::{RotateDidWebvhKeysOptions, UpdateDidWebvhOptions, UpdateDidWeb
 pub use orchestrator::update_did_webvh;
 pub use rotate::rotate_did_webvh_keys;
 
+/// Cross-module accessor for `state_from_jsonl`. `passkey_vms` uses
+/// it to read the current DID document before appending a passkey
+/// VM; the chain-validation invariant stays inside this module.
+pub fn state_from_jsonl_pub(
+    did_log: &str,
+) -> Result<didwebvh_rs::DIDWebVHState, UpdateDidWebvhError> {
+    state::state_from_jsonl(did_log)
+}
+
 #[cfg(test)]
 mod tests {
     use super::keys::{derive_webvh_keys, install_derived_webvh_keys, load_active_update_key};

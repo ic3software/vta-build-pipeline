@@ -471,6 +471,8 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
     #[cfg(feature = "webvh")]
     let webvh_ks = store.keyspace("webvh").unwrap();
     #[cfg(feature = "webvh")]
+    let passkey_vms_ks = store.keyspace("passkey_vms").unwrap();
+    #[cfg(feature = "webvh")]
     let drains_ks = store.keyspace("drains").unwrap();
     #[cfg(feature = "webvh")]
     let snapshot_ks = store
@@ -531,6 +533,8 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         sealed_nonces_ks,
         #[cfg(feature = "webvh")]
         webvh_ks,
+        #[cfg(feature = "webvh")]
+        passkey_vms_ks,
         #[cfg(feature = "webvh")]
         drains_ks,
         #[cfg(feature = "webvh")]

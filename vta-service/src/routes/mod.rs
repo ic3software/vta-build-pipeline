@@ -15,6 +15,8 @@ mod did_webvh;
 mod health;
 pub mod keys;
 #[cfg(feature = "webvh")]
+mod passkey_vms;
+#[cfg(feature = "webvh")]
 mod protocol;
 mod vta;
 
@@ -288,6 +290,23 @@ pub fn router() -> Router<AppState> {
         .route(
             "/contexts/{ctx_id}/dids/{scid}/rotate-keys",
             post(did_webvh::rotate_did_keys_handler),
+        )
+        // Passkey-as-verificationMethod enrolment. See
+        // `docs/02-vta/passkey-verification-methods.md` (forthcoming).
+        // First-time enrolment expects a short-lived enrolment-scope
+        // JWT minted by `pnm passkey-enroll-token`; subsequent calls
+        // use a passkey-derived session JWT.
+        .route(
+            "/did/verification-methods/passkey/challenge",
+            post(passkey_vms::enroll_challenge_handler),
+        )
+        .route(
+            "/did/verification-methods/passkey",
+            post(passkey_vms::enroll_submit_handler).get(passkey_vms::list_passkeys_handler),
+        )
+        .route(
+            "/did/verification-methods/passkey/{fragment}",
+            delete(passkey_vms::revoke_passkey_handler),
         );
 
     // VTA management routes

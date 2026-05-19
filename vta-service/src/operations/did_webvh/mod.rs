@@ -33,7 +33,7 @@ pub use register_server::{
 pub use servers::{add_webvh_server, list_webvh_servers, remove_webvh_server, update_webvh_server};
 pub use update::{
     RotateDidWebvhKeysOptions, UpdateDidWebvhError, UpdateDidWebvhOptions, UpdateDidWebvhResult,
-    rotate_did_webvh_keys, update_did_webvh,
+    rotate_did_webvh_keys, state_from_jsonl_pub, update_did_webvh,
 };
 
 use std::sync::Arc;

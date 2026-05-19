@@ -68,7 +68,7 @@ path = "src/main.rs"
 required-features = ["cli-synthesis"]
 
 [dependencies]
-vti-common = { path = "../vti-common", version = "0.6", features = ["encryption"] }
+vti-common = { path = "../vti-common", version = "0.6", features = ["encryption", "passkey"] }
 vta-sdk = { path = "../vta-sdk", version = "0.6", features = ["didcomm", "sealed-transfer", "provision-integration"] }
 # Shared CLI helpers for the consumer side of sealed-transfer (request
 # generation, bundle opening). Used by `vta bootstrap request` /
@@ -136,6 +136,14 @@ aes = { version = "0.9", optional = true }
 x25519-dalek = { workspace = true }
 multibase = { workspace = true }
 p256 = "0.13"
+# WebAuthn — used by `operations::passkey_vms` to drive the
+# registration ceremony for passkey-as-verificationMethod enrolment.
+webauthn-rs = { workspace = true }
+webauthn-rs-proto = "0.5"
+# CBOR decoder for parsing the WebAuthn attestationObject's authData
+# so the VTA can re-derive the COSE public key and reject any
+# tampered browser-supplied multikey.
+ciborium = "0.2"
 url = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 tempfile = { version = "3", optional = true }

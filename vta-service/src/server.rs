@@ -85,6 +85,12 @@ pub struct AppState {
     pub sealed_nonces_ks: KeyspaceHandle,
     #[cfg(feature = "webvh")]
     pub webvh_ks: KeyspaceHandle,
+    /// In-flight WebAuthn registration state for the
+    /// passkey-as-verificationMethod enrolment ceremony. Holds
+    /// `PasskeyRegistration` keyed by ceremony id; consumed (taken)
+    /// at finish.
+    #[cfg(feature = "webvh")]
+    pub passkey_vms_ks: KeyspaceHandle,
     /// Persisted drain set for the protocol-management feature
     /// (`docs/05-design-notes/didcomm-protocol-management.md`).
     /// Keyed by mediator DID; replayed at boot.
@@ -188,6 +194,8 @@ pub async fn build_app_state(
     #[cfg(feature = "webvh")]
     let webvh_ks = apply_encryption(store.keyspace("webvh")?);
     #[cfg(feature = "webvh")]
+    let passkey_vms_ks = apply_encryption(store.keyspace("passkey_vms")?);
+    #[cfg(feature = "webvh")]
     let drains_ks = apply_encryption(store.keyspace("drains")?);
     #[cfg(feature = "webvh")]
     let snapshot_ks =
@@ -231,6 +239,8 @@ pub async fn build_app_state(
         sealed_nonces_ks,
         #[cfg(feature = "webvh")]
         webvh_ks,
+        #[cfg(feature = "webvh")]
+        passkey_vms_ks,
         #[cfg(feature = "webvh")]
         drains_ks,
         #[cfg(feature = "webvh")]
@@ -321,6 +331,8 @@ pub async fn run(
         let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
         #[cfg(feature = "webvh")]
         let webvh_ks = apply_encryption(store.keyspace("webvh")?);
+        #[cfg(feature = "webvh")]
+        let passkey_vms_ks = apply_encryption(store.keyspace("passkey_vms")?);
         #[cfg(feature = "webvh")]
         let drains_ks = apply_encryption(store.keyspace("drains")?);
         #[cfg(feature = "webvh")]
@@ -481,6 +493,8 @@ pub async fn run(
                 sealed_nonces_ks,
                 #[cfg(feature = "webvh")]
                 webvh_ks,
+                #[cfg(feature = "webvh")]
+                passkey_vms_ks,
                 #[cfg(feature = "webvh")]
                 drains_ks,
                 #[cfg(feature = "webvh")]

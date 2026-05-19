@@ -2,6 +2,7 @@ pub mod create;
 pub mod delete;
 pub mod get;
 pub mod list;
+pub mod passkey_vms;
 pub mod servers;
 pub mod update;
 
@@ -70,3 +71,23 @@ pub const REGISTER_DID_WITH_SERVER: &str =
     "https://firstperson.network/protocols/did-management/1.0/register-did-with-server";
 pub const REGISTER_DID_WITH_SERVER_RESULT: &str =
     "https://firstperson.network/protocols/did-management/1.0/register-did-with-server-result";
+
+pub const ENROLL_PASSKEY_VM_CHALLENGE: &str =
+    "https://firstperson.network/protocols/did-management/1.0/enroll-passkey-vm-challenge";
+pub const ENROLL_PASSKEY_VM_CHALLENGE_RESULT: &str =
+    "https://firstperson.network/protocols/did-management/1.0/enroll-passkey-vm-challenge-result";
+
+pub const ENROLL_PASSKEY_VM_SUBMIT: &str =
+    "https://firstperson.network/protocols/did-management/1.0/enroll-passkey-vm-submit";
+pub const ENROLL_PASSKEY_VM_SUBMIT_RESULT: &str =
+    "https://firstperson.network/protocols/did-management/1.0/enroll-passkey-vm-submit-result";
+
+pub const LIST_PASSKEY_VMS: &str =
+    "https://firstperson.network/protocols/did-management/1.0/list-passkey-vms";
+pub const LIST_PASSKEY_VMS_RESULT: &str =
+    "https://firstperson.network/protocols/did-management/1.0/list-passkey-vms-result";
+
+pub const REVOKE_PASSKEY_VM: &str =
+    "https://firstperson.network/protocols/did-management/1.0/revoke-passkey-vm";
+pub const REVOKE_PASSKEY_VM_RESULT: &str =
+    "https://firstperson.network/protocols/did-management/1.0/revoke-passkey-vm-result";
