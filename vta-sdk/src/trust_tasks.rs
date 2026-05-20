@@ -531,6 +531,61 @@ pub const TASK_CONTEXTS_DID_TEMPLATES_DELETE_1_0: &str =
 pub const TASK_CONTEXTS_DID_TEMPLATES_RENDER_1_0: &str =
     "https://trusttasks.org/spec/vta/contexts/did-templates/render/1.0";
 
+// ─── Backup slice (spec/vta/backup/*) ────────────────────────────────────
+//
+// 3-phase descriptor pattern — see
+// `docs/05-design-notes/backup-descriptor-pattern.md`. The
+// trust-task envelope carries the control plane only; the bulk
+// encrypted bytes flow over `GET / POST /backup/blob/{bundle_id}`
+// (deliberately REST-only, like the public DID log mirror —
+// bulk transport is wrong on top of a JSON envelope).
+//
+// All five URIs require super-admin authentication. Additionally
+// every non-`initiate-*` URI checks caller-DID-owns-bundle so a
+// second super-admin can't snoop on the first's in-flight backup.
+//
+// Slice handlers, op-layer functions, blob REST routes, and the
+// background sweeper land in follow-on commits per the rollout
+// plan in the design doc. URIs are declared here unconditionally
+// so client SDKs can probe; the dispatcher's
+// `KNOWN_FEATURE_GATED_URIS` allowlist will track them until the
+// slice ships.
+
+/// `spec/vta/backup/initiate-export/1.0` — mint an export bundle;
+/// return a [`BundleDescriptor`](crate::protocols::backup_management::descriptors::BundleDescriptor)
+/// pointing at the blob endpoint. Payload:
+/// [`crate::protocols::backup_management::descriptors::InitiateExportBody`].
+/// Auth: super-admin.
+pub const TASK_BACKUP_INITIATE_EXPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/backup/initiate-export/1.0";
+
+/// `spec/vta/backup/complete-export/1.0` — optional ack from the
+/// client after a successful download. Payload:
+/// [`crate::protocols::backup_management::descriptors::CompleteExportBody`].
+/// Auth: super-admin (must match the initiator's DID).
+pub const TASK_BACKUP_COMPLETE_EXPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/backup/complete-export/1.0";
+
+/// `spec/vta/backup/initiate-import/1.0` — mint an upload slot;
+/// return a descriptor for the client to POST bytes to. Payload:
+/// [`crate::protocols::backup_management::descriptors::InitiateImportBody`].
+/// Auth: super-admin.
+pub const TASK_BACKUP_INITIATE_IMPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/backup/initiate-import/1.0";
+
+/// `spec/vta/backup/finalize-import/1.0` — apply uploaded bytes
+/// (or run in preview mode). Payload:
+/// [`crate::protocols::backup_management::descriptors::FinalizeImportBody`].
+/// Auth: super-admin (must match the initiator's DID).
+pub const TASK_BACKUP_FINALIZE_IMPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/backup/finalize-import/1.0";
+
+/// `spec/vta/backup/abort/1.0` — cancel an in-flight bundle in
+/// any non-terminal state. Payload:
+/// [`crate::protocols::backup_management::descriptors::AbortBundleBody`].
+/// Auth: super-admin (must match the initiator's DID).
+pub const TASK_BACKUP_ABORT_1_0: &str = "https://trusttasks.org/spec/vta/backup/abort/1.0";
+
 // ─── Attestation slice (spec/vta/attestation/*) ──────────────────────────
 //
 // TEE-feature-gated and DELIBERATELY UNAUTHENTICATED on the wire
@@ -643,6 +698,11 @@ pub const ALL_URIS: &[&str] = &[
     TASK_CONTEXTS_DID_TEMPLATES_UPDATE_1_0,
     TASK_CONTEXTS_DID_TEMPLATES_DELETE_1_0,
     TASK_CONTEXTS_DID_TEMPLATES_RENDER_1_0,
+    // Backup slice (`TASK_BACKUP_*`) intentionally absent — URIs are
+    // reserved with `pub const` declarations but the slice ships in
+    // a follow-on commit per the rollout plan in
+    // `docs/05-design-notes/backup-descriptor-pattern.md`. Once the
+    // dispatcher arms land, add them here.
     // Attestation slice (REST-routed, unauthenticated)
     TASK_ATTESTATION_STATUS_1_0,
     TASK_ATTESTATION_REPORT_1_0,
