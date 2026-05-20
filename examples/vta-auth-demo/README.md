@@ -14,13 +14,15 @@ server and click around.
 | 4 | Passkey login (DID-VM-resolved WebAuthn)  | `POST /auth/passkey-login/start` + browser WebAuthn API + `POST /auth/passkey-login/finish` | implemented |
 | 5 | Session inspection + revoke               | `GET /auth/sessions`, `DELETE /auth/sessions/{id}`    | implemented |
 | 6 | Trust-task dispatch                       | `POST /api/trust-tasks` with bearer auth              | implemented |
+| 7 | DIDComm primitives smoke-test             | (purely client-side; resolve + pack against any DID)  | implemented |
 | — | Legacy challenge / authenticate           | `POST /auth/challenge` + `POST /auth/`                | **not in demo** |
 | — | Refresh                                   | `POST /auth/refresh`                                  | **not in demo** |
 
 The legacy challenge/authenticate and refresh flows take DIDComm-packed
-messages as their request body. A browser doesn't have a DIDComm pack
-stack and the demo deliberately doesn't ship one. Use `pnm auth` (or
-any programmatic SDK client) for those paths.
+messages as their request body. Step 7 ships the JS DIDComm pack stack
+(`vti-didcomm-js`) — it doesn't drive the legacy flow itself yet, but
+it shows the primitives work in a real browser. A future step can wire
+them up to actually call `/auth/`.
 
 ## Prerequisites
 
@@ -132,6 +134,21 @@ needed.
      (e.g. `keys/get/1.0` needs `{"key_id": "..."}`).
    - Click "Send"; the response payload is printed.
 
+7. **Step 7 — DIDComm primitives smoke-test**:
+   - Paste any DID into "Recipient DID". `did:key:z…` resolves
+     offline; `did:webvh:…` fetches its `did.jsonl` over HTTPS.
+   - "Resolve DID" runs the resolver and shows the resolved DID
+     document + metadata.
+   - "Resolve + pack" additionally:
+     - finds the recipient's first `keyAgreement` X25519 key,
+     - generates an ephemeral X25519 sender keypair,
+     - packs the textarea body as a DIDComm v2 authcrypt JWE
+       (ECDH-1PU + A256CBC-HS512),
+     - prints the JWE — but does NOT deliver it. This is a
+       library smoke-test, not a transport.
+   - The bundled crypto stack is at `./vendor/vti-didcomm-js.js`
+     (100 KB minified, loaded lazily on first click).
+
 ## What the multikey computation does
 
 WebAuthn enrolment is a multi-step ceremony, and the VTA's submit
@@ -155,11 +172,23 @@ enrol path errors out and you'll need to extend `p256AttestationToMultikey`.
 
 ```
 examples/vta-auth-demo/
-├── index.html      UI structure (six numbered sections)
-├── app.js          Flow logic + multikey computation (vanilla ES modules)
-├── styles.css      Minimal dark-theme styling
-└── README.md       This file
+├── index.html                       UI structure (seven numbered sections)
+├── app.js                           Flow logic + multikey computation (vanilla ES modules)
+├── styles.css                       Minimal dark-theme styling
+├── vendor/vti-didcomm-js.js         Bundled DIDComm v2 stack used by Step 7
+└── README.md                        This file
 ```
+
+To regenerate `vendor/vti-didcomm-js.js` after editing the JS library:
+
+```sh
+cd vti-didcomm-js
+npm run build:demo
+```
+
+This runs `esbuild` to produce a minified ESM bundle (currently ~100 KB)
+including `didwebvh-ts` and `@noble/curves`. The bundle is checked in so
+the demo stays zero-build at runtime.
 
 ## Related crates
 
@@ -188,3 +217,7 @@ examples/vta-auth-demo/
   server matches on `credential_id` to find the right VM. If a
   future passkey-login wire format requires the client to declare
   the VM explicitly, the demo will need updating.
+- **Step 7 is a primitive showcase, not a transport.** It packs
+  but doesn't deliver. Wiring the JWE to `POST /auth/` (or to a
+  mediator's `/inbound`) is follow-on work — see B4 in the
+  `vti-didcomm-js` roadmap.

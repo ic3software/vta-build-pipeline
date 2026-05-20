@@ -110,6 +110,12 @@ const els = {
   taskPayload: $("taskPayload"),
   sendTask: $("sendTask"),
   taskOutput: $("taskOutput"),
+
+  dcRecipientDid: $("dcRecipientDid"),
+  dcBody: $("dcBody"),
+  dcResolve: $("dcResolve"),
+  dcPack: $("dcPack"),
+  dcOutput: $("dcOutput"),
 };
 
 // ─── Utilities ────────────────────────────────────────────────────────
@@ -699,6 +705,162 @@ els.sendTask.addEventListener("click", async () => {
     setOutput(els.taskOutput, e.message, "err");
   }
 });
+
+// ─── Section 7: DIDComm primitives (vti-didcomm-js) ──────────────────
+//
+// Smoke-test for the browser-side DIDComm stack:
+//   - Resolve the recipient DID (did:key offline, did:webvh over HTTPS).
+//   - If a keyAgreement key exists, generate an ephemeral sender DID
+//     and pack an authcrypt JWE addressed to it.
+//
+// The JWE is shown verbatim — there is no VTA round-trip from this
+// section. The point is "the lib works in the browser".
+//
+// The vti-didcomm-js bundle is built via `npm run build:demo` in
+// `vti-didcomm-js/`. We load it lazily on first click so the demo's
+// other sections don't pay the 100 KB cost on initial page load.
+
+let didcommLib = null;
+async function loadDidcommLib() {
+  if (didcommLib) return didcommLib;
+  try {
+    didcommLib = await import("./vendor/vti-didcomm-js.js");
+  } catch (e) {
+    throw new Error(
+      `Failed to load ./vendor/vti-didcomm-js.js — run "npm run build:demo" in vti-didcomm-js/ to (re)generate it. (${e.message})`,
+    );
+  }
+  return didcommLib;
+}
+
+/**
+ * Find the first keyAgreement verification method on a DID document
+ * and return its raw 32-byte X25519 public key + the multibase-encoded
+ * `kid` for use as the recipient's `kid` in pack().
+ */
+function findKeyAgreement(didDocument, lib) {
+  const ka = didDocument.keyAgreement;
+  if (!ka || ka.length === 0) {
+    throw new Error("DID document has no keyAgreement entries");
+  }
+  // `keyAgreement[i]` is either a fully-embedded verificationMethod
+  // object or a reference (string id) into `verificationMethod[]`.
+  let vm = ka[0];
+  if (typeof vm === "string") {
+    const found = (didDocument.verificationMethod ?? []).find((v) => v.id === vm);
+    if (!found) throw new Error(`keyAgreement reference ${vm} not resolvable in verificationMethod[]`);
+    vm = found;
+  }
+  if (!vm.publicKeyMultibase) {
+    throw new Error("first keyAgreement entry has no publicKeyMultibase (only Multikey is supported in this demo)");
+  }
+  const { codec, key } = lib.multibase.decodeMultikey(vm.publicKeyMultibase);
+  if (codec[0] !== 0xec || codec[1] !== 0x01) {
+    throw new Error(`keyAgreement key is not X25519 (multicodec ${codec[0].toString(16)}${codec[1].toString(16)})`);
+  }
+  return { kid: vm.id, x25519Pub: key };
+}
+
+els.dcResolve.addEventListener("click", async () => {
+  clearOutput(els.dcOutput);
+  const did = els.dcRecipientDid.value.trim();
+  if (!did) {
+    setOutput(els.dcOutput, "Enter a recipient DID first.", "err");
+    return;
+  }
+  try {
+    const lib = await loadDidcommLib();
+    const { didDocument, didDocumentMetadata } = await lib.resolve(did);
+    setOutput(
+      els.dcOutput,
+      `Resolved ${did}\n\nDID Document:\n${asJson(didDocument)}\n\nMetadata:\n${asJson(didDocumentMetadata)}`,
+      "ok",
+    );
+  } catch (e) {
+    setOutput(els.dcOutput, e.message, "err");
+  }
+});
+
+els.dcPack.addEventListener("click", async () => {
+  clearOutput(els.dcOutput);
+  const did = els.dcRecipientDid.value.trim();
+  if (!did) {
+    setOutput(els.dcOutput, "Enter a recipient DID first.", "err");
+    return;
+  }
+
+  let body;
+  try {
+    body = JSON.parse(els.dcBody.value || "{}");
+  } catch (e) {
+    setOutput(els.dcOutput, `Message body is not valid JSON: ${e.message}`, "err");
+    return;
+  }
+
+  try {
+    const lib = await loadDidcommLib();
+
+    // Step 1: resolve the recipient and locate its keyAgreement key.
+    const { didDocument } = await lib.resolve(did);
+    const recipient = findKeyAgreement(didDocument, lib);
+    const recipientPublicJwk = lib.jwk.publicJwk("X25519", recipient.x25519Pub);
+
+    // Step 2: generate an ephemeral X25519-only sender did:key.
+    // authcrypt's sender binding is via ECDH-1PU's static-static
+    // shared secret, so all we need is an X25519 keypair — no
+    // Ed25519 signing key is needed for this showcase.
+    const senderKeypair = lib.x25519.generateKeyPair();
+    const senderPublicMultikey = lib.multibase.encodeMultikey(
+      lib.multibase.MULTICODEC.X25519_PUB,
+      senderKeypair.publicKey,
+    );
+    const senderDid = `did:key:${senderPublicMultikey}`;
+    const senderKid = `${senderDid}#${senderPublicMultikey}`;
+    const senderPrivateJwk = lib.jwk.privateJwk("X25519", senderKeypair.privateKey, senderKeypair.publicKey);
+
+    // Step 3: pack.
+    const message = {
+      id: `urn:uuid:${crypto.randomUUID()}`,
+      type: "https://example.com/demo/1.0",
+      from: senderDid,
+      to: [did],
+      created_time: Math.floor(Date.now() / 1000),
+      body,
+    };
+    const jwe = await lib.pack({
+      message,
+      sender: { kid: senderKid, privateJwk: senderPrivateJwk },
+      recipient: { kid: recipient.kid, publicJwk: recipientPublicJwk },
+    });
+
+    setOutput(
+      els.dcOutput,
+      [
+        `Ephemeral sender: ${senderDid}`,
+        ``,
+        `Plaintext message:`,
+        asJson(message),
+        ``,
+        `Authcrypt JWE (${jwe.length} bytes):`,
+        prettyJson(jwe),
+        ``,
+        `Recipient keyAgreement kid: ${recipient.kid}`,
+        `Note: not delivered. This is a library smoke-test, not a transport.`,
+      ].join("\n"),
+      "ok",
+    );
+  } catch (e) {
+    setOutput(els.dcOutput, e.message, "err");
+  }
+});
+
+function prettyJson(s) {
+  try {
+    return JSON.stringify(JSON.parse(s), null, 2);
+  } catch {
+    return s;
+  }
+}
 
 // ─── Init ─────────────────────────────────────────────────────────────
 

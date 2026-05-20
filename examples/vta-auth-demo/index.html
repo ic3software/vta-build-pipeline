@@ -102,6 +102,24 @@
     <pre id="taskOutput" class="output"></pre>
   </section>
 
+  <section class="didcomm card">
+    <h2>7. DIDComm primitives (vti-didcomm-js)</h2>
+    <p class="hint">Smoke-test for the browser-side DIDComm v2 stack — resolves a DID, generates an ephemeral sender key, and packs an authcrypt JWE. No VTA round-trip; the JWE is just shown, not delivered. Works with <code>did:key:z…</code> (offline) and <code>did:webvh:…</code> (fetches the log over HTTPS).</p>
+    <label>
+      Recipient DID
+      <input id="dcRecipientDid" type="text" placeholder="did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp">
+    </label>
+    <label>
+      Message body (JSON, optional)
+      <textarea id="dcBody" rows="3" spellcheck="false">{"hello":"world"}</textarea>
+    </label>
+    <div class="row">
+      <button id="dcResolve">Resolve DID</button>
+      <button id="dcPack">Resolve + pack</button>
+    </div>
+    <pre id="dcOutput" class="output"></pre>
+  </section>
+
   <footer>
     <p>Source: <code>examples/vta-auth-demo/</code> · See the in-tree <a href="./README.md">README</a> for run instructions and the auth-flow notes.</p>
   </footer>
