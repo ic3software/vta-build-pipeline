@@ -48,6 +48,7 @@ mod audit;
 mod auth;
 mod config;
 mod contexts;
+mod did_templates;
 mod discovery;
 mod helpers;
 mod keys;
@@ -142,6 +143,7 @@ fn aggregate_dispatched_uris() -> Vec<&'static str> {
     v.extend(auth::DISPATCHED_URIS);
     v.extend(config::DISPATCHED_URIS);
     v.extend(contexts::DISPATCHED_URIS);
+    v.extend(did_templates::DISPATCHED_URIS);
     v.extend(discovery::DISPATCHED_URIS);
     v.extend(keys::DISPATCHED_URIS);
     v.extend(management::DISPATCHED_URIS);
@@ -277,6 +279,44 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
         // ─── Management slice ────────────────────────────────────────
         vta_sdk::trust_tasks::TASK_MANAGEMENT_RELOAD_SERVICES_1_0 => {
             management::handle_reload_services(state, auth, doc).await
+        }
+        // ─── DID-templates slice (global) ────────────────────────────
+        vta_sdk::trust_tasks::TASK_DID_TEMPLATES_LIST_1_0 => {
+            did_templates::handle_list(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_DID_TEMPLATES_CREATE_1_0 => {
+            did_templates::handle_create(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_DID_TEMPLATES_GET_1_0 => {
+            did_templates::handle_get(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_DID_TEMPLATES_UPDATE_1_0 => {
+            did_templates::handle_update(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_DID_TEMPLATES_DELETE_1_0 => {
+            did_templates::handle_delete(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_DID_TEMPLATES_RENDER_1_0 => {
+            did_templates::handle_render(state, auth, doc).await
+        }
+        // ─── DID-templates slice (context-scoped) ────────────────────
+        vta_sdk::trust_tasks::TASK_CONTEXTS_DID_TEMPLATES_LIST_1_0 => {
+            did_templates::handle_context_list(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_DID_TEMPLATES_CREATE_1_0 => {
+            did_templates::handle_context_create(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_DID_TEMPLATES_GET_1_0 => {
+            did_templates::handle_context_get(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_DID_TEMPLATES_UPDATE_1_0 => {
+            did_templates::handle_context_update(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_DID_TEMPLATES_DELETE_1_0 => {
+            did_templates::handle_context_delete(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_DID_TEMPLATES_RENDER_1_0 => {
+            did_templates::handle_context_render(state, auth, doc).await
         }
         // ─── Passkey-VMs slice (feature-gated: webvh + didcomm) ─────
         #[cfg(all(feature = "webvh", feature = "didcomm"))]

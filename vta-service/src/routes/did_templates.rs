@@ -14,33 +14,33 @@ use std::collections::HashMap;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use vta_sdk::did_templates::{DidTemplate, DidTemplateRecord, TemplateVars};
+// Wire types canonically live in vta-sdk per
+// `memory::feedback-wire-types-in-sdk`. The shapes that match the
+// trust-task variants are re-exported under their legacy REST
+// aliases; the Render request body diverges (REST takes `name` from
+// the URL path, trust-task takes `name` in the payload) so the
+// per-handler type stays local.
+pub use vta_sdk::protocols::did_template_management::list::ListDidTemplatesResultBody as ListDidTemplatesResponse;
+pub use vta_sdk::protocols::did_template_management::render::RenderDidTemplateResultBody as RenderDidTemplateResponse;
 
 use crate::auth::{AuthClaims, SuperAdminAuth};
 use crate::error::AppError;
 use crate::operations;
 use crate::server::AppState;
 
-/// Response body for `GET /did-templates`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ListDidTemplatesResponse {
-    pub templates: Vec<DidTemplateRecord>,
-}
-
-/// Request body for `POST /did-templates/{name}/render`.
+/// REST request body for `POST /did-templates/{name}/render` and the
+/// context-scoped variant. `name` is in the URL path, so the body
+/// carries only the caller variables. Distinct from the trust-task
+/// `RenderDidTemplateBody` which carries `name` inline since the
+/// envelope has no path component.
 #[derive(Debug, Deserialize)]
 pub struct RenderDidTemplateRequest {
     #[serde(default)]
     pub vars: HashMap<String, Value>,
-}
-
-/// Response body for `POST /did-templates/{name}/render`.
-#[derive(Debug, Serialize)]
-pub struct RenderDidTemplateResponse {
-    pub document: Value,
 }
 
 /// `GET /did-templates` — list all global templates. Any authenticated caller.

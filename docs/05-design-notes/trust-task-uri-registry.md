@@ -206,30 +206,46 @@ dispatcher's `KNOWN_FEATURE_GATED_URIS` allowlist for builds where
 
 ### DID templates slice (`spec/vta/did-templates/*`)
 
-Global + context-scoped CRUD. Same operations under both scopes; URIs
-distinguish by namespace.
+Global + context-scoped CRUD. Distinct URI hierarchies — see
+"URI hierarchy mirrors resource hierarchy" decision below.
 
-**Global (super-admin):**
+**Status**: implemented (commit `feat(vta-service): Phase 3 —
+DID-templates slice`). Wire bodies in
+`vta_sdk::protocols::did_template_management::*` (each op has its own
+submodule with separate global and context-scoped body types).
 
-| URI | Today's surface |
-|---|---|
-| `spec/vta/did-templates/list/1.0` | `GET /did-templates` |
-| `spec/vta/did-templates/create/1.0` | `POST /did-templates` |
-| `spec/vta/did-templates/get/1.0` | `GET /did-templates/{name}` |
-| `spec/vta/did-templates/update/1.0` | `PATCH /did-templates/{name}` |
-| `spec/vta/did-templates/delete/1.0` | `DELETE /did-templates/{name}` |
-| `spec/vta/did-templates/render/1.0` | `POST /did-templates/{name}/render` |
+**Global (super-admin writes, any-authed reads):**
 
-**Context-scoped (context-admin):**
+| URI | Today's surface | Status |
+|---|---|---|
+| `spec/vta/did-templates/list/1.0` | `GET /did-templates` | implemented |
+| `spec/vta/did-templates/create/1.0` | `POST /did-templates` | implemented |
+| `spec/vta/did-templates/get/1.0` | `GET /did-templates/{name}` | implemented |
+| `spec/vta/did-templates/update/1.0` | `PATCH /did-templates/{name}` | implemented |
+| `spec/vta/did-templates/delete/1.0` | `DELETE /did-templates/{name}` | implemented |
+| `spec/vta/did-templates/render/1.0` | `POST /did-templates/{name}/render` | implemented |
 
-| URI | Today's surface |
-|---|---|
-| `spec/vta/contexts/did-templates/list/1.0` | `GET /contexts/{id}/did-templates` |
-| `spec/vta/contexts/did-templates/create/1.0` | `POST /contexts/{id}/did-templates` |
-| `spec/vta/contexts/did-templates/get/1.0` | `GET /contexts/{id}/did-templates/{name}` |
-| `spec/vta/contexts/did-templates/update/1.0` | `PATCH /contexts/{id}/did-templates/{name}` |
-| `spec/vta/contexts/did-templates/delete/1.0` | `DELETE /contexts/{id}/did-templates/{name}` |
-| `spec/vta/contexts/did-templates/render/1.0` | `POST /contexts/{id}/did-templates/{name}/render` |
+**Context-scoped (super-admin OR admin-with-context writes; any-authed-with-context reads):**
+
+| URI | Today's surface | Status |
+|---|---|---|
+| `spec/vta/contexts/did-templates/list/1.0` | `GET /contexts/{id}/did-templates` | implemented |
+| `spec/vta/contexts/did-templates/create/1.0` | `POST /contexts/{id}/did-templates` | implemented |
+| `spec/vta/contexts/did-templates/get/1.0` | `GET /contexts/{id}/did-templates/{name}` | implemented |
+| `spec/vta/contexts/did-templates/update/1.0` | `PATCH /contexts/{id}/did-templates/{name}` | implemented |
+| `spec/vta/contexts/did-templates/delete/1.0` | `DELETE /contexts/{id}/did-templates/{name}` | implemented |
+| `spec/vta/contexts/did-templates/render/1.0` | `POST /contexts/{id}/did-templates/{name}/render` | implemented |
+
+**Why two URI hierarchies instead of one with `context_id: Option<String>`?**
+Global and context templates aren't the same resource filtered
+differently — they have different owners (super-admin vs
+context-admin), different lifecycles, and different visibility scopes.
+Modelling them as distinct URIs makes the auth contract self-evident
+from the wire `type` field, removes the need for slice handlers to
+branch on `Option<String>`, and mirrors the REST path hierarchy. The
+WebVH-list pattern (single URI with `context_id: Option<String>`) is
+the right call where `context_id` is a *filter*; here it's an
+*ownership boundary*.
 
 ### Passkey VM slice (`spec/vta/passkey-vms/*`)
 
