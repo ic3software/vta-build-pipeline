@@ -1,22 +1,21 @@
 //! Lightweight DIDComm v2 anonymous encryption (anoncrypt) packer.
 //!
-//! Produces a JWE (General JSON Serialization) that can be unpacked by any
-//! DIDComm v2 implementation (including `affinidi-tdk`'s `ATM::unpack()`).
+//! Produces a JWE (General JSON Serialization) that can be unpacked by
+//! `affinidi-messaging-didcomm`'s `decrypt` (the same decrypt used by
+//! `affinidi-tdk`'s `ATM::unpack`).
 //!
-//! This module avoids the heavyweight ATM/TDK runtime initialization. It only
-//! needs the recipient's X25519 public key (derived from their `did:key`).
+//! This module avoids the heavyweight ATM/TDK runtime initialization. It
+//! only needs the recipient's X25519 public key (derived from their
+//! `did:key`).
 //!
-//! Algorithm: ECDH-ES+A256KW (key agreement) + A256GCM (content encryption).
-
-use aes_gcm::aead::Aead;
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use sha2::{Digest, Sha256};
-use x25519_dalek::{PublicKey, StaticSecret};
-
-const GCM_NONCE_LEN: usize = 12;
-const AES_KEY_LEN: usize = 32;
+//! Algorithm: ECDH-ES+A256KW (key agreement) + A256CBC-HS512 (content
+//! encryption) — the algorithm pair the workspace's pinned
+//! `affinidi-messaging-didcomm-0.13` actually decrypts. An earlier
+//! revision emitted A256GCM instead, which the crate doesn't support;
+//! every call fell through to the slower `session::challenge_response`
+//! tier-3 fallback in `integration::auth::try_rest`. Delegating to the
+//! crate's `jwe::encrypt::anoncrypt` keeps the algorithms aligned by
+//! construction.
 
 // ── DIDComm message builder ─────────────────────────────────────────
 
@@ -38,239 +37,25 @@ pub fn build_message(msg_type: &str, body: serde_json::Value, from: &str, to: &s
 /// Pack a plaintext message as a DIDComm v2 anoncrypt JWE (General JSON).
 ///
 /// Returns the JWE as a JSON string suitable for sending to `POST /auth/`.
+///
+/// Delegates to `affinidi_messaging_didcomm::jwe::encrypt::anoncrypt`,
+/// which produces a JWE the workspace's pinned didcomm crate can also
+/// decrypt — by construction. The wire shape:
+///
+///   - `alg`: `ECDH-ES+A256KW`
+///   - `enc`: `A256CBC-HS512`
+///   - 16-byte IV, 32-byte tag, 64-byte CEK split mac||enc.
 pub fn pack_anoncrypt(
     plaintext: &[u8],
     recipient_x25519_pub: &[u8; 32],
     recipient_kid: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    use aes_gcm::aead::rand_core::RngCore;
+    use affinidi_messaging_didcomm::crypto::key_agreement::PublicKeyAgreement;
+    use affinidi_messaging_didcomm::jwe::encrypt::anoncrypt;
 
-    // 1. Generate ephemeral X25519 keypair
-    let ephemeral_secret = StaticSecret::random_from_rng(aes_gcm::aead::OsRng);
-    let ephemeral_pub = PublicKey::from(&ephemeral_secret);
-
-    // 2. ECDH: shared secret
-    let recipient_pub = PublicKey::from(*recipient_x25519_pub);
-    let shared_secret = ephemeral_secret.diffie_hellman(&recipient_pub);
-
-    // 3. Build protected header
-    let protected = serde_json::json!({
-        "typ": "application/didcomm-encrypted+json",
-        "alg": "ECDH-ES+A256KW",
-        "enc": "A256GCM",
-        "apu": B64.encode(b""),
-        "apv": B64.encode(Sha256::digest(recipient_kid.as_bytes())),
-        "epk": {
-            "kty": "OKP",
-            "crv": "X25519",
-            "x": B64.encode(ephemeral_pub.as_bytes()),
-        },
-    });
-    let protected_b64 = B64.encode(protected.to_string().as_bytes());
-
-    // 4. Derive key-wrapping key via Concat KDF
-    let apu = b"";
-    let apv = Sha256::digest(recipient_kid.as_bytes());
-    let kek = concat_kdf(shared_secret.as_bytes(), "A256KW", apu, &apv)?;
-
-    // 5. Generate random CEK (32 bytes for AES-256-GCM)
-    let mut cek = [0u8; AES_KEY_LEN];
-    aes_gcm::aead::OsRng.fill_bytes(&mut cek);
-
-    // 6. AES-256 Key Wrap the CEK
-    let encrypted_key = aes_key_wrap(&kek, &cek)?;
-
-    // 7. AES-256-GCM encrypt the plaintext with CEK
-    let cipher = Aes256Gcm::new_from_slice(&cek).map_err(|e| format!("aes-gcm key: {e}"))?;
-    let mut nonce_bytes = [0u8; GCM_NONCE_LEN];
-    aes_gcm::aead::OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    // AAD = protected header (base64url encoded)
-    let ciphertext_with_tag = cipher
-        .encrypt(
-            nonce,
-            aes_gcm::aead::Payload {
-                msg: plaintext,
-                aad: protected_b64.as_bytes(),
-            },
-        )
-        .map_err(|e| format!("aes-gcm encrypt: {e}"))?;
-
-    // Split ciphertext and tag (last 16 bytes is the GCM tag)
-    let tag_start = ciphertext_with_tag.len() - 16;
-    let ciphertext = &ciphertext_with_tag[..tag_start];
-    let tag = &ciphertext_with_tag[tag_start..];
-
-    // 8. Assemble JWE General JSON Serialization
-    let jwe = serde_json::json!({
-        "protected": protected_b64,
-        "recipients": [{
-            "header": { "kid": recipient_kid },
-            "encrypted_key": B64.encode(&encrypted_key),
-        }],
-        "iv": B64.encode(nonce_bytes),
-        "ciphertext": B64.encode(ciphertext),
-        "tag": B64.encode(tag),
-    });
-
-    Ok(jwe.to_string())
-}
-
-// ── Concat KDF (NIST SP 800-56A, single-pass SHA-256) ──────────────
-
-/// Derive a 256-bit key from ECDH shared secret using Concat KDF.
-fn concat_kdf(
-    z: &[u8],
-    algorithm: &str,
-    apu: &[u8],
-    apv: &[u8],
-) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    let mut hasher = Sha256::new();
-
-    // counter = 00000001
-    hasher.update(1u32.to_be_bytes());
-
-    // Z = shared secret
-    hasher.update(z);
-
-    // OtherInfo:
-    // AlgorithmID = len(4 BE) || algorithm
-    hasher.update((algorithm.len() as u32).to_be_bytes());
-    hasher.update(algorithm.as_bytes());
-
-    // PartyUInfo = len(4 BE) || apu
-    hasher.update((apu.len() as u32).to_be_bytes());
-    hasher.update(apu);
-
-    // PartyVInfo = len(4 BE) || apv
-    hasher.update((apv.len() as u32).to_be_bytes());
-    hasher.update(apv);
-
-    // SuppPubInfo = keydatalen in bits (256) as 32-bit BE
-    hasher.update(256u32.to_be_bytes());
-
-    let result = hasher.finalize();
-    Ok(result.into())
-}
-
-// ── AES-256 Key Wrap (RFC 3394) ─────────────────────────────────────
-
-/// Wrap a key using AES-256 Key Wrap (RFC 3394).
-///
-/// Input: 32-byte KEK, key to wrap (multiple of 8 bytes).
-/// Output: wrapped key (input_len + 8 bytes).
-fn aes_key_wrap(kek: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // aes 0.9 renamed `BlockEncrypt` → `BlockCipherEncrypt`.
-    use aes::Aes256;
-    use aes::cipher::{BlockCipherEncrypt, KeyInit as AesKeyInit};
-
-    if !plaintext.len().is_multiple_of(8) || plaintext.is_empty() {
-        return Err("key wrap input must be a non-empty multiple of 8 bytes".into());
-    }
-
-    let n = plaintext.len() / 8;
-    let cipher = Aes256::new_from_slice(kek).map_err(|e| format!("aes key wrap: {e}"))?;
-
-    // Initialize: A = IV (0xA6 repeated 8 times), R[1..n] = plaintext blocks
-    let mut a = [0xA6u8; 8];
-    let mut r: Vec<[u8; 8]> = plaintext
-        .chunks_exact(8)
-        .map(|c| {
-            let mut block = [0u8; 8];
-            block.copy_from_slice(c);
-            block
-        })
-        .collect();
-
-    // Wrap: 6 rounds
-    for j in 0..6u64 {
-        for (i, ri) in r.iter_mut().enumerate().take(n) {
-            let t = (n as u64) * j + (i as u64) + 1;
-
-            // B = AES(K, A || R[i])
-            let mut block = aes::Block::default();
-            block[..8].copy_from_slice(&a);
-            block[8..].copy_from_slice(ri);
-            cipher.encrypt_block(&mut block);
-
-            // A = MSB(64, B) ^ t
-            a.copy_from_slice(&block[..8]);
-            let t_bytes = t.to_be_bytes();
-            for k in 0..8 {
-                a[k] ^= t_bytes[k];
-            }
-
-            // R[i] = LSB(64, B)
-            ri.copy_from_slice(&block[8..]);
-        }
-    }
-
-    // Output: A || R[1] || R[2] || ... || R[n]
-    let mut output = Vec::with_capacity(8 + plaintext.len());
-    output.extend_from_slice(&a);
-    for block in &r {
-        output.extend_from_slice(block);
-    }
-    Ok(output)
-}
-
-/// Unwrap a key using AES-256 Key Unwrap (RFC 3394). Used for testing.
-#[cfg(test)]
-fn aes_key_unwrap(
-    kek: &[u8; 32],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // aes 0.9 renamed `BlockDecrypt` → `BlockCipherDecrypt`.
-    use aes::Aes256;
-    use aes::cipher::{BlockCipherDecrypt, KeyInit as AesKeyInit};
-
-    if !ciphertext.len().is_multiple_of(8) || ciphertext.len() < 24 {
-        return Err("key unwrap input must be at least 24 bytes and a multiple of 8".into());
-    }
-
-    let n = (ciphertext.len() / 8) - 1;
-    let cipher = Aes256::new_from_slice(kek)?;
-
-    let mut a = [0u8; 8];
-    a.copy_from_slice(&ciphertext[..8]);
-    let mut r: Vec<[u8; 8]> = ciphertext[8..]
-        .chunks_exact(8)
-        .map(|c| {
-            let mut block = [0u8; 8];
-            block.copy_from_slice(c);
-            block
-        })
-        .collect();
-
-    for j in (0..6u64).rev() {
-        for i in (0..n).rev() {
-            let t = (n as u64) * j + (i as u64) + 1;
-
-            let t_bytes = t.to_be_bytes();
-            for k in 0..8 {
-                a[k] ^= t_bytes[k];
-            }
-
-            let mut block = aes::Block::default();
-            block[..8].copy_from_slice(&a);
-            block[8..].copy_from_slice(&r[i]);
-            cipher.decrypt_block(&mut block);
-
-            a.copy_from_slice(&block[..8]);
-            r[i].copy_from_slice(&block[8..]);
-        }
-    }
-
-    if a != [0xA6u8; 8] {
-        return Err("key unwrap integrity check failed".into());
-    }
-
-    let mut output = Vec::with_capacity(n * 8);
-    for block in &r {
-        output.extend_from_slice(block);
-    }
-    Ok(output)
+    let recipient_pub = PublicKeyAgreement::X25519(*recipient_x25519_pub);
+    anoncrypt(plaintext, &[(recipient_kid, &recipient_pub)])
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("anoncrypt: {e}").into() })
 }
 
 // ── did:key → X25519 public key conversion ──────────────────────────
@@ -315,6 +100,7 @@ pub fn did_key_agreement_kid(did: &str) -> Result<String, Box<dyn std::error::Er
 
 /// Convert an Ed25519 seed (private key) to X25519 static secret bytes.
 pub fn ed25519_seed_to_x25519_secret(seed: &[u8; 32]) -> [u8; 32] {
+    use sha2::Digest;
     // Standard Ed25519→X25519 conversion: SHA-512(seed)[0..32] with clamping
     let hash = sha2::Sha512::digest(seed);
     let mut x25519_bytes = [0u8; 32];
@@ -351,45 +137,6 @@ pub fn pack_auth_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_aes_key_wrap_roundtrip() {
-        let kek = [42u8; 32];
-        let plaintext = [1u8; 32]; // 32 bytes = 4 blocks of 8
-
-        let wrapped = aes_key_wrap(&kek, &plaintext).unwrap();
-        assert_eq!(wrapped.len(), 40); // 32 + 8
-
-        let unwrapped = aes_key_unwrap(&kek, &wrapped).unwrap();
-        assert_eq!(unwrapped, plaintext);
-    }
-
-    #[test]
-    fn test_aes_key_wrap_different_keys_different_output() {
-        let kek1 = [1u8; 32];
-        let kek2 = [2u8; 32];
-        let plaintext = [99u8; 32];
-
-        let w1 = aes_key_wrap(&kek1, &plaintext).unwrap();
-        let w2 = aes_key_wrap(&kek2, &plaintext).unwrap();
-        assert_ne!(w1, w2);
-    }
-
-    #[test]
-    fn test_concat_kdf_deterministic() {
-        let z = [0u8; 32];
-        let k1 = concat_kdf(&z, "A256KW", b"", b"recipient").unwrap();
-        let k2 = concat_kdf(&z, "A256KW", b"", b"recipient").unwrap();
-        assert_eq!(k1, k2);
-    }
-
-    #[test]
-    fn test_concat_kdf_different_algorithms() {
-        let z = [0u8; 32];
-        let k1 = concat_kdf(&z, "A256KW", b"", b"x").unwrap();
-        let k2 = concat_kdf(&z, "A128KW", b"", b"x").unwrap();
-        assert_ne!(k1, k2);
-    }
 
     #[test]
     fn test_parse_did_key_ed25519() {
@@ -431,15 +178,19 @@ mod tests {
 
     #[test]
     fn test_pack_anoncrypt_produces_valid_jwe() {
-        let recipient_secret = StaticSecret::random_from_rng(aes_gcm::aead::OsRng);
-        let recipient_pub = PublicKey::from(&recipient_secret);
+        use affinidi_messaging_didcomm::crypto::key_agreement::{Curve, PrivateKeyAgreement};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 
-        let jwe_str = pack_anoncrypt(
-            b"hello world",
-            recipient_pub.as_bytes(),
-            "did:key:test#key-1",
-        )
-        .unwrap();
+        // Generate a recipient X25519 keypair via the same crate the
+        // server uses — keeps the test honest about wire compatibility.
+        let recipient_private = PrivateKeyAgreement::generate(Curve::X25519);
+        let recipient_pub_bytes = match recipient_private.public_key() {
+            affinidi_messaging_didcomm::crypto::key_agreement::PublicKeyAgreement::X25519(b) => b,
+            _ => unreachable!("we asked for X25519"),
+        };
+
+        let jwe_str =
+            pack_anoncrypt(b"hello world", &recipient_pub_bytes, "did:key:test#key-1").unwrap();
 
         let jwe: serde_json::Value = serde_json::from_str(&jwe_str).unwrap();
         assert!(jwe["protected"].is_string());
@@ -449,13 +200,27 @@ mod tests {
         assert!(jwe["ciphertext"].is_string());
         assert!(jwe["tag"].is_string());
 
-        // Verify protected header
+        // The protected header MUST advertise the algorithm pair the
+        // workspace's pinned `affinidi-messaging-didcomm-0.13` accepts
+        // on decrypt. Regressing this to A256GCM means every consumer
+        // silently falls through to the slower tier-3 fallback.
         let protected_json: serde_json::Value =
             serde_json::from_slice(&B64.decode(jwe["protected"].as_str().unwrap()).unwrap())
                 .unwrap();
         assert_eq!(protected_json["alg"], "ECDH-ES+A256KW");
-        assert_eq!(protected_json["enc"], "A256GCM");
+        assert_eq!(protected_json["enc"], "A256CBC-HS512");
         assert_eq!(protected_json["typ"], "application/didcomm-encrypted+json");
+
+        // Decrypt round-trip via the same crate the server uses.
+        let decrypted = affinidi_messaging_didcomm::jwe::decrypt::decrypt(
+            &jwe_str,
+            "did:key:test#key-1",
+            &recipient_private,
+            None, // anoncrypt — no sender public key needed
+        )
+        .expect("decrypt round-trip");
+        assert_eq!(decrypted.plaintext, b"hello world");
+        assert!(!decrypted.authenticated, "anoncrypt is not authenticated");
     }
 
     #[test]

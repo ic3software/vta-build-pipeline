@@ -9194,11 +9194,10 @@ dependencies = [
 name = "vta-sdk"
 version = "0.6.0"
 dependencies = [
- "aes 0.9.0",
- "aes-gcm",
  "affinidi-crypto",
  "affinidi-data-integrity",
  "affinidi-did-resolver-cache-sdk",
+ "affinidi-messaging-didcomm",
  "affinidi-secrets-resolver",
  "affinidi-tdk",
  "affinidi-vc",
