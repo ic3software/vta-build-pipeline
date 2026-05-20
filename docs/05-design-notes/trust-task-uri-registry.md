@@ -272,19 +272,27 @@ hit, and the transport can be swapped (VTA-streamed in v1, S3-presigned
 later) without changing clients. Modelled on OCI image distribution +
 Sigstore + Git LFS.
 
-| URI | Purpose |
-|---|---|
-| `spec/vta/backup/initiate-export/1.0` | Request export. Returns `BundleDescriptor { bundle_id, transport_url, transport_token, expected_sha256, expected_size_bytes, algorithm, expires_at }`. Authed + audit-logged. |
-| `spec/vta/backup/complete-export/1.0` | Optional client ack of successful download. Closes the audit loop. |
-| `spec/vta/backup/initiate-import/1.0` | Request import. Returns upload BundleDescriptor with POST target. |
-| `spec/vta/backup/finalize-import/1.0` | Apply uploaded bytes; returns `{ status, dids_loaded, contexts_loaded }`. |
-| `spec/vta/backup/abort/1.0` | Cancel an in-flight bundle by `bundle_id`. |
+**Status**: implemented (Stages 1–5 of the rollout plan landed; sweeper
++ CLI still pending). Full design in
+`docs/05-design-notes/backup-descriptor-pattern.md`.
 
-**Plus one REST endpoint that stays REST (excluded from migration):**
-`GET /backup/blob/{bundle_id}` with `X-Export-Token` header. Streams
-encrypted bytes (chunked transfer-encoding). Token is one-shot, 5-minute
-TTL. Analogous to `GET /did/{did}/log` — bulk transport is wrong on top
-of a JSON envelope.
+| URI | Purpose | Status |
+|---|---|---|
+| `spec/vta/backup/initiate-export/1.0` | Request export. Returns `BundleDescriptor { bundle_id, transport_url, transport_token, expected_sha256, expected_size_bytes, algorithm, expires_at }`. Authed + audit-logged. | implemented |
+| `spec/vta/backup/complete-export/1.0` | Optional client ack of successful download. Closes the audit loop. | implemented |
+| `spec/vta/backup/initiate-import/1.0` | Request import. Returns upload BundleDescriptor with POST target. | implemented |
+| `spec/vta/backup/finalize-import/1.0` | Apply uploaded bytes; returns `{ status, source_did, key/acl/context/audit/imported counts }`. | implemented |
+| `spec/vta/backup/abort/1.0` | Cancel an in-flight bundle by `bundle_id`. Idempotent on terminal. | implemented |
+
+**Plus REST endpoints that stay REST (deliberate, not migrated):**
+- `GET /backup/blob/{bundle_id}` — one-shot download. `X-Backup-Token`
+  header bound to bundle_id, hashed server-side. Implemented in
+  `routes::backup_blob`.
+- `POST /backup/blob/{bundle_id}` — upload-once. Same token-based auth.
+
+Analogous to `GET /did/{did}/log` — bulk transport is wrong on top of
+a JSON envelope. The 1 MB global body cap is overridden for these
+routes (100 MB; enforced in-handler via `to_bytes(_, CAP)`).
 
 Algorithms supported initially: `stream` (this VTA serves the bytes).
 Future: `s3-presigned`, `chunked-trust-task` (for DIDComm-only deployments

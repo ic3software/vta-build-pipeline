@@ -46,6 +46,7 @@ use crate::server::AppState;
 mod acl;
 mod audit;
 mod auth;
+mod backup;
 mod config;
 mod contexts;
 mod did_templates;
@@ -141,6 +142,7 @@ fn aggregate_dispatched_uris() -> Vec<&'static str> {
     v.extend(acl::DISPATCHED_URIS);
     v.extend(audit::DISPATCHED_URIS);
     v.extend(auth::DISPATCHED_URIS);
+    v.extend(backup::DISPATCHED_URIS);
     v.extend(config::DISPATCHED_URIS);
     v.extend(contexts::DISPATCHED_URIS);
     v.extend(did_templates::DISPATCHED_URIS);
@@ -280,6 +282,20 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
         vta_sdk::trust_tasks::TASK_MANAGEMENT_RELOAD_SERVICES_1_0 => {
             management::handle_reload_services(state, auth, doc).await
         }
+        // ─── Backup slice (descriptor pattern) ───────────────────────
+        vta_sdk::trust_tasks::TASK_BACKUP_INITIATE_EXPORT_1_0 => {
+            backup::handle_initiate_export(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_BACKUP_COMPLETE_EXPORT_1_0 => {
+            backup::handle_complete_export(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_BACKUP_INITIATE_IMPORT_1_0 => {
+            backup::handle_initiate_import(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_BACKUP_FINALIZE_IMPORT_1_0 => {
+            backup::handle_finalize_import(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_BACKUP_ABORT_1_0 => backup::handle_abort(state, auth, doc).await,
         // ─── DID-templates slice (global) ────────────────────────────
         vta_sdk::trust_tasks::TASK_DID_TEMPLATES_LIST_1_0 => {
             did_templates::handle_list(state, auth, doc).await

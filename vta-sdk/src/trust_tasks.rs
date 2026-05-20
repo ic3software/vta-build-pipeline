@@ -698,11 +698,13 @@ pub const ALL_URIS: &[&str] = &[
     TASK_CONTEXTS_DID_TEMPLATES_UPDATE_1_0,
     TASK_CONTEXTS_DID_TEMPLATES_DELETE_1_0,
     TASK_CONTEXTS_DID_TEMPLATES_RENDER_1_0,
-    // Backup slice (`TASK_BACKUP_*`) intentionally absent — URIs are
-    // reserved with `pub const` declarations but the slice ships in
-    // a follow-on commit per the rollout plan in
-    // `docs/05-design-notes/backup-descriptor-pattern.md`. Once the
-    // dispatcher arms land, add them here.
+    // Backup slice (descriptor pattern). URIs land in ALL_URIS now
+    // that the trust-task slice is wired in vta-service.
+    TASK_BACKUP_INITIATE_EXPORT_1_0,
+    TASK_BACKUP_COMPLETE_EXPORT_1_0,
+    TASK_BACKUP_INITIATE_IMPORT_1_0,
+    TASK_BACKUP_FINALIZE_IMPORT_1_0,
+    TASK_BACKUP_ABORT_1_0,
     // Attestation slice (REST-routed, unauthenticated)
     TASK_ATTESTATION_STATUS_1_0,
     TASK_ATTESTATION_REPORT_1_0,
