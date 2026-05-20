@@ -92,19 +92,22 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
     // Phase 3 slice implementations replace each `not_implemented_yet`
     // arm with a real handler.
     match type_uri.as_str() {
-        // ─── Auth slice (post-login operations) ──────────────────────
-        vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_1_0
-        | vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_1_0
-        | vta_sdk::trust_tasks::TASK_AUTH_REFRESH_1_0
-        | vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_1_0 => {
-            not_implemented_yet(doc, "auth-slice handler — Phase 3.1 work")
-        }
-        // ─── Unknown (or routed via dedicated REST) ──────────────────
+        // ─── Auth slice (authenticated operations) ───────────────────
         //
-        // The two passkey-login URIs land here on the dispatcher path;
-        // operators should hit `/auth/passkey-login/{start,finish}`
-        // directly. Returning `unsupported_type` is correct — the
-        // dispatcher doesn't handle them.
+        // Only `revoke-session/1.0` reaches this dispatcher because
+        // challenge/authenticate/refresh are pre-authentication and
+        // can't pass AuthClaims. They live on dedicated REST routes
+        // (see REST_ROUTED in the parity harness below).
+        vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_1_0 => {
+            not_implemented_yet(doc, "auth-slice revoke-session — Phase 3.1 work")
+        }
+        // ─── Unknown / REST-routed ───────────────────────────────────
+        //
+        // Pre-auth URIs (passkey-login-{start,finish}, challenge,
+        // authenticate, refresh) hit dedicated REST endpoints, not
+        // the dispatcher. A client mistakenly sending them through
+        // the envelope path gets `unsupported_type` here — which is
+        // correct from the dispatcher's POV.
         _ => method_not_found(doc, &type_uri),
     }
 }
@@ -217,17 +220,17 @@ mod tests {
     fn dispatcher_handles_every_vta_sdk_uri() {
         // URIs the dispatcher's `dispatch_typed` function explicitly
         // matches — keep in lockstep with the match arms above.
-        let dispatched: &[&str] = &[
-            vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_1_0,
-            vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_1_0,
-            vta_sdk::trust_tasks::TASK_AUTH_REFRESH_1_0,
-            vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_1_0,
-        ];
+        let dispatched: &[&str] = &[vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_1_0];
 
         // URIs deliberately routed via dedicated unauth REST endpoints
         // (not the authenticated /api/trust-tasks dispatcher).
-        // Bootstrap operations the user invokes BEFORE they have a session.
+        // Pre-authentication operations the user invokes BEFORE they
+        // have a session, so they can't pass AuthClaims through the
+        // dispatcher's extractor.
         let rest_routed: &[&str] = &[
+            vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_1_0,
+            vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_1_0,
+            vta_sdk::trust_tasks::TASK_AUTH_REFRESH_1_0,
             vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_1_0,
             vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0,
         ];
