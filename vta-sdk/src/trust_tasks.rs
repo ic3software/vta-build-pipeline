@@ -258,6 +258,27 @@ pub const TASK_CONFIG_UPDATE_1_0: &str = "https://trusttasks.org/spec/vta/config
 pub const TASK_MANAGEMENT_RELOAD_SERVICES_1_0: &str =
     "https://trusttasks.org/spec/vta/management/reload-services/1.0";
 
+// ─── Attestation slice (spec/vta/attestation/*) ──────────────────────────
+//
+// TEE-feature-gated and DELIBERATELY UNAUTHENTICATED on the wire
+// (the existing legacy `/attestation/status` + `/attestation/report`
+// REST routes don't take `AuthClaims`). Operators rely on TEE proofs
+// being publicly verifiable. These URIs live on the REST_ROUTED
+// allowlist for the parity harness; the dispatcher never sees them.
+
+/// `spec/vta/attestation/status/1.0` — return the VTA's TEE detection
+/// status (`tee_present`, attestation provider, etc.). No request
+/// body. Unauthenticated. TEE-feature-gated; returns
+/// `tee_attestation_error` when the binary lacks the `tee` feature.
+pub const TASK_ATTESTATION_STATUS_1_0: &str =
+    "https://trusttasks.org/spec/vta/attestation/status/1.0";
+
+/// `spec/vta/attestation/report/1.0` — produce a fresh attestation
+/// report with a client-supplied nonce. Unauthenticated.
+/// TEE-feature-gated.
+pub const TASK_ATTESTATION_REPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/attestation/report/1.0";
+
 // ─── Future slices ───────────────────────────────────────────────────────
 //
 // attestation, services, webvh, did-templates, passkey-vms, backup,
@@ -315,6 +336,9 @@ pub const ALL_URIS: &[&str] = &[
     TASK_CONFIG_UPDATE_1_0,
     // Management slice
     TASK_MANAGEMENT_RELOAD_SERVICES_1_0,
+    // Attestation slice (REST-routed, unauthenticated)
+    TASK_ATTESTATION_STATUS_1_0,
+    TASK_ATTESTATION_REPORT_1_0,
 ];
 
 #[cfg(test)]

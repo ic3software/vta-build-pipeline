@@ -326,11 +326,16 @@ mod tests {
         // have a session, so they can't pass AuthClaims through the
         // dispatcher's extractor.
         let rest_routed: &[&str] = &[
+            // Auth (pre-login)
             vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_1_0,
             vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_1_0,
             vta_sdk::trust_tasks::TASK_AUTH_REFRESH_1_0,
             vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_1_0,
             vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0,
+            // Attestation (unauth — TEE proofs are publicly verifiable
+            // by design)
+            vta_sdk::trust_tasks::TASK_ATTESTATION_STATUS_1_0,
+            vta_sdk::trust_tasks::TASK_ATTESTATION_REPORT_1_0,
         ];
 
         for declared in vta_sdk::trust_tasks::ALL_URIS {
