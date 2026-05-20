@@ -9,14 +9,21 @@
     "./base64url": "./src/base64url.js",
     "./multibase": "./src/multibase.js",
     "./jwk": "./src/jwk.js",
-    "./concat-kdf": "./src/concat-kdf.js"
+    "./concat-kdf": "./src/concat-kdf.js",
+    "./x25519": "./src/x25519.js",
+    "./ecdh-1pu": "./src/ecdh-1pu.js",
+    "./pack": "./src/pack.js",
+    "./unpack": "./src/unpack.js"
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "license": "Apache-2.0",
   "engines": {
     "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0"
   },
   "private": true
 }
