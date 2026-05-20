@@ -295,6 +295,23 @@ pub const TASK_PASSKEY_VMS_LIST_1_0: &str = "https://trusttasks.org/spec/vta/pas
 pub const TASK_PASSKEY_VMS_REVOKE_1_0: &str =
     "https://trusttasks.org/spec/vta/passkey-vms/revoke/1.0";
 
+// ─── Provision-integration (spec/vta/provision-integration/*) ───────────
+//
+// Feature-gated: handler requires `webvh` (DID-doc mutation + log
+// entries). The legacy REST handler is at
+// `POST /bootstrap/provision-integration`; the trust-task envelope
+// carries the same request/response shapes the SDK already exports
+// under `vta_sdk::provision_integration::http`.
+
+/// `spec/vta/provision-integration/request/1.0` — submit a VP-framed
+/// `BootstrapRequest` plus provisioning options to the VTA; receive a
+/// sealed `TemplateBootstrap` bundle back. Payload:
+/// [`crate::provision_integration::http::ProvisionIntegrationRequest`].
+/// Auth: Admin role on the target context (super-admin to use
+/// `create_context: true`).
+pub const TASK_PROVISION_INTEGRATION_REQUEST_1_0: &str =
+    "https://trusttasks.org/spec/vta/provision-integration/request/1.0";
+
 // ─── Attestation slice (spec/vta/attestation/*) ──────────────────────────
 //
 // TEE-feature-gated and DELIBERATELY UNAUTHENTICATED on the wire
@@ -378,6 +395,8 @@ pub const ALL_URIS: &[&str] = &[
     TASK_PASSKEY_VMS_ENROLL_SUBMIT_1_0,
     TASK_PASSKEY_VMS_LIST_1_0,
     TASK_PASSKEY_VMS_REVOKE_1_0,
+    // Provision-integration (feature-gated: webvh)
+    TASK_PROVISION_INTEGRATION_REQUEST_1_0,
     // Attestation slice (REST-routed, unauthenticated)
     TASK_ATTESTATION_STATUS_1_0,
     TASK_ATTESTATION_REPORT_1_0,

@@ -54,6 +54,8 @@ mod keys;
 mod management;
 #[cfg(all(feature = "webvh", feature = "didcomm"))]
 mod passkey_vms;
+#[cfg(feature = "webvh")]
+mod provision_integration;
 mod seeds;
 
 use helpers::{body_parse_error_response, method_not_found};
@@ -106,6 +108,8 @@ const KNOWN_FEATURE_GATED_URIS: &[&str] = &[
     vta_sdk::trust_tasks::TASK_PASSKEY_VMS_ENROLL_SUBMIT_1_0,
     vta_sdk::trust_tasks::TASK_PASSKEY_VMS_LIST_1_0,
     vta_sdk::trust_tasks::TASK_PASSKEY_VMS_REVOKE_1_0,
+    // Provision-integration — requires `webvh`.
+    vta_sdk::trust_tasks::TASK_PROVISION_INTEGRATION_REQUEST_1_0,
 ];
 
 /// Aggregate `DISPATCHED_URIS` from every slice module. Feature-gated
@@ -130,6 +134,8 @@ fn aggregate_dispatched_uris() -> Vec<&'static str> {
     // harness passes in builds where the feature is off.
     #[cfg(all(feature = "webvh", feature = "didcomm"))]
     v.extend(passkey_vms::DISPATCHED_URIS);
+    #[cfg(feature = "webvh")]
+    v.extend(provision_integration::DISPATCHED_URIS);
     v
 }
 
@@ -268,6 +274,11 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
         #[cfg(all(feature = "webvh", feature = "didcomm"))]
         vta_sdk::trust_tasks::TASK_PASSKEY_VMS_REVOKE_1_0 => {
             passkey_vms::handle_revoke(state, auth, doc).await
+        }
+        // ─── Provision-integration (feature-gated: webvh) ────────────
+        #[cfg(feature = "webvh")]
+        vta_sdk::trust_tasks::TASK_PROVISION_INTEGRATION_REQUEST_1_0 => {
+            provision_integration::handle_request(state, auth, doc).await
         }
         // ─── Unknown / REST-routed ───────────────────────────────────
         //
