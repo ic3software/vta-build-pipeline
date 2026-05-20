@@ -817,6 +817,11 @@ pub async fn run_setup_wizard(
         services: ServicesConfig {
             rest: enable_rest,
             didcomm: enable_didcomm,
+            // WebAuthn-RP service defaults off at setup. The
+            // operator enables it later via
+            // `pnm services webauthn enable --url <portal-url>`
+            // once they're ready to wire up a browser flow.
+            webauthn: false,
         },
         messaging,
         auth: AuthConfig {

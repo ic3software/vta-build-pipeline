@@ -52,6 +52,13 @@ pub async fn cmd_services_list(client: &VtaClient) -> Result<(), Box<dyn std::er
                     println!("    URL:          {u}");
                 }
             }
+            vta_sdk::protocol::services::ServiceState::Webauthn { enabled, url } => {
+                let on = if *enabled { "on" } else { "off" };
+                println!("  WebAuthn: {on}");
+                if let Some(u) = url {
+                    println!("    URL:          {u}");
+                }
+            }
         }
     }
     Ok(())

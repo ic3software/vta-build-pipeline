@@ -135,6 +135,10 @@ fn default_services() -> ServicesConfig {
     ServicesConfig {
         rest: true,
         didcomm: true,
+        // WebAuthn defaults off — operators flip this on via
+        // `services webauthn enable`, and the existing `services.rest`
+        // continues to be the discoverable HTTP surface until they do.
+        webauthn: false,
     }
 }
 

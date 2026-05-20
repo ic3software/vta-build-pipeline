@@ -2,17 +2,23 @@
 //!
 //! Spec: `docs/05-design-notes/runtime-service-management.md` §3.2.
 //!
-//! At least one transport service (REST or DIDComm) must be
-//! advertised in the VTA's DID document at all times. Disable /
+//! At least one transport service (REST, DIDComm, or WebAuthn) must
+//! be advertised in the VTA's DID document at all times. Disable /
 //! rollback paths funnel through [`would_violate_last_service`] to
 //! enforce this — there is no `--force` escape hatch and no
 //! per-call-site duplication of the predicate.
 //!
 //! The function is pure: callers compute the post-mutation enabled
 //! state for the kind they're touching and pass it in. State for
-//! the *other* kind is read off the supplied [`CurrentServices`]
+//! the *other* kinds is read off the supplied [`CurrentServices`]
 //! snapshot. This keeps the predicate testable in isolation and
 //! independent of the persistence layer.
+//!
+//! WebAuthn counts as a transport for this invariant: a VTA
+//! advertising only `#vta-webauthn` is still reachable (browser
+//! users can authenticate via the portal and drive trust-tasks
+//! over that session). What we forbid is "zero advertised
+//! transports of any kind".
 
 use vta_sdk::error::VtaError;
 
@@ -30,13 +36,15 @@ use crate::operations::protocol::snapshot::ServiceKind;
 pub struct CurrentServices {
     pub rest_enabled: bool,
     pub didcomm_enabled: bool,
+    pub webauthn_enabled: bool,
 }
 
 impl CurrentServices {
-    pub const fn new(rest_enabled: bool, didcomm_enabled: bool) -> Self {
+    pub const fn new(rest_enabled: bool, didcomm_enabled: bool, webauthn_enabled: bool) -> Self {
         Self {
             rest_enabled,
             didcomm_enabled,
+            webauthn_enabled,
         }
     }
 }
@@ -90,11 +98,24 @@ impl ProposedOp {
 /// over the supplied state, making it cheap to call defensively
 /// (e.g. as the first thing inside a mutation entry point).
 pub fn would_violate_last_service(state: &CurrentServices, op: ProposedOp) -> Result<(), VtaError> {
-    let (rest_after, didcomm_after) = match op.kind {
-        ServiceKind::Rest => (op.kind_will_be_enabled, state.didcomm_enabled),
-        ServiceKind::Didcomm => (state.rest_enabled, op.kind_will_be_enabled),
+    let (rest_after, didcomm_after, webauthn_after) = match op.kind {
+        ServiceKind::Rest => (
+            op.kind_will_be_enabled,
+            state.didcomm_enabled,
+            state.webauthn_enabled,
+        ),
+        ServiceKind::Didcomm => (
+            state.rest_enabled,
+            op.kind_will_be_enabled,
+            state.webauthn_enabled,
+        ),
+        ServiceKind::Webauthn => (
+            state.rest_enabled,
+            state.didcomm_enabled,
+            op.kind_will_be_enabled,
+        ),
     };
-    if !rest_after && !didcomm_after {
+    if !rest_after && !didcomm_after && !webauthn_after {
         return Err(VtaError::LastServiceRefused);
     }
     Ok(())
@@ -104,14 +125,17 @@ pub fn would_violate_last_service(state: &CurrentServices, op: ProposedOp) -> Re
 mod tests {
     use super::*;
 
-    /// Spec §7a.1 state model — the four (rest, didcomm) combinations.
-    /// `S0` is invariant-violating but a valid input to the predicate
-    /// (because the predicate is also called from `enable` paths
-    /// that bring the VTA *out* of the bricked state).
-    const S0: CurrentServices = CurrentServices::new(false, false);
-    const S1: CurrentServices = CurrentServices::new(true, false); // rest only
-    const S2: CurrentServices = CurrentServices::new(false, true); // didcomm only
-    const S3: CurrentServices = CurrentServices::new(true, true);
+    /// Spec §7a.1 state model — combinations of (rest, didcomm,
+    /// webauthn). `S0` is invariant-violating but a valid input to
+    /// the predicate (because the predicate is also called from
+    /// `enable` paths that bring the VTA *out* of the bricked
+    /// state). Webauthn is always off in S0/S1/S2/S3 — the
+    /// post-WebAuthn truth table is exercised by
+    /// `full_truth_table_with_webauthn` below.
+    const S0: CurrentServices = CurrentServices::new(false, false, false);
+    const S1: CurrentServices = CurrentServices::new(true, false, false); // rest only
+    const S2: CurrentServices = CurrentServices::new(false, true, false); // didcomm only
+    const S3: CurrentServices = CurrentServices::new(true, true, false);
 
     /// Disabling either kind from S3 leaves the other on — never
     /// rejects.
@@ -157,12 +181,54 @@ mod tests {
     #[test]
     fn enable_never_violates() {
         for state in &[S0, S1, S2, S3] {
-            for kind in &[ServiceKind::Rest, ServiceKind::Didcomm] {
+            for kind in &[
+                ServiceKind::Rest,
+                ServiceKind::Didcomm,
+                ServiceKind::Webauthn,
+            ] {
                 assert!(
                     would_violate_last_service(state, ProposedOp::enable(*kind)).is_ok(),
                     "enable from {state:?} for {kind:?} must be accepted",
                 );
             }
+        }
+    }
+
+    /// WebAuthn-only state — disabling WebAuthn would brick the
+    /// VTA the same way disabling the only-enabled REST or DIDComm
+    /// would.
+    #[test]
+    fn webauthn_only_state_cannot_disable_webauthn() {
+        let s_w = CurrentServices::new(false, false, true);
+        let err = would_violate_last_service(&s_w, ProposedOp::disable(ServiceKind::Webauthn))
+            .unwrap_err();
+        assert!(matches!(err, VtaError::LastServiceRefused));
+    }
+
+    /// WebAuthn keeps a VTA alive even when REST and DIDComm are
+    /// both off — disabling either of them must be accepted.
+    #[test]
+    fn webauthn_keeps_invariant_when_other_two_disabled() {
+        let s_w = CurrentServices::new(false, false, true);
+        assert!(would_violate_last_service(&s_w, ProposedOp::disable(ServiceKind::Rest)).is_ok());
+        assert!(
+            would_violate_last_service(&s_w, ProposedOp::disable(ServiceKind::Didcomm)).is_ok()
+        );
+    }
+
+    /// With all three on, disabling any single kind is fine.
+    #[test]
+    fn all_three_on_any_single_disable_is_ok() {
+        let s_all = CurrentServices::new(true, true, true);
+        for kind in &[
+            ServiceKind::Rest,
+            ServiceKind::Didcomm,
+            ServiceKind::Webauthn,
+        ] {
+            assert!(
+                would_violate_last_service(&s_all, ProposedOp::disable(*kind)).is_ok(),
+                "all-on, disable {kind:?} must be accepted",
+            );
         }
     }
 

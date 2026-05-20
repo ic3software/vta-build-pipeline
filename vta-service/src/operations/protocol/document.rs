@@ -72,6 +72,20 @@ pub const REST_SERVICE_FRAGMENT: &str = "#vta-rest";
 /// renaming would silently break SDK resolution.
 pub const REST_SERVICE_TYPE: &str = "VTARest";
 
+/// Fragment used for the VTA's WebAuthn-RP service entry. Distinct
+/// from `#vta-rest` because the WebAuthn-RP surface has different
+/// availability semantics from the general REST API (it can be
+/// runtime-toggled independently and may be advertised on DIDs that
+/// don't otherwise expose REST — e.g. a passkey-only login portal).
+pub const WEBAUTHN_SERVICE_FRAGMENT: &str = "#vta-webauthn";
+
+/// `type` literal for the WebAuthn-RP service entry. Aligns with the
+/// emerging convention used in the DIF / VC ecosystem for declaring
+/// a WebAuthn relying party on a DID document, rather than minting a
+/// VTA-internal `VTAxxx` name. If wider tooling settles on a
+/// different literal later, this is the one knob to change.
+pub const WEBAUTHN_SERVICE_TYPE: &str = "WebAuthnRP";
+
 /// A read-only view of the DIDComm service entry on a DID document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DidcommServiceRef {
@@ -101,6 +115,19 @@ pub struct RestServiceRef {
     pub url: String,
 }
 
+/// A read-only view of the WebAuthn-RP service entry on a DID
+/// document. Same shape as [`RestServiceRef`] — just a URL — but
+/// kept as a distinct type so handlers can't accidentally treat one
+/// as the other (different runtime gates, different availability).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebauthnServiceRef {
+    /// Full service `id` (e.g. `did:webvh:scid:host:path#vta-webauthn`).
+    pub id: String,
+    /// The URL this entry advertises — typically the operator-facing
+    /// auth portal (e.g. `https://vta.example.com/auth/portal`).
+    pub url: String,
+}
+
 #[derive(Debug, Error)]
 pub enum DocumentPatchError {
     #[error("DID document is not a JSON object")]
@@ -111,6 +138,8 @@ pub enum DocumentPatchError {
     EmptyMediatorDid,
     #[error("REST URL must be a non-empty string")]
     EmptyRestUrl,
+    #[error("WebAuthn URL must be a non-empty string")]
+    EmptyWebauthnUrl,
 }
 
 /// Locate the `#vta-didcomm` service entry on `doc`, if any.
@@ -230,20 +259,29 @@ fn matches_canonical_fragment(id: &str, fragment: &str) -> bool {
     !prefix.contains('#')
 }
 
-/// Sort the `service` array so DIDComm comes before REST, with all
-/// other entries (e.g. `#tee-attestation`) preserving their original
-/// relative order.
+/// Sort the `service` array so DIDComm comes before REST and
+/// WebAuthn, with all other entries (e.g. `#tee-attestation`)
+/// preserving their original relative order.
 ///
-/// Spec §3.3 — when both transports are advertised, DIDComm is the
-/// preferred transport for clients that support it. We encode this
-/// via array ordering so a DID-Core resolver walking the array
+/// Spec §3.3 — when multiple transports are advertised, DIDComm is
+/// the preferred transport for clients that support it. We encode
+/// this via array ordering so a DID-Core resolver walking the array
 /// picks DIDComm first. No `priority` key is used (DIDComm-v2-spec
 /// only) so that DID-Core-only resolvers see the same preference.
 ///
-/// Stable sort: `#vta-didcomm` -> `#vta-rest` -> everything else
-/// (preserved in input order). Idempotent. Pure — only mutates the
-/// `service` field of `doc`; verification methods and other fields
-/// are untouched.
+/// Stable sort: `#vta-didcomm` -> `#vta-rest` -> `#vta-webauthn` ->
+/// everything else (preserved in input order). Idempotent. Pure —
+/// only mutates the `service` field of `doc`; verification methods
+/// and other fields are untouched.
+///
+/// WebAuthn sits after REST because:
+/// - DIDComm is preferred when the client can do it (private
+///   end-to-end, no public-internet requirement)
+/// - REST is the next-best for programmatic clients that hold a
+///   bearer credential
+/// - WebAuthn is the operator/user-facing fallback that requires a
+///   browser session — listed last so non-browser clients don't
+///   accidentally pick it.
 pub fn sort_services_canonical(doc: &mut Value) {
     let Some(obj) = doc.as_object_mut() else {
         return;
@@ -253,13 +291,15 @@ pub fn sort_services_canonical(doc: &mut Value) {
     };
     services.sort_by_key(|s| {
         let id = s.get("id").and_then(Value::as_str).unwrap_or("");
-        // 0 = DIDComm, 1 = REST, 2 = anything else (e.g. TEE)
+        // 0 = DIDComm, 1 = REST, 2 = WebAuthn, 3 = anything else (TEE etc.)
         if id_matches_didcomm(id) {
             0u8
         } else if id_matches_rest(id) {
             1u8
-        } else {
+        } else if id_matches_webauthn(id) {
             2u8
+        } else {
+            3u8
         }
     });
 }
@@ -399,6 +439,96 @@ pub fn without_rest_service(mut doc: Value) -> Value {
     doc
 }
 
+/// Locate the `#vta-webauthn` service entry on `doc`, if any.
+pub fn current_webauthn_service(doc: &Value) -> Option<WebauthnServiceRef> {
+    let services = doc.get("service")?.as_array()?;
+    for svc in services {
+        let id = svc.get("id")?.as_str()?;
+        if id_matches_webauthn(id) {
+            let url = extract_rest_url(svc.get("serviceEndpoint")?)?;
+            return Some(WebauthnServiceRef {
+                id: id.to_string(),
+                url,
+            });
+        }
+    }
+    None
+}
+
+/// Insert or replace the `#vta-webauthn` service entry, returning the
+/// updated document. Other service entries (`#vta-didcomm`,
+/// `#vta-rest`, `#tee-attestation`, …) are preserved byte-for-byte;
+/// `verificationMethod` and the verification-relation arrays are
+/// untouched.
+///
+/// The `serviceEndpoint` is rendered as a plain URL string for
+/// symmetry with `with_rest_service`'s shape — wallets and
+/// `vta-sdk::session::resolve_*_url` walk strings, single-entry
+/// arrays, and `{ uri }` objects interchangeably.
+pub fn with_webauthn_service(mut doc: Value, url: &str) -> Result<Value, DocumentPatchError> {
+    if url.is_empty() {
+        return Err(DocumentPatchError::EmptyWebauthnUrl);
+    }
+    let did_id = doc
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or(DocumentPatchError::MissingDocumentId)?
+        .to_string();
+
+    let new_entry = json!({
+        "id": format!("{did_id}{WEBAUTHN_SERVICE_FRAGMENT}"),
+        "type": WEBAUTHN_SERVICE_TYPE,
+        "serviceEndpoint": url,
+    });
+
+    let obj = doc.as_object_mut().ok_or(DocumentPatchError::NotAnObject)?;
+
+    let services = obj
+        .entry("service")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .expect("service field must be an array");
+
+    if let Some(existing) = services.iter_mut().find(|s| {
+        s.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(id_matches_webauthn)
+    }) {
+        *existing = new_entry;
+    } else {
+        services.push(new_entry);
+    }
+
+    sort_services_canonical(&mut doc);
+    Ok(doc)
+}
+
+/// Remove the `#vta-webauthn` service entry. Symmetric with
+/// [`without_rest_service`].
+pub fn without_webauthn_service(mut doc: Value) -> Value {
+    let Some(obj) = doc.as_object_mut() else {
+        return doc;
+    };
+    let Some(services) = obj.get_mut("service").and_then(Value::as_array_mut) else {
+        return doc;
+    };
+    services.retain(|s| {
+        !s.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(id_matches_webauthn)
+    });
+    if services.is_empty() {
+        obj.remove("service");
+    }
+    doc
+}
+
+/// Match the workspace's canonical `#vta-webauthn` fragment shape.
+/// See [`id_matches_didcomm`] for the rationale on strict matching.
+fn id_matches_webauthn(id: &str) -> bool {
+    matches_canonical_fragment(id, WEBAUTHN_SERVICE_FRAGMENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,13 +543,97 @@ mod tests {
     fn fragment_match_is_strict_not_suffix() {
         assert!(id_matches_didcomm("did:webvh:foo#vta-didcomm"));
         assert!(id_matches_rest("did:webvh:foo#vta-rest"));
+        assert!(id_matches_webauthn("did:webvh:foo#vta-webauthn"));
         // Nested fragment — reject.
         assert!(!id_matches_didcomm("did:webvh:foo#extra#vta-didcomm"));
         assert!(!id_matches_rest("did:webvh:foo#extra#vta-rest"));
+        assert!(!id_matches_webauthn("did:webvh:foo#extra#vta-webauthn"));
         // Suffix-only collision — reject (fragment was preceded by
         // characters that aren't a `#`).
         assert!(!id_matches_didcomm("did:webvh:foo-vta-didcomm"));
         assert!(!id_matches_rest("did:webvh:foo-vta-rest"));
+        assert!(!id_matches_webauthn("did:webvh:foo-vta-webauthn"));
+    }
+
+    #[test]
+    fn with_webauthn_service_inserts_then_replaces() {
+        let doc = doc_without_service();
+        let patched = with_webauthn_service(doc, "https://vta.example.com/auth/portal").unwrap();
+        let svc = current_webauthn_service(&patched).expect("webauthn entry present");
+        assert_eq!(svc.url, "https://vta.example.com/auth/portal");
+        assert_eq!(svc.id, format!("{}#vta-webauthn", vta_did()));
+
+        // Replace with a new URL.
+        let patched2 =
+            with_webauthn_service(patched, "https://vta.example.com/auth/portal-v2").unwrap();
+        let svc2 = current_webauthn_service(&patched2).expect("webauthn entry present");
+        assert_eq!(svc2.url, "https://vta.example.com/auth/portal-v2");
+        // Only one entry — replacement, not duplication.
+        let services = patched2.get("service").unwrap().as_array().unwrap();
+        let webauthn_entries = services
+            .iter()
+            .filter(|s| id_matches_webauthn(s.get("id").and_then(Value::as_str).unwrap_or("")))
+            .count();
+        assert_eq!(webauthn_entries, 1);
+    }
+
+    #[test]
+    fn with_webauthn_service_rejects_empty_url() {
+        let err = with_webauthn_service(doc_without_service(), "").unwrap_err();
+        assert!(matches!(err, DocumentPatchError::EmptyWebauthnUrl));
+    }
+
+    #[test]
+    fn without_webauthn_service_removes_entry() {
+        let doc = with_webauthn_service(doc_without_service(), "https://x.example.com").unwrap();
+        assert!(current_webauthn_service(&doc).is_some());
+        let stripped = without_webauthn_service(doc);
+        assert!(current_webauthn_service(&stripped).is_none());
+        // Service array gone entirely when it's the only entry.
+        assert!(stripped.get("service").is_none());
+    }
+
+    #[test]
+    fn sort_canonical_places_webauthn_after_rest_before_other() {
+        // Start with TEE first, then WebAuthn, then REST, then
+        // DIDComm — pathological reverse order. The sort should
+        // bring DIDComm to front, REST second, WebAuthn third,
+        // TEE last.
+        let base = doc_without_service();
+        let with_d = with_didcomm_service(base, "did:webvh:m").unwrap();
+        let with_dr = with_rest_service(with_d, "https://r.example.com").unwrap();
+        let mut with_drw =
+            with_webauthn_service(with_dr, "https://r.example.com/auth/portal").unwrap();
+        // Inject a TEE-shaped entry (mimics what attestation publishing
+        // does) so we can verify "other" entries land at the end.
+        let services = with_drw
+            .get_mut("service")
+            .and_then(Value::as_array_mut)
+            .unwrap();
+        services.insert(
+            0,
+            json!({
+                "id": format!("{}#tee-attestation", vta_did()),
+                "type": "TEEAttestation",
+                "serviceEndpoint": "https://r.example.com/attestation",
+            }),
+        );
+        sort_services_canonical(&mut with_drw);
+        let services = with_drw.get("service").unwrap().as_array().unwrap();
+        assert!(id_matches_didcomm(
+            services[0].get("id").unwrap().as_str().unwrap()
+        ));
+        assert!(id_matches_rest(
+            services[1].get("id").unwrap().as_str().unwrap()
+        ));
+        assert!(id_matches_webauthn(
+            services[2].get("id").unwrap().as_str().unwrap()
+        ));
+        // TEE last
+        assert_eq!(
+            services[3].get("id").unwrap().as_str().unwrap(),
+            format!("{}#tee-attestation", vta_did())
+        );
     }
 
     fn vta_did() -> &'static str {

@@ -167,15 +167,15 @@ pub async fn disable_rest(
     //    order, where the §3.2 invariant is checked before reading
     //    the webvh log. The prior_url for the snapshot is captured
     //    later, after the brick check has already passed.
-    let didcomm_enabled = {
+    let (didcomm_enabled, webauthn_enabled) = {
         let cfg = config.read().await;
         if !cfg.services.rest {
             return Err(DisableRestError::ServiceNotPresent);
         }
-        cfg.services.didcomm
+        (cfg.services.didcomm, cfg.services.webauthn)
     };
     would_violate_last_service(
-        &CurrentServices::new(true, didcomm_enabled),
+        &CurrentServices::new(true, didcomm_enabled, webauthn_enabled),
         ProposedOp::disable(ServiceKind::Rest),
     )?;
 
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn brick_prevention_rejects_disable_rest_when_didcomm_off() {
         let result = would_violate_last_service(
-            &CurrentServices::new(true, false),
+            &CurrentServices::new(true, false, false),
             ProposedOp::disable(ServiceKind::Rest),
         );
         let err = DisableRestError::from(result.unwrap_err());
@@ -383,7 +383,18 @@ mod tests {
     #[test]
     fn brick_prevention_allows_disable_rest_when_didcomm_on() {
         let result = would_violate_last_service(
-            &CurrentServices::new(true, true),
+            &CurrentServices::new(true, true, false),
+            ProposedOp::disable(ServiceKind::Rest),
+        );
+        assert!(result.is_ok());
+    }
+
+    /// Disabling REST is also allowed when WebAuthn alone is on
+    /// — WebAuthn counts as a transport for invariant purposes.
+    #[test]
+    fn brick_prevention_allows_disable_rest_when_webauthn_on() {
+        let result = would_violate_last_service(
+            &CurrentServices::new(true, false, true),
             ProposedOp::disable(ServiceKind::Rest),
         );
         assert!(result.is_ok());

@@ -172,6 +172,16 @@ pub struct ServicesConfig {
     pub rest: bool,
     #[serde(default = "default_true")]
     pub didcomm: bool,
+    /// WebAuthn-RP service — the dedicated `/auth/portal` +
+    /// `/auth/passkey-login/*` + `/did/verification-methods/passkey/*`
+    /// surface. Distinct from `rest` so an operator can run a
+    /// REST-less, browser-facing-only VTA (e.g. one that only
+    /// publishes WebAuthn flows for end-users plus DIDComm for
+    /// programmatic peers). Defaults to `false` because legacy
+    /// installs don't have this surface enabled; new installs that
+    /// want browser-side passkey login flip this on explicitly.
+    #[serde(default)]
+    pub webauthn: bool,
 }
 
 fn default_true() -> bool {
@@ -183,6 +193,7 @@ impl Default for ServicesConfig {
         Self {
             rest: true,
             didcomm: true,
+            webauthn: false,
         }
     }
 }

@@ -321,7 +321,11 @@ async fn read_preconditions(
         // VtaError::LastServiceRefused maps to the existing
         // NoProtocolRemaining wire variant.
         if let Err(VtaError::LastServiceRefused) = would_violate_last_service(
-            &CurrentServices::new(cfg.services.rest, cfg.services.didcomm),
+            &CurrentServices::new(
+                cfg.services.rest,
+                cfg.services.didcomm,
+                cfg.services.webauthn,
+            ),
             ProposedOp::disable(ServiceKind::Didcomm),
         ) {
             return Err(DisableDidcommError::NoProtocolRemaining);

@@ -228,6 +228,12 @@ pub async fn run_services_list(config_path: Option<PathBuf>) -> CliResult {
                     println!("    URL:          {u}");
                 }
             }
+            vta_sdk::protocol::services::ServiceState::Webauthn { enabled, url } => {
+                println!("  WebAuthn: {}", if *enabled { "on" } else { "off" });
+                if let Some(u) = url {
+                    println!("    URL:          {u}");
+                }
+            }
         }
     }
     Ok(())

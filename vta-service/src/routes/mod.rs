@@ -3,6 +3,7 @@ mod acl;
 mod attestation;
 mod audit;
 mod auth;
+mod auth_portal;
 mod backup;
 mod backup_blob;
 mod bootstrap;
@@ -174,6 +175,19 @@ pub fn router_with_cors(allowed_origins: &[String]) -> Router<AppState> {
         .route("/did/{did}/log", get(did_webvh::get_did_log_public_handler));
     let unauth = unauth.layer(unauth_layer);
 
+    // Auth portal — same-origin popup target for cross-origin WebAuthn
+    // flows. Sits on its own router branch so:
+    //  - It's NOT behind the rate-limit layer (operator may refresh
+    //    repeatedly while testing).
+    //  - It's NOT behind UNAUTH_BODY_SIZE (the HTML response is
+    //    bigger than that; the cap is for inbound bodies but separate
+    //    branches keep the contract obvious).
+    //  - It's NOT behind CORS itself — the response is meant to be
+    //    loaded directly into a popup window same-origin, not fetched
+    //    cross-origin.
+    // See `routes::auth_portal` for the full security model.
+    let auth_portal_router = Router::new().route("/auth/portal", get(auth_portal::portal_handler));
+
     // Authenticated provision-integration (context-admin gated). Kept
     // separate from `unauth` so the rate-limiter doesn't apply — the
     // endpoint already hard-gates on `AdminAuth`.
@@ -186,6 +200,7 @@ pub fn router_with_cors(allowed_origins: &[String]) -> Router<AppState> {
     let router = Router::new().merge(unauth);
     #[cfg(feature = "webvh")]
     let router = router.merge(auth_provision);
+    let router = router.merge(auth_portal_router);
 
     let router = router
         .route(
