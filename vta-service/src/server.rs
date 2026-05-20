@@ -453,6 +453,8 @@ pub async fn run(
         let storage_sessions_ks = sessions_ks.clone();
         let storage_audit_ks = audit_ks.clone();
         let storage_acl_ks = acl_ks.clone();
+        let storage_backup_bundles_ks = backup_bundles_ks.clone();
+        let storage_backup_blob_dir = backup_blob_dir.clone();
         let storage_audit_config = config.audit.clone();
         let storage_auth_config = config.auth.clone();
         let has_auth = auth.jwt_keys.is_some();
@@ -736,6 +738,8 @@ pub async fn run(
                     storage_sessions_ks,
                     storage_audit_ks,
                     storage_acl_ks,
+                    storage_backup_bundles_ks,
+                    storage_backup_blob_dir,
                     storage_audit_config,
                     storage_auth_config,
                     has_auth,
@@ -825,11 +829,14 @@ pub async fn run(
 
 /// Storage thread: runs session cleanup loop and persists the store on shutdown.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_storage_thread(
     store: Store,
     sessions_ks: KeyspaceHandle,
     audit_ks: KeyspaceHandle,
     acl_ks: KeyspaceHandle,
+    backup_bundles_ks_storage: KeyspaceHandle,
+    backup_blob_dir_storage: std::path::PathBuf,
     audit_config: crate::config::AuditConfig,
     auth_config: AuthConfig,
     has_auth: bool,
@@ -863,6 +870,19 @@ fn run_storage_thread(
                         // Prune expired AclEntry rows and PendingBootstrap rows.
                         if let Err(e) = crate::acl_sweeper::sweep_expired(&acl_ks).await {
                             warn!("acl sweeper error: {e}");
+                        }
+                        // Expire & retention-prune in-flight backup
+                        // bundles (descriptor-pattern slice). TTL
+                        // pass transitions stale non-terminal records
+                        // to Expired; retention pass deletes terminal
+                        // records older than the 24h audit window.
+                        if let Err(e) = crate::backup_bundle_sweeper::sweep_bundles(
+                            &backup_bundles_ks_storage,
+                            &backup_blob_dir_storage,
+                        )
+                        .await
+                        {
+                            warn!("backup bundle sweeper error: {e}");
                         }
                     }
                     _ = shutdown_rx.changed() => {
