@@ -479,6 +479,13 @@ pub(crate) enum BackupCommands {
         /// Output file path (default: `vta-backup-<timestamp>.vtabak`)
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
+        /// Use the new descriptor-pattern trust-task flow instead of
+        /// the legacy inline `/backup/export` REST route. Off by
+        /// default during the transition window; will flip to on by
+        /// default in a future release. See
+        /// `docs/05-design-notes/backup-descriptor-pattern.md`.
+        #[arg(long)]
+        use_trust_task: bool,
     },
     /// Import VTA state from an encrypted backup file
     Import {
@@ -487,6 +494,11 @@ pub(crate) enum BackupCommands {
         /// Preview only — show what would be imported without applying
         #[arg(long)]
         preview: bool,
+        /// Use the new descriptor-pattern trust-task flow instead of
+        /// the legacy inline `/backup/import` REST route. Off by
+        /// default during the transition window.
+        #[arg(long)]
+        use_trust_task: bool,
     },
 }
 
