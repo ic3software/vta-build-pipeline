@@ -56,6 +56,74 @@ mod seeds;
 
 use helpers::{body_parse_error_response, method_not_found};
 
+/// URIs that the VTA exposes through dedicated unauth REST routes
+/// rather than the authenticated `/api/trust-tasks` dispatcher.
+///
+/// Per the feature-gating convention in
+/// `docs/05-design-notes/trust-task-feature-gating.md`: the parity
+/// harness accepts these as "tracked" without requiring a dispatcher
+/// arm. The corresponding handlers live in `routes::auth` (passkey
+/// login, legacy challenge/authenticate/refresh) and
+/// `routes::attestation` (TEE status / report).
+#[allow(dead_code)] // consumed by the dispatcher's test-only parity harness
+const REST_ROUTED: &[&str] = &[
+    // Auth (pre-login — no session, can't pass AuthClaims)
+    vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_1_0,
+    vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_1_0,
+    vta_sdk::trust_tasks::TASK_AUTH_REFRESH_1_0,
+    vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_1_0,
+    vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0,
+    // Attestation (unauth — TEE proofs are publicly verifiable by design)
+    vta_sdk::trust_tasks::TASK_ATTESTATION_STATUS_1_0,
+    vta_sdk::trust_tasks::TASK_ATTESTATION_REPORT_1_0,
+];
+
+/// URIs that vta-sdk declares but the dispatcher may not wire in
+/// every build because they depend on `vta-service` feature flags
+/// (e.g. `webvh`, `didcomm`, `tee`).
+///
+/// When their feature is **on**, the slice module's `DISPATCHED_URIS`
+/// const also lists them, so they're tracked by
+/// `aggregate_dispatched_uris()`. When the feature is **off**, the
+/// slice module isn't compiled — its const isn't aggregated — so only
+/// this allowlist keeps the parity harness from failing on them.
+///
+/// Adding a URI here is a deliberate act: it says "this URI's
+/// dispatch lives behind a feature flag and may be unreachable in
+/// some builds, but the URI is canonically declared in vta-sdk."
+///
+/// All entries are unconditional (don't change per cfg). They're
+/// just statements that the dispatcher knows about them.
+#[allow(dead_code)] // consumed by the dispatcher's test-only parity harness
+const KNOWN_FEATURE_GATED_URIS: &[&str] = &[
+    // Empty for now. Feature-gated slices (passkey-vms, webvh
+    // lifecycle, services management, provision-integration, join
+    // requests, bootstrap, etc.) will add entries here as they land.
+];
+
+/// Aggregate `DISPATCHED_URIS` from every slice module. Feature-gated
+/// slices contribute only when their cfg is satisfied — this is the
+/// load-bearing detail that lets `KNOWN_FEATURE_GATED_URIS` work as a
+/// shrunk-build allowlist.
+#[cfg(test)]
+fn aggregate_dispatched_uris() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = Vec::new();
+    v.extend(acl::DISPATCHED_URIS);
+    v.extend(audit::DISPATCHED_URIS);
+    v.extend(auth::DISPATCHED_URIS);
+    v.extend(config::DISPATCHED_URIS);
+    v.extend(contexts::DISPATCHED_URIS);
+    v.extend(discovery::DISPATCHED_URIS);
+    v.extend(keys::DISPATCHED_URIS);
+    v.extend(management::DISPATCHED_URIS);
+    v.extend(seeds::DISPATCHED_URIS);
+    // Feature-gated slices add their `v.extend(slice::DISPATCHED_URIS)`
+    // here under `#[cfg(feature = "...")]`. The corresponding URIs
+    // must also appear in `KNOWN_FEATURE_GATED_URIS` so the parity
+    // harness passes in builds where the feature is off.
+    v
+}
+
 /// `POST /api/trust-tasks` handler.
 ///
 /// Bearer-auth'd via [`AuthClaims`]; the caller's DID is the
@@ -266,84 +334,57 @@ mod tests {
     /// invariant). Every URI declared in `vta-sdk::trust_tasks` must
     /// either:
     ///
-    /// 1. Be handled by `dispatch_typed` in this dispatcher, OR
-    /// 2. Be on the `REST_ROUTED` allowlist (bootstrap-y operations
-    ///    served by dedicated unauth REST handlers — see
-    ///    `routes/auth.rs::passkey_login_{start,finish}` and the
-    ///    legacy `/auth/{challenge,,refresh}` routes).
+    /// 1. Be tracked by a slice module's `DISPATCHED_URIS` const
+    ///    (the slice's handler IS wired into `dispatch_typed`), OR
+    /// 2. Be on the `REST_ROUTED` allowlist (served by dedicated
+    ///    unauth REST handlers — passkey login, legacy challenge/
+    ///    authenticate/refresh, TEE attestation), OR
+    /// 3. Be on the `KNOWN_FEATURE_GATED_URIS` allowlist (feature-
+    ///    flagged in vta-service and not compiled in this build).
     ///
-    /// Adding a new URI const to vta-sdk without doing one of these
-    /// makes this test fail loudly with the offending URI in the
-    /// message.
+    /// See `docs/05-design-notes/trust-task-feature-gating.md` for
+    /// the full convention.
+    ///
+    /// Adding a new URI to `vta-sdk::trust_tasks::ALL_URIS` without
+    /// doing one of these three fails this test loudly with the
+    /// offending URI in the message.
     #[test]
     fn dispatcher_handles_every_vta_sdk_uri() {
-        // URIs the dispatcher's `dispatch_typed` function explicitly
-        // matches — keep in lockstep with the match arms above.
-        let dispatched: &[&str] = &[
-            // Auth (only revoke-session)
-            vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_1_0,
-            // ACL
-            vta_sdk::trust_tasks::TASK_ACL_LIST_1_0,
-            vta_sdk::trust_tasks::TASK_ACL_CREATE_1_0,
-            vta_sdk::trust_tasks::TASK_ACL_GET_1_0,
-            vta_sdk::trust_tasks::TASK_ACL_UPDATE_1_0,
-            vta_sdk::trust_tasks::TASK_ACL_DELETE_1_0,
-            // Contexts
-            vta_sdk::trust_tasks::TASK_CONTEXTS_LIST_1_0,
-            vta_sdk::trust_tasks::TASK_CONTEXTS_CREATE_1_0,
-            vta_sdk::trust_tasks::TASK_CONTEXTS_GET_1_0,
-            vta_sdk::trust_tasks::TASK_CONTEXTS_UPDATE_1_0,
-            vta_sdk::trust_tasks::TASK_CONTEXTS_UPDATE_DID_1_0,
-            vta_sdk::trust_tasks::TASK_CONTEXTS_PREVIEW_DELETE_1_0,
-            vta_sdk::trust_tasks::TASK_CONTEXTS_DELETE_1_0,
-            // Keys
-            vta_sdk::trust_tasks::TASK_KEYS_LIST_1_0,
-            vta_sdk::trust_tasks::TASK_KEYS_CREATE_1_0,
-            vta_sdk::trust_tasks::TASK_KEYS_GET_1_0,
-            vta_sdk::trust_tasks::TASK_KEYS_RENAME_1_0,
-            vta_sdk::trust_tasks::TASK_KEYS_REVOKE_1_0,
-            vta_sdk::trust_tasks::TASK_KEYS_SIGN_1_0,
-            // Seeds
-            vta_sdk::trust_tasks::TASK_SEEDS_LIST_1_0,
-            vta_sdk::trust_tasks::TASK_SEEDS_ROTATE_1_0,
-            vta_sdk::trust_tasks::TASK_SEEDS_EXPORT_MNEMONIC_1_0,
-            // Audit
-            vta_sdk::trust_tasks::TASK_AUDIT_LIST_LOGS_1_0,
-            vta_sdk::trust_tasks::TASK_AUDIT_GET_RETENTION_1_0,
-            vta_sdk::trust_tasks::TASK_AUDIT_UPDATE_RETENTION_1_0,
-            // Discovery
-            vta_sdk::trust_tasks::TASK_DISCOVERY_CAPABILITIES_1_0,
-            // Config
-            vta_sdk::trust_tasks::TASK_CONFIG_GET_1_0,
-            vta_sdk::trust_tasks::TASK_CONFIG_UPDATE_1_0,
-            // Management
-            vta_sdk::trust_tasks::TASK_MANAGEMENT_RELOAD_SERVICES_1_0,
-        ];
-
-        // URIs deliberately routed via dedicated unauth REST endpoints
-        // (not the authenticated /api/trust-tasks dispatcher).
-        // Pre-authentication operations the user invokes BEFORE they
-        // have a session, so they can't pass AuthClaims through the
-        // dispatcher's extractor.
-        let rest_routed: &[&str] = &[
-            // Auth (pre-login)
-            vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_1_0,
-            vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_1_0,
-            vta_sdk::trust_tasks::TASK_AUTH_REFRESH_1_0,
-            vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_1_0,
-            vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0,
-            // Attestation (unauth — TEE proofs are publicly verifiable
-            // by design)
-            vta_sdk::trust_tasks::TASK_ATTESTATION_STATUS_1_0,
-            vta_sdk::trust_tasks::TASK_ATTESTATION_REPORT_1_0,
-        ];
+        let dispatched = aggregate_dispatched_uris();
 
         for declared in vta_sdk::trust_tasks::ALL_URIS {
+            let in_dispatched = dispatched.contains(declared);
+            let in_rest_routed = REST_ROUTED.contains(declared);
+            let in_feature_gated = KNOWN_FEATURE_GATED_URIS.contains(declared);
+
             assert!(
-                dispatched.contains(declared) || rest_routed.contains(declared),
-                "vta-sdk declares URI `{declared}` but it is neither dispatched nor on the \
-                 REST_ROUTED allowlist — wire it into `dispatch_typed` or add it to one of \
-                 the lists above"
+                in_dispatched || in_rest_routed || in_feature_gated,
+                "vta-sdk declares URI `{declared}` but it is not tracked in this dispatcher — \
+                 either (a) add it to a slice's `DISPATCHED_URIS` const and wire a match arm, \
+                 (b) add it to `REST_ROUTED` if it lives on a dedicated REST route, or \
+                 (c) add it to `KNOWN_FEATURE_GATED_URIS` with a comment explaining the gating"
+            );
+        }
+    }
+
+    /// Defensive guard against double-tracking. A URI should appear in
+    /// exactly one of (DISPATCHED_URIS for some slice, REST_ROUTED,
+    /// KNOWN_FEATURE_GATED_URIS) — except that
+    /// `KNOWN_FEATURE_GATED_URIS` redundantly mirrors a feature-gated
+    /// slice's URIs when the feature is on. That redundancy is allowed
+    /// (the harness tolerates it); other overlaps would indicate
+    /// confusion about which transport a URI uses.
+    ///
+    /// Specifically: a URI MUST NOT be in BOTH `aggregate_dispatched_uris()`
+    /// AND `REST_ROUTED`. That'd mean two handlers compete for it.
+    #[test]
+    fn no_uri_is_both_dispatched_and_rest_routed() {
+        let dispatched = aggregate_dispatched_uris();
+        for uri in REST_ROUTED {
+            assert!(
+                !dispatched.contains(uri),
+                "URI `{uri}` is in REST_ROUTED but also in a slice's DISPATCHED_URIS — \
+                 a URI must live on exactly one transport"
             );
         }
     }
