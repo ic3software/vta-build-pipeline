@@ -83,6 +83,22 @@ pub struct AppState {
     /// Anti-replay log for sealed-bootstrap `bundle_id`s. One row per seal;
     /// `PersistentNonceStore` refuses duplicates.
     pub sealed_nonces_ks: KeyspaceHandle,
+    /// In-flight backup-bundle records for the descriptor-pattern
+    /// export/import slice (see
+    /// `docs/05-design-notes/backup-descriptor-pattern.md`). Holds
+    /// only the control-plane state — `.vtabak` bytes live on disk
+    /// under [`Self::backup_blob_dir`]. Encrypted at rest (records
+    /// include hashed bearer tokens; nothing useful leaks if the
+    /// keyspace is read, but encrypting it keeps storage-layer
+    /// invariants uniform across slices).
+    pub backup_bundles_ks: KeyspaceHandle,
+    /// Filesystem directory under which `.vtabak` byte blobs are
+    /// staged for in-flight backup bundles. Created lazily at first
+    /// `initiate-*` call. Permissions: 0700 (owner-only). Each
+    /// blob is at `{backup_blob_dir}/{bundle_id}.vtabak` with mode
+    /// 0600. The sweeper deletes both the file and the record
+    /// when a bundle ages out.
+    pub backup_blob_dir: std::path::PathBuf,
     #[cfg(feature = "webvh")]
     pub webvh_ks: KeyspaceHandle,
     /// In-flight WebAuthn registration state for the
@@ -191,6 +207,13 @@ pub async fn build_app_state(
     // row is a one-byte sentinel, so the keyspace is intentionally
     // unencrypted — saves a decrypt hop on every request.
     let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
+    let backup_bundles_ks = apply_encryption(store.keyspace("backup_bundles")?);
+    // Stage `.vtabak` blobs under `{data_dir}/backups`. Created lazily
+    // by the op layer at first `initiate-*` call (so a VTA that never
+    // does backups doesn't get an empty directory). See
+    // `docs/05-design-notes/backup-descriptor-pattern.md` §"State
+    // machine" for the file-system layout.
+    let backup_blob_dir = config.store.data_dir.join("backups");
     #[cfg(feature = "webvh")]
     let webvh_ks = apply_encryption(store.keyspace("webvh")?);
     #[cfg(feature = "webvh")]
@@ -237,6 +260,8 @@ pub async fn build_app_state(
         imported_ks,
         cache_ks,
         sealed_nonces_ks,
+        backup_bundles_ks,
+        backup_blob_dir,
         #[cfg(feature = "webvh")]
         webvh_ks,
         #[cfg(feature = "webvh")]
@@ -329,6 +354,8 @@ pub async fn run(
         let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
         let cache_ks = store.keyspace("cache")?;
         let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
+        let backup_bundles_ks = apply_encryption(store.keyspace("backup_bundles")?);
+        let backup_blob_dir = config.store.data_dir.join("backups");
         #[cfg(feature = "webvh")]
         let webvh_ks = apply_encryption(store.keyspace("webvh")?);
         #[cfg(feature = "webvh")]
@@ -491,6 +518,8 @@ pub async fn run(
                 imported_ks,
                 cache_ks,
                 sealed_nonces_ks,
+                backup_bundles_ks,
+                backup_blob_dir,
                 #[cfg(feature = "webvh")]
                 webvh_ks,
                 #[cfg(feature = "webvh")]

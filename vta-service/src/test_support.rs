@@ -467,6 +467,8 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
     let cache_ks = store.keyspace("cache").unwrap();
     let imported_ks = store.keyspace("imported_secrets").unwrap();
     let sealed_nonces_ks = store.keyspace("sealed_nonces").unwrap();
+    let backup_bundles_ks = store.keyspace("backup_bundles").unwrap();
+    let backup_blob_dir = dir.path().join("backups");
     let did_templates_ks = store.keyspace("did_templates").unwrap();
     #[cfg(feature = "webvh")]
     let webvh_ks = store.keyspace("webvh").unwrap();
@@ -531,6 +533,8 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         imported_ks,
         cache_ks,
         sealed_nonces_ks,
+        backup_bundles_ks,
+        backup_blob_dir,
         #[cfg(feature = "webvh")]
         webvh_ks,
         #[cfg(feature = "webvh")]
