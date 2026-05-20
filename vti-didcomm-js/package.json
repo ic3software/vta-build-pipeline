@@ -1,0 +1,22 @@
+{
+  "name": "vti-didcomm-js",
+  "version": "0.1.0",
+  "description": "Browser-side DIDComm v2 implementation for the Verifiable Trust Infrastructure workspace. Focused subset: authcrypt + X25519 + A256GCM + Ed25519, no anoncrypt, no multi-recipient. See docs/05-design-notes/didcomm-js-implementation.md.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./base64url": "./src/base64url.js",
+    "./multibase": "./src/multibase.js",
+    "./jwk": "./src/jwk.js",
+    "./concat-kdf": "./src/concat-kdf.js"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "private": true
+}
