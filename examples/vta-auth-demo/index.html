@@ -25,9 +25,39 @@
     </div>
   </section>
 
+  <section class="bootstrap card">
+    <h2>2. Bootstrap auth (paste JWT)</h2>
+    <p class="hint">First-time setup: get a JWT from <code>pnm auth show-token</code>, paste it here. Unlocks Step 3 (enrol passkey) and Step 5 (sessions + trust-tasks) without going through passkey login.</p>
+    <label>
+      Access token (JWT)
+      <textarea id="bootstrapJwt" rows="3" spellcheck="false" placeholder="eyJhbGciOi…"></textarea>
+    </label>
+    <div class="row">
+      <button id="bootstrapApply">Use this token</button>
+      <span id="bootstrapStatus" class="status muted"></span>
+    </div>
+  </section>
+
+  <section class="enrol card">
+    <h2>3. Enrol a passkey VM</h2>
+    <p class="hint">Adds a WebAuthn passkey as a <code>verificationMethod</code> on a WebVH-managed DID. Requires an admin JWT (from Step 2). The browser drives <code>navigator.credentials.create</code>; the VTA publishes the new VM via a WebVH LogEntry.</p>
+    <label>
+      Target DID
+      <input id="enrolDid" type="text" placeholder="did:webvh:example.com:alice">
+    </label>
+    <label>
+      Label (optional, e.g. "MacBook Touch ID")
+      <input id="enrolLabel" type="text" placeholder="demo-key">
+    </label>
+    <div class="row">
+      <button id="enrolStart">Enrol passkey</button>
+    </div>
+    <pre id="enrolOutput" class="output"></pre>
+  </section>
+
   <section class="passkey card">
-    <h2>2. Passkey login</h2>
-    <p class="hint">DID-VM-resolved WebAuthn. The browser presents an assertion; the VTA verifies against the passkey verificationMethod published on the DID document.</p>
+    <h2>4. Passkey login</h2>
+    <p class="hint">Once a DID has a passkey VM (from Step 3 or already enrolled), use it to obtain a JWT directly — no DIDComm round-trip.</p>
     <label>
       DID
       <input id="loginDid" type="text" placeholder="did:webvh:example.com:alice">
@@ -40,7 +70,7 @@
   </section>
 
   <section class="session card hidden" id="sessionSection">
-    <h2>3. Session inspection</h2>
+    <h2>5. Session inspection</h2>
     <div class="kv">
       <div><span class="label">Access token:</span> <code id="tokenDisplay" class="ellipsis"></code></div>
       <div><span class="label">Session id:</span> <code id="sessionIdDisplay"></code></div>
@@ -56,7 +86,7 @@
   </section>
 
   <section class="trust-tasks card hidden" id="trustTasksSection">
-    <h2>4. Trust-task dispatch</h2>
+    <h2>6. Trust-task dispatch</h2>
     <p class="hint">POSTs a typed trust-task envelope to <code>/api/trust-tasks</code>. Select a known URI from the dropdown or edit the payload directly.</p>
     <label>
       Type URI

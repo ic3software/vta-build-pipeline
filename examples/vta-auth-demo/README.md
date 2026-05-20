@@ -6,31 +6,35 @@ server and click around.
 
 ## What it exercises
 
-| Flow                                | Surface                                                | Status      |
-|-------------------------------------|--------------------------------------------------------|-------------|
-| Passkey login (DID-VM-resolved WebAuthn) | `POST /auth/passkey-login/start` + browser WebAuthn API + `POST /auth/passkey-login/finish` | implemented |
-| Session inspection                  | `GET /auth/sessions`                                   | implemented |
-| Revoke session                      | `DELETE /auth/sessions/{session_id}`                   | implemented |
-| Trust-task dispatch                 | `POST /api/trust-tasks` with bearer auth               | implemented |
-| Legacy challenge / authenticate     | `POST /auth/challenge` + `POST /auth/`                 | **not in demo** |
-| Refresh                             | `POST /auth/refresh`                                   | **not in demo** |
+| Step | Flow                                  | Surface                                                | Status |
+|---|------------------------------------------|--------------------------------------------------------|---|
+| 1 | Health check                              | `GET /health`                                         | implemented |
+| 2 | Bootstrap auth (paste JWT)                | (purely client-side; needed when there's no passkey VM yet) | implemented |
+| 3 | Enrol a passkey VM                        | `POST /did/verification-methods/passkey/challenge` + browser WebAuthn API + `POST /did/verification-methods/passkey` | implemented |
+| 4 | Passkey login (DID-VM-resolved WebAuthn)  | `POST /auth/passkey-login/start` + browser WebAuthn API + `POST /auth/passkey-login/finish` | implemented |
+| 5 | Session inspection + revoke               | `GET /auth/sessions`, `DELETE /auth/sessions/{id}`    | implemented |
+| 6 | Trust-task dispatch                       | `POST /api/trust-tasks` with bearer auth              | implemented |
+| — | Legacy challenge / authenticate           | `POST /auth/challenge` + `POST /auth/`                | **not in demo** |
+| — | Refresh                                   | `POST /auth/refresh`                                  | **not in demo** |
 
 The legacy challenge/authenticate and refresh flows take DIDComm-packed
-messages as their request body, not browser-friendly JSON. Use
-`pnm auth` (or any programmatic SDK client) for those paths — they need
-a DIDComm pack stack the browser doesn't have built in.
+messages as their request body. A browser doesn't have a DIDComm pack
+stack and the demo deliberately doesn't ship one. Use `pnm auth` (or
+any programmatic SDK client) for those paths.
 
 ## Prerequisites
 
 - A running VTA reachable from your machine (typically
-  `http://localhost:8100` — `cargo run -p vta-service` from a
-  workspace checkout).
-- A user with a passkey verificationMethod published on their DID
-  document. Set one up via `pnm passkey-vms enroll-challenge` →
-  follow the browser ceremony → `pnm passkey-vms enroll-submit`. The
-  enrolment ceremony itself requires an authenticated session, so
-  you'll need a pre-existing admin DID configured on the VTA before
-  the demo can drive the passkey-login flow.
+  `http://localhost:8100`).
+- An existing admin DID set up via `pnm` (your cold-start operator
+  identity). PNM authenticates via the legacy DIDComm-based flow, so
+  this works against an unmodified VTA.
+- The VTA's `[server] cors_origins` must include this page's origin
+  (default `http://localhost:8000`). See "Configuring the VTA" below.
+- A WebVH-managed DID where you want to enrol a passkey VM. Easiest
+  option: mint one with `pnm webvh create-did --context <ctx>` and
+  grant it admin role with `pnm acl create --did <new-did> --role admin
+  --contexts <ctx>`. You can also use an existing one.
 - A static-file server. Anything will do. Two easy options:
 
   ```sh
@@ -65,46 +69,94 @@ Reload the VTA after changing the config (`pnm vta restart` or kill
 `cors_origins` is non-empty — production VTAs leave it empty by
 default.
 
-Important: the CORS layer doesn't accept wildcards. Add only the
-specific origins you want allowed. The bearer token is the only
-cross-origin credential, so a loose CORS policy means a loose
-authorisation policy.
+Wildcards are not accepted. Add only the specific origins you want
+allowed. The bearer token is the only cross-origin credential, so a
+loose CORS policy means a loose authorisation policy.
+
+## Where the JWT for Step 2 comes from
+
+The demo's Step 2 (Bootstrap) needs an existing JWT, because Step 3
+(enrolment) is admin-gated and there's no passkey-derived JWT yet.
+
+Get one from the CLI:
+
+```sh
+pnm auth show-token
+```
+
+This prints the current admin JWT to stdout (re-authenticating first
+if the cached one expired). Copy the output and paste it into the
+"Access token (JWT)" box in Step 2.
+
+Once a passkey VM is enrolled (Step 3), you can use Step 4 (passkey
+login) instead — it produces a JWT directly, no `pnm auth show-token`
+needed.
 
 ## Running through the flows
 
-1. Open `http://localhost:8000` in your browser.
-2. **Step 1 — Connect**: confirm "Check /health" returns OK. If you
-   get a CORS error in the browser console, the VTA's
-   `cors_origins` doesn't include this page's origin.
-3. **Step 2 — Passkey login**:
-   - Enter the DID whose passkey you want to authenticate as.
-   - Click "Start" — the VTA returns a challenge and the credential
-     IDs the DID document advertises.
-   - Click "Finish" — the browser invokes
-     `navigator.credentials.get(...)`. Touch ID / Face ID / a security
-     key prompt appears. Once the assertion comes back, the demo
-     POSTs it to `/auth/passkey-login/finish` and stores the JWT.
-4. **Step 3 — Session inspection** (appears after login):
-   - "List active sessions" shows every session on this VTA the
-     caller can see (any-authed for own; admin sees all).
-   - "Revoke current session" deletes the JWT's session row. After
-     revocation, sending another trust-task should 401.
-5. **Step 4 — Trust-task dispatch** (appears after login):
-   - Pick a URI from the dropdown (e.g.
-     `discovery/capabilities/1.0`). The payload field auto-fills
-     with a minimal body.
-   - Click "Send" — the demo wraps the payload in a trust-task
-     envelope and POSTs it to `/api/trust-tasks`. The full request
-     and response are printed.
-   - Edit the payload textarea for other URIs that need parameters
+1. **Step 1 — Connect**: confirm "Check /health" returns OK. CORS
+   errors in the browser console mean the VTA's `cors_origins`
+   doesn't include this page's origin.
+
+2. **Step 2 — Bootstrap**:
+   - Run `pnm auth show-token` in your terminal; copy the output.
+   - Paste into the textarea, click "Use this token".
+   - Status line shows the JWT's role and expiry.
+   - Sessions + trust-task panels (Steps 5/6) are now unlocked.
+
+3. **Step 3 — Enrol a passkey VM**:
+   - Enter a WebVH-managed DID your operator has admin role on.
+   - Optional label (e.g. `"MacBook Touch ID"`).
+   - Click "Enrol passkey".
+   - Browser invokes WebAuthn registration; touch your authenticator.
+   - On success the demo shows the new VM's `id`, the computed
+     multikey, and the WebVH version that recorded the change.
+   - The enrolled DID is pre-filled into Step 4's input.
+
+4. **Step 4 — Passkey login** (you can do this fresh after enrolment
+   or after signing out):
+   - Click "Start" to fetch the challenge.
+   - Click "Finish" to invoke `navigator.credentials.get(...)` and
+     submit the assertion.
+   - On success the session panel (Step 5) appears with the new JWT.
+
+5. **Step 5 — Session inspection**:
+   - "List active sessions" shows every session this caller can see.
+   - "Revoke current session" deletes the JWT's session row;
+     subsequent calls return 401.
+   - "Sign out" clears local demo state without touching the VTA.
+
+6. **Step 6 — Trust-task dispatch**:
+   - Pick a URI from the dropdown (e.g. `discovery/capabilities/1.0`).
+   - Edit the payload textarea for URIs that take parameters
      (e.g. `keys/get/1.0` needs `{"key_id": "..."}`).
+   - Click "Send"; the response payload is printed.
+
+## What the multikey computation does
+
+WebAuthn enrolment is a multi-step ceremony, and the VTA's submit
+endpoint requires `publicKeyMultibase` to match what the server
+re-derives from the attestation. The demo computes it from the
+attestation's SPKI bytes (via `getPublicKey()`):
+
+1. Take the SPKI-encoded public key (DER).
+2. Extract the trailing 65-byte uncompressed P-256 point
+   (`04 || X[32] || Y[32]`).
+3. Compress to 33 bytes (`02|03 || X`) based on Y's parity.
+4. Prefix with multicodec varint `0x80 0x24` (p256-pub = 0x1200).
+5. Base58btc-encode with a `z` multibase prefix.
+
+This only works for ES256 (P-256, COSE algorithm -7). Modern platform
+authenticators (Touch ID, Face ID, Windows Hello) all default to
+ES256; if you have an authenticator that returns Ed25519 or RSA, the
+enrol path errors out and you'll need to extend `p256AttestationToMultikey`.
 
 ## Source layout
 
 ```
 examples/vta-auth-demo/
-├── index.html      UI structure
-├── app.js          Flow logic (vanilla ES modules, no build)
+├── index.html      UI structure (six numbered sections)
+├── app.js          Flow logic + multikey computation (vanilla ES modules)
 ├── styles.css      Minimal dark-theme styling
 └── README.md       This file
 ```
@@ -113,24 +165,26 @@ examples/vta-auth-demo/
 
 - **vti-webauthn** — the server-side verifier the passkey-login
   finish endpoint calls into. Server-side counterpart to the
-  WebAuthn assertion the demo's "Finish" step sends.
-- **vta-sdk** — the Rust client library. `VtaClient::backup_export_via_descriptor` etc. are the programmatic
-  equivalents of the trust-task dispatch flow exercised in step 4.
+  WebAuthn assertion the demo's Finish step sends.
+- **vta-sdk** — the Rust client library. Programmatic equivalents of
+  the trust-task dispatch flow (`VtaClient::post_trust_task`).
 - **vta-service::routes::auth** — the route handlers behind every
   `/auth/*` endpoint.
+- **vta-service::routes::passkey_vms** — the routes Step 3 hits.
 - **vta-service::routes::trust_tasks** — the dispatcher behind
   `POST /api/trust-tasks` that fans out to per-slice handlers.
 
 ## Known limitations
 
+- **ES256 only** for enrolment. Other COSE algorithms surface as a
+  clear error in Step 3.
 - **Legacy challenge/auth & refresh** are DIDComm-message-based and
   not callable from a browser without a DIDComm pack/unpack stack.
-  They're deliberately out of scope for this demo. Use `pnm auth` or
-  the SDK for those paths.
-- **Session-bound passkey assertions**: v0.1 of the passkey-login
-  flow stores the verifying-method id implicitly (the server matches
-  on credential_id). Future versions may require the client to
-  declare `verificationMethod` explicitly; the demo passes an empty
-  string today.
+  Out of scope for this demo. Use `pnm auth` or the SDK.
 - **No persistence**: the demo holds the JWT in memory. Reloading
-  the page loses the session.
+  the page loses the session — you'll need to re-bootstrap or
+  re-login.
+- **The login Finish step passes `verificationMethod: ""`** — the
+  server matches on `credential_id` to find the right VM. If a
+  future passkey-login wire format requires the client to declare
+  the VM explicitly, the demo will need updating.

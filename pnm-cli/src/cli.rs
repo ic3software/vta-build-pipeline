@@ -730,6 +730,14 @@ pub(crate) enum AuthCommands {
         /// unseal`).
         challenge: String,
     },
+    /// Print the current access token (JWT) to stdout. Use only for
+    /// debugging or for pasting into a tool that needs a bearer
+    /// credential (e.g. the `examples/vta-auth-demo/` browser
+    /// harness). The token is sensitive — don't share it.
+    ///
+    /// If no token is cached, performs a fresh authentication first.
+    /// Fails if PNM hasn't been set up (`pnm setup`).
+    ShowToken,
 }
 
 #[derive(Subcommand)]

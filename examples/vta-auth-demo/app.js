@@ -1,12 +1,17 @@
 // VTA auth demo — vanilla JS, no build step.
 //
-// Three flows exercised here:
+// Five flows exercised here:
 //
-//   1. Passkey login (DID-VM-resolved WebAuthn) — POST start, browser
-//      navigator.credentials.get(), POST finish → JWT.
-//   2. Session inspection + revoke — GET /auth/sessions, DELETE one.
-//   3. Trust-task dispatch — POST /api/trust-tasks with a typed
-//      envelope, parse the response payload.
+//   2. Bootstrap auth — paste a JWT from `pnm auth show-token` to
+//      skip passkey login. Unlocks the enrol + session + trust-task
+//      panels.
+//   3. Enrol a passkey VM — POST challenge → navigator.credentials.create()
+//      → compute publicKeyMultibase from the SPKI → POST submit.
+//   4. Passkey login — POST start → navigator.credentials.get() →
+//      POST finish → JWT.
+//   5. Session inspection + revoke — GET /auth/sessions, DELETE one.
+//   6. Trust-task dispatch — POST /api/trust-tasks with a typed
+//      envelope.
 //
 // The legacy challenge/authenticate flow is DIDComm-message-based and
 // not browser-friendly; use `pnm auth` for that path. See README.
@@ -75,6 +80,15 @@ const els = {
   vtaUrl: $("vtaUrl"),
   checkHealth: $("checkHealth"),
   healthStatus: $("healthStatus"),
+
+  bootstrapJwt: $("bootstrapJwt"),
+  bootstrapApply: $("bootstrapApply"),
+  bootstrapStatus: $("bootstrapStatus"),
+
+  enrolDid: $("enrolDid"),
+  enrolLabel: $("enrolLabel"),
+  enrolStart: $("enrolStart"),
+  enrolOutput: $("enrolOutput"),
 
   loginDid: $("loginDid"),
   loginStart: $("loginStart"),
@@ -176,6 +190,105 @@ async function vtaFetch(path, opts = {}) {
   return body;
 }
 
+// ─── Multikey computation (ES256 only) ────────────────────────────────
+//
+// The VTA's passkey-VM submit endpoint requires `publicKeyMultibase`
+// to match what the server re-derives from the attestation
+// authenticatorData. Mismatches are rejected as `PublicKeyMismatch`.
+//
+// We compute it browser-side from the WebAuthn AttestationResponse's
+// `getPublicKey()` output (SPKI-encoded), which is a much simpler
+// path than parsing the attestationObject's CBOR ourselves.
+//
+// Only ES256 (P-256, COSE algorithm -7) is supported here. Modern
+// platform authenticators (Touch ID, Face ID, Windows Hello) all use
+// ES256 by default; if your authenticator returns Ed25519, the
+// `enrolPasskey` path errors out and you'll need to extend this.
+
+// Compress a SEC1 uncompressed P-256 point (04 || X[32] || Y[32]) to
+// 33-byte compressed form (02/03 || X[32]) based on Y's parity.
+function compressP256(uncompressed) {
+  if (uncompressed.length !== 65 || uncompressed[0] !== 0x04) {
+    throw new Error(
+      `expected SEC1 uncompressed P-256 point (65 bytes starting 04); got ${uncompressed.length} bytes starting ${uncompressed[0]}`,
+    );
+  }
+  const x = uncompressed.slice(1, 33);
+  const y = uncompressed.slice(33, 65);
+  const prefix = (y[31] & 1) === 0 ? 0x02 : 0x03;
+  const out = new Uint8Array(33);
+  out[0] = prefix;
+  out.set(x, 1);
+  return out;
+}
+
+// Extract the SEC1 uncompressed point from an SPKI-encoded P-256
+// public key. SPKI for a P-256 pubkey ends with a BIT STRING whose
+// content is `00 04 X Y` — we walk the DER just enough to land on
+// the trailing 65 bytes.
+//
+// Rather than implementing a full DER parser, we exploit that
+// SPKI(P-256) has a fixed 26-byte algorithm-identifier prefix
+// followed by `03 42 00 04 X Y`. The trailing 66 bytes are
+// predictable: `03 42 00 04 X[32] Y[32]`.
+function spkiToSec1P256(spki) {
+  if (spki.length < 66) {
+    throw new Error(`SPKI too short for P-256 (${spki.length} bytes)`);
+  }
+  const tail = spki.slice(spki.length - 66);
+  if (tail[0] !== 0x03 || tail[1] !== 0x42 || tail[2] !== 0x00 || tail[3] !== 0x04) {
+    throw new Error(
+      `SPKI tail doesn't match P-256 BIT STRING shape (got ${Array.from(tail.slice(0, 4))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join(" ")})`,
+    );
+  }
+  return tail.slice(3); // 04 X[32] Y[32]
+}
+
+// Encode a byte sequence as base58btc per the multibase spec.
+const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58btcEncode(bytes) {
+  if (bytes.length === 0) return "";
+  // Count leading zero bytes.
+  let zeros = 0;
+  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+
+  const digits = [];
+  for (let i = zeros; i < bytes.length; i++) {
+    let carry = bytes[i];
+    for (let j = 0; j < digits.length; j++) {
+      carry += digits[j] << 8;
+      digits[j] = carry % 58;
+      carry = (carry / 58) | 0;
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = (carry / 58) | 0;
+    }
+  }
+
+  let s = "";
+  for (let i = 0; i < zeros; i++) s += "1";
+  for (let i = digits.length - 1; i >= 0; i--) s += B58[digits[i]];
+  return s;
+}
+
+// Build a P-256 Multikey from the WebAuthn AttestationResponse.
+// Returns the base58btc-encoded multibase string (`z…`).
+function p256AttestationToMultikey(attestationResponse) {
+  const spki = new Uint8Array(attestationResponse.getPublicKey());
+  const sec1 = spkiToSec1P256(spki);
+  const compressed = compressP256(sec1);
+  // Multicodec 0x1200 (p256-pub) in unsigned-varint = 0x80 0x24.
+  const multikey = new Uint8Array(2 + compressed.length);
+  multikey[0] = 0x80;
+  multikey[1] = 0x24;
+  multikey.set(compressed, 2);
+  return "z" + base58btcEncode(multikey);
+}
+
 // ─── Health ───────────────────────────────────────────────────────────
 
 els.checkHealth.addEventListener("click", async () => {
@@ -190,6 +303,162 @@ els.checkHealth.addEventListener("click", async () => {
     // The browser console will have the CORS message in the latter case.
     els.healthStatus.textContent = `error · ${e.message.split("\n")[0]}`;
     els.healthStatus.className = "status err";
+  }
+});
+
+// ─── Bootstrap (paste JWT) ────────────────────────────────────────────
+
+els.bootstrapApply.addEventListener("click", () => {
+  const raw = els.bootstrapJwt.value.trim();
+  if (!raw) {
+    els.bootstrapStatus.textContent = "paste a JWT first";
+    els.bootstrapStatus.className = "status err";
+    return;
+  }
+  const claims = decodeJwtPayload(raw);
+  if (!claims) {
+    els.bootstrapStatus.textContent = "doesn't look like a JWT (need three dot-separated segments)";
+    els.bootstrapStatus.className = "status err";
+    return;
+  }
+  // Synthesize an AuthenticateResponse-shaped object so the same
+  // storeAuth() path the passkey-login Finish step uses also handles
+  // the paste case.
+  storeAuth({
+    sessionId: claims.session_id || null,
+    data: {
+      accessToken: raw,
+      accessExpiresAt: claims.exp || 0,
+      refreshToken: null,
+      refreshExpiresAt: null,
+    },
+  });
+  els.bootstrapStatus.textContent = `JWT accepted · role=${claims.role ?? "unknown"} · exp=${claims.exp ? new Date(claims.exp * 1000).toISOString() : "n/a"}`;
+  els.bootstrapStatus.className = "status ok";
+});
+
+// ─── Passkey enrolment ───────────────────────────────────────────────
+
+els.enrolStart.addEventListener("click", async () => {
+  clearOutput(els.enrolOutput);
+  if (!state.accessToken) {
+    setOutput(els.enrolOutput, "No access token. Paste one in Step 2 first.", "err");
+    return;
+  }
+  const did = els.enrolDid.value.trim();
+  if (!did) {
+    setOutput(els.enrolOutput, "Target DID is required.", "err");
+    return;
+  }
+  const label = els.enrolLabel.value.trim() || null;
+
+  try {
+    // 1. Request a registration challenge from the VTA.
+    const ceremony = await vtaFetch(
+      `/did/verification-methods/passkey/challenge?did=${encodeURIComponent(did)}`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${state.accessToken}`,
+        },
+        body: JSON.stringify({ did, label }),
+      },
+    );
+
+    // 2. Run the WebAuthn registration ceremony.
+    //
+    // `challenge` and `userHandle` arrive as base64url-encoded byte
+    // strings; the WebAuthn API wants ArrayBuffers of those bytes.
+    const publicKey = {
+      challenge: b64urlDecode(ceremony.challenge),
+      rp: { id: ceremony.rpId, name: ceremony.rpName },
+      user: {
+        id: b64urlDecode(ceremony.userHandle),
+        name: ceremony.userName,
+        displayName: ceremony.userDisplayName,
+      },
+      pubKeyCredParams: [
+        { type: "public-key", alg: -7 }, // ES256 (P-256). Only ES256 is supported in this demo.
+      ],
+      timeout: ceremony.timeoutMs || 60_000,
+      authenticatorSelection: {
+        // `platform` = Touch ID / Face ID / Windows Hello. Use
+        // `cross-platform` for security keys / hybrid (phone). Leave
+        // unset to accept any.
+        userVerification: "preferred",
+        residentKey: "preferred",
+      },
+      attestation: "none",
+    };
+
+    const credential = await navigator.credentials.create({ publicKey });
+    if (!credential) {
+      setOutput(els.enrolOutput, "Browser returned no credential.", "err");
+      return;
+    }
+
+    // 3. Extract the public key and compute the multikey.
+    //
+    // `getPublicKeyAlgorithm()` and `getPublicKey()` are WebAuthn L3
+    // additions (Chrome 85+, Safari 15.4+, Firefox 119+). They give
+    // us the COSE algorithm number and the SPKI-encoded public key —
+    // simpler than parsing the attestationObject CBOR ourselves.
+    const alg = credential.response.getPublicKeyAlgorithm();
+    if (alg !== -7) {
+      setOutput(
+        els.enrolOutput,
+        `This demo only supports ES256 (-7). Authenticator returned algorithm ${alg}. Use a platform authenticator (Touch ID / Face ID / Windows Hello), which default to ES256.`,
+        "err",
+      );
+      return;
+    }
+    const publicKeyMultibase = p256AttestationToMultikey(credential.response);
+
+    // 4. Build the submit body and POST.
+    const ad = new Uint8Array(credential.response.getAuthenticatorData());
+    const ao = new Uint8Array(credential.response.attestationObject);
+    const cd = new Uint8Array(credential.response.clientDataJSON);
+    const rawId = new Uint8Array(credential.rawId);
+    const transports =
+      typeof credential.response.getTransports === "function"
+        ? credential.response.getTransports()
+        : [];
+
+    const submitBody = {
+      did,
+      ceremonyId: ceremony.ceremonyId,
+      credentialId: b64urlEncode(rawId),
+      publicKeyMultibase,
+      coseAlgorithm: alg,
+      attestationObject: b64urlEncode(ao),
+      clientDataJson: b64urlEncode(cd),
+      authenticatorData: b64urlEncode(ad),
+      transports,
+      label,
+    };
+
+    const result = await vtaFetch("/did/verification-methods/passkey", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${state.accessToken}`,
+      },
+      body: JSON.stringify(submitBody),
+    });
+
+    setOutput(
+      els.enrolOutput,
+      `Passkey enrolled.\n\nMultikey: ${publicKeyMultibase}\nVM id: ${result.verificationMethod.id}\nWebVH version: ${result.webvhVersion}\n\nFull response:\n${asJson(result)}`,
+      "ok",
+    );
+    // Helpful default: pre-fill the login DID so the operator can
+    // immediately test passkey login with the just-enrolled VM.
+    if (!els.loginDid.value.trim()) {
+      els.loginDid.value = did;
+    }
+  } catch (e) {
+    setOutput(els.enrolOutput, e.message, "err");
   }
 });
 
@@ -230,11 +499,7 @@ els.loginFinish.addEventListener("click", async () => {
   }
   try {
     // Server-side challenge is hex-encoded 32 bytes; WebAuthn wants
-    // an ArrayBuffer of those bytes. The browser stamps the challenge
-    // into clientDataJSON as base64url; the server side decodes both
-    // representations the same way (passkey-verify checks against
-    // SHA-256(canonical body) for the document-binding case, or the
-    // raw nonce for legacy passkey login).
+    // an ArrayBuffer of those bytes.
     const challengeBytes = hexToBytes(state.loginChallenge);
     const allowCredentials = state.loginAllowCredentials.map((id) => ({
       id: b64urlDecode(id),
@@ -262,10 +527,7 @@ els.loginFinish.addEventListener("click", async () => {
 
     // The browser doesn't tell us which DID-doc VM was used — the
     // server resolves the DID and matches credential_id against the
-    // published verificationMethods. Pass the credential_id verbatim;
-    // the server uses it to look up the verificationMethod URL.
-    // (The wire field `verificationMethod` is required by the SDK
-    // type; pass empty and let the server derive it from credId.)
+    // published verificationMethods.
     const reqBody = {
       sessionId: state.loginSessionId,
       credentialId: b64urlEncode(credId),
@@ -341,9 +603,13 @@ function clearAuth() {
   if (expiresTimer) clearInterval(expiresTimer);
   els.sessionSection.classList.add("hidden");
   els.trustTasksSection.classList.add("hidden");
+  els.bootstrapJwt.value = "";
+  els.bootstrapStatus.textContent = "";
+  els.bootstrapStatus.className = "status muted";
   clearOutput(els.loginOutput);
   clearOutput(els.sessionsOutput);
   clearOutput(els.taskOutput);
+  clearOutput(els.enrolOutput);
 }
 
 els.signOut.addEventListener("click", clearAuth);

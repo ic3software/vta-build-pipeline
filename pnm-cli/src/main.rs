@@ -213,7 +213,7 @@ async fn main() {
         } => commands::vta::run_restart(&client).await,
         Commands::Vta { .. } => unreachable!("VTA non-restart handled in pre-auth dispatch"),
         Commands::Health => commands::health::run(effective_url_override, &keyring_key).await,
-        Commands::Auth { command } => commands::auth::run(&keyring_key, command),
+        Commands::Auth { command } => commands::auth::run(&keyring_key, command).await,
         Commands::Config { command } => commands::config::run(&client, command).await,
         Commands::Services { command } => commands::services::run(&client, command).await,
         Commands::Contexts { command } => commands::contexts::run(&client, command).await,

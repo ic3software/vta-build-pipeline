@@ -169,6 +169,29 @@ pub async fn ensure_authenticated(
     store().ensure_authenticated(base_url, keyring_key).await
 }
 
+/// Print the current access token (JWT) to stdout. Performs a fresh
+/// authentication if the cached token is missing or expired. Used by
+/// operator tooling that needs to paste the bearer credential into a
+/// browser (e.g. `examples/vta-auth-demo/`).
+///
+/// Resolves the VTA URL the same way every other PNM command does —
+/// from the session's stored VTA DID + DID resolver. Errors if PNM
+/// hasn't been set up.
+pub async fn show_token(keyring_key: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let session = loaded_session(keyring_key).ok_or_else(|| -> Box<dyn std::error::Error> {
+        "no session — run `pnm setup` to provision an admin identity first".into()
+    })?;
+    let vta_did = session
+        .vta_did
+        .ok_or_else(|| -> Box<dyn std::error::Error> {
+            "session has no VTA DID bound — run `pnm setup continue` to finish setup".into()
+        })?;
+    let url = vta_sdk::session::resolve_vta_url(&vta_did).await?;
+    let token = ensure_authenticated(&url, keyring_key).await?;
+    println!("{token}");
+    Ok(())
+}
+
 /// Connect to the VTA using the preferred transport (DIDComm or REST).
 ///
 /// If `url_override` is provided, always uses REST.
