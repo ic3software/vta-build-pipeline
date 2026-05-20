@@ -18,6 +18,7 @@ pub mod keys;
 mod passkey_vms;
 #[cfg(feature = "webvh")]
 mod protocol;
+mod trust_tasks;
 mod vta;
 
 use std::sync::Arc;
@@ -75,6 +76,15 @@ pub fn router() -> Router<AppState> {
     let unauth = Router::new()
         // Sealed-transfer bootstrap (token or attestation gated inside)
         .route("/bootstrap/request", post(bootstrap::request))
+        // Passkey login (DID-VM-resolved WebAuthn assertions).
+        // Trust-task URIs: vta/auth/passkey-login-{start,finish}/1.0.
+        // Unauthenticated — the user has no session before
+        // passkey-login-finish issues the JWT.
+        .route("/auth/passkey-login/start", post(auth::passkey_login_start))
+        .route(
+            "/auth/passkey-login/finish",
+            post(auth::passkey_login_finish),
+        )
         // Auth flow entry points
         .route("/auth/challenge", post(auth::challenge))
         .route("/auth/", post(auth::authenticate))
@@ -112,6 +122,10 @@ pub fn router() -> Router<AppState> {
             get(auth::session_list).delete(auth::revoke_sessions_by_did),
         )
         .route("/auth/sessions/{session_id}", delete(auth::revoke_session))
+        // Trust-task envelope dispatcher (per
+        // docs/05-design-notes/trust-task-uri-registry.md). Phase 2
+        // scaffold; handlers register per Phase 3 slice.
+        .route("/api/trust-tasks", post(trust_tasks::dispatch_trust_task))
         .route(
             "/config",
             get(config::get_config).patch(config::update_config),

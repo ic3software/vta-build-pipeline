@@ -18,6 +18,10 @@ pub mod did_webvh;
 pub mod export;
 pub mod internal_authority;
 pub mod keys;
+/// Passkey login — DID-VM-resolved WebAuthn assertion verification.
+/// Drives `vta/auth/passkey-login-{start,finish}/1.0` trust-tasks.
+/// Distinct from [`passkey_vms`] which handles VM *enrolment*.
+pub mod passkey_login;
 /// Passkey-as-verificationMethod enrolment. Lets a browser wallet
 /// (`pnm-browser-plugin`) add a WebAuthn passkey as a Multikey VM
 /// (purpose `authentication`) on a VTA-managed webvh DID. See

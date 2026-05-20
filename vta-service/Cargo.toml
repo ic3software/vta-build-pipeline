@@ -70,6 +70,21 @@ required-features = ["cli-synthesis"]
 [dependencies]
 vti-common = { path = "../vti-common", version = "0.6", features = ["encryption", "passkey"] }
 vta-sdk = { path = "../vta-sdk", version = "0.6", features = ["didcomm", "sealed-transfer", "provision-integration"] }
+# DID-VM-resolved WebAuthn assertion verifier — drives the new
+# `vta/auth/passkey-login-{start,finish}/1.0` trust-task handlers.
+# Distinct from `webauthn-rs` (which drives the passkey *enrolment*
+# ceremony in `operations::passkey_vms`); this crate handles the
+# *assertion* (login) path against DID-document VMs.
+vti-webauthn = { path = "../vti-webauthn", version = "0.1" }
+# Trust-Tasks framework — wire-envelope for the trust-task migration.
+# `trust-tasks-rs` provides TrustTask<P>, Proof, dispatcher types.
+# `trust-tasks-https` provides the HttpsHandler adapter + status-code
+# mapping for the framework's error vocabulary.
+# `trust-tasks-proof` provides AffinidiVerifier for embedded
+# Data-Integrity proofs on trust-tasks themselves.
+trust-tasks-rs = { workspace = true }
+trust-tasks-https = { workspace = true }
+trust-tasks-proof = { workspace = true }
 # Shared CLI helpers for the consumer side of sealed-transfer (request
 # generation, bundle opening). Used by `vta bootstrap request` /
 # `vta bootstrap open` so cold-start clients can run the offline flow

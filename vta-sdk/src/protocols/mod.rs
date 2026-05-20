@@ -10,6 +10,8 @@ pub mod discovery;
 #[cfg(feature = "didcomm")]
 pub mod join_requests;
 pub mod key_management;
+/// Passkey-based login flow (`vta/auth/passkey-login-{start,finish}/1.0`).
+pub mod passkey_login;
 pub mod protocol_management;
 #[cfg(feature = "provision-integration")]
 pub mod provision_integration_management;

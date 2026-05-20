@@ -545,3 +545,213 @@ pub async fn revoke_sessions_by_did(
     );
     Ok(Json(RevokeByDidResponse { revoked }))
 }
+
+// ---------- Passkey login ----------
+//
+// Per the trust-task migration registry these correspond to:
+//   - vta/auth/passkey-login-start/1.0
+//   - vta/auth/passkey-login-finish/1.0
+//
+// They are UNAUTHENTICATED (the user has no session yet) — mounted on
+// the same router section as `POST /auth/challenge` and `POST /auth/`.
+// The trust-task envelope dispatcher at /api/trust-tasks handles only
+// authenticated operations.
+
+use base64::Engine as _;
+use base64::engine::general_purpose;
+use vta_sdk::protocols::passkey_login::{
+    PasskeyLoginFinishRequest, PasskeyLoginStartRequest, PasskeyLoginStartResponse,
+};
+
+use crate::operations::passkey_login::{
+    VtaVmResolver, enumerate_passkey_vms, verify_passkey_login,
+};
+
+/// POST /auth/passkey-login/start — issue a passkey-bound challenge. Auth: unauthenticated.
+pub async fn passkey_login_start(
+    State(state): State<AppState>,
+    Json(req): Json<PasskeyLoginStartRequest>,
+) -> Result<Json<PasskeyLoginStartResponse>, AppError> {
+    // ACL gate — same as /auth/challenge.
+    check_acl(&state.acl_ks, &req.did).await?;
+
+    // Mint challenge.
+    let session_id = Uuid::new_v4().to_string();
+    let mut challenge_bytes = [0u8; 32];
+    rand::fill(&mut challenge_bytes);
+    let challenge = hex::encode(challenge_bytes);
+
+    // Persist pending session — same shape as the legacy auth challenge
+    // so existing JWT-mint plumbing in `passkey_login_finish` can
+    // consume it.
+    let session = Session {
+        session_id: session_id.clone(),
+        did: req.did.clone(),
+        challenge: challenge.clone(),
+        state: SessionState::ChallengeSent,
+        created_at: now_epoch(),
+        refresh_token: None,
+        refresh_expires_at: None,
+        tee_attested: false,
+    };
+    store_session(&state.sessions_ks, &session).await?;
+
+    // Enumerate the DID's passkey VMs to populate allowCredentials.
+    // v0.1 returns empty; browsers fall back to discoverable credentials.
+    let allow_credentials = match state.did_resolver.clone() {
+        Some(resolver) => {
+            let vta_resolver = VtaVmResolver::new(resolver);
+            enumerate_passkey_vms(&vta_resolver, &req.did)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|vm| general_purpose::URL_SAFE_NO_PAD.encode(vm.credential_id))
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
+    info!(did = %req.did, session_id = %session_id, "passkey login challenge issued");
+    audit!(
+        "auth.passkey_login_start",
+        actor = &req.did,
+        resource = &session_id,
+        outcome = "success"
+    );
+
+    Ok(Json(PasskeyLoginStartResponse {
+        session_id,
+        challenge,
+        allow_credentials,
+    }))
+}
+
+/// POST /auth/passkey-login/finish — verify the WebAuthn assertion and issue tokens. Auth: unauthenticated.
+pub async fn passkey_login_finish(
+    State(state): State<AppState>,
+    Json(req): Json<PasskeyLoginFinishRequest>,
+) -> Result<Json<AuthenticateResponse>, AppError> {
+    let jwt_keys = state
+        .jwt_keys
+        .as_ref()
+        .ok_or_else(|| AppError::Authentication("JWT keys not configured".into()))?;
+    let did_resolver = state
+        .did_resolver
+        .clone()
+        .ok_or_else(|| AppError::Authentication("DID resolver not configured".into()))?;
+
+    // 1. Look up pending session.
+    let mut session = get_session(&state.sessions_ks, &req.session_id)
+        .await?
+        .ok_or_else(|| AppError::Authentication("session not found".into()))?;
+    if session.state != SessionState::ChallengeSent {
+        warn!(session_id = %req.session_id, "passkey login rejected: session replay");
+        return Err(AppError::Authentication(
+            "session already authenticated (replay)".into(),
+        ));
+    }
+
+    // 2. Challenge TTL.
+    let (challenge_ttl, access_expiry, refresh_expiry) = {
+        let config = state.config.read().await;
+        (
+            config.auth.challenge_ttl,
+            config.auth.access_token_expiry,
+            config.auth.refresh_token_expiry,
+        )
+    };
+    if now_epoch().saturating_sub(session.created_at) > challenge_ttl {
+        warn!(session_id = %req.session_id, "passkey login rejected: challenge expired");
+        return Err(AppError::Authentication("challenge expired".into()));
+    }
+
+    // 3. Build AssertionPayload.
+    let decode = |s: &str, what: &'static str| {
+        general_purpose::URL_SAFE_NO_PAD
+            .decode(s.as_bytes())
+            .or_else(|_| general_purpose::URL_SAFE.decode(s.as_bytes()))
+            .map_err(|_| AppError::Authentication(format!("{what} is not valid base64url")))
+    };
+    let assertion = vti_webauthn::AssertionPayload {
+        credential_id: decode(&req.credential_id, "credential_id")?,
+        authenticator_data: decode(&req.authenticator_data, "authenticator_data")?,
+        client_data_json: decode(&req.client_data_json, "client_data_json")?,
+        signature: decode(&req.signature, "signature")?,
+        verification_method: req.verification_method.clone(),
+    };
+
+    // 4. Sanity-check that the assertion is against the DID this
+    //    session was issued for — defence in depth before crypto.
+    let claimed_did = req
+        .verification_method
+        .split_once('#')
+        .map(|(did, _frag)| did)
+        .unwrap_or(&req.verification_method);
+    if claimed_did != session.did {
+        warn!(
+            session_did = %session.did,
+            assertion_did = %claimed_did,
+            "passkey login rejected: DID mismatch"
+        );
+        return Err(AppError::Authentication(
+            "verification_method DID does not match session DID".into(),
+        ));
+    }
+
+    // 5. Verify the assertion.
+    let public_url = state.config.read().await.public_url.clone();
+    let public_url =
+        public_url.ok_or_else(|| AppError::Config("public_url not configured".into()))?;
+    let config = vti_webauthn::VerifierConfig::from_public_url(&public_url, true)
+        .map_err(|e| AppError::Config(format!("invalid public_url: {e}")))?;
+    let resolver = VtaVmResolver::new(did_resolver);
+    let _verified =
+        verify_passkey_login(&assertion, session.challenge.as_bytes(), &resolver, &config)
+            .await
+            .map_err(|e| AppError::Authentication(format!("assertion verification failed: {e}")))?;
+
+    // 6. ACL lookup for role + contexts.
+    let (role, allowed_contexts) = check_acl_full(&state.acl_ks, &session.did).await?;
+
+    // 7. Mint tokens — same shape as the legacy authenticate() flow.
+    #[cfg(feature = "tee")]
+    let tee_attested = session.tee_attested;
+    #[cfg(not(feature = "tee"))]
+    let tee_attested = false;
+    let claims = jwt_keys.new_claims(
+        session.did.clone(),
+        session.session_id.clone(),
+        role.to_string(),
+        allowed_contexts,
+        access_expiry,
+        tee_attested,
+    );
+    let access_expires_at = claims.exp;
+    let access_token = jwt_keys.encode(&claims)?;
+    let refresh_token = Uuid::new_v4().to_string();
+    let refresh_expires_at = now_epoch() + refresh_expiry;
+
+    session.state = SessionState::Authenticated;
+    session.refresh_token = Some(refresh_token.clone());
+    session.refresh_expires_at = Some(refresh_expires_at);
+    update_session(&state.sessions_ks, &session).await?;
+    store_refresh_index(&state.sessions_ks, &refresh_token, &session.session_id).await?;
+
+    info!(did = %session.did, session_id = %session.session_id, "passkey login successful");
+    audit!(
+        "auth.passkey_login_finish",
+        actor = &session.did,
+        resource = &session.session_id,
+        outcome = "success"
+    );
+
+    Ok(Json(AuthenticateResponse {
+        session_id: Some(session.session_id),
+        data: AuthenticateData {
+            access_token,
+            access_expires_at,
+            refresh_token: Some(refresh_token),
+            refresh_expires_at: Some(refresh_expires_at),
+        },
+    }))
+}
