@@ -13,18 +13,23 @@
 //   1. Parse the JWE JSON.
 //   2. Decode + validate the protected header.
 //   3. Find the recipients[] entry matching our kid.
-//   4. Derive the KEK via recipient-side ECDH-1PU.
-//   5. Unwrap the CEK with AES-KW.
-//   6. AES-GCM decrypt the ciphertext with the CEK + AAD=protected.
-//   7. Parse the plaintext as JSON; return { message, senderKid }.
+//   4. Read the content-encryption auth tag from the JWE (we need
+//      it as Concat KDF SuppPrivInfo — see pack.js for why).
+//   5. Derive the KEK via recipient-side ECDH-1PU, binding `tag`.
+//   6. Unwrap the CEK with AES-KW. Tampered ciphertext flips the
+//      tag, which flips the KEK, which makes this step fail with
+//      "integrity check failed" before we even attempt to decrypt.
+//   7. A256CBC-HS512 decrypt the ciphertext with the CEK + AAD=protected.
+//   8. Parse the plaintext as JSON; return { message, senderKid }.
 
+import * as a256cbcHs512 from "./a256cbc-hs512.js";
 import * as aes from "./aes.js";
 import * as b64u from "./base64url.js";
 import * as ecdh1pu from "./ecdh-1pu.js";
 import * as jwk from "./jwk.js";
 
 const ALG = "ECDH-1PU+A256KW";
-const ENC = "A256GCM";
+const ENC = "A256CBC-HS512";
 
 /**
  * Unpack an authcrypt JWE.
@@ -93,7 +98,15 @@ export async function unpack(jweJson, recipient, sender) {
     throw new Error("unpack: matched recipients[] entry has no encrypted_key");
   }
 
-  // 3. Derive the KEK via recipient-side ECDH-1PU.
+  // 3. Read the content-encryption auth tag, IV, ciphertext from
+  //    the JWE. We need `tag` BEFORE deriving the KEK because
+  //    ECDH-1PU+A256KW folds it into Concat KDF as SuppPrivInfo.
+  const iv = b64u.decode(jwe.iv);
+  const ciphertext = b64u.decode(jwe.ciphertext);
+  const tag = b64u.decode(jwe.tag);
+  const aad = new TextEncoder().encode(protectedB64);
+
+  // 4. Derive the KEK via recipient-side ECDH-1PU.
   const recipientPriv = jwk.rawPrivate(recipient.privateJwk);
   const ephemeralPublic = b64u.decode(header.epk.x);
   if (ephemeralPublic.length !== 32) {
@@ -113,30 +126,28 @@ export async function unpack(jweJson, recipient, sender) {
     alg: ALG,
     apu: apuBytes,
     apv: apvBytes,
+    ccTag: tag,
   });
 
-  // 4. Unwrap the CEK.
+  // 5. Unwrap the CEK.
   const encryptedKey = b64u.decode(recipientEntry.encrypted_key);
   const cek = await aes.unwrapKey(kek, encryptedKey);
 
-  // 5. AES-GCM decrypt. AAD is the ASCII bytes of the base64url
-  //    protected header — same encoding as the sender used.
-  const iv = b64u.decode(jwe.iv);
-  const ciphertext = b64u.decode(jwe.ciphertext);
-  const tag = b64u.decode(jwe.tag);
-  const aad = new TextEncoder().encode(protectedB64);
+  // 6. A256CBC-HS512 decrypt. AAD is the ASCII bytes of the
+  //    base64url protected header — same encoding as the sender
+  //    used.
 
   let plaintext;
   try {
-    plaintext = await aes.aesGcmDecrypt({
-      key: cek,
+    plaintext = await a256cbcHs512.decrypt({
+      cek,
       iv,
       aad,
       ciphertext,
       tag,
     });
   } catch (e) {
-    throw new Error(`unpack: AES-GCM decrypt failed: ${e.message}`);
+    throw new Error(`unpack: A256CBC-HS512 decrypt failed: ${e.message}`);
   } finally {
     cek.fill(0);
     kek.fill(0);

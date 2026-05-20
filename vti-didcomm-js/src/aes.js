@@ -1,42 +1,33 @@
 // AES primitives via Web Crypto. No dependencies, native everywhere
 // modern (Node 16+, all browsers since ~2018).
 //
-// Two flavours used by authcrypt JWE:
+// Used by authcrypt JWE for the key-wrapping step only — content
+// encryption is A256CBC-HS512, which lives in `a256cbc-hs512.js`.
+// (Earlier revisions of this file shipped A256GCM helpers; those
+// were removed when we switched to the algorithm DIDComm v2 mandates.)
 //
-//   - AES-256-KW (RFC 3394): wraps the CEK with the KEK derived
-//     from ECDH-1PU. Output is 8 bytes longer than the CEK (one
-//     extra block of integrity check).
-//   - AES-256-GCM: encrypts the plaintext with the CEK, with the
-//     ASCII-encoded protected header as additional authenticated
-//     data. 12-byte IV per JWA, 16-byte tag appended.
+// AES-256-KW (RFC 3394) wraps the 64-byte CEK with the 32-byte KEK
+// derived from ECDH-1PU. Output is the CEK length + 8 bytes (one
+// extra block of integrity check).
 //
-// Web Crypto returns the GCM tag concatenated to the ciphertext;
-// we split it out so the JWE structure can carry it in its
-// dedicated `tag` field.
+// Inner-key gotcha: Web Crypto's `wrapKey` takes a CryptoKey, not
+// raw bytes. AES-GCM CryptoKeys are restricted to 128/192/256-bit
+// lengths, so they can't hold a 64-byte A256CBC-HS512 CEK. We
+// import the CEK as an HMAC key instead — HMAC accepts arbitrary
+// key lengths — and target HMAC on unwrap as well.
 
 /**
  * AES-256-KW (RFC 3394) wrap.
  *
  * @param {Uint8Array} kek - 32 bytes
- * @param {Uint8Array} cek - the key to wrap (32 bytes for A256GCM)
+ * @param {Uint8Array} cek - the key to wrap (64 bytes for A256CBC-HS512)
  * @returns {Promise<Uint8Array>} cek.length + 8 bytes
  */
 export async function wrapKey(kek, cek) {
   assertBytes("kek", kek, 32);
   assertBytes("cek", cek);
-  // The CEK has to be a CryptoKey to be wrapped; we import it as a
-  // raw symmetric key with no usages (AES-KW only cares about
-  // shipping the bytes, not running them through an algorithm).
-  // `"AES-GCM"` is the conventional choice for the inner-key
-  // algorithm — its `extractable` requirement matches our use.
   const kekKey = await importKekForKw(kek, ["wrapKey"]);
-  const cekKey = await crypto.subtle.importKey(
-    "raw",
-    cek,
-    { name: "AES-GCM", length: cek.length * 8 },
-    /* extractable */ true,
-    ["encrypt", "decrypt"],
-  );
+  const cekKey = await importInnerKey(cek);
   const wrapped = await crypto.subtle.wrapKey("raw", cekKey, kekKey, "AES-KW");
   return new Uint8Array(wrapped);
 }
@@ -52,16 +43,19 @@ export async function unwrapKey(kek, wrapped) {
   assertBytes("kek", kek, 32);
   assertBytes("wrapped", wrapped);
   const kekKey = await importKekForKw(kek, ["unwrapKey"]);
-  // The unwrapped key comes out as a CryptoKey; export to raw bytes
-  // so the caller can hand it to `AES-GCM` decrypt below.
+  // Target HMAC/SHA-256 because HMAC keys accept any length —
+  // important when the inner CEK is 64 bytes (A256CBC-HS512).
+  // The unwrapped key comes out as a CryptoKey; export to raw
+  // bytes so the caller can hand it to the content-encryption
+  // helper.
   const cekKey = await crypto.subtle.unwrapKey(
     "raw",
     wrapped,
     kekKey,
     "AES-KW",
-    { name: "AES-GCM", length: (wrapped.length - 8) * 8 },
+    { name: "HMAC", hash: "SHA-256", length: (wrapped.length - 8) * 8 },
     /* extractable */ true,
-    ["encrypt", "decrypt"],
+    ["sign", "verify"],
   );
   const raw = await crypto.subtle.exportKey("raw", cekKey);
   return new Uint8Array(raw);
@@ -77,94 +71,18 @@ async function importKekForKw(kek, usages) {
   );
 }
 
-/**
- * AES-256-GCM encrypt with `aad` as the additional authenticated
- * data. Returns `{ ciphertext, tag }` split — Web Crypto produces
- * `ciphertext || tag`, we slice apart so the caller can write each
- * to the JWE's `ciphertext` and `tag` fields independently.
- *
- * @param {Object} args
- * @param {Uint8Array} args.key   - 32 bytes
- * @param {Uint8Array} args.iv    - 12 bytes (JWA convention for A256GCM)
- * @param {Uint8Array} args.aad   - bytes — typically the ASCII of the JWE protected header
- * @param {Uint8Array} args.plaintext
- * @returns {Promise<{ ciphertext: Uint8Array, tag: Uint8Array }>}
- */
-export async function aesGcmEncrypt({ key, iv, aad, plaintext }) {
-  assertBytes("key", key, 32);
-  assertBytes("iv", iv, 12);
-  assertBytes("aad", aad);
-  assertBytes("plaintext", plaintext);
-  const k = await crypto.subtle.importKey(
+// Import the CEK as an HMAC key purely as a vehicle for AES-KW
+// wrap. HMAC accepts any byte length; AES-GCM doesn't — and we
+// don't care what the inner algorithm is because AES-KW only ships
+// the raw bytes.
+async function importInnerKey(bytes) {
+  return crypto.subtle.importKey(
     "raw",
-    key,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt"],
+    bytes,
+    { name: "HMAC", hash: "SHA-256", length: bytes.length * 8 },
+    /* extractable */ true,
+    ["sign", "verify"],
   );
-  const out = new Uint8Array(
-    await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv, additionalData: aad, tagLength: 128 },
-      k,
-      plaintext,
-    ),
-  );
-  // Web Crypto AES-GCM emits ciphertext || tag (16-byte tag for
-  // 128-bit tagLength). Split into separate fields.
-  const tagLen = 16;
-  const ciphertext = out.subarray(0, out.length - tagLen);
-  const tag = out.subarray(out.length - tagLen);
-  return { ciphertext, tag };
-}
-
-/**
- * AES-256-GCM decrypt. Reassembles `ciphertext || tag` for Web
- * Crypto's expectations.
- *
- * @param {Object} args
- * @param {Uint8Array} args.key
- * @param {Uint8Array} args.iv
- * @param {Uint8Array} args.aad
- * @param {Uint8Array} args.ciphertext
- * @param {Uint8Array} args.tag - 16 bytes
- * @returns {Promise<Uint8Array>} plaintext
- * @throws on auth-tag mismatch.
- */
-export async function aesGcmDecrypt({ key, iv, aad, ciphertext, tag }) {
-  assertBytes("key", key, 32);
-  assertBytes("iv", iv, 12);
-  assertBytes("aad", aad);
-  assertBytes("ciphertext", ciphertext);
-  assertBytes("tag", tag, 16);
-  const k = await crypto.subtle.importKey(
-    "raw",
-    key,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["decrypt"],
-  );
-  const combined = new Uint8Array(ciphertext.length + tag.length);
-  combined.set(ciphertext, 0);
-  combined.set(tag, ciphertext.length);
-  const pt = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv, additionalData: aad, tagLength: 128 },
-    k,
-    combined,
-  );
-  return new Uint8Array(pt);
-}
-
-/**
- * Generate a fresh 256-bit CEK and a 96-bit IV.
- *
- * @returns {{ key: Uint8Array, iv: Uint8Array }}
- */
-export function generateAes256GcmKeyAndIv() {
-  const key = new Uint8Array(32);
-  const iv = new Uint8Array(12);
-  crypto.getRandomValues(key);
-  crypto.getRandomValues(iv);
-  return { key, iv };
 }
 
 function assertBytes(name, value, exactLen) {

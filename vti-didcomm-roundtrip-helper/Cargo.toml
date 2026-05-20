@@ -1,0 +1,21 @@
+[package]
+name = "vti-didcomm-roundtrip-helper"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+publish = false
+description = "Test-only Rust helper for the vti-didcomm-js round-trip harness. Reads a JWE + recipient private key + (optionally) sender public key from stdin as JSON, unpacks via affinidi-messaging-didcomm, emits the result as JSON on stdout. Not for production."
+
+[[bin]]
+name = "didcomm-unpack"
+path = "src/main.rs"
+
+[dependencies]
+# Declared locally rather than via `workspace = true` since the
+# workspace's `[workspace.dependencies]` doesn't (yet) list this
+# crate — vta-service also declares it locally at version "0.13".
+# Keep these two versions aligned by hand.
+affinidi-messaging-didcomm = "0.13"
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

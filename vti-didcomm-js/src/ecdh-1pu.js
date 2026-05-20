@@ -14,6 +14,15 @@
 //
 // For DIDComm v2 authcrypt the canonical algorithm string is
 // "ECDH-1PU+A256KW" (RFC 7518 §4.6 Concat KDF AlgorithmID input).
+//
+// Key-wrap mode binding: when ECDH-1PU is paired with an A*KW key
+// wrap (draft-madden-jose-ecdh-1pu §2.3), the JWE content-encryption
+// auth tag is folded into the Concat KDF as SuppPrivInfo. This binds
+// the KEK derivation to the ciphertext — a tampered ciphertext
+// produces a different KEK, the AES-KW unwrap integrity check fails,
+// and the unwrap throws before the recipient even attempts content
+// decryption. Callers MUST supply `ccTag` in this mode; both sides
+// have to agree byte-for-byte on the tag for the KEKs to match.
 
 import * as concatKdf from "./concat-kdf.js";
 import * as x25519 from "./x25519.js";
@@ -37,6 +46,9 @@ import * as x25519 from "./x25519.js";
  * @param {string} args.alg - typically `"ECDH-1PU+A256KW"`
  * @param {Uint8Array} args.apu
  * @param {Uint8Array} args.apv
+ * @param {Uint8Array} [args.ccTag] - JWE content-encryption auth tag
+ *   for key-wrap mode binding. Required for ECDH-1PU+A*KW; should be
+ *   omitted for ECDH-1PU direct.
  * @returns {Promise<Uint8Array>} 32-byte KEK
  */
 export async function deriveKekAuthcrypt({
@@ -46,11 +58,12 @@ export async function deriveKekAuthcrypt({
   alg,
   apu,
   apv,
+  ccTag,
 }) {
   const ze = x25519.sharedSecret(ephemeralPrivate, recipientPublic);
   const zs = x25519.sharedSecret(senderPrivate, recipientPublic);
   const z = concat(ze, zs);
-  return concatKdf.deriveKey(z, { alg, apu, apv }, 256);
+  return concatKdf.deriveKey(z, { alg, apu, apv, suppPrivInfo: ccTag }, 256);
 }
 
 /**
@@ -69,6 +82,8 @@ export async function deriveKekAuthcrypt({
  * @param {string} args.alg
  * @param {Uint8Array} args.apu
  * @param {Uint8Array} args.apv
+ * @param {Uint8Array} [args.ccTag] - JWE content-encryption auth tag
+ *   for key-wrap mode binding. Same value the sender used.
  * @returns {Promise<Uint8Array>} 32-byte KEK
  */
 export async function recipientKekAuthcrypt({
@@ -78,11 +93,12 @@ export async function recipientKekAuthcrypt({
   alg,
   apu,
   apv,
+  ccTag,
 }) {
   const ze = x25519.sharedSecret(recipientPrivate, ephemeralPublic);
   const zs = x25519.sharedSecret(recipientPrivate, senderPublic);
   const z = concat(ze, zs);
-  return concatKdf.deriveKey(z, { alg, apu, apv }, 256);
+  return concatKdf.deriveKey(z, { alg, apu, apv, suppPrivInfo: ccTag }, 256);
 }
 
 function concat(a, b) {

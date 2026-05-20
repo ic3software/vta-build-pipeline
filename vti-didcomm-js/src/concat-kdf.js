@@ -19,7 +19,12 @@
 //   SuppPubInfo = uint32_be(keyDataLen_bits)
 //   lenPrefix(x) = uint32_be(byteLen(x)) || x
 //
-// SuppPrivInfo is omitted (empty) in JOSE.
+// SuppPrivInfo is normally omitted, but for ECDH-1PU in
+// Key-Agreement-with-Key-Wrap mode (draft-madden-jose-ecdh-1pu §2.3)
+// it carries the JWE content-encryption auth tag (`cc_tag`),
+// appended RAW (no length prefix — that's the convention shared by
+// affinidi-messaging-didcomm, go-jose, jwx). This binds the KEK
+// derivation to the ciphertext.
 //
 // We only support SHA-256 + JOSE OtherInfo construction — the
 // specific shape ECDH-1PU+A256KW needs. A general Concat KDF would
@@ -43,12 +48,15 @@ const HASH_LEN = 32; // SHA-256 output length
  *   (NOT base64url). The caller is responsible for base64url-decoding
  *   the `apu` header value before passing it here. Empty allowed.
  * @param {Uint8Array} otherInfo.apv - Same shape as `apu`.
+ * @param {Uint8Array} [otherInfo.suppPrivInfo] - Optional raw bytes
+ *   appended after SuppPubInfo (NOT length-prefixed). Used by
+ *   ECDH-1PU+A256KW to carry the JWE content-encryption auth tag.
  * @param {number} keyDataLenBits - Number of bits of derived
  *   keying material to produce. Must be a multiple of 8 and ≤ 4096
  *   (defensive cap to catch order-of-magnitude bugs).
  * @returns {Promise<Uint8Array>}
  */
-export async function deriveKey(z, { alg, apu, apv }, keyDataLenBits) {
+export async function deriveKey(z, { alg, apu, apv, suppPrivInfo }, keyDataLenBits) {
   if (!(z instanceof Uint8Array)) {
     throw new TypeError("ConcatKDF: Z must be Uint8Array");
   }
@@ -57,6 +65,9 @@ export async function deriveKey(z, { alg, apu, apv }, keyDataLenBits) {
   }
   if (!(apu instanceof Uint8Array) || !(apv instanceof Uint8Array)) {
     throw new TypeError("ConcatKDF: apu and apv must be Uint8Array");
+  }
+  if (suppPrivInfo !== undefined && !(suppPrivInfo instanceof Uint8Array)) {
+    throw new TypeError("ConcatKDF: suppPrivInfo must be Uint8Array if provided");
   }
   if (
     typeof keyDataLenBits !== "number" ||
@@ -76,6 +87,7 @@ export async function deriveKey(z, { alg, apu, apv }, keyDataLenBits) {
     lengthPrefix(apu),
     lengthPrefix(apv),
     uint32be(keyDataLenBits),
+    suppPrivInfo ?? new Uint8Array(),
   );
 
   const reps = Math.ceil(keyDataLenBytes / HASH_LEN);
