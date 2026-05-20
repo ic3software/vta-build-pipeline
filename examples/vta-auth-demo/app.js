@@ -116,6 +116,11 @@ const els = {
   dcResolve: $("dcResolve"),
   dcPack: $("dcPack"),
   dcOutput: $("dcOutput"),
+
+  daVtaDid: $("daVtaDid"),
+  daGenerate: $("daGenerate"),
+  daAuthenticate: $("daAuthenticate"),
+  daOutput: $("daOutput"),
 };
 
 // ─── Utilities ────────────────────────────────────────────────────────
@@ -861,6 +866,104 @@ function prettyJson(s) {
     return s;
   }
 }
+
+// ─── Section 8: DIDComm-packed /auth/ (vti-didcomm-js) ───────────────
+//
+// Drives the legacy challenge-response auth flow end-to-end from the
+// browser, the same one PNM uses via the Rust auth_light client. On
+// success we hand the JWT to `storeAuth(...)` so Sections 5/6 light up
+// just like passkey login.
+
+const ephemeralClient = {
+  did: null,
+  kid: null,
+  privateKey: null,
+  publicKey: null,
+};
+
+els.daGenerate.addEventListener("click", async () => {
+  clearOutput(els.daOutput);
+  try {
+    const lib = await loadDidcommLib();
+    const c = lib.vtaRestAuth.generateEphemeralClient();
+    ephemeralClient.did = c.did;
+    ephemeralClient.kid = c.kid;
+    ephemeralClient.privateKey = c.privateKey;
+    ephemeralClient.publicKey = c.publicKey;
+    els.daAuthenticate.disabled = false;
+    setOutput(
+      els.daOutput,
+      [
+        `Generated ephemeral client DID:`,
+        ``,
+        `  ${c.did}`,
+        ``,
+        `Add it to the VTA's ACL before clicking Authenticate, e.g.:`,
+        ``,
+        `  pnm acl create --did ${c.did} --role admin --contexts <ctx>`,
+        ``,
+        `(The /auth/challenge handler ACL-gates the request — an unregistered`,
+        `did:key will 403 at step 1.)`,
+      ].join("\n"),
+      "ok",
+    );
+  } catch (e) {
+    setOutput(els.daOutput, e.message, "err");
+  }
+});
+
+els.daAuthenticate.addEventListener("click", async () => {
+  if (!ephemeralClient.privateKey) {
+    setOutput(els.daOutput, "Generate an ephemeral client first.", "err");
+    return;
+  }
+  const vtaDid = els.daVtaDid.value.trim();
+  if (!vtaDid) {
+    setOutput(els.daOutput, "Enter the VTA's DID first.", "err");
+    return;
+  }
+  clearOutput(els.daOutput);
+
+  try {
+    const lib = await loadDidcommLib();
+    const result = await lib.vtaRestAuth.authenticate({
+      baseUrl: baseUrl(),
+      vtaDid,
+      clientDid: ephemeralClient.did,
+      clientX25519Private: ephemeralClient.privateKey,
+      clientX25519Public: ephemeralClient.publicKey,
+      clientKid: ephemeralClient.kid,
+    });
+
+    // Reuse the existing session-store helper so Sections 5/6 light up
+    // identically to passkey login.
+    storeAuth({
+      sessionId: result.sessionId,
+      data: {
+        accessToken: result.accessToken,
+        accessExpiresAt: result.accessExpiresAt,
+        refreshToken: result.refreshToken,
+        refreshExpiresAt: result.refreshExpiresAt,
+      },
+    });
+
+    setOutput(
+      els.daOutput,
+      [
+        `Authenticated as: ${ephemeralClient.did}`,
+        `Session id: ${result.sessionId ?? "(unknown)"}`,
+        `Access token (truncated): ${result.accessToken.slice(0, 32)}…`,
+        `Expires at: ${new Date(result.accessExpiresAt * 1000).toISOString()}`,
+        result.refreshToken
+          ? `Refresh token present (expires ${new Date((result.refreshExpiresAt ?? 0) * 1000).toISOString()})`
+          : `No refresh token`,
+      ].join("\n"),
+      "ok",
+    );
+  } catch (e) {
+    setOutput(els.daOutput, e.message, "err");
+  }
+});
 
 // ─── Init ─────────────────────────────────────────────────────────────
 

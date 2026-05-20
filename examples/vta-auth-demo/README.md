@@ -15,14 +15,14 @@ server and click around.
 | 5 | Session inspection + revoke               | `GET /auth/sessions`, `DELETE /auth/sessions/{id}`    | implemented |
 | 6 | Trust-task dispatch                       | `POST /api/trust-tasks` with bearer auth              | implemented |
 | 7 | DIDComm primitives smoke-test             | (purely client-side; resolve + pack against any DID)  | implemented |
-| — | Legacy challenge / authenticate           | `POST /auth/challenge` + `POST /auth/`                | **not in demo** |
+| 8 | DIDComm-packed `/auth/` end-to-end          | `POST /auth/challenge` + `POST /auth/`                | implemented |
 | — | Refresh                                   | `POST /auth/refresh`                                  | **not in demo** |
 
-The legacy challenge/authenticate and refresh flows take DIDComm-packed
-messages as their request body. Step 7 ships the JS DIDComm pack stack
-(`vti-didcomm-js`) — it doesn't drive the legacy flow itself yet, but
-it shows the primitives work in a real browser. A future step can wire
-them up to actually call `/auth/`.
+The legacy challenge/authenticate flow is now driven from the browser
+via `vti-didcomm-js` (Step 8) — same authcrypt format the VTA's
+`affinidi-messaging-didcomm-0.13` decrypt path actually accepts.
+Refresh remains "use the SDK" for now; the wire shape is the same as
+authenticate.
 
 ## Prerequisites
 
@@ -147,7 +147,29 @@ needed.
      - prints the JWE — but does NOT deliver it. This is a
        library smoke-test, not a transport.
    - The bundled crypto stack is at `./vendor/vti-didcomm-js.js`
-     (100 KB minified, loaded lazily on first click).
+     (~100 KB minified, loaded lazily on first click).
+
+8. **Step 8 — DIDComm-packed `/auth/` end-to-end**:
+   - Paste the VTA's DID (the one served by the running VTA —
+     e.g. from `pnm webvh list-dids`).
+   - Click "Generate ephemeral client DID". The demo prints the
+     `did:key:z…` it minted along with the exact `pnm acl create`
+     command you need to run (the `/auth/challenge` handler
+     ACL-gates the request; an unregistered DID will 403).
+   - Run that command in your terminal.
+   - Click "Authenticate". The demo:
+     - POSTs `{ did }` to `/auth/challenge` and reads back
+       `{ sessionId, data: { challenge } }`.
+     - Resolves the VTA's DID to find its keyAgreement X25519 key.
+     - Builds a DIDComm v2 plaintext message of type
+       `https://affinidi.com/atm/1.0/authenticate` with body
+       `{ challenge, session_id }`, authcrypt-packs it (ECDH-1PU
+       + A256CBC-HS512), and POSTs the JWE to `/auth/` as
+       `text/plain`.
+     - Stores the returned JWT — Sections 5/6 light up just like
+       passkey login.
+   - This is the browser-side equivalent of `pnm auth show-token`;
+     useful for testing the wire flow without a CLI dependency.
 
 ## What the multikey computation does
 
@@ -172,10 +194,10 @@ enrol path errors out and you'll need to extend `p256AttestationToMultikey`.
 
 ```
 examples/vta-auth-demo/
-├── index.html                       UI structure (seven numbered sections)
+├── index.html                       UI structure (eight numbered sections)
 ├── app.js                           Flow logic + multikey computation (vanilla ES modules)
 ├── styles.css                       Minimal dark-theme styling
-├── vendor/vti-didcomm-js.js         Bundled DIDComm v2 stack used by Step 7
+├── vendor/vti-didcomm-js.js         Bundled DIDComm v2 stack used by Steps 7+8
 └── README.md                        This file
 ```
 
@@ -218,6 +240,9 @@ the demo stays zero-build at runtime.
   future passkey-login wire format requires the client to declare
   the VM explicitly, the demo will need updating.
 - **Step 7 is a primitive showcase, not a transport.** It packs
-  but doesn't deliver. Wiring the JWE to `POST /auth/` (or to a
-  mediator's `/inbound`) is follow-on work — see B4 in the
-  `vti-didcomm-js` roadmap.
+  but doesn't deliver. See Step 8 for the actual delivery path,
+  or future work for the mediator-routed transport.
+- **Step 8 requires the ephemeral client DID to be pre-registered**
+  in the VTA's ACL. The demo prints the exact `pnm acl create`
+  command; run it before clicking Authenticate or the
+  `/auth/challenge` call will 403.
