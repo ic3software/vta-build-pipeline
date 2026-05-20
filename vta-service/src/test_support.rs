@@ -406,6 +406,8 @@ pub struct TestAppContext {
     pub sessions_ks: KeyspaceHandle,
     pub acl_ks: KeyspaceHandle,
     pub keys_ks: KeyspaceHandle,
+    pub backup_bundles_ks: KeyspaceHandle,
+    pub backup_blob_dir: std::path::PathBuf,
     pub config: Arc<RwLock<AppConfig>>,
     /// Owns the on-disk fjall data dir. When this drops, files are
     /// removed; the caller MUST keep it alive for the duration of the
@@ -533,8 +535,8 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         imported_ks,
         cache_ks,
         sealed_nonces_ks,
-        backup_bundles_ks,
-        backup_blob_dir,
+        backup_bundles_ks: backup_bundles_ks.clone(),
+        backup_blob_dir: backup_blob_dir.clone(),
         #[cfg(feature = "webvh")]
         webvh_ks,
         #[cfg(feature = "webvh")]
@@ -579,6 +581,8 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         sessions_ks,
         acl_ks,
         keys_ks,
+        backup_bundles_ks,
+        backup_blob_dir,
         config,
         _dir: dir,
     };

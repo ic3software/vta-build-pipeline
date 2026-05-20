@@ -146,6 +146,10 @@ azure_identity = { workspace = true, optional = true }
 # vaultrs's default TLS backend, matching the rest of the workspace.
 vaultrs = { version = "0.8", optional = true }
 sha2 = { workspace = true }
+# Constant-time byte equality. Used by `backup_bundle_store` to
+# verify backup-bundle bearer tokens against their stored
+# `SHA-256(token)` hash without leaking byte-position via timing.
+subtle = { workspace = true }
 cbc = { version = "0.2", optional = true }
 aes = { version = "0.9", optional = true }
 x25519-dalek = { workspace = true }

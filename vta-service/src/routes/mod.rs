@@ -4,6 +4,7 @@ mod attestation;
 mod audit;
 mod auth;
 mod backup;
+mod backup_blob;
 mod bootstrap;
 mod cache;
 mod capabilities;
@@ -41,6 +42,20 @@ const MAX_BODY_SIZE: usize = 1024 * 1024;
 /// JWE / sealed-transfer payload but reject 1 MB blob floods that the
 /// rate limiter alone cannot starve out.
 const UNAUTH_BODY_SIZE: usize = 64 * 1024;
+
+/// Body-size cap for the backup-descriptor blob endpoints. The whole
+/// point of the descriptor pattern is to escape the trust-task
+/// envelope's 1 MB cap, so this needs a much larger budget. 100 MB
+/// covers a typical-to-large VTA's full backup (keys + ACL +
+/// contexts + WebVH DID logs + audit). A future enhancement could
+/// make this config-driven, but baking the conservative ceiling in
+/// avoids an operator footgun (set-to-10-GB).
+///
+/// `pub(super)` so the blob route handler can pass it to
+/// `axum::body::to_bytes` — the per-handler cap is the canonical
+/// source of truth; the router-level layer is disabled (see
+/// `backup_blob_router` construction below).
+pub(super) const BACKUP_BLOB_BODY_SIZE: usize = 100 * 1024 * 1024;
 
 /// Per-client-IP rate-limit budget for unauthenticated endpoints.
 ///
@@ -329,6 +344,28 @@ pub fn router() -> Router<AppState> {
         .route("/metrics", get(vta::metrics))
         .route("/backup/export", post(backup::export))
         .route("/backup/import", post(backup::import));
+
+    // Backup-descriptor blob endpoints. NOT JWT-gated — the
+    // `X-Backup-Token` header IS the credential (one-shot for
+    // GET, bound to bundle_id, hashed server-side). Justified
+    // in `docs/05-design-notes/backup-descriptor-pattern.md`
+    // §"Auth model".
+    //
+    // Body limit is disabled at the router level so the global
+    // `MAX_BODY_SIZE` (1 MB) doesn't constrain backups, which
+    // legitimately need 10s of MB. The handler enforces a
+    // `BACKUP_BLOB_BODY_SIZE` (100 MB) ceiling itself via
+    // `axum::body::to_bytes` so we still reject pathological
+    // uploads; doing it inside the handler keeps the limit
+    // visible in one place (not split between two layers with
+    // ambiguous override semantics).
+    let backup_blob_router = Router::new()
+        .route(
+            "/backup/blob/{bundle_id}",
+            get(backup_blob::get_blob).post(backup_blob::post_blob),
+        )
+        .layer(DefaultBodyLimit::disable());
+    let router = router.merge(backup_blob_router);
 
     // Authenticated health details and capabilities
     let router = router
