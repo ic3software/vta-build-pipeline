@@ -26,9 +26,11 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderName, HeaderValue, Method};
 use axum::routing::{delete, get, post, put};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::server::AppState;
 
@@ -73,7 +75,61 @@ pub fn health_router() -> Router<AppState> {
     Router::new().route("/health", get(health::health))
 }
 
+/// Build a CORS layer from a list of allowed origins. Returns
+/// `None` when the list is empty — the caller must skip the layer
+/// in that case so a fresh-install VTA keeps the legacy
+/// no-cross-origin behaviour.
+///
+/// Cross-origin requests with `Authorization` headers don't carry
+/// browser credentials (no `allow_credentials`), so the bearer
+/// token is the only client-side state in the cross-origin path.
+/// Wildcard origins are deliberately not accepted — every allowed
+/// origin must be explicit so a misconfiguration can't let
+/// arbitrary sites borrow operator tokens.
+fn build_cors_layer(allowed_origins: &[String]) -> Option<CorsLayer> {
+    if allowed_origins.is_empty() {
+        return None;
+    }
+    // Filter:
+    //   - `*` — tower-http's `AllowOrigin::list` panics on the
+    //     wildcard. We deliberately don't fall through to
+    //     `AllowOrigin::any()` either; explicit origins only.
+    //   - malformed values that can't be parsed as a header value.
+    let parsed: Vec<HeaderValue> = allowed_origins
+        .iter()
+        .filter(|o| !o.is_empty() && *o != "*")
+        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .collect();
+    if parsed.is_empty() {
+        // Either an operator passed only invalid entries (a
+        // typo'd config that should be visible in startup logs)
+        // or the original list was filtered down to nothing. Skip
+        // the layer rather than partially-apply CORS — a
+        // half-configured CORS surface is worse than none.
+        return None;
+    }
+    Some(
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(parsed))
+            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH])
+            .allow_headers([
+                HeaderName::from_static("content-type"),
+                HeaderName::from_static("authorization"),
+                HeaderName::from_static("x-backup-token"),
+            ])
+            .max_age(std::time::Duration::from_secs(60)),
+    )
+}
+
 pub fn router() -> Router<AppState> {
+    router_with_cors(&[])
+}
+
+/// Build the router and conditionally apply a CORS layer for the
+/// given list of allowed origins. Wraps [`router()`] for callers
+/// (production VTA front-ends) that already hold a config; empty
+/// list = no layer = legacy behaviour.
+pub fn router_with_cors(allowed_origins: &[String]) -> Router<AppState> {
     // Per-IP rate-limit layer applied to every unauthenticated endpoint.
     // Authenticated routes stay unthrottled — JWT auth is itself a gate,
     // and legitimate operator traffic against the management plane
@@ -373,5 +429,72 @@ pub fn router() -> Router<AppState> {
         .route("/capabilities", get(capabilities::capabilities));
 
     // Apply global request body size limit to protect enclave memory
-    router.layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+    let router = router.layer(DefaultBodyLimit::max(MAX_BODY_SIZE));
+
+    // Apply CORS conditionally — empty origin list = no layer at all
+    // (preserves the legacy no-cross-origin behaviour for production
+    // deployments that don't need browser-side fetch).
+    match build_cors_layer(allowed_origins) {
+        Some(cors) => router.layer(cors),
+        None => router,
+    }
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+
+    #[test]
+    fn empty_list_disables_cors_entirely() {
+        assert!(build_cors_layer(&[]).is_none());
+    }
+
+    #[test]
+    fn explicit_origin_produces_layer() {
+        let layer = build_cors_layer(&["http://localhost:8000".to_string()]);
+        assert!(layer.is_some());
+    }
+
+    #[test]
+    fn invalid_origin_filtered_out_and_empty_result_returns_none() {
+        // `\n` is invalid in a header value. If it's the only entry,
+        // the filter empties the list and we end up at the
+        // no-layer branch — a fresh-install VTA shouldn't get a
+        // partially-applied CORS surface just because a config typo
+        // got past serde.
+        let bad_origin = "http://localhost:8000\n".to_string();
+        assert!(build_cors_layer(&[bad_origin]).is_none());
+    }
+
+    #[test]
+    fn wildcard_alone_yields_no_layer() {
+        // tower-http's `AllowOrigin::list` PANICS on the literal
+        // `*`. The build_cors_layer filter strips wildcards
+        // explicitly so an operator typo can't bring down the
+        // VTA at startup. (Wildcards would also expose bearer
+        // tokens to any origin, which is exactly the kind of
+        // config error we want to refuse — better empty than
+        // permissive.)
+        assert!(
+            build_cors_layer(&["*".to_string()]).is_none(),
+            "wildcard must be filtered to None, never partial-applied"
+        );
+    }
+
+    #[test]
+    fn wildcard_mixed_with_explicit_origins_drops_wildcard_keeps_others() {
+        // Defensive: a mixed list shouldn't break the layer
+        // build — the wildcard is dropped and the explicit
+        // entries remain.
+        let layer = build_cors_layer(&["*".to_string(), "http://localhost:8000".to_string()]);
+        assert!(layer.is_some());
+    }
+
+    #[test]
+    fn empty_origin_string_filtered() {
+        // Operator pastes a blank line into config — should be
+        // skipped, not turned into an empty header value.
+        let layer = build_cors_layer(&["".to_string(), "http://x".to_string()]);
+        assert!(layer.is_some());
+    }
 }

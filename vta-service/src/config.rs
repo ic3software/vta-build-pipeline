@@ -193,6 +193,22 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Origins permitted to make cross-origin requests against the
+    /// VTA's REST surface. Empty (default) disables the CORS layer
+    /// entirely — a fresh-install VTA refuses cross-origin requests
+    /// the way the legacy behaviour did. Production deployments
+    /// typically leave this empty (programmatic clients send the
+    /// bearer token directly and don't need browser-side CORS); the
+    /// demo at `examples/vta-auth-demo/` sets it to
+    /// `["http://localhost:8000"]` so an operator can drive the
+    /// auth flow from a browser running on a different localhost
+    /// port.
+    ///
+    /// Each entry is matched exactly against the request's `Origin`
+    /// header. Wildcards are not accepted — bearer credentials must
+    /// not flow to arbitrary origins.
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
 }
 
 fn default_host() -> String {
@@ -218,6 +234,7 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            cors_origins: Vec::new(),
         }
     }
 }

@@ -928,7 +928,13 @@ fn run_rest_thread(
         let listener = tokio::net::TcpListener::from_std(std_listener)
             .expect("failed to convert std TcpListener to tokio TcpListener");
 
-        let traced_routes = routes::router()
+        // Snapshot the CORS origins for the router build. The config
+        // is reloadable, but a router rebuild requires a full
+        // service restart (which the operator triggers via
+        // /vta/restart after editing the file), so reading the
+        // current values here is correct.
+        let cors_origins = state.config.read().await.server.cors_origins.clone();
+        let traced_routes = routes::router_with_cors(&cors_origins)
             .with_state(state.clone())
             .layer(axum::middleware::from_fn(crate::metrics::track_metrics))
             .layer(
