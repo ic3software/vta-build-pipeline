@@ -152,11 +152,44 @@ pub const TASK_CONTEXTS_PREVIEW_DELETE_1_0: &str =
 /// Auth: Super Admin only.
 pub const TASK_CONTEXTS_DELETE_1_0: &str = "https://trusttasks.org/spec/vta/contexts/delete/1.0";
 
+// ─── Keys slice (spec/vta/keys/*) ────────────────────────────────────────
+
+/// `spec/vta/keys/list/1.0` — list key records (paginated, filterable).
+/// Payload: [`crate::protocols::key_management::list::ListKeysBody`].
+pub const TASK_KEYS_LIST_1_0: &str = "https://trusttasks.org/spec/vta/keys/list/1.0";
+
+/// `spec/vta/keys/create/1.0` — derive a new key from the active seed.
+/// Payload: [`crate::protocols::key_management::create::CreateKeyBody`].
+/// Auth: Admin.
+pub const TASK_KEYS_CREATE_1_0: &str = "https://trusttasks.org/spec/vta/keys/create/1.0";
+
+/// `spec/vta/keys/get/1.0` — retrieve a single key record.
+/// Payload: [`crate::protocols::key_management::get::GetKeyBody`].
+pub const TASK_KEYS_GET_1_0: &str = "https://trusttasks.org/spec/vta/keys/get/1.0";
+
+/// `spec/vta/keys/rename/1.0` — rename a key's identifier.
+/// Payload: [`crate::protocols::key_management::rename::RenameKeyBody`].
+/// Auth: Admin.
+pub const TASK_KEYS_RENAME_1_0: &str = "https://trusttasks.org/spec/vta/keys/rename/1.0";
+
+/// `spec/vta/keys/revoke/1.0` — invalidate a key.
+/// Payload: [`crate::protocols::key_management::revoke::RevokeKeyBody`].
+/// Auth: Admin.
+pub const TASK_KEYS_REVOKE_1_0: &str = "https://trusttasks.org/spec/vta/keys/revoke/1.0";
+
+/// `spec/vta/keys/sign/1.0` — sign a base64url-encoded payload with a
+/// stored key (raw-bytes signing oracle).
+/// Payload: [`crate::protocols::key_management::sign::SignRequestBody`].
+/// Auth: write (Application or higher).
+pub const TASK_KEYS_SIGN_1_0: &str = "https://trusttasks.org/spec/vta/keys/sign/1.0";
+
 // ─── Future slices ───────────────────────────────────────────────────────
 //
-// keys, seeds, audit, attestation, services, webvh, did-templates,
+// seeds, audit, attestation, services, webvh, did-templates,
 // passkey-vms, backup, config, discovery, management, join-requests,
-// bootstrap.
+// bootstrap. Keys import + wrapping-key + secret-export defer to
+// follow-on work (import has transport-unwrap complexity; secret-export
+// moves to the seeds slice per the URI registry).
 //
 // Each slice ships in its own Phase 3 PR. The migration mapping table
 // in docs/05-design-notes/trust-task-uri-registry.md enumerates the
@@ -187,6 +220,13 @@ pub const ALL_URIS: &[&str] = &[
     TASK_CONTEXTS_UPDATE_DID_1_0,
     TASK_CONTEXTS_PREVIEW_DELETE_1_0,
     TASK_CONTEXTS_DELETE_1_0,
+    // Keys slice
+    TASK_KEYS_LIST_1_0,
+    TASK_KEYS_CREATE_1_0,
+    TASK_KEYS_GET_1_0,
+    TASK_KEYS_RENAME_1_0,
+    TASK_KEYS_REVOKE_1_0,
+    TASK_KEYS_SIGN_1_0,
 ];
 
 #[cfg(test)]
