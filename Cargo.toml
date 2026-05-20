@@ -11,6 +11,7 @@ members = [
   "vta-enclave",
   "vtc-service",
   "vti-common",
+  "vti-webauthn",
 ]
 exclude = ["deploy/nitro/enclave-proxy"]
 resolver = "3"
@@ -103,6 +104,23 @@ multibase = "0.9"
 # the AWS-vetted libcrypto fork; same primitives, no `rsa` crate.
 jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 
+# AWS-LC backend used directly by `vti-webauthn` for ECDSA P-256 WebAuthn
+# assertion verification. Already in our dep tree via `jsonwebtoken`'s
+# `aws_lc_rs` feature and via `aws-sdk-kms`; hoisting here so the
+# crypto-pin discipline (CLAUDE.md "Versioning & publishing") applies
+# uniformly. Pin minimum patch — CVE landings should not silently
+# regress.
+aws-lc-rs = "1.16"
+
+# Trust-Tasks framework — wire-envelope for the trust-task migration
+# initiative (docs/05-design-notes/trust-task-uri-registry.md).
+# Pinned to the same upstream commit as affinidi-webvh-service via
+# `[patch.crates-io]` below so both services consume byte-identical
+# framework bytes — the spec moves faster than crates.io releases.
+trust-tasks-rs = { version = "0.1", default-features = false }
+trust-tasks-https = { version = "0.1", default-features = false, features = ["server", "client", "jwt"] }
+trust-tasks-proof = { version = "0.1", default-features = false, features = ["affinidi"] }
+
 # Axum extras (typed headers for Bearer auth)
 axum-extra = { version = "0.12", features = ["typed-header"] }
 
@@ -187,6 +205,17 @@ keyring-core = "1"
 apple-native-keyring-store = { version = "1", default-features = false, features = ["keychain"] }
 windows-native-keyring-store = "1"
 dbus-secret-service-keyring-store = { version = "1", default-features = false, features = ["crypto-rust"] }
+
+# Pin the trust-tasks crates to a specific upstream commit so this
+# workspace and affinidi-webvh-service consume byte-identical framework
+# bytes. The crates.io 0.1 releases lag the upstream spec; this
+# guarantees a VTA and a webvh-service deployed together can't disagree
+# on wire format. Bump in lockstep with affinidi-webvh-service when the
+# upstream pin moves.
+[patch.crates-io]
+trust-tasks-rs = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf.git", rev = "21db8a8a031a59797a2cc49ad800158e644d51e4" }
+trust-tasks-https = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf.git", rev = "21db8a8a031a59797a2cc49ad800158e644d51e4" }
+trust-tasks-proof = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf.git", rev = "21db8a8a031a59797a2cc49ad800158e644d51e4" }
 
 [profile.release]
 lto = "thin"
