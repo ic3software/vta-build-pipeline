@@ -191,6 +191,59 @@ mod tests {
         let _ = resp;
     }
 
+    /// Pins the framework's current `TypeUri::from_str` constraint:
+    /// the wire-format `type` field MUST use the canonical
+    /// `/spec/<slug>/<major.minor>` shape. Flat URIs are rejected at
+    /// JSON deserialization.
+    ///
+    /// **Design implication.** The workspace's URI registry in
+    /// `vta-sdk::trust_tasks` currently exposes flat URIs (no `/spec/`
+    /// segment). Those constants are fine for INTERNAL identifiers /
+    /// match arms / HTTP `Trust-Task:` header tags — they're just
+    /// string-equal matches. But the WIRE FORMAT in the JSON `type`
+    /// field must be canonical. Phase 3 work needs to reconcile this:
+    /// either (a) move the registry to canonical form, or (b) keep
+    /// flat consts and convert on the wire boundary.
+    ///
+    /// See `docs/05-design-notes/trust-task-uri-registry.md` for the
+    /// pending resolution.
+    #[test]
+    fn framework_requires_canonical_uri_in_wire_type_field() {
+        // Canonical form parses.
+        let canonical = serde_json::json!({
+            "id": "urn:uuid:00000000-0000-0000-0000-000000000001",
+            "type": "https://trusttasks.org/spec/vta-auth-revoke-session/1.0",
+            "issuer": "did:example:alice",
+            "recipient": "did:example:vta",
+            "issuedAt": "2026-05-20T00:00:00Z",
+            "payload": { "session_id": "sess-1" }
+        });
+        let bytes = serde_json::to_vec(&canonical).unwrap();
+        let parsed: Result<TrustTask<Value>, _> = serde_json::from_slice(&bytes);
+        assert!(
+            parsed.is_ok(),
+            "canonical URI must parse: {:?}",
+            parsed.err()
+        );
+
+        // Flat form is rejected.
+        let flat = serde_json::json!({
+            "id": "urn:uuid:00000000-0000-0000-0000-000000000001",
+            "type": "https://trusttasks.org/vta/auth/revoke-session/1.0",
+            "issuer": "did:example:alice",
+            "recipient": "did:example:vta",
+            "issuedAt": "2026-05-20T00:00:00Z",
+            "payload": { "session_id": "sess-1" }
+        });
+        let bytes = serde_json::to_vec(&flat).unwrap();
+        let parsed: Result<TrustTask<Value>, _> = serde_json::from_slice(&bytes);
+        assert!(
+            parsed.is_err(),
+            "flat URI must NOT parse — if this changes, the framework \
+             relaxed its parser and Phase 3 design can simplify"
+        );
+    }
+
     #[test]
     fn phase_2_uri_registry_present() {
         // Compile-time check: every URI we route in `dispatch_typed`
