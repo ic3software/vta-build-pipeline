@@ -183,13 +183,34 @@ pub const TASK_KEYS_REVOKE_1_0: &str = "https://trusttasks.org/spec/vta/keys/rev
 /// Auth: write (Application or higher).
 pub const TASK_KEYS_SIGN_1_0: &str = "https://trusttasks.org/spec/vta/keys/sign/1.0";
 
+// ─── Seeds slice (spec/vta/seeds/*) ──────────────────────────────────────
+
+/// `spec/vta/seeds/list/1.0` — list all seed records.
+/// Payload: [`crate::protocols::seed_management::list::ListSeedsBody`]
+/// (empty). Auth: Admin.
+pub const TASK_SEEDS_LIST_1_0: &str = "https://trusttasks.org/spec/vta/seeds/list/1.0";
+
+/// `spec/vta/seeds/rotate/1.0` — rotate the active seed, optionally
+/// supplying a new mnemonic.
+/// Payload: [`crate::protocols::seed_management::rotate::RotateSeedBody`].
+/// Auth: Admin.
+pub const TASK_SEEDS_ROTATE_1_0: &str = "https://trusttasks.org/spec/vta/seeds/rotate/1.0";
+
+/// `spec/vta/seeds/export-mnemonic/1.0` — one-shot BIP-39 mnemonic
+/// export under `MnemonicExportGuard`. Was `/keys/{id}/secret` in
+/// the legacy REST surface — relocated to the seeds slice because it
+/// operates on the seed identifier, not an individual key.
+/// Payload: [`crate::protocols::key_management::secret::GetKeySecretBody`].
+/// Auth: Admin only. Zeroized on drop.
+pub const TASK_SEEDS_EXPORT_MNEMONIC_1_0: &str =
+    "https://trusttasks.org/spec/vta/seeds/export-mnemonic/1.0";
+
 // ─── Future slices ───────────────────────────────────────────────────────
 //
-// seeds, audit, attestation, services, webvh, did-templates,
-// passkey-vms, backup, config, discovery, management, join-requests,
-// bootstrap. Keys import + wrapping-key + secret-export defer to
-// follow-on work (import has transport-unwrap complexity; secret-export
-// moves to the seeds slice per the URI registry).
+// audit, attestation, services, webvh, did-templates, passkey-vms,
+// backup, config, discovery, management, join-requests, bootstrap.
+// Keys import + wrapping-key defer to follow-on work (import has
+// transport-unwrap complexity at the route boundary).
 //
 // Each slice ships in its own Phase 3 PR. The migration mapping table
 // in docs/05-design-notes/trust-task-uri-registry.md enumerates the
@@ -227,6 +248,10 @@ pub const ALL_URIS: &[&str] = &[
     TASK_KEYS_RENAME_1_0,
     TASK_KEYS_REVOKE_1_0,
     TASK_KEYS_SIGN_1_0,
+    // Seeds slice
+    TASK_SEEDS_LIST_1_0,
+    TASK_SEEDS_ROTATE_1_0,
+    TASK_SEEDS_EXPORT_MNEMONIC_1_0,
 ];
 
 #[cfg(test)]

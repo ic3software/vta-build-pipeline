@@ -1,6 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Empty request body for the list-seeds operation. Exists so the
+/// trust-task envelope's `payload` field has a typed shape; the
+/// operation takes no input parameters.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListSeedsBody {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeedInfo {
     pub id: u32,

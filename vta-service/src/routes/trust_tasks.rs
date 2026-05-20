@@ -43,7 +43,10 @@ use vta_sdk::protocols::key_management::get::GetKeyBody;
 use vta_sdk::protocols::key_management::list::ListKeysBody;
 use vta_sdk::protocols::key_management::rename::RenameKeyBody;
 use vta_sdk::protocols::key_management::revoke::RevokeKeyBody;
+use vta_sdk::protocols::key_management::secret::GetKeySecretBody;
 use vta_sdk::protocols::key_management::sign::SignRequestBody;
+use vta_sdk::protocols::seed_management::list::ListSeedsBody;
+use vta_sdk::protocols::seed_management::rotate::RotateSeedBody;
 
 use crate::acl::Role;
 use crate::audit::audit;
@@ -162,6 +165,12 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
         vta_sdk::trust_tasks::TASK_KEYS_RENAME_1_0 => handle_keys_rename(state, auth, doc).await,
         vta_sdk::trust_tasks::TASK_KEYS_REVOKE_1_0 => handle_keys_revoke(state, auth, doc).await,
         vta_sdk::trust_tasks::TASK_KEYS_SIGN_1_0 => handle_keys_sign(state, auth, doc).await,
+        // ─── Seeds slice ─────────────────────────────────────────────
+        vta_sdk::trust_tasks::TASK_SEEDS_LIST_1_0 => handle_seeds_list(state, auth, doc).await,
+        vta_sdk::trust_tasks::TASK_SEEDS_ROTATE_1_0 => handle_seeds_rotate(state, auth, doc).await,
+        vta_sdk::trust_tasks::TASK_SEEDS_EXPORT_MNEMONIC_1_0 => {
+            handle_seeds_export_mnemonic(state, auth, doc).await
+        }
         // ─── Unknown / REST-routed ───────────────────────────────────
         //
         // Pre-auth URIs (passkey-login-{start,finish}, challenge,
@@ -767,6 +776,83 @@ async fn handle_keys_sign(state: &AppState, auth: &AuthClaims, doc: TrustTask<Va
     }
 }
 
+// ─── Seeds slice handlers ────────────────────────────────────────────────
+
+/// Handler for `spec/vta/seeds/list/1.0`. Admin only.
+async fn handle_seeds_list(state: &AppState, auth: &AuthClaims, doc: TrustTask<Value>) -> Response {
+    if let Err(e) = auth.require_admin() {
+        return app_error_to_reject(&doc, e);
+    }
+    let _req: ListSeedsBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match operations::seeds::list_seeds(&state.keys_ks, TRANSPORT_TRUST_TASK).await {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
+/// Handler for `spec/vta/seeds/rotate/1.0`. Admin only.
+async fn handle_seeds_rotate(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    if let Err(e) = auth.require_admin() {
+        return app_error_to_reject(&doc, e);
+    }
+    let req: RotateSeedBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match operations::seeds::rotate_seed(
+        &state.keys_ks,
+        &state.imported_ks,
+        &state.seed_store,
+        &state.audit_ks,
+        &auth.did,
+        req.mnemonic.as_deref(),
+        TRANSPORT_TRUST_TASK,
+    )
+    .await
+    {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
+/// Handler for `spec/vta/seeds/export-mnemonic/1.0`. Admin only.
+/// One-shot mnemonic export under `MnemonicExportGuard`; the returned
+/// payload zeroizes on drop.
+async fn handle_seeds_export_mnemonic(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    if let Err(e) = auth.require_admin() {
+        return app_error_to_reject(&doc, e);
+    }
+    let req: GetKeySecretBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match operations::keys::get_key_secret(
+        &state.keys_ks,
+        &state.imported_ks,
+        &state.seed_store,
+        &state.audit_ks,
+        auth,
+        &req.key_id,
+        TRANSPORT_TRUST_TASK,
+    )
+    .await
+    {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 /// Parse a trust-task document's `payload` field as the typed body
@@ -1029,6 +1115,9 @@ mod tests {
             vta_sdk::trust_tasks::TASK_KEYS_RENAME_1_0,
             vta_sdk::trust_tasks::TASK_KEYS_REVOKE_1_0,
             vta_sdk::trust_tasks::TASK_KEYS_SIGN_1_0,
+            vta_sdk::trust_tasks::TASK_SEEDS_LIST_1_0,
+            vta_sdk::trust_tasks::TASK_SEEDS_ROTATE_1_0,
+            vta_sdk::trust_tasks::TASK_SEEDS_EXPORT_MNEMONIC_1_0,
         ];
 
         // URIs deliberately routed via dedicated unauth REST endpoints
