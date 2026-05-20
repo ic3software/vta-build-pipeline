@@ -6,6 +6,29 @@ pub struct ChallengeRequest {
     pub did: String,
 }
 
+/// Trust-task payload for `spec/vta/auth/revoke-session/1.0` (request)
+/// — revoke a single session by id.
+///
+/// Authorisation: the caller (via `AuthClaims`) must own the session
+/// OR have `Role::Admin`. Enforced in the dispatcher handler, not the
+/// schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeSessionRequest {
+    /// Identifier of the session to revoke.
+    pub session_id: String,
+}
+
+/// Trust-task payload for `spec/vta/auth/revoke-session/1.0#response`
+/// — empty success body.
+///
+/// Modelled as a struct (rather than `()`) so future fields (e.g.
+/// `revokedAt: DateTime<Utc>`) can be added without a wire-format
+/// version bump (additive per serde defaults).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeSessionResponse {}
+
 /// Server responds from `POST /auth/challenge`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +71,24 @@ pub struct AuthenticateData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revoke_session_request_round_trips() {
+        let req = RevokeSessionRequest {
+            session_id: "sess-abc-123".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"sessionId\":\"sess-abc-123\""), "{json}");
+        let parsed: RevokeSessionRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.session_id, "sess-abc-123");
+    }
+
+    #[test]
+    fn revoke_session_response_is_empty_object() {
+        let resp = RevokeSessionResponse::default();
+        let json = serde_json::to_string(&resp).unwrap();
+        assert_eq!(json, "{}", "empty success body");
+    }
 
     #[test]
     fn test_challenge_response_camel_case() {

@@ -25,8 +25,12 @@ use serde_json::Value;
 use trust_tasks_https::status_for_code;
 use trust_tasks_rs::{ErrorPayload, ErrorResponse, RejectReason, TrustTask, TypeUri};
 use uuid::Uuid;
+use vta_sdk::protocols::auth::{RevokeSessionRequest, RevokeSessionResponse};
 
+use crate::acl::Role;
+use crate::audit::audit;
 use crate::auth::AuthClaims;
+use crate::auth::session::{delete_session, get_session};
 use crate::error::AppError;
 use crate::server::AppState;
 
@@ -99,7 +103,7 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
         // can't pass AuthClaims. They live on dedicated REST routes
         // (see REST_ROUTED in the parity harness below).
         vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_1_0 => {
-            not_implemented_yet(doc, "auth-slice revoke-session — Phase 3.1 work")
+            handle_revoke_session(state, auth, doc).await
         }
         // ─── Unknown / REST-routed ───────────────────────────────────
         //
@@ -112,8 +116,134 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
     }
 }
 
+/// Handler for `spec/vta/auth/revoke-session/1.0`.
+///
+/// Parses the request payload, looks up the session, authorises the
+/// caller (session owner OR `Role::Admin`), deletes the session, and
+/// returns a `#response`-typed success document with an empty body.
+///
+/// Mirrors `routes::auth::revoke_session` (the legacy
+/// `DELETE /auth/sessions/{session_id}` REST handler) — same audit
+/// event key (`session.revoke`), same authorisation rule.
+async fn handle_revoke_session(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    // 1. Parse the payload.
+    let req: RevokeSessionRequest = match serde_json::from_value(doc.payload.clone()) {
+        Ok(r) => r,
+        Err(e) => {
+            return reject_with(
+                &doc,
+                RejectReason::MalformedRequest {
+                    reason: format!("revoke-session payload parse: {e}"),
+                },
+            );
+        }
+    };
+
+    // 2. Look up the session.
+    let session = match get_session(&state.sessions_ks, &req.session_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return reject_with(
+                &doc,
+                RejectReason::TaskFailed {
+                    reason: format!("session not found: {}", req.session_id),
+                    details: None,
+                },
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "session lookup failed in revoke-session");
+            return reject_with(
+                &doc,
+                RejectReason::InternalError {
+                    reason: format!("session lookup: {e}"),
+                },
+            );
+        }
+    };
+
+    // 3. Authorise: caller owns the session OR has Role::Admin. Same
+    //    rule as the legacy REST handler.
+    if session.did != auth.did && auth.role != Role::Admin {
+        tracing::warn!(
+            caller = %auth.did,
+            session_did = %session.did,
+            session_id = %req.session_id,
+            "revoke-session rejected: caller is not owner or admin"
+        );
+        return reject_with(
+            &doc,
+            RejectReason::PermissionDenied {
+                reason: "cannot revoke another user's session".to_string(),
+            },
+        );
+    }
+
+    // 4. Delete.
+    if let Err(e) = delete_session(&state.sessions_ks, &req.session_id).await {
+        tracing::error!(error = %e, session_id = %req.session_id, "session delete failed");
+        return reject_with(
+            &doc,
+            RejectReason::InternalError {
+                reason: format!("session delete: {e}"),
+            },
+        );
+    }
+
+    // 5. Audit.
+    audit!(
+        "session.revoke",
+        actor = &auth.did,
+        resource = &req.session_id,
+        outcome = "success"
+    );
+    tracing::info!(caller = %auth.did, session_id = %req.session_id, "session revoked via trust-task");
+
+    // 6. Build the success response document.
+    success_response(&doc, RevokeSessionResponse::default())
+}
+
+/// Build a routed rejection document for the given reason and wrap it
+/// in an HTTP response. The framework computes the status code from
+/// the reject's standard code.
+fn reject_with(doc: &TrustTask<Value>, reason: RejectReason) -> Response {
+    let routed = doc.reject_with(format!("urn:uuid:{}", Uuid::new_v4()), reason);
+    error_response(routed)
+}
+
+/// Build a routed success document with the given payload and wrap
+/// it in an HTTP 200 response.
+fn success_response<R: serde::Serialize>(doc: &TrustTask<Value>, payload: R) -> Response {
+    let response_doc = doc.respond_with(format!("urn:uuid:{}", Uuid::new_v4()), payload);
+    let body = match serde_json::to_vec(&response_doc) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialise success response doc");
+            return reject_with(
+                doc,
+                RejectReason::InternalError {
+                    reason: format!("response serialisation: {e}"),
+                },
+            );
+        }
+    };
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 /// Build a routed `task_failed` rejection for a URI we know about but
-/// haven't implemented yet.
+/// haven't implemented yet. Kept available for Phase 3.2+ slices that
+/// will add new handlers — each lands as a `not_implemented_yet`
+/// placeholder before being filled in.
+#[allow(dead_code)]
 fn not_implemented_yet(doc: TrustTask<Value>, reason: &str) -> Response {
     let reject = RejectReason::TaskFailed {
         reason: reason.to_string(),
