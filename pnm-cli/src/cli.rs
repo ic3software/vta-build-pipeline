@@ -779,6 +779,13 @@ pub(crate) enum ServicesCommands {
         #[command(subcommand)]
         command: DidcommCommands,
     },
+    /// Manage WebAuthn-RP advertisement (the browser-facing
+    /// passkey-login surface advertised at `#vta-webauthn` on the
+    /// VTA's DID document).
+    Webauthn {
+        #[command(subcommand)]
+        command: WebauthnCommands,
+    },
     /// Show inbound-message attribution by mediator and sender.
     /// (Replaces `pnm mediator report`.)
     Report {
@@ -811,6 +818,30 @@ pub(crate) enum RestCommands {
     Disable,
     /// Fail-forward the most recent REST mutation by re-applying
     /// the snapshotted prior state (spec §3.5a).
+    Rollback,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum WebauthnCommands {
+    /// Add a `#vta-webauthn` service entry advertising `--url`
+    /// (typically the auth-portal URL, e.g.
+    /// `https://vta.example.com/auth/portal`).
+    Enable {
+        #[arg(long)]
+        url: String,
+    },
+    /// Replace the URL on the existing `#vta-webauthn` entry.
+    Update {
+        #[arg(long)]
+        url: String,
+    },
+    /// Remove the `#vta-webauthn` entry AND strip every passkey
+    /// verificationMethod from the DIDs this VTA controls. Operators
+    /// must re-enrol passkeys after re-enabling. Refused when
+    /// disabling WebAuthn would leave no transport advertised.
+    Disable,
+    /// Fail-forward the most recent WebAuthn mutation by re-applying
+    /// the snapshotted prior state.
     Rollback,
 }
 

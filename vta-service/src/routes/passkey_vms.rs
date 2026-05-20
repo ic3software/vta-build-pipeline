@@ -24,6 +24,24 @@ use crate::error::AppError;
 use crate::operations;
 use crate::server::AppState;
 
+/// Runtime gate: refuse every passkey-VM management call when the
+/// WebAuthn-RP service is disabled. Without the service entry
+/// advertising the RP, any newly-enrolled VM would point at an
+/// unreachable surface; refuse rather than persist orphan state.
+///
+/// Returns `Forbidden` (rather than `Unauthorized`) because the
+/// problem is service config, not caller credentials.
+async fn ensure_webauthn_enabled(state: &AppState) -> Result<(), AppError> {
+    if !state.config.read().await.services.webauthn {
+        return Err(AppError::Forbidden(
+            "WebAuthn service is disabled on this VTA. Operator: enable with \
+             `pnm services webauthn enable --url <url>`."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PasskeyVmDidQuery {
     pub did: String,
@@ -41,6 +59,7 @@ pub async fn enroll_challenge_handler(
     State(state): State<AppState>,
     Json(body): Json<EnrollPasskeyChallengeBody>,
 ) -> Result<Json<EnrollPasskeyChallengeResponse>, AppError> {
+    ensure_webauthn_enabled(&state).await?;
     let config = state.config.read().await;
     let result = operations::passkey_vms::start_enrollment(
         &state.webvh_ks,
@@ -59,6 +78,7 @@ pub async fn enroll_submit_handler(
     State(state): State<AppState>,
     Json(body): Json<EnrollPasskeySubmitBody>,
 ) -> Result<Json<EnrollPasskeySubmitResponse>, AppError> {
+    ensure_webauthn_enabled(&state).await?;
     let did_resolver = state
         .did_resolver
         .as_ref()

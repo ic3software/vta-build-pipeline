@@ -572,6 +572,16 @@ pub async fn passkey_login_start(
     State(state): State<AppState>,
     Json(req): Json<PasskeyLoginStartRequest>,
 ) -> Result<Json<PasskeyLoginStartResponse>, AppError> {
+    // Runtime gate: WebAuthn-RP service must be advertised.
+    // Returns 403 with a clear message when the service is off so a
+    // misconfigured demo doesn't spend operator time on
+    // "why isn't login working".
+    if !state.config.read().await.services.webauthn {
+        return Err(AppError::Forbidden(
+            "WebAuthn service is disabled on this VTA.".into(),
+        ));
+    }
+
     // ACL gate — same as /auth/challenge.
     check_acl(&state.acl_ks, &req.did).await?;
 
@@ -631,6 +641,13 @@ pub async fn passkey_login_finish(
     State(state): State<AppState>,
     Json(req): Json<PasskeyLoginFinishRequest>,
 ) -> Result<Json<AuthenticateResponse>, AppError> {
+    // Runtime gate (mirrors `passkey_login_start`).
+    if !state.config.read().await.services.webauthn {
+        return Err(AppError::Forbidden(
+            "WebAuthn service is disabled on this VTA.".into(),
+        ));
+    }
+
     let jwt_keys = state
         .jwt_keys
         .as_ref()

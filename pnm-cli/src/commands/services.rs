@@ -3,7 +3,9 @@
 use vta_cli_common::commands::services;
 use vta_sdk::client::VtaClient;
 
-use crate::cli::{DidcommCommands, DrainCommands, RestCommands, ServicesCommands};
+use crate::cli::{
+    DidcommCommands, DrainCommands, RestCommands, ServicesCommands, WebauthnCommands,
+};
 
 pub(crate) async fn run(
     client: &VtaClient,
@@ -13,6 +15,7 @@ pub(crate) async fn run(
         ServicesCommands::List => services::cmd_services_list(client).await,
         ServicesCommands::Rest { command } => run_rest(client, command).await,
         ServicesCommands::Didcomm { command } => run_didcomm(client, command).await,
+        ServicesCommands::Webauthn { command } => run_webauthn(client, command).await,
         ServicesCommands::Report {
             since,
             until,
@@ -21,6 +24,22 @@ pub(crate) async fn run(
             Ok(format) => services::cmd_services_report(client, since, until, format).await,
             Err(msg) => Err(msg.into()),
         },
+    }
+}
+
+async fn run_webauthn(
+    client: &VtaClient,
+    command: WebauthnCommands,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        WebauthnCommands::Enable { url } => {
+            services::cmd_services_webauthn_enable(client, url).await
+        }
+        WebauthnCommands::Update { url } => {
+            services::cmd_services_webauthn_update(client, url).await
+        }
+        WebauthnCommands::Disable => services::cmd_services_webauthn_disable(client).await,
+        WebauthnCommands::Rollback => services::cmd_services_webauthn_rollback(client).await,
     }
 }
 

@@ -60,15 +60,32 @@ pub struct PortalQuery {
 }
 
 /// `GET /auth/portal` — return the auth-portal HTML if the caller's
-/// `origin` is in `server.cors_origins`, otherwise 403.
+/// `origin` is in `server.cors_origins`, otherwise 403. Also gated
+/// at runtime on `services.webauthn` — returns 503 with a structured
+/// `service_disabled` body when the WebAuthn service is currently
+/// off, so the operator's CLI can show a useful error.
 pub async fn portal_handler(
     State(state): State<AppState>,
     Query(query): Query<PortalQuery>,
 ) -> Response {
-    let allowed = {
+    let (allowed, webauthn_enabled) = {
         let config = state.config.read().await;
-        config.server.cors_origins.clone()
+        (config.server.cors_origins.clone(), config.services.webauthn)
     };
+
+    if !webauthn_enabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            "<!doctype html><meta charset=\"utf-8\"><title>VTA Auth Portal</title>\
+             <body style=\"font-family:sans-serif;padding:2rem;color:#d65a5a;\">\
+             <h1>503 — WebAuthn service disabled</h1>\
+             <p>This VTA does not currently advertise a WebAuthn-RP surface. \
+             The operator can re-enable with <code>pnm services webauthn enable --url &lt;url&gt;</code>.</p>\
+             </body>",
+        )
+            .into_response();
+    }
 
     if !allowed.iter().any(|o| o == &query.origin) {
         return (

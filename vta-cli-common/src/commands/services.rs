@@ -111,6 +111,62 @@ pub async fn cmd_services_rest_rollback(
     Ok(())
 }
 
+// ── services webauthn {enable, update, disable, rollback} ─────────
+
+pub async fn cmd_services_webauthn_enable(
+    client: &VtaClient,
+    url: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = vta_sdk::protocol::services::EnableWebauthnRequest::new(url);
+    let resp = client.enable_webauthn(req).await?;
+    println!("WebAuthn enabled.");
+    println!("  New version ID: {}", resp.log_entry_version_id);
+    println!("  Effective at:   {}", resp.effective_at);
+    print_serverless_hint(resp.serverless, &resp.vta_did);
+    Ok(())
+}
+
+pub async fn cmd_services_webauthn_update(
+    client: &VtaClient,
+    url: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let req = vta_sdk::protocol::services::UpdateWebauthnRequest::new(url);
+    let resp = client.update_webauthn(req).await?;
+    println!("WebAuthn URL updated.");
+    println!("  New version ID: {}", resp.log_entry_version_id);
+    println!("  Effective at:   {}", resp.effective_at);
+    print_serverless_hint(resp.serverless, &resp.vta_did);
+    Ok(())
+}
+
+pub async fn cmd_services_webauthn_disable(
+    client: &VtaClient,
+) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!(
+        "WARNING: disabling WebAuthn will also REMOVE passkey verificationMethods from every DID \
+         this VTA controls. Any operator currently using passkey login will need to re-enrol \
+         after the next `services webauthn enable`."
+    );
+    let resp = client
+        .disable_webauthn(vta_sdk::protocol::services::DisableWebauthnRequest::default())
+        .await?;
+    println!("WebAuthn disabled.");
+    println!("  New version ID: {}", resp.log_entry_version_id);
+    println!("  Effective at:   {}", resp.effective_at);
+    print_serverless_hint(resp.serverless, &resp.vta_did);
+    Ok(())
+}
+
+pub async fn cmd_services_webauthn_rollback(
+    client: &VtaClient,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resp = client
+        .rollback_webauthn(vta_sdk::protocol::services::RollbackWebauthnRequest::default())
+        .await?;
+    print_rollback_result("WebAuthn", &resp);
+    Ok(())
+}
+
 // ── services didcomm {enable, update, disable, rollback} ──────────
 
 pub async fn cmd_services_didcomm_enable(

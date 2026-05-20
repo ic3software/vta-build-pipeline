@@ -342,6 +342,22 @@ pub fn router_with_cors(allowed_origins: &[String]) -> Router<AppState> {
             "/services/rest/rollback",
             post(protocol::rollback_rest_handler),
         )
+        .route(
+            "/services/webauthn/enable",
+            post(protocol::enable_webauthn_handler),
+        )
+        .route(
+            "/services/webauthn/update",
+            post(protocol::update_webauthn_handler),
+        )
+        .route(
+            "/services/webauthn/disable",
+            post(protocol::disable_webauthn_handler),
+        )
+        .route(
+            "/services/webauthn/rollback",
+            post(protocol::rollback_webauthn_handler),
+        )
         .route("/services", get(protocol::list_services_handler))
         .route("/services/didcomm/drain", get(protocol::list_drain_handler))
         .route(

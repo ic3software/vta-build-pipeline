@@ -72,6 +72,30 @@ pub const ROLLBACK_DIDCOMM: &str =
 pub const ROLLBACK_DIDCOMM_RESULT: &str =
     "https://firstperson.network/protocols/services-management/1.0/didcomm-rollback-result";
 
+// WebAuthn-RP service ops. Same shape as REST — single URL on the
+// `#vta-webauthn` service entry — but with different runtime
+// availability semantics + the hard-disable passkey-VM cleanup.
+
+pub const ENABLE_WEBAUTHN: &str =
+    "https://firstperson.network/protocols/services-management/1.0/webauthn-enable";
+pub const ENABLE_WEBAUTHN_RESULT: &str =
+    "https://firstperson.network/protocols/services-management/1.0/webauthn-enable-result";
+
+pub const UPDATE_WEBAUTHN: &str =
+    "https://firstperson.network/protocols/services-management/1.0/webauthn-update";
+pub const UPDATE_WEBAUTHN_RESULT: &str =
+    "https://firstperson.network/protocols/services-management/1.0/webauthn-update-result";
+
+pub const DISABLE_WEBAUTHN: &str =
+    "https://firstperson.network/protocols/services-management/1.0/webauthn-disable";
+pub const DISABLE_WEBAUTHN_RESULT: &str =
+    "https://firstperson.network/protocols/services-management/1.0/webauthn-disable-result";
+
+pub const ROLLBACK_WEBAUTHN: &str =
+    "https://firstperson.network/protocols/services-management/1.0/webauthn-rollback";
+pub const ROLLBACK_WEBAUTHN_RESULT: &str =
+    "https://firstperson.network/protocols/services-management/1.0/webauthn-rollback-result";
+
 // Read-only inspection (T4.2). Auth: super-admin. The result
 // payload uses the SDK's `ServicesListResponse` shape — one
 // entry per kind, canonical DIDComm-before-REST order.
