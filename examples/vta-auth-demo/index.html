@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VTA auth demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>VTA Auth Demo</h1>
+    <p class="sub">A static-file harness for exercising the VTA's auth surface from a browser.</p>
+  </header>
+
+  <section class="settings card">
+    <h2>1. Connect</h2>
+    <label>
+      VTA base URL
+      <input id="vtaUrl" type="text" value="http://localhost:8100" placeholder="http://localhost:8100">
+    </label>
+    <p class="hint">Must be reachable from this page. The VTA must include this page's origin in <code>[server] cors_origins</code> — see the README.</p>
+    <div class="row">
+      <button id="checkHealth">Check /health</button>
+      <span id="healthStatus" class="status muted"></span>
+    </div>
+  </section>
+
+  <section class="passkey card">
+    <h2>2. Passkey login</h2>
+    <p class="hint">DID-VM-resolved WebAuthn. The browser presents an assertion; the VTA verifies against the passkey verificationMethod published on the DID document.</p>
+    <label>
+      DID
+      <input id="loginDid" type="text" placeholder="did:webvh:example.com:alice">
+    </label>
+    <div class="row">
+      <button id="loginStart">Start (request challenge)</button>
+      <button id="loginFinish" disabled>Finish (sign + send assertion)</button>
+    </div>
+    <pre id="loginOutput" class="output"></pre>
+  </section>
+
+  <section class="session card hidden" id="sessionSection">
+    <h2>3. Session inspection</h2>
+    <div class="kv">
+      <div><span class="label">Access token:</span> <code id="tokenDisplay" class="ellipsis"></code></div>
+      <div><span class="label">Session id:</span> <code id="sessionIdDisplay"></code></div>
+      <div><span class="label">Role:</span> <code id="roleDisplay"></code></div>
+      <div><span class="label">Expires in:</span> <span id="expiresIn">—</span></div>
+    </div>
+    <div class="row">
+      <button id="listSessions">List active sessions</button>
+      <button id="revokeCurrent" class="warn">Revoke current session</button>
+      <button id="signOut" class="warn">Sign out (clear local state)</button>
+    </div>
+    <pre id="sessionsOutput" class="output"></pre>
+  </section>
+
+  <section class="trust-tasks card hidden" id="trustTasksSection">
+    <h2>4. Trust-task dispatch</h2>
+    <p class="hint">POSTs a typed trust-task envelope to <code>/api/trust-tasks</code>. Select a known URI from the dropdown or edit the payload directly.</p>
+    <label>
+      Type URI
+      <select id="taskUri"></select>
+    </label>
+    <label>
+      Payload (JSON)
+      <textarea id="taskPayload" rows="6">{}</textarea>
+    </label>
+    <div class="row">
+      <button id="sendTask">Send</button>
+    </div>
+    <pre id="taskOutput" class="output"></pre>
+  </section>
+
+  <footer>
+    <p>Source: <code>examples/vta-auth-demo/</code> · See the in-tree <a href="./README.md">README</a> for run instructions and the auth-flow notes.</p>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

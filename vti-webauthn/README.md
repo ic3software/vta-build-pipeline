@@ -3,6 +3,13 @@
 DID-VM-resolved WebAuthn assertion verifier for the Verifiable Trust
 Infrastructure.
 
+## See also
+
+- **[`examples/vta-auth-demo/`](../examples/vta-auth-demo/)** — a
+  static-file browser harness for exercising the VTA's passkey login
+  end-to-end. Drives the WebAuthn API against the verifier in this
+  crate.
+
 This crate verifies WebAuthn (FIDO2 / passkey) assertions where the
 credential's public key is resolved from a **DID Document
 `verificationMethod`**, not from a server-side credential store.
