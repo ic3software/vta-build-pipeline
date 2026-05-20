@@ -31,6 +31,12 @@ use vta_sdk::protocols::acl_management::get::GetAclBody;
 use vta_sdk::protocols::acl_management::list::ListAclBody;
 use vta_sdk::protocols::acl_management::update::UpdateAclBody;
 use vta_sdk::protocols::auth::{RevokeSessionRequest, RevokeSessionResponse};
+use vta_sdk::protocols::context_management::create::CreateContextBody;
+use vta_sdk::protocols::context_management::delete::{DeleteContextBody, DeleteContextPreviewBody};
+use vta_sdk::protocols::context_management::get::GetContextBody;
+use vta_sdk::protocols::context_management::list::ListContextsBody;
+use vta_sdk::protocols::context_management::update::UpdateContextBody;
+use vta_sdk::protocols::context_management::update_did::UpdateContextDidBody;
 
 use crate::acl::Role;
 use crate::audit::audit;
@@ -122,6 +128,26 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
         vta_sdk::trust_tasks::TASK_ACL_GET_1_0 => handle_acl_get(state, auth, doc).await,
         vta_sdk::trust_tasks::TASK_ACL_UPDATE_1_0 => handle_acl_update(state, auth, doc).await,
         vta_sdk::trust_tasks::TASK_ACL_DELETE_1_0 => handle_acl_delete(state, auth, doc).await,
+        // ─── Contexts slice ──────────────────────────────────────────
+        vta_sdk::trust_tasks::TASK_CONTEXTS_LIST_1_0 => {
+            handle_contexts_list(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_CREATE_1_0 => {
+            handle_contexts_create(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_GET_1_0 => handle_contexts_get(state, auth, doc).await,
+        vta_sdk::trust_tasks::TASK_CONTEXTS_UPDATE_1_0 => {
+            handle_contexts_update(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_UPDATE_DID_1_0 => {
+            handle_contexts_update_did(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_PREVIEW_DELETE_1_0 => {
+            handle_contexts_preview_delete(state, auth, doc).await
+        }
+        vta_sdk::trust_tasks::TASK_CONTEXTS_DELETE_1_0 => {
+            handle_contexts_delete(state, auth, doc).await
+        }
         // ─── Unknown / REST-routed ───────────────────────────────────
         //
         // Pre-auth URIs (passkey-login-{start,finish}, challenge,
@@ -363,6 +389,187 @@ async fn handle_acl_delete(state: &AppState, auth: &AuthClaims, doc: TrustTask<V
         TRANSPORT_TRUST_TASK,
     )
     .await
+    {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
+// ─── Contexts slice handlers ─────────────────────────────────────────────
+
+/// Handler for `spec/vta/contexts/list/1.0`.
+async fn handle_contexts_list(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    let _req: ListContextsBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match operations::contexts::list_contexts(&state.contexts_ks, auth, TRANSPORT_TRUST_TASK).await
+    {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
+/// Handler for `spec/vta/contexts/create/1.0`. Super-admin only.
+async fn handle_contexts_create(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    if let Err(e) = auth.require_super_admin() {
+        return app_error_to_reject(&doc, e);
+    }
+    let req: CreateContextBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match operations::contexts::create_context(
+        &state.contexts_ks,
+        auth,
+        &req.id,
+        req.name,
+        req.description,
+        TRANSPORT_TRUST_TASK,
+    )
+    .await
+    {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
+/// Handler for `spec/vta/contexts/get/1.0`.
+async fn handle_contexts_get(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    let req: GetContextBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match operations::contexts::get_context_op(
+        &state.contexts_ks,
+        auth,
+        &req.id,
+        TRANSPORT_TRUST_TASK,
+    )
+    .await
+    {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
+/// Handler for `spec/vta/contexts/update/1.0`. Super-admin only.
+async fn handle_contexts_update(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    if let Err(e) = auth.require_super_admin() {
+        return app_error_to_reject(&doc, e);
+    }
+    let req: UpdateContextBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match operations::contexts::update_context(
+        &state.contexts_ks,
+        auth,
+        &req.id,
+        operations::contexts::UpdateContextParams {
+            name: req.name,
+            did: req.did,
+            description: req.description,
+        },
+        TRANSPORT_TRUST_TASK,
+    )
+    .await
+    {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
+/// Handler for `spec/vta/contexts/update-did/1.0`. Admin only.
+async fn handle_contexts_update_did(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    if let Err(e) = auth.require_admin() {
+        return app_error_to_reject(&doc, e);
+    }
+    let req: UpdateContextDidBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match operations::contexts::update_context_did(
+        &state.contexts_ks,
+        auth,
+        &req.id,
+        req.did,
+        TRANSPORT_TRUST_TASK,
+    )
+    .await
+    {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
+/// Handler for `spec/vta/contexts/preview-delete/1.0`. Super-admin only.
+async fn handle_contexts_preview_delete(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    if let Err(e) = auth.require_super_admin() {
+        return app_error_to_reject(&doc, e);
+    }
+    let req: DeleteContextPreviewBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match operations::contexts::preview_delete_context(
+        &state.contexts_ks,
+        &state.keys_ks,
+        &state.acl_ks,
+        &state.did_templates_ks,
+        #[cfg(feature = "webvh")]
+        &state.webvh_ks,
+        auth,
+        &req.id,
+        TRANSPORT_TRUST_TASK,
+    )
+    .await
+    {
+        Ok(body) => success_response(&doc, body),
+        Err(e) => app_error_to_reject(&doc, e),
+    }
+}
+
+/// Handler for `spec/vta/contexts/delete/1.0`. Super-admin only.
+async fn handle_contexts_delete(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    if let Err(e) = auth.require_super_admin() {
+        return app_error_to_reject(&doc, e);
+    }
+    let req: DeleteContextBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let ks = operations::Keyspaces::from_app_state(state);
+    match operations::contexts::delete_context(&ks, auth, &req.id, req.force, TRANSPORT_TRUST_TASK)
+        .await
     {
         Ok(body) => success_response(&doc, body),
         Err(e) => app_error_to_reject(&doc, e),
@@ -618,6 +825,13 @@ mod tests {
             vta_sdk::trust_tasks::TASK_ACL_GET_1_0,
             vta_sdk::trust_tasks::TASK_ACL_UPDATE_1_0,
             vta_sdk::trust_tasks::TASK_ACL_DELETE_1_0,
+            vta_sdk::trust_tasks::TASK_CONTEXTS_LIST_1_0,
+            vta_sdk::trust_tasks::TASK_CONTEXTS_CREATE_1_0,
+            vta_sdk::trust_tasks::TASK_CONTEXTS_GET_1_0,
+            vta_sdk::trust_tasks::TASK_CONTEXTS_UPDATE_1_0,
+            vta_sdk::trust_tasks::TASK_CONTEXTS_UPDATE_DID_1_0,
+            vta_sdk::trust_tasks::TASK_CONTEXTS_PREVIEW_DELETE_1_0,
+            vta_sdk::trust_tasks::TASK_CONTEXTS_DELETE_1_0,
         ];
 
         // URIs deliberately routed via dedicated unauth REST endpoints

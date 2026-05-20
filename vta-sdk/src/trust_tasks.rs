@@ -111,11 +111,52 @@ pub const TASK_ACL_UPDATE_1_0: &str = "https://trusttasks.org/spec/vta/acl/updat
 /// Auth: Admin or Initiator.
 pub const TASK_ACL_DELETE_1_0: &str = "https://trusttasks.org/spec/vta/acl/delete/1.0";
 
+// ─── Contexts slice (spec/vta/contexts/*) ────────────────────────────────
+
+/// `spec/vta/contexts/list/1.0` — list contexts visible to caller.
+/// Payload: [`crate::protocols::context_management::list::ListContextsBody`]
+/// (empty). Auth: any authenticated user.
+pub const TASK_CONTEXTS_LIST_1_0: &str = "https://trusttasks.org/spec/vta/contexts/list/1.0";
+
+/// `spec/vta/contexts/create/1.0` — create a new context. Payload:
+/// [`crate::protocols::context_management::create::CreateContextBody`].
+/// Auth: Super Admin only.
+pub const TASK_CONTEXTS_CREATE_1_0: &str = "https://trusttasks.org/spec/vta/contexts/create/1.0";
+
+/// `spec/vta/contexts/get/1.0` — retrieve a context by id. Payload:
+/// [`crate::protocols::context_management::get::GetContextBody`].
+pub const TASK_CONTEXTS_GET_1_0: &str = "https://trusttasks.org/spec/vta/contexts/get/1.0";
+
+/// `spec/vta/contexts/update/1.0` — update name/did/description.
+/// Payload: [`crate::protocols::context_management::update::UpdateContextBody`].
+/// Auth: Super Admin only.
+pub const TASK_CONTEXTS_UPDATE_1_0: &str = "https://trusttasks.org/spec/vta/contexts/update/1.0";
+
+/// `spec/vta/contexts/update-did/1.0` — set the context's bound DID.
+/// Payload:
+/// [`crate::protocols::context_management::update_did::UpdateContextDidBody`].
+/// Auth: Admin with context access.
+pub const TASK_CONTEXTS_UPDATE_DID_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/update-did/1.0";
+
+/// `spec/vta/contexts/preview-delete/1.0` — preview resources affected
+/// by deletion. Payload:
+/// [`crate::protocols::context_management::delete::DeleteContextPreviewBody`].
+/// Auth: Super Admin only.
+pub const TASK_CONTEXTS_PREVIEW_DELETE_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/preview-delete/1.0";
+
+/// `spec/vta/contexts/delete/1.0` — delete a context and its
+/// associated resources. Payload:
+/// [`crate::protocols::context_management::delete::DeleteContextBody`].
+/// Auth: Super Admin only.
+pub const TASK_CONTEXTS_DELETE_1_0: &str = "https://trusttasks.org/spec/vta/contexts/delete/1.0";
+
 // ─── Future slices ───────────────────────────────────────────────────────
 //
-// keys, seeds, contexts, audit, attestation, services, webvh,
-// did-templates, passkey-vms, backup, config, discovery, management,
-// join-requests, bootstrap.
+// keys, seeds, audit, attestation, services, webvh, did-templates,
+// passkey-vms, backup, config, discovery, management, join-requests,
+// bootstrap.
 //
 // Each slice ships in its own Phase 3 PR. The migration mapping table
 // in docs/05-design-notes/trust-task-uri-registry.md enumerates the
@@ -138,6 +179,14 @@ pub const ALL_URIS: &[&str] = &[
     TASK_ACL_GET_1_0,
     TASK_ACL_UPDATE_1_0,
     TASK_ACL_DELETE_1_0,
+    // Contexts slice
+    TASK_CONTEXTS_LIST_1_0,
+    TASK_CONTEXTS_CREATE_1_0,
+    TASK_CONTEXTS_GET_1_0,
+    TASK_CONTEXTS_UPDATE_1_0,
+    TASK_CONTEXTS_UPDATE_DID_1_0,
+    TASK_CONTEXTS_PREVIEW_DELETE_1_0,
+    TASK_CONTEXTS_DELETE_1_0,
 ];
 
 #[cfg(test)]
