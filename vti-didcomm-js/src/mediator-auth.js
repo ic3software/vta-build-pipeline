@@ -114,7 +114,11 @@ export async function authenticateToMediator({
   });
 
   // ── Step 3: POST /authenticate ───────────────────────────────────
-  const auth = await postRaw(fetchFn, mediator.authEndpoint, jweJson, "text/plain");
+  // The mediator's /authenticate takes `Json<InboundMessage>`, so the
+  // JWE goes as `application/json` (the JWE string is already valid
+  // JSON). This differs from the VTA's /auth/, which takes a raw
+  // `String` body (text/plain).
+  const auth = await postRaw(fetchFn, mediator.authEndpoint, jweJson, "application/json");
   const data = auth?.data;
   if (!data?.access_token) {
     throw new Error(
