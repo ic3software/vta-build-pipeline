@@ -54,7 +54,9 @@ pub async fn challenge_response_light(
 
     let challenge: ChallengeResponse = challenge_resp.json().await?;
 
-    // Step 2: Pack encrypted authenticate message
+    // Step 2: Pack encrypted authenticate message. `pack_auth_message`
+    // is async because `did:webvh` VTAs require an HTTP fetch + chain
+    // verification; for `did:key:` VTAs the future resolves without I/O.
     let packed = didcomm_light::pack_auth_message(
         "https://affinidi.com/atm/1.0/authenticate",
         serde_json::json!({
@@ -64,6 +66,7 @@ pub async fn challenge_response_light(
         client_did,
         vta_did,
     )
+    .await
     .map_err(|e| VtaError::Validation(format!("pack auth message: {e}")))?;
 
     // Step 3: Send packed message
@@ -116,6 +119,7 @@ pub async fn refresh_token_light(
         client_did,
         vta_did,
     )
+    .await
     .map_err(|e| VtaError::Validation(format!("pack refresh message: {e}")))?;
 
     let refresh_url = format!("{base_url}/auth/refresh");

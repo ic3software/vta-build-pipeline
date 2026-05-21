@@ -156,9 +156,10 @@ async fn authenticate_endpoint_401_maps_to_auth() {
 
 #[tokio::test]
 async fn pack_failure_with_invalid_vta_did_maps_to_validation() {
-    // `pack_auth_message` calls `parse_did_key_ed25519`, which returns
-    // an error for non-`did:key` strings. `auth_light` wraps that into
-    // `VtaError::Validation`.
+    // `pack_auth_message` resolves the VTA's keyAgreement via
+    // `resolve_vta_keyagreement`, which supports `did:key` and
+    // `did:webvh` only. A `did:web` VTA produces an "unsupported DID
+    // method" error that `auth_light` wraps into `VtaError::Validation`.
     let server = MockServer::start().await;
     mount_challenge(&server).await;
     let (client_did, client_priv) = did_key_from_seed(0x11);

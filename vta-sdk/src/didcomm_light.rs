@@ -112,31 +112,252 @@ pub fn ed25519_seed_to_x25519_secret(seed: &[u8; 32]) -> [u8; 32] {
     x25519_bytes
 }
 
+// ── VTA keyAgreement resolution ─────────────────────────────────────
+
+/// Resolve a VTA's first `keyAgreement` X25519 key.
+///
+/// Returns `(kid, x25519_public_bytes)`:
+///   - `kid` is the verification-method id the JWE's `recipients[].header.kid`
+///     and AAD/APV need (the VTA's secrets resolver looks up secrets by it).
+///   - `x25519_public_bytes` is the raw 32-byte public key for ECDH.
+///
+/// Supported DID methods:
+///   - `did:key:` — inlined, no I/O. Only the Ed25519 form; the X25519
+///     keyAgreement key is derived via the Edwards-to-Montgomery map and
+///     the kid is `{did}#{x25519_multikey}`.
+///   - `did:webvh:` — fetches and verifies the log via `didwebvh-rs`,
+///     then walks the DID document to find the first `keyAgreement` with
+///     an X25519 `publicKeyMultibase`.
+///
+/// Other DID methods fall through to `Unsupported` — callers (currently
+/// `integration::auth::try_rest`) handle that by falling back to the
+/// heavyweight `session::challenge_response` path.
+pub async fn resolve_vta_keyagreement(
+    vta_did: &str,
+) -> Result<(String, [u8; 32]), Box<dyn std::error::Error>> {
+    if vta_did.starts_with("did:key:") {
+        let ed_pub = parse_did_key_ed25519(vta_did)?;
+        let x_pub = ed25519_pub_to_x25519_pub(&ed_pub)?;
+        let kid = did_key_agreement_kid(vta_did)?;
+        Ok((kid, x_pub))
+    } else if vta_did.starts_with("did:webvh:") {
+        resolve_webvh_keyagreement(vta_did).await
+    } else {
+        Err(format!(
+            "unsupported VTA DID method (lightweight path supports did:key and did:webvh only): {vta_did}"
+        )
+        .into())
+    }
+}
+
+/// Fetch + verify a `did:webvh:` log and extract its first X25519 keyAgreement.
+async fn resolve_webvh_keyagreement(
+    vta_did: &str,
+) -> Result<(String, [u8; 32]), Box<dyn std::error::Error>> {
+    use didwebvh_rs::DIDWebVHState;
+    use didwebvh_rs::log_entry::LogEntryMethods;
+    use didwebvh_rs::resolve::ResolveOptions;
+
+    let mut state = DIDWebVHState::default();
+    let (log_entry, _meta) = state
+        .resolve(vta_did, ResolveOptions::default())
+        .await
+        .map_err(|e| format!("resolve did:webvh {vta_did}: {e}"))?;
+    let did_doc = log_entry
+        .get_did_document()
+        .map_err(|e| format!("render did:webvh document for {vta_did}: {e}"))?;
+    extract_x25519_keyagreement(&did_doc)
+}
+
+/// Walk a serde DID document JSON value and find the first keyAgreement
+/// entry that exposes an X25519 `publicKeyMultibase`. Resolves a `#fragment`
+/// reference into the matching `verificationMethod[]` entry per DID Core
+/// §5.4.1.
+fn extract_x25519_keyagreement(
+    did_doc: &serde_json::Value,
+) -> Result<(String, [u8; 32]), Box<dyn std::error::Error>> {
+    let did_id = did_doc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("DID document has no `id`")?;
+
+    let key_agreement = did_doc
+        .get("keyAgreement")
+        .and_then(|v| v.as_array())
+        .ok_or("DID document has no `keyAgreement` array")?;
+
+    for ka in key_agreement {
+        let vm = match ka {
+            serde_json::Value::String(reference) => {
+                resolve_vm_reference(did_doc, did_id, reference)?
+            }
+            serde_json::Value::Object(_) => ka.clone(),
+            _ => continue,
+        };
+        let kid = vm
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("verificationMethod has no `id`")?
+            .to_string();
+        let Some(pk_mb) = vm.get("publicKeyMultibase").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let (_, bytes) =
+            multibase::decode(pk_mb).map_err(|e| format!("decode publicKeyMultibase: {e}"))?;
+        // X25519 multikey: multicodec varint 0xec 0x01, then 32 bytes.
+        if bytes.len() == 34 && bytes[0] == 0xec && bytes[1] == 0x01 {
+            let mut x_pub = [0u8; 32];
+            x_pub.copy_from_slice(&bytes[2..]);
+            return Ok((kid, x_pub));
+        }
+    }
+
+    Err("no X25519 keyAgreement Multikey found on this DID".into())
+}
+
+/// Resolve a `#fragment` (or absolute DID URL) reference into the matching
+/// `verificationMethod[]` entry. Returns the inline `Value`.
+fn resolve_vm_reference(
+    did_doc: &serde_json::Value,
+    did_id: &str,
+    reference: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    // Accept both bare-fragment and absolute forms.
+    let target_id = if reference.starts_with('#') {
+        format!("{did_id}{reference}")
+    } else {
+        reference.to_string()
+    };
+    let vms = did_doc
+        .get("verificationMethod")
+        .and_then(|v| v.as_array())
+        .ok_or("DID document missing `verificationMethod` while resolving reference")?;
+    vms.iter()
+        .find(|vm| {
+            vm.get("id").and_then(|i| i.as_str()) == Some(target_id.as_str())
+                || vm.get("id").and_then(|i| i.as_str()) == Some(reference)
+        })
+        .cloned()
+        .ok_or_else(|| {
+            format!("keyAgreement reference {reference} not in verificationMethod[]").into()
+        })
+}
+
 // ── High-level: pack auth message ───────────────────────────────────
 
 /// Pack a DIDComm v2 authenticate message for VTA challenge-response.
 ///
-/// This is the lightweight equivalent of `atm.pack_encrypted()` — it produces
-/// a JWE that the server's ATM can unpack, without needing ATM initialization.
-pub fn pack_auth_message(
+/// This is the lightweight equivalent of `atm.pack_encrypted()` — it
+/// produces a JWE that the server's ATM can unpack, without needing
+/// ATM initialization. Supports both `did:key:` (no I/O) and
+/// `did:webvh:` (fetches + verifies the log) VTAs; for other DID
+/// methods, errors out so the caller can fall back to the heavyweight
+/// `session::challenge_response` path.
+pub async fn pack_auth_message(
     msg_type: &str,
     body: serde_json::Value,
     client_did: &str,
     vta_did: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let plaintext = build_message(msg_type, body, client_did, vta_did);
-
-    // Get recipient's X25519 public key from their did:key
-    let ed_pub = parse_did_key_ed25519(vta_did)?;
-    let x_pub = ed25519_pub_to_x25519_pub(&ed_pub)?;
-    let kid = did_key_agreement_kid(vta_did)?;
-
+    let (kid, x_pub) = resolve_vta_keyagreement(vta_did).await?;
     pack_anoncrypt(plaintext.as_bytes(), &x_pub, &kid)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an X25519 `publicKeyMultibase` (multicodec 0xec01) from raw bytes.
+    fn x25519_multikey(bytes: &[u8; 32]) -> String {
+        let mut buf = Vec::with_capacity(34);
+        buf.extend_from_slice(&[0xec, 0x01]);
+        buf.extend_from_slice(bytes);
+        multibase::encode(multibase::Base::Base58Btc, &buf)
+    }
+
+    #[test]
+    fn extract_keyagreement_embedded_vm() {
+        let x = [7u8; 32];
+        let doc = serde_json::json!({
+            "id": "did:webvh:scid:example.com",
+            "keyAgreement": [{
+                "id": "did:webvh:scid:example.com#key-agreement-0",
+                "type": "Multikey",
+                "publicKeyMultibase": x25519_multikey(&x),
+            }],
+        });
+        let (kid, pub_bytes) = extract_x25519_keyagreement(&doc).unwrap();
+        assert_eq!(kid, "did:webvh:scid:example.com#key-agreement-0");
+        assert_eq!(pub_bytes, x);
+    }
+
+    #[test]
+    fn extract_keyagreement_by_reference() {
+        let x = [9u8; 32];
+        let doc = serde_json::json!({
+            "id": "did:webvh:scid:example.com",
+            "keyAgreement": ["#key-agreement-0"],
+            "verificationMethod": [{
+                "id": "did:webvh:scid:example.com#key-agreement-0",
+                "type": "Multikey",
+                "publicKeyMultibase": x25519_multikey(&x),
+            }],
+        });
+        let (kid, pub_bytes) = extract_x25519_keyagreement(&doc).unwrap();
+        assert_eq!(kid, "did:webvh:scid:example.com#key-agreement-0");
+        assert_eq!(pub_bytes, x);
+    }
+
+    #[test]
+    fn extract_keyagreement_skips_non_x25519_and_errors() {
+        // An Ed25519 (0xed01) entry in keyAgreement is not a valid X25519
+        // recipient — extraction must skip it and report "none found".
+        let mut buf = vec![0xed, 0x01];
+        buf.extend_from_slice(&[1u8; 32]);
+        let doc = serde_json::json!({
+            "id": "did:webvh:scid:example.com",
+            "keyAgreement": [{
+                "id": "did:webvh:scid:example.com#wrong",
+                "type": "Multikey",
+                "publicKeyMultibase": multibase::encode(multibase::Base::Base58Btc, &buf),
+            }],
+        });
+        let err = extract_x25519_keyagreement(&doc).unwrap_err();
+        assert!(err.to_string().contains("no X25519 keyAgreement"), "{err}");
+    }
+
+    #[test]
+    fn extract_keyagreement_no_keyagreement_errors() {
+        let doc = serde_json::json!({ "id": "did:webvh:scid:example.com" });
+        let err = extract_x25519_keyagreement(&doc).unwrap_err();
+        assert!(err.to_string().contains("no `keyAgreement`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_keyagreement_did_key_no_io() {
+        // did:key resolution is inlined — no network. The kid fragment is
+        // the derived X25519 multikey and the returned bytes must match.
+        let ed_pub = [42u8; 32];
+        let did = format!(
+            "did:key:{}",
+            crate::did_key::ed25519_multibase_pubkey(&ed_pub)
+        );
+        let (kid, x_pub) = resolve_vta_keyagreement(&did).await.unwrap();
+        assert!(kid.starts_with(&did));
+        assert_eq!(x_pub, ed25519_pub_to_x25519_pub(&ed_pub).unwrap());
+    }
+
+    #[tokio::test]
+    async fn resolve_keyagreement_rejects_unsupported_method() {
+        let err = resolve_vta_keyagreement("did:web:example.com")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported VTA DID method"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn test_parse_did_key_ed25519() {

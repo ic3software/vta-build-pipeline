@@ -12,11 +12,14 @@
 //! 2. **Lightweight REST** via [`VtaClient::from_credential`]. Works for
 //!    VTAs reachable via HTTP(S); uses the `didcomm_light` message
 //!    packer to produce the challenge-response envelope and stores the
-//!    resulting bearer token with auto-refresh enabled.
+//!    resulting bearer token with auto-refresh enabled. Resolves
+//!    `did:key` (inline, no I/O) and `did:webvh` (fetch + verify the
+//!    log) VTAs.
 //! 3. **Session-based REST** via [`crate::session::challenge_response`].
 //!    Same wire flow as tier 2 but routed through the full TDK stack;
-//!    kept as a defensive fallback for edge cases where the lightweight
-//!    packer doesn't match what the VTA expects.
+//!    kept as a defensive fallback for VTA DID methods tier 2 doesn't
+//!    resolve directly (anything other than `did:key` / `did:webvh`),
+//!    where the TDK's full DID resolver is needed.
 //!
 //! Network errors at tier 2 are returned immediately (the VTA is
 //! unreachable; retrying via tier 3 won't help). Non-network errors at
