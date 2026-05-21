@@ -18,11 +18,18 @@
 //   5. JSON-parse the response → `{ sessionId?, data: { accessToken,
 //      accessExpiresAt, refreshToken?, refreshExpiresAt? } }`.
 //
+// `refresh()` reuses the same authcrypt-pack-and-POST machinery
+// against `/auth/refresh` (message type `.../authenticate/refresh`,
+// body `{ refresh_token }`). The VTA rotates the refresh token on
+// every call (RFC 6749 §10.4), so the returned `refreshToken` must
+// replace the one the caller held — replaying the spent token fails.
+//
 // Caller responsibilities:
 //   - The `client_did` must already be in the VTA's ACL (the
 //     /auth/challenge handler ACL-gates the request). Demos that
 //     mint ephemeral did:keys need to run `pnm acl create` first.
 //   - The VTA's `cors_origins` must include this page's origin.
+//   - Persist the rotated `refreshToken` from each `refresh()` call.
 
 import { resolve as resolveDid } from "./resolver.js";
 import { pack } from "./pack.js";
@@ -31,6 +38,7 @@ import * as jwk from "./jwk.js";
 import * as x25519 from "./x25519.js";
 
 const AUTH_MESSAGE_TYPE = "https://affinidi.com/atm/1.0/authenticate";
+const REFRESH_MESSAGE_TYPE = "https://affinidi.com/atm/1.0/authenticate/refresh";
 
 /**
  * Authenticate to a VTA over REST using DIDComm-packed challenge
@@ -69,25 +77,20 @@ export async function authenticate({
   clientKid,
   fetch: customFetch,
 }) {
-  assertNonEmptyString("baseUrl", baseUrl);
-  assertNonEmptyString("vtaDid", vtaDid);
   assertNonEmptyString("clientDid", clientDid);
-  assertBytes("clientX25519Private", clientX25519Private, 32);
-  assertBytes("clientX25519Public", clientX25519Public, 32);
-
-  const fetchFn = customFetch ?? globalThis.fetch;
-  if (typeof fetchFn !== "function") {
-    throw new Error("vta-rest-auth: no fetch implementation available");
-  }
-
-  // Build the caller's kid lazily — if the caller didn't supply one,
-  // assume their public key is the fragment (matches how did:key
-  // X25519-only DIDs are structured).
-  const resolvedClientKid = clientKid ?? defaultClientKid(clientDid, clientX25519Public);
+  const ctx = buildContext({
+    baseUrl,
+    vtaDid,
+    clientDid,
+    clientX25519Private,
+    clientX25519Public,
+    clientKid,
+    customFetch,
+  });
 
   // ── Step 1: request the challenge ────────────────────────────────
   const challenge = await postJson(
-    fetchFn,
+    ctx.fetchFn,
     joinUrl(baseUrl, "/auth/challenge"),
     { did: clientDid },
   );
@@ -97,55 +100,73 @@ export async function authenticate({
     );
   }
 
-  // ── Step 2: resolve the VTA's keyAgreement ────────────────────────
-  const recipient = await resolveVtaRecipient(vtaDid);
-
-  // ── Step 3: build + pack the response message ─────────────────────
-  const message = {
-    id: `urn:uuid:${randomUuid()}`,
-    typ: "application/didcomm-plain+json",
+  // ── Steps 2-4: pack the response message and POST it to /auth/ ────
+  const auth = await packAndPost(ctx, {
+    path: "/auth/",
     type: AUTH_MESSAGE_TYPE,
-    from: clientDid,
-    to: [vtaDid],
     body: {
       challenge: challenge.data.challenge,
       // The VTA reads `session_id` (snake_case) from the body.
       session_id: challenge.sessionId,
     },
-  };
+  });
+  return tokenResult(auth, "/auth/");
+}
 
-  const senderPrivateJwk = jwk.privateJwk(
-    "X25519",
+/**
+ * Exchange a refresh token for a fresh access + refresh token pair.
+ *
+ * The VTA implements RFC 6749 §10.4 refresh-token rotation: the
+ * presented token is single-use, and the response carries a NEW
+ * refresh token. Callers MUST persist `result.refreshToken` /
+ * `result.refreshExpiresAt` and use them for the next refresh —
+ * replaying the original token after a successful refresh fails with
+ * "refresh token not found".
+ *
+ * The refresh message is authcrypt-packed to the VTA exactly like the
+ * initial authenticate message (the VTA's `/auth/refresh` handler
+ * unpacks it the same way); the VTA looks up the session by the
+ * `refresh_token` in the body, so the sender binding is not load-
+ * bearing here — but we still pack to the VTA's keyAgreement.
+ *
+ * @param {Object} args - same `client*` + `vtaDid` + `baseUrl` shape
+ *   as {@link authenticate}, plus:
+ * @param {string} args.refreshToken - the current refresh token.
+ * @returns {Promise<{
+ *   accessToken: string,
+ *   accessExpiresAt: number,
+ *   refreshToken?: string,
+ *   refreshExpiresAt?: number,
+ *   sessionId?: string,
+ * }>}
+ */
+export async function refresh({
+  baseUrl,
+  vtaDid,
+  clientDid,
+  clientX25519Private,
+  clientX25519Public,
+  clientKid,
+  refreshToken,
+  fetch: customFetch,
+}) {
+  assertNonEmptyString("refreshToken", refreshToken);
+  const ctx = buildContext({
+    baseUrl,
+    vtaDid,
+    clientDid,
     clientX25519Private,
     clientX25519Public,
-  );
-  const recipientPublicJwk = jwk.publicJwk("X25519", recipient.x25519Pub);
-
-  const jweJson = await pack({
-    message,
-    sender: { kid: resolvedClientKid, privateJwk: senderPrivateJwk },
-    recipient: { kid: recipient.kid, publicJwk: recipientPublicJwk },
+    clientKid,
+    customFetch,
   });
 
-  // ── Step 4: send to /auth/ ────────────────────────────────────────
-  const auth = await postRaw(
-    fetchFn,
-    joinUrl(baseUrl, "/auth/"),
-    jweJson,
-    "text/plain",
-  );
-  if (!auth?.data?.accessToken) {
-    throw new Error(
-      `vta-rest-auth: /auth/ response missing accessToken (got ${JSON.stringify(auth)})`,
-    );
-  }
-  return {
-    accessToken: auth.data.accessToken,
-    accessExpiresAt: auth.data.accessExpiresAt,
-    refreshToken: auth.data.refreshToken,
-    refreshExpiresAt: auth.data.refreshExpiresAt,
-    sessionId: auth.sessionId,
-  };
+  const auth = await packAndPost(ctx, {
+    path: "/auth/refresh",
+    type: REFRESH_MESSAGE_TYPE,
+    body: { refresh_token: refreshToken },
+  });
+  return tokenResult(auth, "/auth/refresh");
 }
 
 /**
@@ -174,6 +195,93 @@ export function generateEphemeralClient() {
 }
 
 // ─── Internals ──────────────────────────────────────────────────────────
+
+/**
+ * Validate the shared `client*` + transport args once and bundle them
+ * into a context object both `authenticate` and `refresh` thread through
+ * the pack/post helper.
+ */
+function buildContext({
+  baseUrl,
+  vtaDid,
+  clientDid,
+  clientX25519Private,
+  clientX25519Public,
+  clientKid,
+  customFetch,
+}) {
+  assertNonEmptyString("baseUrl", baseUrl);
+  assertNonEmptyString("vtaDid", vtaDid);
+  assertNonEmptyString("clientDid", clientDid);
+  assertBytes("clientX25519Private", clientX25519Private, 32);
+  assertBytes("clientX25519Public", clientX25519Public, 32);
+
+  const fetchFn = customFetch ?? globalThis.fetch;
+  if (typeof fetchFn !== "function") {
+    throw new Error("vta-rest-auth: no fetch implementation available");
+  }
+
+  return {
+    baseUrl,
+    vtaDid,
+    clientDid,
+    clientX25519Private,
+    clientX25519Public,
+    // If the caller didn't supply a kid, assume their public key is the
+    // fragment (matches how did:key X25519-only DIDs are structured).
+    clientKid: clientKid ?? defaultClientKid(clientDid, clientX25519Public),
+    fetchFn,
+  };
+}
+
+/**
+ * Resolve the VTA's keyAgreement, build a DIDComm message of the given
+ * `type` + `body`, authcrypt-pack it, and POST the JWE to `path` as
+ * `text/plain`. Returns the parsed JSON response.
+ */
+async function packAndPost(ctx, { path, type, body }) {
+  const recipient = await resolveVtaRecipient(ctx.vtaDid);
+
+  const message = {
+    id: `urn:uuid:${randomUuid()}`,
+    typ: "application/didcomm-plain+json",
+    type,
+    from: ctx.clientDid,
+    to: [ctx.vtaDid],
+    body,
+  };
+
+  const senderPrivateJwk = jwk.privateJwk(
+    "X25519",
+    ctx.clientX25519Private,
+    ctx.clientX25519Public,
+  );
+  const recipientPublicJwk = jwk.publicJwk("X25519", recipient.x25519Pub);
+
+  const jweJson = await pack({
+    message,
+    sender: { kid: ctx.clientKid, privateJwk: senderPrivateJwk },
+    recipient: { kid: recipient.kid, publicJwk: recipientPublicJwk },
+  });
+
+  return postRaw(ctx.fetchFn, joinUrl(ctx.baseUrl, path), jweJson, "text/plain");
+}
+
+/** Validate + normalize a `/auth/`-family token response. */
+function tokenResult(resp, path) {
+  if (!resp?.data?.accessToken) {
+    throw new Error(
+      `vta-rest-auth: ${path} response missing accessToken (got ${JSON.stringify(resp)})`,
+    );
+  }
+  return {
+    accessToken: resp.data.accessToken,
+    accessExpiresAt: resp.data.accessExpiresAt,
+    refreshToken: resp.data.refreshToken,
+    refreshExpiresAt: resp.data.refreshExpiresAt,
+    sessionId: resp.sessionId,
+  };
+}
 
 async function resolveVtaRecipient(vtaDid) {
   const { didDocument } = await resolveDid(vtaDid);

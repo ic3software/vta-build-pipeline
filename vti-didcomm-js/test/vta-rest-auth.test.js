@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 
 import {
   authenticate,
+  refresh,
   generateEphemeralClient,
 } from "../src/vta-rest-auth.js";
 import * as x25519 from "../src/x25519.js";
@@ -49,6 +50,28 @@ function mockFetch({ baseUrl, challengeBody, authBody, onChallenge, onAuth }) {
       if (url === `${baseUrl}/auth/`) {
         onAuth?.(init.body);
         return new Response(JSON.stringify(authBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(`unexpected url ${url}`, { status: 404 });
+    },
+    calls,
+  };
+}
+
+/**
+ * Mock `fetch` for the refresh flow — only the `/auth/refresh`
+ * endpoint. `onRefresh` receives the raw JWE body.
+ */
+function mockRefreshFetch({ baseUrl, refreshBody, onRefresh }) {
+  const calls = [];
+  return {
+    fetch: async (url, init) => {
+      calls.push({ url, method: init.method, headers: init.headers, body: init.body });
+      if (url === `${baseUrl}/auth/refresh`) {
+        onRefresh?.(init.body);
+        return new Response(JSON.stringify(refreshBody), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -175,6 +198,136 @@ test("authenticate: packed message has correct DIDComm fields", async () => {
   assert.equal(plaintext.body.challenge, "abc123def456");
   assert.equal(plaintext.body.session_id, "sess-xyz", "body uses snake_case session_id");
   assert.ok(plaintext.id?.startsWith("urn:uuid:"), "id is a uuid urn");
+});
+
+// ─── Refresh ─────────────────────────────────────────────────────────────
+
+test("refresh: exchanges a refresh token for a new pair (no challenge call)", async () => {
+  const vta = buildFakeVta();
+  const client = generateEphemeralClient();
+
+  const refreshBody = {
+    sessionId: "sess-abc123",
+    data: {
+      accessToken: "new.access.jwt",
+      accessExpiresAt: 1_800_000_900,
+      refreshToken: "rotated-refresh",
+      refreshExpiresAt: 1_800_086_400,
+    },
+  };
+
+  let refreshReq = null;
+  const { fetch, calls } = mockRefreshFetch({
+    baseUrl: "https://vta.test",
+    refreshBody,
+    onRefresh: (b) => (refreshReq = b),
+  });
+
+  const result = await refresh({
+    baseUrl: "https://vta.test",
+    vtaDid: vta.did,
+    clientDid: client.did,
+    clientX25519Private: client.privateKey,
+    clientX25519Public: client.publicKey,
+    refreshToken: "old-refresh",
+    fetch,
+  });
+
+  // Rotation: caller gets the NEW refresh token back.
+  assert.equal(result.accessToken, "new.access.jwt");
+  assert.equal(result.refreshToken, "rotated-refresh");
+  assert.equal(result.refreshExpiresAt, 1_800_086_400);
+
+  // Refresh hits ONLY /auth/refresh — no /auth/challenge round-trip.
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://vta.test/auth/refresh");
+  assert.equal(calls[0].headers["content-type"], "text/plain");
+  const jwe = JSON.parse(refreshReq);
+  for (const field of ["protected", "recipients", "iv", "ciphertext", "tag"]) {
+    assert.ok(field in jwe, `JWE missing ${field}`);
+  }
+  assert.equal(jwe.recipients[0].header.kid, vta.kid);
+});
+
+test("refresh: packed message carries the refresh_token + correct type", async () => {
+  const helperPath = pathResolve(
+    process.env.CARGO_TARGET_DIR || pathResolve(import.meta.dirname, "..", "..", "target"),
+    "debug",
+    "didcomm-unpack",
+  );
+  if (!existsSync(helperPath)) {
+    return; // round-trip helper not built — skip
+  }
+
+  const vta = buildFakeVta();
+  const client = generateEphemeralClient();
+
+  let capturedJwe = null;
+  const { fetch } = mockRefreshFetch({
+    baseUrl: "https://vta.test",
+    refreshBody: { data: { accessToken: "ok", accessExpiresAt: 1 } },
+    onRefresh: (b) => (capturedJwe = b),
+  });
+
+  await refresh({
+    baseUrl: "https://vta.test",
+    vtaDid: vta.did,
+    clientDid: client.did,
+    clientX25519Private: client.privateKey,
+    clientX25519Public: client.publicKey,
+    refreshToken: "the-refresh-token",
+    fetch,
+  });
+
+  const unpackResult = await runHelper(helperPath, {
+    jwe: capturedJwe,
+    recipient_kid: vta.kid,
+    recipient_private_x_b64u: bytesToB64u(vta.privateKey),
+    sender_public_x_b64u: bytesToB64u(client.publicKey),
+  });
+
+  assert.ok(unpackResult.ok, `unpack failed: ${JSON.stringify(unpackResult)}`);
+  const plaintext = unpackResult.plaintext;
+  assert.equal(plaintext.type, "https://affinidi.com/atm/1.0/authenticate/refresh");
+  assert.equal(plaintext.body.refresh_token, "the-refresh-token");
+  assert.deepEqual(plaintext.to, [vta.did]);
+});
+
+test("refresh: requires a non-empty refreshToken", async () => {
+  const client = generateEphemeralClient();
+  await assert.rejects(
+    () =>
+      refresh({
+        baseUrl: "https://vta.test",
+        vtaDid: "did:key:zABC",
+        clientDid: client.did,
+        clientX25519Private: client.privateKey,
+        clientX25519Public: client.publicKey,
+        refreshToken: "",
+        fetch: async () => new Response("{}", { status: 200 }),
+      }),
+    /refreshToken must be a non-empty string/,
+  );
+});
+
+test("refresh: surfaces 4xx (e.g. rotated/replayed token)", async () => {
+  const vta = buildFakeVta();
+  const client = generateEphemeralClient();
+  const fetch = async () =>
+    new Response('{"error":"refresh token not found"}', { status: 401 });
+  await assert.rejects(
+    () =>
+      refresh({
+        baseUrl: "https://vta.test",
+        vtaDid: vta.did,
+        clientDid: client.did,
+        clientX25519Private: client.privateKey,
+        clientX25519Public: client.publicKey,
+        refreshToken: "stale",
+        fetch,
+      }),
+    /401.*refresh token not found/,
+  );
 });
 
 // ─── Error paths ─────────────────────────────────────────────────────────
