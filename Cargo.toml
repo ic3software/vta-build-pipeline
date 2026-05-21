@@ -11,7 +11,6 @@ members = [
   "vta-enclave",
   "vtc-service",
   "vti-common",
-  "vti-didcomm-roundtrip-helper",
   "vti-webauthn",
 ]
 exclude = ["deploy/nitro/enclave-proxy"]

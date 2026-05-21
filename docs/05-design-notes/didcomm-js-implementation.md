@@ -146,7 +146,15 @@ header canonicalization).
 
 ## File layout
 
-New workspace member: `vti-didcomm-js/` at the workspace root.
+> **Moved (2026-05-21):** `vti-didcomm-js` now lives in its own
+> repository, [`OpenVTC/vti-didcomm-js`](https://github.com/OpenVTC/vti-didcomm-js),
+> published to npm as `@openvtc/vti-didcomm-js`. It is no longer a
+> member of this Cargo/npm workspace. The cross-impl Rust round-trip
+> helper (`vti-didcomm-roundtrip-helper`) moved with it, to
+> `tools/roundtrip-helper/` in that repo. The layout below is retained
+> for historical context; the canonical source is the standalone repo.
+
+Originally a workspace member at `vti-didcomm-js/` in the workspace root:
 
 ```
 vti-didcomm-js/
@@ -174,8 +182,9 @@ vti-didcomm-js/
 ```
 
 ESM, no transpiler, no bundler in the source tree. Browser-ready as
-relative-import modules. Consumers (demo, plugin) import via
-`../../vti-didcomm-js/src/index.js` or as an npm workspace.
+relative-import modules. Consumers now depend on the published
+`@openvtc/vti-didcomm-js` package (the demo vendors a checked-in
+browser bundle of it under `examples/vta-auth-demo/vendor/`).
 
 ## Round-trip-against-Rust test harness
 
@@ -381,12 +390,12 @@ Before B1 starts, get explicit ack on:
    routing/2.0 + messagepickup/3.0. Confirm we're targeting ATM
    compatibility specifically, not e.g. Hyperledger mediator.
 
-5. **Workspace location** — `vti-didcomm-js/` at workspace root
-   (peer of `vti-webauthn/`, `vta-sdk/`, etc.). The "vti-" prefix
-   matches our common-crate naming convention even though this is
-   a JS package, not Rust. Alternative: `examples/didcomm-js/` if
-   we want to emphasize it's a demo aid rather than production
-   tooling.
+5. **Workspace location** — *Resolved (2026-05-21):* extracted to a
+   standalone repo, [`OpenVTC/vti-didcomm-js`](https://github.com/OpenVTC/vti-didcomm-js),
+   published as `@openvtc/vti-didcomm-js`. It started life at the
+   workspace root (peer of `vti-webauthn/`, `vta-sdk/`, etc.) but
+   graduated to its own repo once it became a publishable,
+   independently-versioned library rather than a demo aid.
 
 6. **Test endpoint feature gate** — `POST /test/didcomm/unpack` is
    a security-sensitive surface (lets anyone unpack a JWE they

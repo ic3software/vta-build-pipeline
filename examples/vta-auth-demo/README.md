@@ -227,16 +227,22 @@ examples/vta-auth-demo/
 └── README.md                        This file
 ```
 
-To regenerate `vendor/vti-didcomm-js.js` after editing the JS library:
+The DIDComm library now lives in its own repository
+([`OpenVTC/vti-didcomm-js`](https://github.com/OpenVTC/vti-didcomm-js),
+published as `@openvtc/vti-didcomm-js`). To regenerate
+`vendor/vti-didcomm-js.js` after a library change, build a browser
+bundle from a checkout of that repo and copy it here, e.g.:
 
 ```sh
-cd vti-didcomm-js
-npm run build:demo
+# from a vti-didcomm-js checkout
+npx esbuild src/index.js --bundle --format=esm --platform=browser \
+  --target=es2022 --minify --legal-comments=inline \
+  --outfile=/path/to/verifiable-trust-infrastructure/examples/vta-auth-demo/vendor/vti-didcomm-js.js
 ```
 
-This runs `esbuild` to produce a minified ESM bundle (currently ~100 KB)
-including `didwebvh-ts` and `@noble/curves`. The bundle is checked in so
-the demo stays zero-build at runtime.
+This produces a minified ESM bundle (currently ~100 KB) including
+`didwebvh-ts` and `@noble/curves`. The bundle is checked in so the demo
+stays zero-build at runtime.
 
 ## Related crates
 
