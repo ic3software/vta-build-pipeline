@@ -5,6 +5,7 @@
   "type": "module",
   "main": "src/index.js",
   "types": "types/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": { "types": "./types/index.d.ts", "import": "./src/index.js" },
     "./base64url": { "types": "./types/base64url.d.ts", "import": "./src/base64url.js" },
@@ -14,6 +15,7 @@
     "./x25519": { "types": "./types/x25519.d.ts", "import": "./src/x25519.js" },
     "./ecdh-1pu": { "types": "./types/ecdh-1pu.d.ts", "import": "./src/ecdh-1pu.js" },
     "./ecdh-es": { "types": "./types/ecdh-es.d.ts", "import": "./src/ecdh-es.js" },
+    "./aes": { "types": "./types/aes.d.ts", "import": "./src/aes.js" },
     "./a256cbc-hs512": { "types": "./types/a256cbc-hs512.d.ts", "import": "./src/a256cbc-hs512.js" },
     "./pack": { "types": "./types/pack.d.ts", "import": "./src/pack.js" },
     "./anoncrypt": { "types": "./types/anoncrypt.d.ts", "import": "./src/anoncrypt.js" },

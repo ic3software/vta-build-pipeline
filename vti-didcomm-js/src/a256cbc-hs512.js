@@ -171,9 +171,9 @@ function constantTimeEqual(a, b) {
 
 function assertBytes(name, value, exactLen) {
   if (!(value instanceof Uint8Array)) {
-    throw new TypeError(`${name} must be Uint8Array`);
+    throw new TypeError(`a256cbc-hs512: ${name} must be Uint8Array`);
   }
   if (exactLen !== undefined && value.length !== exactLen) {
-    throw new Error(`${name} must be ${exactLen} bytes, got ${value.length}`);
+    throw new Error(`a256cbc-hs512: ${name} must be ${exactLen} bytes, got ${value.length}`);
   }
 }

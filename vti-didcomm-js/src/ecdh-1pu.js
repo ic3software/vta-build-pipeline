@@ -35,9 +35,11 @@ import * as x25519 from "./x25519.js";
  * - `senderPrivate` is the sender's long-term key-agreement key
  *   (advertised on their DID document's `keyAgreement`).
  * - `apu` / `apv` are the raw byte values that the JWE protected
- *   header will base64url-encode. Common DIDComm convention:
+ *   header will base64url-encode. As implemented in `pack.js`:
  *     apu = utf8(sender_kid)
- *     apv = utf8(sorted_recipient_kids_joined_by_dot)  // single-recipient: just the kid
+ *     apv = sha256(recipient_kid)   // single-recipient; the DIDComm
+ *           multi-recipient form is sha256 of the sorted kids joined
+ *           by '.', which collapses to sha256(kid) for one recipient
  *
  * @param {Object} args
  * @param {Uint8Array} args.ephemeralPrivate - 32-byte X25519 scalar

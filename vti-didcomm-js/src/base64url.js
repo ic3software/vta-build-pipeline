@@ -64,6 +64,13 @@ export function decode(s) {
   }
   // Normalize standard-base64 inputs.
   const norm = s.replace(/[+]/g, "-").replace(/[/]/g, "_").replace(/=+$/, "");
+  // A base64 group is 2–4 chars; a remainder of exactly 1 char can
+  // never be a valid encoding (it carries only 6 bits, < one byte).
+  // Reject it rather than silently dropping it — at a crypto trust
+  // boundary, non-canonical input is a malleability surface.
+  if (norm.length % 4 === 1) {
+    throw new Error(`base64url.decode: invalid length (${norm.length} chars; %4 === 1)`);
+  }
   const out = new Uint8Array(Math.floor((norm.length * 3) / 4));
   let outIdx = 0;
   let n = 0;

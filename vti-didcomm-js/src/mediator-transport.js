@@ -52,6 +52,11 @@ const LIVE_DELIVERY_CHANGE_TYPE = "https://didcomm.org/messagepickup/3.0/live-de
 // to satisfy the subprotocol-echo handshake.
 const WS_APP_SUBPROTOCOL = "didcomm";
 
+// Cap on un-awaited inbound messages held for a future `waitFor`. A
+// request/response client buffers at most a handful; this only bounds a
+// misbehaving mediator pushing unsolicited frames.
+const MAX_INBOX = 256;
+
 /**
  * Build the `live-delivery-change` plaintext that enables live
  * delivery over the current WebSocket. The caller authcrypt-packs it
@@ -211,6 +216,19 @@ export class MediatorSession {
 
   _openSocket() {
     return new Promise((resolve, reject) => {
+      // `connect()` settles exactly once: on the first of open / error /
+      // close. A strict client that rejects the 101 (e.g. no subprotocol
+      // echoed) fires `error` then `close` *before* `onopen` — without
+      // this guard the connect promise would hang forever. After open,
+      // error/close instead fail any pending waiters (see below).
+      let settled = false;
+      const settleConnect = (fn, arg) => {
+        if (settled) return false;
+        settled = true;
+        fn(arg);
+        return true;
+      };
+
       // Subprotocol bearer: ["bearer.<jwt>", "<app>"]. The mediator
       // reads the JWT from Sec-WebSocket-Protocol when no Authorization
       // header is present (browsers can't set the header), and echoes
@@ -221,21 +239,27 @@ export class MediatorSession {
         WS_APP_SUBPROTOCOL,
       ]);
       this.ws = ws;
+      ws.onopen = () => settleConnect(resolve);
       ws.onmessage = (ev) => this._onFrame(ev.data);
-      ws.onerror = (ev) => {
-        if (this._waiters.length === 0) return;
-        const err = new Error("mediator-transport: WebSocket error");
-        for (const w of this._waiters.splice(0)) w.reject(err);
+      ws.onerror = () => {
+        // Before open: fail the connect. After open: fail pending waiters.
+        if (settleConnect(reject, new Error("mediator-transport: WebSocket failed to open"))) {
+          return;
+        }
+        for (const w of this._waiters.splice(0)) {
+          clearTimeout(w.timer);
+          w.reject(new Error("mediator-transport: WebSocket error"));
+        }
       };
       ws.onclose = () => {
-        const err = new Error("mediator-transport: WebSocket closed");
-        for (const w of this._waiters.splice(0)) w.reject(err);
+        if (settleConnect(reject, new Error("mediator-transport: WebSocket closed before open"))) {
+          return;
+        }
+        for (const w of this._waiters.splice(0)) {
+          clearTimeout(w.timer);
+          w.reject(new Error("mediator-transport: WebSocket closed"));
+        }
       };
-      ws.onopen = () => resolve();
-      // Some WebSocket impls surface a connect failure only via onerror
-      // before onopen — reject the connect promise in that window.
-      const onEarlyError = () => reject(new Error("mediator-transport: WebSocket failed to open"));
-      ws.addEventListener?.("error", onEarlyError, { once: true });
     });
   }
 
@@ -267,7 +291,11 @@ export class MediatorSession {
       clearTimeout(w.timer);
       w.resolve(result.message);
     } else {
+      // Buffer for a not-yet-registered waiter, but bound the buffer so a
+      // chatty/malicious mediator can't grow it without limit in a
+      // long-lived tab. Drop the oldest when over the cap.
       this._inbox.push({ thid, message: result.message });
+      if (this._inbox.length > MAX_INBOX) this._inbox.shift();
     }
   }
 

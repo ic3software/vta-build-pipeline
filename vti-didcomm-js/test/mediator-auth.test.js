@@ -4,10 +4,34 @@ import { spawn } from "node:child_process";
 import { resolve as pathResolve } from "node:path";
 import { existsSync } from "node:fs";
 
-import { authenticateToMediator } from "../src/mediator-auth.js";
+import {
+  authenticateToMediator,
+  parseMediatorEndpoints,
+} from "../src/mediator-auth.js";
 import { generateEphemeralClient } from "../src/vta-rest-auth.js";
 import * as x25519 from "../src/x25519.js";
 import * as multibase from "../src/multibase.js";
+
+// Build a resolved-DID-document for a mediator whose X25519
+// keyAgreement we control, with given service endpoints.
+function mediatorDoc(did, { rest, ws, auth, x25519Pub }) {
+  const mb = multibase.encodeMultikey(multibase.MULTICODEC.X25519_PUB, x25519Pub);
+  const eps = [];
+  if (ws) eps.push({ accept: ["didcomm/v2"], uri: ws });
+  if (rest) eps.push({ accept: ["didcomm/v2"], uri: rest });
+  const service = [
+    { id: `${did}#dc`, type: ["DIDCommMessaging"], serviceEndpoint: eps },
+  ];
+  if (auth) service.push({ id: `${did}#auth`, type: ["Authentication"], serviceEndpoint: auth });
+  return {
+    id: did,
+    keyAgreement: [`${did}#key-1`],
+    verificationMethod: [
+      { id: `${did}#key-1`, type: "Multikey", controller: did, publicKeyMultibase: mb },
+    ],
+    service,
+  };
+}
 
 // A fake mediator: a did:key with an X25519 key we control, so we can
 // unpack the auth JWE the client produces. The auth endpoints are
@@ -137,6 +161,157 @@ test("authenticateToMediator: rejects non-Uint8Array key", async () => {
         fetch: async () => new Response("{}"),
       }),
     /clientX25519Private must be Uint8Array/,
+  );
+});
+
+// ─── parseMediatorEndpoints (pure) ──────────────────────────────────
+
+test("parseMediatorEndpoints: splits ws/https + reads keyAgreement", () => {
+  const did = "did:webvh:scid:host:m";
+  const kp = x25519.generateKeyPair();
+  const doc = mediatorDoc(did, {
+    ws: "wss://m.example/ws",
+    rest: "https://m.example/v1",
+    auth: "https://m.example/v1/authenticate",
+    x25519Pub: kp.publicKey,
+  });
+  const m = parseMediatorEndpoints(doc, did);
+  assert.equal(m.restEndpoint, "https://m.example/v1");
+  assert.equal(m.wsEndpoint, "wss://m.example/ws");
+  assert.equal(m.authEndpoint, "https://m.example/v1/authenticate");
+  assert.equal(m.kid, `${did}#key-1`);
+  assert.equal(m.x25519Pub.length, 32);
+});
+
+test("parseMediatorEndpoints: derives auth endpoint from REST when no Authentication service", () => {
+  const did = "did:webvh:scid:host:m";
+  const kp = x25519.generateKeyPair();
+  const doc = mediatorDoc(did, { rest: "https://m.example/v1/", x25519Pub: kp.publicKey });
+  const m = parseMediatorEndpoints(doc, did);
+  assert.equal(m.authEndpoint, "https://m.example/v1/authenticate");
+  assert.equal(m.wsEndpoint, null);
+});
+
+test("parseMediatorEndpoints: throw branches", () => {
+  const did = "did:x:m";
+  const kp = x25519.generateKeyPair();
+  // No REST endpoint.
+  assert.throws(
+    () => parseMediatorEndpoints({ id: did, service: [], keyAgreement: [] }, did),
+    /no REST DIDCommMessaging endpoint/,
+  );
+  // No keyAgreement.
+  assert.throws(
+    () =>
+      parseMediatorEndpoints(
+        { id: did, service: [{ id: `${did}#dc`, type: ["DIDCommMessaging"], serviceEndpoint: [{ uri: "https://m/v1" }] }] },
+        did,
+      ),
+    /no keyAgreement/,
+  );
+});
+
+test("parseMediatorEndpoints: rejects insecure endpoints unless allowInsecure", () => {
+  const did = "did:x:m";
+  const kp = x25519.generateKeyPair();
+  const doc = mediatorDoc(did, { rest: "http://m.example/v1", x25519Pub: kp.publicKey });
+  assert.throws(() => parseMediatorEndpoints(doc, did), /insecure REST endpoint/);
+  // allowInsecure lets it through.
+  const m = parseMediatorEndpoints(doc, did, { allowInsecure: true });
+  assert.equal(m.restEndpoint, "http://m.example/v1");
+});
+
+// ─── authenticateToMediator full HTTP flow (mock fetch + injected resolver) ──
+
+test("authenticateToMediator: full challenge → pack → /authenticate → token (snake_case)", async (t) => {
+  if (!existsSync(HELPER)) {
+    t.skip("round-trip helper not built");
+    return;
+  }
+  const client = generateEphemeralClient();
+  const medKp = x25519.generateKeyPair();
+  const medDid = "did:webvh:scid:host:mediator";
+  const doc = mediatorDoc(medDid, {
+    ws: "wss://m.example/ws",
+    rest: "https://m.example/v1",
+    auth: "https://m.example/v1/authenticate",
+    x25519Pub: medKp.publicKey,
+  });
+
+  let challengeReq = null;
+  let authBody = null;
+  const fetch = async (url, init) => {
+    if (url === "https://m.example/v1/authenticate/challenge") {
+      challengeReq = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({ sessionId: "S", data: { challenge: "CHAL", session_id: "S" } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url === "https://m.example/v1/authenticate") {
+      authBody = init.body;
+      assert.equal(init.headers["content-type"], "application/json");
+      return new Response(
+        JSON.stringify({
+          sessionId: "S",
+          data: {
+            access_token: "med.jwt",
+            access_expires_at: 111,
+            refresh_token: "med.refresh",
+            refresh_expires_at: 222,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(`unexpected ${url}`, { status: 404 });
+  };
+
+  const result = await authenticateToMediator({
+    mediatorDid: medDid,
+    clientDid: client.did,
+    clientX25519Private: client.privateKey,
+    clientX25519Public: client.publicKey,
+    clientKid: client.kid,
+    fetch,
+    resolve: async () => ({ didDocument: doc }),
+  });
+
+  // snake_case token parsing.
+  assert.equal(result.accessToken, "med.jwt");
+  assert.equal(result.accessExpiresAt, 111);
+  assert.equal(result.refreshToken, "med.refresh");
+  assert.deepEqual(challengeReq, { did: client.did });
+
+  // The /authenticate body is a real authcrypt JWE the mediator can
+  // decrypt — verify via the Rust helper.
+  const unpacked = await runHelper(HELPER, {
+    jwe: authBody,
+    recipient_kid: `${medDid}#key-1`,
+    recipient_private_x_b64u: bytesToB64u(medKp.privateKey),
+    sender_public_x_b64u: bytesToB64u(client.publicKey),
+  });
+  assert.ok(unpacked.ok, `auth JWE unpack failed: ${JSON.stringify(unpacked)}`);
+  assert.equal(unpacked.plaintext.type, "https://affinidi.com/atm/1.0/authenticate");
+  assert.equal(unpacked.plaintext.body.challenge, "CHAL");
+  assert.equal(unpacked.plaintext.body.session_id, "S");
+});
+
+test("authenticateToMediator: surfaces a 4xx from /authenticate/challenge", async () => {
+  const client = generateEphemeralClient();
+  const medKp = x25519.generateKeyPair();
+  const doc = mediatorDoc("did:x:m", { rest: "https://m/v1", x25519Pub: medKp.publicKey });
+  await assert.rejects(
+    () =>
+      authenticateToMediator({
+        mediatorDid: "did:x:m",
+        clientDid: client.did,
+        clientX25519Private: client.privateKey,
+        clientX25519Public: client.publicKey,
+        fetch: async () => new Response('{"message":"DID blocked"}', { status: 403 }),
+        resolve: async () => ({ didDocument: doc }),
+      }),
+    /403/,
   );
 });
 

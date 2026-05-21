@@ -26,7 +26,7 @@ const OKP_CURVES = new Set(["X25519", "Ed25519"]);
 export function publicJwk(crv, keyBytes, kid) {
   assertCurve(crv);
   if (keyBytes.length !== 32) {
-    throw new Error(`${crv} public key must be 32 bytes, got ${keyBytes.length}`);
+    throw new Error(`jwk: ${crv} public key must be 32 bytes, got ${keyBytes.length}`);
   }
   const jwk = { kty: "OKP", crv, x: b64u.encode(keyBytes) };
   if (kid) jwk.kid = kid;
@@ -45,7 +45,7 @@ export function publicJwk(crv, keyBytes, kid) {
 export function privateJwk(crv, privateBytes, publicBytes, kid) {
   const pub = publicJwk(crv, publicBytes, kid);
   if (privateBytes.length !== 32) {
-    throw new Error(`${crv} private key must be 32 bytes, got ${privateBytes.length}`);
+    throw new Error(`jwk: ${crv} private key must be 32 bytes, got ${privateBytes.length}`);
   }
   return { ...pub, d: b64u.encode(privateBytes) };
 }
@@ -60,7 +60,7 @@ export function rawPublic(jwk) {
   assertOkpShape(jwk);
   const bytes = b64u.decode(jwk.x);
   if (bytes.length !== 32) {
-    throw new Error(`${jwk.crv} JWK 'x' must decode to 32 bytes, got ${bytes.length}`);
+    throw new Error(`jwk: ${jwk.crv} JWK 'x' must decode to 32 bytes, got ${bytes.length}`);
   }
   return bytes;
 }
@@ -75,11 +75,11 @@ export function rawPublic(jwk) {
 export function rawPrivate(jwk) {
   assertOkpShape(jwk);
   if (!jwk.d) {
-    throw new Error("OKP JWK has no 'd' — this is a public-only key");
+    throw new Error("jwk: OKP JWK has no 'd' — this is a public-only key");
   }
   const bytes = b64u.decode(jwk.d);
   if (bytes.length !== 32) {
-    throw new Error(`${jwk.crv} JWK 'd' must decode to 32 bytes, got ${bytes.length}`);
+    throw new Error(`jwk: ${jwk.crv} JWK 'd' must decode to 32 bytes, got ${bytes.length}`);
   }
   return bytes;
 }
@@ -102,19 +102,19 @@ export function toPublic(jwk) {
 
 function assertCurve(crv) {
   if (!OKP_CURVES.has(crv)) {
-    throw new Error(`unsupported OKP curve: ${crv}. Expected one of ${[...OKP_CURVES].join(", ")}`);
+    throw new Error(`jwk: unsupported OKP curve: ${crv}. Expected one of ${[...OKP_CURVES].join(", ")}`);
   }
 }
 
 function assertOkpShape(jwk) {
   if (!jwk || typeof jwk !== "object") {
-    throw new TypeError("JWK must be an object");
+    throw new TypeError("jwk: JWK must be an object");
   }
   if (jwk.kty !== "OKP") {
-    throw new Error(`JWK kty must be 'OKP', got ${JSON.stringify(jwk.kty)}`);
+    throw new Error(`jwk: JWK kty must be 'OKP', got ${JSON.stringify(jwk.kty)}`);
   }
   assertCurve(jwk.crv);
   if (typeof jwk.x !== "string") {
-    throw new Error("JWK 'x' must be a string");
+    throw new Error("jwk: JWK 'x' must be a string");
   }
 }

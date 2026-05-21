@@ -108,7 +108,7 @@ src/
 ## Tests
 
 ```sh
-npm test          # node --test; 140+ tests
+npm test          # node --test; 150+ tests
 ```
 
 Includes RFC 7518 §B.3 (A256CBC-HS512) and §C (Concat KDF) known-answer

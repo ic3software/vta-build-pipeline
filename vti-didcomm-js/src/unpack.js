@@ -111,6 +111,19 @@ export async function unpack(jweJson, recipient, sender) {
 
   let kek;
   if (isAuthcrypt) {
+    // Bind the authenticated sender identity: `apu` (which is fed into
+    // the KDF) must equal utf8(skid) (which selects the sender key we
+    // return as `senderKid`). Both my pack and affinidi-messaging-didcomm
+    // set apu = sender_kid, so a mismatch is a malformed/forged
+    // envelope. The KEK already binds both independently (a swap breaks
+    // decryption), but rejecting here keeps the returned `senderKid`
+    // unambiguous for callers that authorize on it.
+    const apuStr = new TextDecoder().decode(apuBytes);
+    if (apuStr !== header.skid) {
+      throw new Error(
+        `unpack: authcrypt apu (${JSON.stringify(apuStr)}) does not match skid (${JSON.stringify(header.skid)})`,
+      );
+    }
     kek = await ecdh1pu.recipientKekAuthcrypt({
       recipientPrivate: recipientPriv,
       ephemeralPublic,

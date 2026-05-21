@@ -70,6 +70,8 @@ export async function authenticateToMediator({
   clientX25519Public,
   clientKid,
   fetch: customFetch,
+  allowInsecure = false,
+  resolve,
 }) {
   assertNonEmptyString("mediatorDid", mediatorDid);
   assertNonEmptyString("clientDid", clientDid);
@@ -81,7 +83,9 @@ export async function authenticateToMediator({
     throw new Error("mediator-auth: no fetch implementation available");
   }
 
-  const mediator = await resolveMediator(mediatorDid);
+  const resolveOpts = { allowInsecure };
+  if (resolve) resolveOpts.resolve = resolve;
+  const mediator = await resolveMediator(mediatorDid, resolveOpts);
   const resolvedClientKid = clientKid ?? defaultClientKid(clientDid, clientX25519Public);
 
   // ── Step 1: challenge ────────────────────────────────────────────
@@ -150,17 +154,39 @@ export async function authenticateToMediator({
  * if no explicit `Authentication` service is present.
  *
  * @param {string} mediatorDid
+ * @param {Object} [options]
+ * @param {boolean} [options.allowInsecure=false] - permit ws:///http:// endpoints.
+ * @param {Function} [options.resolve] - DID resolver (default: the
+ *   built-in dispatcher). Injectable for tests.
  * @returns {Promise<{
  *   did: string, restEndpoint: string, wsEndpoint: string,
  *   authEndpoint: string, kid: string, x25519Pub: Uint8Array,
  * }>}
  */
-export async function resolveMediator(mediatorDid) {
-  const { didDocument } = await resolveDid(mediatorDid);
+export async function resolveMediator(mediatorDid, { allowInsecure = false, resolve = resolveDid } = {}) {
+  const { didDocument } = await resolve(mediatorDid);
   if (!didDocument || typeof didDocument !== "object") {
     throw new Error(`mediator-auth: could not resolve mediator DID ${mediatorDid}`);
   }
+  return parseMediatorEndpoints(didDocument, mediatorDid, { allowInsecure });
+}
 
+/**
+ * Parse a resolved mediator DID document into its endpoints +
+ * keyAgreement. Pure (no I/O) — exported so the parsing is unit-
+ * testable without a live resolver.
+ *
+ * @param {Object} didDocument
+ * @param {string} mediatorDid
+ * @param {Object} [options]
+ * @param {boolean} [options.allowInsecure=false]
+ * @returns {{did:string, restEndpoint:string, wsEndpoint:string|null,
+ *   authEndpoint:string, kid:string, x25519Pub:Uint8Array}}
+ */
+export function parseMediatorEndpoints(didDocument, mediatorDid, { allowInsecure = false } = {}) {
+  if (!didDocument || typeof didDocument !== "object") {
+    throw new Error(`mediator-auth: invalid DID document for ${mediatorDid}`);
+  }
   const services = Array.isArray(didDocument.service) ? didDocument.service : [];
 
   // DIDCommMessaging service: REST + WS endpoints live in its
@@ -193,6 +219,24 @@ export async function resolveMediator(mediatorDid) {
   }
   if (!authEndpoint) {
     throw new Error(`mediator-auth: ${mediatorDid} has no resolvable authenticate endpoint`);
+  }
+
+  // Refuse plaintext transports by default: a tampered/stale DID
+  // document must not be able to downgrade us to `ws://` / `http://`,
+  // which would leak the bearer JWT and traffic. Opt out only for
+  // local dev with `{ allowInsecure: true }`.
+  if (!allowInsecure) {
+    for (const [label, url] of [
+      ["REST", restEndpoint],
+      ["auth", authEndpoint],
+      ["WebSocket", wsEndpoint],
+    ]) {
+      if (typeof url === "string" && (url.startsWith("http://") || url.startsWith("ws://"))) {
+        throw new Error(
+          `mediator-auth: ${mediatorDid} advertises an insecure ${label} endpoint (${url}); pass { allowInsecure: true } to permit it`,
+        );
+      }
+    }
   }
 
   const { kid, x25519Pub } = extractX25519KeyAgreement(didDocument, mediatorDid);
