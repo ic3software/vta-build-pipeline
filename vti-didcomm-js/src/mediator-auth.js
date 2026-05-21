@@ -97,12 +97,18 @@ export async function authenticateToMediator({
   }
 
   // ── Step 2: pack the authenticate response ───────────────────────
+  // The mediator requires `created_time` + `expires_time` on auth
+  // messages (rejects with `e.p.message.expires_time.missing`
+  // otherwise). 5-minute validity window, matching the SDK.
+  const now = Math.floor(Date.now() / 1000);
   const message = {
     id: `urn:uuid:${randomUuid()}`,
     typ: "application/didcomm-plain+json",
     type: AUTH_MESSAGE_TYPE,
     from: clientDid,
     to: [mediatorDid],
+    created_time: now,
+    expires_time: now + 300,
     body: { challenge: challengeStr, session_id: sessionId },
   };
   const senderPrivateJwk = jwk.privateJwk("X25519", clientX25519Private, clientX25519Public);
