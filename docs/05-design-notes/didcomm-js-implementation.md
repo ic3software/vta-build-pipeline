@@ -1,10 +1,86 @@
 # DIDComm v2 JS implementation — design note
 
-**Status**: design (B0). Pins the scope of a hand-rolled browser-side
-DIDComm v2 implementation so we can implement against a fixed target
-in subsequent phases. No code lands until this note is signed off.
+**Status**: **implemented and proven live (2026-05-21).** B1–B5 plus
+the mediator transport (M1–M4) have shipped as `vti-didcomm-js`, and
+both the REST auth path and the full browser → mediator → VTA →
+mediator → browser round-trip are validated against live infra
+(`glenn.storm.ws`, `webvh.storm.ws`, `mediator.vtc.storm.ws`). The
+sections below from "Why hand-rolled" onward are the original **B0
+design plan**, kept for context; where the as-built result deviates
+from the plan, the **As-built** section immediately below is
+authoritative.
 
-## Why hand-rolled, not the Rust crate compiled to WASM
+## As-built (authoritative — supersedes the B0 plan where they differ)
+
+The plan was sound; a handful of details changed once we hit the real
+Rust crate and the real mediator. The deviations that matter:
+
+1. **Content encryption is A256CBC-HS512, not A256GCM.** The pinned
+   `affinidi-messaging-didcomm` 0.13 decrypts **A256CBC-HS512 only**
+   (it hardcodes a 16-byte IV + 32-byte tag and doesn't read `enc`).
+   A256GCM JWEs simply don't round-trip with it. So `pack`/`unpack`
+   use **ECDH-1PU+A256KW + A256CBC-HS512** (authcrypt), and
+   ECDH-1PU's key-wrap mode folds the content-encryption tag into the
+   Concat KDF as SuppPrivInfo (draft-madden §2.3) — meaning pack must
+   encrypt *before* deriving the KEK. Every "A256GCM" / "12-byte IV"
+   reference in the B0 sections below should read A256CBC-HS512 /
+   16-byte IV / 64-byte CEK.
+
+2. **DID resolution**: `did:key` is in-tree (Ed25519/X25519/P-256,
+   incl. the Edwards→Montgomery derivation for the Ed25519
+   keyAgreement key); `did:webvh` is delegated to DIF's
+   **`didwebvh-ts`** (full hash-chain + Data-Integrity verification)
+   rather than a hand-rolled `did.jsonl` parser. **`did:peer` was not
+   implemented** — our mediator is a `did:webvh`, so numalgo-2 wasn't
+   needed.
+
+3. **Two transports, not one.** B4 became the **VTA REST** path
+   (challenge → DIDComm-packed `/auth/` → JWT, + refresh with RFC 6749
+   §10.4 rotation). The **mediator** path (forward routing + WS live
+   delivery) landed separately as M1–M4. Pick REST when the VTA is on
+   HTTPS; pick mediator when it isn't.
+
+4. **Round-trip harness is a standalone Rust crate, not a vta-service
+   test endpoint.** `vti-didcomm-roundtrip-helper` (`publish = false`)
+   is a tiny bin that reads a JWE from stdin and shells it through
+   `affinidi-messaging-didcomm`'s `unpack`. JS tests spawn it. This
+   avoided adding a security-sensitive test route to vta-service
+   (open question #6 is moot).
+
+5. **`return_route: all` IS used** (B0 deferred it). It's how the
+   mediator knows to push live-delivery responses back over the same
+   WebSocket (message-pickup 3.0).
+
+6. **Mediator WS auth: subprotocol bearer + a mandatory second
+   subprotocol.** Browsers can't set an `Authorization` header on a
+   WebSocket, so the mediator accepts the JWT as a
+   `Sec-WebSocket-Protocol: bearer.<jwt>` entry. **Gotcha:** if only
+   that entry is offered, the mediator selects no subprotocol and a
+   spec-strict client (every browser + Node undici) rejects the 101
+   with code 1006. The client therefore offers a second, separator-
+   free entry (`didcomm`) for the mediator to echo back. `didcomm/v2`
+   can't be used — `/` is not a valid RFC 6455 subprotocol token char.
+
+7. **As-built module layout** (under `vti-didcomm-js/src/`):
+   `base64url.js`, `multibase.js`, `jwk.js`, `concat-kdf.js`,
+   `x25519.js`, `ecdh-1pu.js`, `aes.js`, `a256cbc-hs512.js`,
+   `pack.js`, `unpack.js`, `did-key.js`, `did-webvh.js`,
+   `resolver.js`, `vta-rest-auth.js`, `forward.js`, `mediator-auth.js`,
+   `mediator-transport.js`, `vta-didcomm.js`, `index.js`.
+
+**Tests**: 135 passing (`npm test`), incl. RFC 7518 §B.3 (A256CBC-HS512)
+and RFC 7518 §C (Concat KDF) known-answer vectors, did:webvh against
+real `didwebvh-rs` fixtures, and cross-implementation round-trips
+through the Rust unpack helper.
+
+**Consumers**: `examples/vta-auth-demo` (9 sections; 7=primitives,
+8=REST auth+refresh, 9=mediator). Integration into the
+`pnm-browser-plugin` (`@pnm/core`) is in progress — it replaces the
+earlier `@pnm/didcomm-wasm` approach.
+
+---
+
+## Why hand-rolled, not the Rust crate compiled to WASM (B0 plan)
 
 `affinidi-messaging-didcomm` v0.13.2 has dependency-tree blockers:
 
