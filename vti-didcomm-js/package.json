@@ -18,7 +18,11 @@
     "./did-key": "./src/did-key.js",
     "./did-webvh": "./src/did-webvh.js",
     "./resolver": "./src/resolver.js",
-    "./vta-rest-auth": "./src/vta-rest-auth.js"
+    "./vta-rest-auth": "./src/vta-rest-auth.js",
+    "./forward": "./src/forward.js",
+    "./mediator-auth": "./src/mediator-auth.js",
+    "./mediator-transport": "./src/mediator-transport.js",
+    "./vta-didcomm": "./src/vta-didcomm.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js",

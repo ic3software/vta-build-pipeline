@@ -4,8 +4,9 @@
 // B2: ECDH-1PU + AES + A256CBC-HS512 + pack/unpack.
 // B3: DID resolver (did:key in-tree, did:webvh via didwebvh-ts).
 // B4: VTA REST auth via DIDComm-packed /auth/.
-// B5+: full mediator transport (forward routing + pickup) — see
-//      `docs/05-design-notes/didcomm-js-implementation.md`.
+// M1-M4: mediator transport — mediator auth, routing/2.0/forward,
+//        WebSocket + message-pickup 3.0 live delivery, sendAndWait.
+//        See `docs/05-design-notes/didcomm-js-implementation.md`.
 
 export * as base64url from "./base64url.js";
 export * as multibase from "./multibase.js";
@@ -21,3 +22,7 @@ export * as didKey from "./did-key.js";
 export * as didWebvh from "./did-webvh.js";
 export { createResolver, defaultResolver, resolve } from "./resolver.js";
 export * as vtaRestAuth from "./vta-rest-auth.js";
+export { buildForward } from "./forward.js";
+export { authenticateToMediator, resolveMediator } from "./mediator-auth.js";
+export { MediatorSession, buildLiveDeliveryChange, peekSkid, unpackInbound } from "./mediator-transport.js";
+export { connectVtaViaMediator, VtaMediatorClient, resolveX25519KeyAgreement } from "./vta-didcomm.js";
