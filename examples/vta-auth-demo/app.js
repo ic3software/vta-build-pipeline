@@ -122,6 +122,11 @@ const els = {
   daAuthenticate: $("daAuthenticate"),
   daRefresh: $("daRefresh"),
   daOutput: $("daOutput"),
+
+  dmVtaDid: $("dmVtaDid"),
+  dmMediatorDid: $("dmMediatorDid"),
+  dmConnect: $("dmConnect"),
+  dmOutput: $("dmOutput"),
 };
 
 // ─── Utilities ────────────────────────────────────────────────────────
@@ -892,6 +897,7 @@ els.daGenerate.addEventListener("click", async () => {
     ephemeralClient.privateKey = c.privateKey;
     ephemeralClient.publicKey = c.publicKey;
     els.daAuthenticate.disabled = false;
+    els.dmConnect.disabled = false;
     setOutput(
       els.daOutput,
       [
@@ -1024,6 +1030,108 @@ els.daRefresh.addEventListener("click", async () => {
     );
   } catch (e) {
     setOutput(els.daOutput, e.message, "err");
+  }
+});
+
+// ─── Section 9: DIDComm via mediator (vti-didcomm-js) ────────────────
+//
+// Routes a trust-ping browser → mediator → VTA → mediator → browser
+// over a live WebSocket (message-pickup 3.0 live delivery), proving
+// the mediator transport end-to-end. Reuses the Step 8 ephemeral
+// client. The mediator DID is auto-derived from the VTA's
+// #vta-didcomm service when the field is left blank.
+
+const TRUST_PING_TYPE = "https://didcomm.org/trust-ping/2.0/ping";
+
+/** Find the mediator DID in the VTA's DIDCommMessaging service. */
+function deriveMediatorDid(vtaDidDocument) {
+  const services = Array.isArray(vtaDidDocument.service) ? vtaDidDocument.service : [];
+  const dc = services.find((s) => {
+    const t = s?.type;
+    return t === "DIDCommMessaging" || (Array.isArray(t) && t.includes("DIDCommMessaging"));
+  });
+  if (!dc) return null;
+  const eps = Array.isArray(dc.serviceEndpoint) ? dc.serviceEndpoint : [dc.serviceEndpoint];
+  for (const ep of eps) {
+    const uri = typeof ep === "string" ? ep : ep?.uri;
+    // The DIDComm service endpoint URI is the mediator's DID.
+    if (typeof uri === "string" && uri.startsWith("did:")) return uri;
+  }
+  return null;
+}
+
+els.dmConnect.addEventListener("click", async () => {
+  if (!ephemeralClient.privateKey) {
+    setOutput(els.dmOutput, "Generate an ephemeral client DID in Step 8 first.", "err");
+    return;
+  }
+  const vtaDid = els.dmVtaDid.value.trim();
+  if (!vtaDid) {
+    setOutput(els.dmOutput, "Enter the VTA's DID first.", "err");
+    return;
+  }
+  clearOutput(els.dmOutput);
+
+  let client = null;
+  try {
+    const lib = await loadDidcommLib();
+
+    // Resolve the VTA to derive the mediator DID if not supplied.
+    let mediatorDid = els.dmMediatorDid.value.trim();
+    if (!mediatorDid) {
+      const { didDocument } = await lib.resolve(vtaDid);
+      mediatorDid = deriveMediatorDid(didDocument);
+      if (!mediatorDid) {
+        setOutput(
+          els.dmOutput,
+          "Could not auto-derive a mediator DID from the VTA's #vta-didcomm service — enter one manually.",
+          "err",
+        );
+        return;
+      }
+    }
+
+    setOutput(
+      els.dmOutput,
+      `Connecting via mediator…\n  VTA:      ${vtaDid}\n  Mediator: ${mediatorDid}\n  Client:   ${ephemeralClient.did}`,
+      "ok",
+    );
+
+    client = await lib.connectVtaViaMediator({
+      vtaDid,
+      mediatorDid,
+      clientDid: ephemeralClient.did,
+      clientX25519Private: ephemeralClient.privateKey,
+      clientX25519Public: ephemeralClient.publicKey,
+      clientKid: ephemeralClient.kid,
+    });
+
+    const t0 = performance.now();
+    const response = await client.sendAndWait(
+      TRUST_PING_TYPE,
+      { response_requested: true },
+      30000,
+    );
+    const ms = Math.round(performance.now() - t0);
+
+    setOutput(
+      els.dmOutput,
+      [
+        `Round-trip OK via mediator (${ms} ms).`,
+        ``,
+        `Sent:     trust-ping  →  ${vtaDid}`,
+        `Received: ${response.type}`,
+        `thid:     ${response.thid ?? "(none)"}`,
+        ``,
+        `Full browser → mediator → VTA → mediator → browser DIDComm`,
+        `round-trip proven. No VTA REST endpoint was used.`,
+      ].join("\n"),
+      "ok",
+    );
+  } catch (e) {
+    setOutput(els.dmOutput, e.message, "err");
+  } finally {
+    if (client) client.close();
   }
 });
 

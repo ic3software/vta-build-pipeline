@@ -16,6 +16,7 @@ server and click around.
 | 6 | Trust-task dispatch                       | `POST /api/trust-tasks` with bearer auth              | implemented |
 | 7 | DIDComm primitives smoke-test             | (purely client-side; resolve + pack against any DID)  | implemented |
 | 8 | DIDComm-packed `/auth/` + refresh end-to-end | `POST /auth/challenge` + `POST /auth/` + `POST /auth/refresh` | implemented |
+| 9 | DIDComm via mediator (no VTA REST) | mediator `/authenticate` + WS live delivery + `routing/2.0/forward` | implemented |
 
 The legacy challenge/authenticate **and** refresh flows are now driven
 from the browser via `vti-didcomm-js` (Step 8) — same authcrypt format
@@ -176,6 +177,26 @@ needed.
      so it only works for a session established via Step 8, not one
      from passkey login.
 
+9. **Step 9 — DIDComm via mediator** (the VTA-not-reachable path):
+   - Reuses the Step 8 ephemeral client DID (generate it there first).
+   - Enter the VTA DID; leave the mediator DID blank to auto-derive it
+     from the VTA's `#vta-didcomm` service endpoint.
+   - Click "Connect via mediator + trust-ping". The demo:
+     - authenticates to the mediator (challenge → authcrypt response →
+       mediator JWT),
+     - opens a WebSocket to the mediator using the **subprotocol
+       bearer** (`new WebSocket(url, ["bearer."+jwt])`) and enables
+       message-pickup 3.0 live delivery,
+     - packs a `trust-ping` authcrypt'd to the VTA, wraps it in
+       `routing/2.0/forward` addressed to the mediator (`next` = VTA),
+       and sends it over the WS,
+     - awaits the VTA's `ping-response`, correlated by `thid`, pushed
+       back over the same WS by the mediator.
+   - On success it reports the round-trip time. **No VTA REST endpoint
+     is used** — this is the path for VTAs that aren't reachable over
+     HTTPS. Trust-ping needs no VTA ACL entry; the only requirement is
+     that the mediator lets the client connect.
+
 ## What the multikey computation does
 
 WebAuthn enrolment is a multi-step ceremony, and the VTA's submit
@@ -199,10 +220,10 @@ enrol path errors out and you'll need to extend `p256AttestationToMultikey`.
 
 ```
 examples/vta-auth-demo/
-├── index.html                       UI structure (eight numbered sections)
+├── index.html                       UI structure (nine numbered sections)
 ├── app.js                           Flow logic + multikey computation (vanilla ES modules)
 ├── styles.css                       Minimal dark-theme styling
-├── vendor/vti-didcomm-js.js         Bundled DIDComm v2 stack used by Steps 7+8
+├── vendor/vti-didcomm-js.js         Bundled DIDComm v2 stack used by Steps 7-9
 └── README.md                        This file
 ```
 

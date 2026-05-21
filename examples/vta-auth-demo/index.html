@@ -135,6 +135,23 @@
     <pre id="daOutput" class="output"></pre>
   </section>
 
+  <section class="didcomm-mediator card">
+    <h2>9. DIDComm via mediator (vti-didcomm-js)</h2>
+    <p class="hint">The <em>VTA-not-reachable</em> path: instead of POSTing to the VTA's REST API, this routes a DIDComm message <strong>browser → mediator → VTA → mediator → browser</strong> over a live WebSocket. It authenticates to the mediator (subprotocol-bearer WS), enables message-pickup 3.0 live delivery, sends a <code>trust-ping</code> wrapped in <code>routing/2.0/forward</code> addressed to the VTA, and awaits the thid-correlated <code>ping-response</code>. Reuses the ephemeral client DID from Step 8. Trust-ping needs no VTA ACL — only that the mediator lets the client connect.</p>
+    <label>
+      VTA DID
+      <input id="dmVtaDid" type="text" placeholder="did:webvh:…:glenn-vta">
+    </label>
+    <label>
+      Mediator DID (leave blank to auto-derive from the VTA's <code>#vta-didcomm</code> service)
+      <input id="dmMediatorDid" type="text" placeholder="(auto)">
+    </label>
+    <div class="row">
+      <button id="dmConnect" disabled>Connect via mediator + trust-ping</button>
+    </div>
+    <pre id="dmOutput" class="output"></pre>
+  </section>
+
   <footer>
     <p>Source: <code>examples/vta-auth-demo/</code> · See the in-tree <a href="./README.md">README</a> for run instructions and the auth-flow notes.</p>
   </footer>
