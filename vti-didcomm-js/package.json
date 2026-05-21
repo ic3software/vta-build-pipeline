@@ -1,5 +1,5 @@
 {
-  "name": "vti-didcomm-js",
+  "name": "@openvtc/vti-didcomm-js",
   "version": "0.1.0",
   "description": "Browser-side DIDComm v2 implementation for the Verifiable Trust Infrastructure. Focused subset: authcrypt (ECDH-1PU + A256CBC-HS512), did:key + did:webvh resolution, VTA REST auth, and ATM mediator transport. Byte-compatible with affinidi-messaging-didcomm.",
   "type": "module",

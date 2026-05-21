@@ -44,14 +44,14 @@ BBS+, attachments beyond the forward envelope.
 ## Install
 
 ```sh
-npm install vti-didcomm-js
+npm install @openvtc/vti-didcomm-js
 ```
 
 ## Usage
 
 ```js
-import { pack, unpack, packAnoncrypt, resolve } from "vti-didcomm-js";
-import * as jwk from "vti-didcomm-js/jwk";
+import { pack, unpack, packAnoncrypt, resolve } from "@openvtc/vti-didcomm-js";
+import * as jwk from "@openvtc/vti-didcomm-js/jwk";
 
 // Resolve a recipient and pack an authcrypt message to its keyAgreement.
 const { didDocument } = await resolve("did:webvh:…:vta");
@@ -71,13 +71,13 @@ const { message, senderKid, authenticated } = await unpack(jwe, {
 
 Higher-level helpers:
 
-- `vti-didcomm-js/vta-rest-auth` — `authenticate` / `refresh` against a
+- `@openvtc/vti-didcomm-js/vta-rest-auth` — `authenticate` / `refresh` against a
   VTA's REST `/auth/` surface.
-- `vti-didcomm-js/vta-didcomm` — `connectVtaViaMediator` →
+- `@openvtc/vti-didcomm-js/vta-didcomm` — `connectVtaViaMediator` →
   `client.sendAndWait(type, body)` over a mediator WebSocket.
 
-Each module is also a subpath export (e.g. `vti-didcomm-js/pack`,
-`vti-didcomm-js/resolver`, `vti-didcomm-js/mediator-transport`).
+Each module is also a subpath export (e.g. `@openvtc/vti-didcomm-js/pack`,
+`@openvtc/vti-didcomm-js/resolver`, `@openvtc/vti-didcomm-js/mediator-transport`).
 
 ## Module map
 
