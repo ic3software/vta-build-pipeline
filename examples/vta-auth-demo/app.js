@@ -120,6 +120,7 @@ const els = {
   daVtaDid: $("daVtaDid"),
   daGenerate: $("daGenerate"),
   daAuthenticate: $("daAuthenticate"),
+  daRefresh: $("daRefresh"),
   daOutput: $("daOutput"),
 };
 
@@ -947,6 +948,9 @@ els.daAuthenticate.addEventListener("click", async () => {
       },
     });
 
+    // Enable refresh only if the VTA actually issued a refresh token.
+    els.daRefresh.disabled = !result.refreshToken;
+
     setOutput(
       els.daOutput,
       [
@@ -955,8 +959,66 @@ els.daAuthenticate.addEventListener("click", async () => {
         `Access token (truncated): ${result.accessToken.slice(0, 32)}…`,
         `Expires at: ${new Date(result.accessExpiresAt * 1000).toISOString()}`,
         result.refreshToken
-          ? `Refresh token present (expires ${new Date((result.refreshExpiresAt ?? 0) * 1000).toISOString()})`
+          ? `Refresh token present (expires ${new Date((result.refreshExpiresAt ?? 0) * 1000).toISOString()}) — "Refresh access token" enabled.`
           : `No refresh token`,
+      ].join("\n"),
+      "ok",
+    );
+  } catch (e) {
+    setOutput(els.daOutput, e.message, "err");
+  }
+});
+
+els.daRefresh.addEventListener("click", async () => {
+  if (!ephemeralClient.privateKey) {
+    setOutput(els.daOutput, "Authenticate via Section 8 first.", "err");
+    return;
+  }
+  if (!state.refreshToken) {
+    setOutput(els.daOutput, "No refresh token in state — authenticate first.", "err");
+    return;
+  }
+  const vtaDid = els.daVtaDid.value.trim();
+  if (!vtaDid) {
+    setOutput(els.daOutput, "Enter the VTA's DID first.", "err");
+    return;
+  }
+  clearOutput(els.daOutput);
+
+  try {
+    const lib = await loadDidcommLib();
+    const result = await lib.vtaRestAuth.refresh({
+      baseUrl: baseUrl(),
+      vtaDid,
+      clientDid: ephemeralClient.did,
+      clientX25519Private: ephemeralClient.privateKey,
+      clientX25519Public: ephemeralClient.publicKey,
+      clientKid: ephemeralClient.kid,
+      // RFC 6749 §10.4 rotation: this token is single-use. storeAuth
+      // below overwrites state.refreshToken with the rotated one.
+      refreshToken: state.refreshToken,
+    });
+
+    storeAuth({
+      sessionId: result.sessionId,
+      data: {
+        accessToken: result.accessToken,
+        accessExpiresAt: result.accessExpiresAt,
+        refreshToken: result.refreshToken,
+        refreshExpiresAt: result.refreshExpiresAt,
+      },
+    });
+    els.daRefresh.disabled = !result.refreshToken;
+
+    setOutput(
+      els.daOutput,
+      [
+        `Refreshed access token.`,
+        `New access token (truncated): ${result.accessToken.slice(0, 32)}…`,
+        `Expires at: ${new Date(result.accessExpiresAt * 1000).toISOString()}`,
+        result.refreshToken
+          ? `Refresh token rotated (the previous one is now single-use spent).`
+          : `No new refresh token returned.`,
       ].join("\n"),
       "ok",
     );

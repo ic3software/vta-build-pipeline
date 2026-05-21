@@ -15,14 +15,13 @@ server and click around.
 | 5 | Session inspection + revoke               | `GET /auth/sessions`, `DELETE /auth/sessions/{id}`    | implemented |
 | 6 | Trust-task dispatch                       | `POST /api/trust-tasks` with bearer auth              | implemented |
 | 7 | DIDComm primitives smoke-test             | (purely client-side; resolve + pack against any DID)  | implemented |
-| 8 | DIDComm-packed `/auth/` end-to-end          | `POST /auth/challenge` + `POST /auth/`                | implemented |
-| — | Refresh                                   | `POST /auth/refresh`                                  | **not in demo** |
+| 8 | DIDComm-packed `/auth/` + refresh end-to-end | `POST /auth/challenge` + `POST /auth/` + `POST /auth/refresh` | implemented |
 
-The legacy challenge/authenticate flow is now driven from the browser
-via `vti-didcomm-js` (Step 8) — same authcrypt format the VTA's
-`affinidi-messaging-didcomm-0.13` decrypt path actually accepts.
-Refresh remains "use the SDK" for now; the wire shape is the same as
-authenticate.
+The legacy challenge/authenticate **and** refresh flows are now driven
+from the browser via `vti-didcomm-js` (Step 8) — same authcrypt format
+the VTA's `affinidi-messaging-didcomm-0.13` decrypt path actually
+accepts. Refresh rotates the token (RFC 6749 §10.4): each refresh
+returns a new refresh token and the old one is single-use.
 
 ## Prerequisites
 
@@ -170,6 +169,12 @@ needed.
        passkey login.
    - This is the browser-side equivalent of `pnm auth show-token`;
      useful for testing the wire flow without a CLI dependency.
+   - **Refresh access token** (enabled after a successful auth that
+     returned a refresh token) packs a `.../authenticate/refresh`
+     message to the VTA, POSTs it to `/auth/refresh`, and stores the
+     rotated token pair. Reuses the same ephemeral client identity —
+     so it only works for a session established via Step 8, not one
+     from passkey login.
 
 ## What the multikey computation does
 
