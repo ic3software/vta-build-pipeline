@@ -944,7 +944,12 @@ fn run_rest_thread(
                     .on_response(DefaultOnResponse::new().level(Level::INFO)),
             );
 
-        let app = traced_routes.merge(routes::health_router().with_state(state));
+        // `/health` stays out of the trace + metrics layers (it's a
+        // high-frequency probe), but still needs the API's CORS policy
+        // so browser tools can run their cross-origin connectivity
+        // check against it.
+        let app =
+            traced_routes.merge(routes::health_router_with_cors(&cors_origins).with_state(state));
 
         let shutdown_rx = shutdown_rx.clone();
         axum::serve(

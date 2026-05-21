@@ -76,6 +76,26 @@ pub fn health_router() -> Router<AppState> {
     Router::new().route("/health", get(health::health))
 }
 
+/// Health-check route with the same CORS policy as the API surface.
+///
+/// `/health` is deliberately kept out of the trace + metrics layers
+/// (it's a high-frequency liveness probe and would swamp the logs),
+/// which is why `server.rs` merges it *after* those layers are applied
+/// to the main router. CORS, however, must still cover it: browser
+/// tools (e.g. `examples/vta-auth-demo`) probe `/health` cross-origin
+/// as their first connectivity check, and without an
+/// `Access-Control-Allow-Origin` header the browser blocks the read
+/// with an opaque "Failed to fetch". Apply the same origin allowlist
+/// here so the probe works whenever the API CORS is configured; an
+/// empty allowlist yields no layer (legacy no-cross-origin behaviour).
+pub fn health_router_with_cors(allowed_origins: &[String]) -> Router<AppState> {
+    let router = health_router();
+    match build_cors_layer(allowed_origins) {
+        Some(cors) => router.layer(cors),
+        None => router,
+    }
+}
+
 /// Build a CORS layer from a list of allowed origins. Returns
 /// `None` when the list is empty — the caller must skip the layer
 /// in that case so a fresh-install VTA keeps the legacy
@@ -527,5 +547,17 @@ mod cors_tests {
         // skipped, not turned into an empty header value.
         let layer = build_cors_layer(&["".to_string(), "http://x".to_string()]);
         assert!(layer.is_some());
+    }
+
+    #[test]
+    fn health_router_with_cors_builds_both_branches() {
+        // Both the with-origins (layer applied) and empty (no layer)
+        // branches must construct without panicking. `.layer(cors)`
+        // on a wildcard would panic inside tower-http, but
+        // `build_cors_layer` filters wildcards to `None` first — this
+        // guards the wiring that depends on that invariant.
+        let _with = health_router_with_cors(&["http://localhost:8000".to_string()]);
+        let _without = health_router_with_cors(&[]);
+        let _wildcard_only = health_router_with_cors(&["*".to_string()]);
     }
 }
