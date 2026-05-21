@@ -41,8 +41,21 @@ const FORWARD_MESSAGE_TYPE = "https://didcomm.org/routing/2.0/forward";
  */
 export function buildForward({ next, from, mediatorDid, innerJwe }) {
   assertNonEmptyString("next", next);
-  assertNonEmptyString("from", from);
-  assertNonEmptyString("mediatorDid", mediatorDid);
+  // `from` + `mediatorDid` are optional: omit them for an ANONCRYPT
+  // forward (the standard DIDComm shape — the mediator is the
+  // recipient via the JWE encryption, not the plaintext `to`, and an
+  // anoncrypt forward carries no sender). Supply them for an
+  // AUTHCRYPT forward, where the sender is bound and `to` names the
+  // mediator. If one is given, both must be.
+  const hasFrom = from !== undefined && from !== null;
+  const hasMediator = mediatorDid !== undefined && mediatorDid !== null;
+  if (hasFrom !== hasMediator) {
+    throw new TypeError("buildForward: pass both `from` and `mediatorDid`, or neither");
+  }
+  if (hasFrom) {
+    assertNonEmptyString("from", from);
+    assertNonEmptyString("mediatorDid", mediatorDid);
+  }
 
   let inner;
   if (typeof innerJwe === "string") {
@@ -57,15 +70,18 @@ export function buildForward({ next, from, mediatorDid, innerJwe }) {
     throw new TypeError("buildForward: innerJwe must be a JWE JSON string or object");
   }
 
-  return {
+  const message = {
     id: `urn:uuid:${randomUuid()}`,
     typ: "application/didcomm-plain+json",
     type: FORWARD_MESSAGE_TYPE,
-    from,
-    to: [mediatorDid],
     body: { next },
     attachments: [{ data: { json: inner } }],
   };
+  if (hasFrom) {
+    message.from = from;
+    message.to = [mediatorDid];
+  }
+  return message;
 }
 
 export { FORWARD_MESSAGE_TYPE };

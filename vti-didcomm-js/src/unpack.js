@@ -1,44 +1,38 @@
-// Authcrypt JWE unpack — reverse of `pack.js`.
+// JWE unpack — reverse of `pack.js` (authcrypt) and `anoncrypt.js`.
 //
-// Inputs the recipient holds:
-//   - Their `kid` (so they know which `recipients[]` entry to use).
-//   - Their X25519 private key.
-//   - The sender's X25519 public key (looked up by `skid` from the
-//     JWE protected header). This module takes the resolved public
-//     key as a parameter so DID resolution is the caller's concern
-//     (see B3 for the resolver).
+// Dispatches on the protected header's `alg`:
+//   - "ECDH-1PU+A256KW" (authcrypt): sender-bound. Requires the
+//     sender's X25519 public key (resolved out-of-band from `skid`).
+//     The content-encryption tag is folded into the Concat KDF as
+//     SuppPrivInfo, so a tampered ciphertext fails the AES-KW
+//     integrity check before decryption.
+//   - "ECDH-ES+A256KW" (anoncrypt): no sender. No `skid`/`apu`, no
+//     SuppPrivInfo. `sender` is ignored and `senderKid` is undefined.
 //
-// Unpack steps:
-//
-//   1. Parse the JWE JSON.
-//   2. Decode + validate the protected header.
-//   3. Find the recipients[] entry matching our kid.
-//   4. Read the content-encryption auth tag from the JWE (we need
-//      it as Concat KDF SuppPrivInfo — see pack.js for why).
-//   5. Derive the KEK via recipient-side ECDH-1PU, binding `tag`.
-//   6. Unwrap the CEK with AES-KW. Tampered ciphertext flips the
-//      tag, which flips the KEK, which makes this step fail with
-//      "integrity check failed" before we even attempt to decrypt.
-//   7. A256CBC-HS512 decrypt the ciphertext with the CEK + AAD=protected.
-//   8. Parse the plaintext as JSON; return { message, senderKid }.
+// The recipient supplies their `kid` + X25519 private key. For
+// authcrypt the caller resolves the sender's public key (see the
+// resolver) and passes it in.
 
 import * as a256cbcHs512 from "./a256cbc-hs512.js";
 import * as aes from "./aes.js";
 import * as b64u from "./base64url.js";
 import * as ecdh1pu from "./ecdh-1pu.js";
+import * as ecdhEs from "./ecdh-es.js";
 import * as jwk from "./jwk.js";
 
-const ALG = "ECDH-1PU+A256KW";
+const ALG_AUTHCRYPT = "ECDH-1PU+A256KW";
+const ALG_ANONCRYPT = "ECDH-ES+A256KW";
 const ENC = "A256CBC-HS512";
 
 /**
- * Unpack an authcrypt JWE.
+ * Unpack an authcrypt or anoncrypt JWE.
  *
  * @param {string} jweJson - JWE as a JSON string
  * @param {Object} recipient - `{ kid, privateJwk }`
- * @param {Object} sender    - `{ publicJwk }` — the sender's X25519
- *   public key, resolved out-of-band from `skid` in the JWE header.
- * @returns {Promise<{ message: Object, senderKid: string }>}
+ * @param {Object} [sender] - `{ publicJwk }` — the sender's X25519
+ *   public key, required for authcrypt (ECDH-1PU), ignored for
+ *   anoncrypt (ECDH-ES).
+ * @returns {Promise<{ message: Object, senderKid: string|undefined, authenticated: boolean }>}
  */
 export async function unpack(jweJson, recipient, sender) {
   if (typeof jweJson !== "string") {
@@ -46,9 +40,6 @@ export async function unpack(jweJson, recipient, sender) {
   }
   if (!recipient?.kid || !recipient?.privateJwk) {
     throw new TypeError("unpack: recipient.{kid, privateJwk} required");
-  }
-  if (!sender?.publicJwk) {
-    throw new TypeError("unpack: sender.publicJwk required");
   }
 
   let jwe;
@@ -69,8 +60,12 @@ export async function unpack(jweJson, recipient, sender) {
     throw new Error(`unpack: protected header not JSON: ${e.message}`);
   }
 
-  if (header.alg !== ALG) {
-    throw new Error(`unpack: unsupported alg ${JSON.stringify(header.alg)}; expected ${ALG}`);
+  const isAuthcrypt = header.alg === ALG_AUTHCRYPT;
+  const isAnoncrypt = header.alg === ALG_ANONCRYPT;
+  if (!isAuthcrypt && !isAnoncrypt) {
+    throw new Error(
+      `unpack: unsupported alg ${JSON.stringify(header.alg)}; expected ${ALG_AUTHCRYPT} or ${ALG_ANONCRYPT}`,
+    );
   }
   if (header.enc !== ENC) {
     throw new Error(`unpack: unsupported enc ${JSON.stringify(header.enc)}; expected ${ENC}`);
@@ -78,14 +73,14 @@ export async function unpack(jweJson, recipient, sender) {
   if (!header.epk || header.epk.kty !== "OKP" || header.epk.crv !== "X25519") {
     throw new Error(`unpack: epk must be OKP/X25519`);
   }
-  if (!header.skid) {
-    throw new Error("unpack: protected header missing skid");
+  if (isAuthcrypt && !header.skid) {
+    throw new Error("unpack: authcrypt protected header missing skid");
+  }
+  if (isAuthcrypt && !sender?.publicJwk) {
+    throw new TypeError("unpack: sender.publicJwk required for authcrypt");
   }
 
-  // 2. Find our recipients[] entry. Single-recipient mode in this
-  //    implementation — but the JWE structure carries an array, so
-  //    handle either an exact kid match or (for compatibility) the
-  //    first entry when there's exactly one and no kid header on it.
+  // 2. Find our recipients[] entry.
   const recipientEntry = jwe.recipients.find(
     (r) => r?.header?.kid === recipient.kid,
   );
@@ -98,54 +93,51 @@ export async function unpack(jweJson, recipient, sender) {
     throw new Error("unpack: matched recipients[] entry has no encrypted_key");
   }
 
-  // 3. Read the content-encryption auth tag, IV, ciphertext from
-  //    the JWE. We need `tag` BEFORE deriving the KEK because
-  //    ECDH-1PU+A256KW folds it into Concat KDF as SuppPrivInfo.
+  // 3. Read IV, ciphertext, tag. For authcrypt the tag is also the
+  //    Concat KDF SuppPrivInfo, so it's needed before deriving the KEK.
   const iv = b64u.decode(jwe.iv);
   const ciphertext = b64u.decode(jwe.ciphertext);
   const tag = b64u.decode(jwe.tag);
   const aad = new TextEncoder().encode(protectedB64);
 
-  // 4. Derive the KEK via recipient-side ECDH-1PU.
+  // 4. Derive the KEK (algorithm-dependent).
   const recipientPriv = jwk.rawPrivate(recipient.privateJwk);
   const ephemeralPublic = b64u.decode(header.epk.x);
   if (ephemeralPublic.length !== 32) {
     throw new Error(`unpack: epk.x must decode to 32 bytes, got ${ephemeralPublic.length}`);
   }
-  const senderPublic = jwk.rawPublic(sender.publicJwk);
-
-  // The KDF inputs use the RAW apu/apv bytes (NOT the base64url
-  // strings on the wire). Decode here.
   const apuBytes = header.apu ? b64u.decode(header.apu) : new Uint8Array();
   const apvBytes = header.apv ? b64u.decode(header.apv) : new Uint8Array();
 
-  const kek = await ecdh1pu.recipientKekAuthcrypt({
-    recipientPrivate: recipientPriv,
-    ephemeralPublic,
-    senderPublic,
-    alg: ALG,
-    apu: apuBytes,
-    apv: apvBytes,
-    ccTag: tag,
-  });
+  let kek;
+  if (isAuthcrypt) {
+    kek = await ecdh1pu.recipientKekAuthcrypt({
+      recipientPrivate: recipientPriv,
+      ephemeralPublic,
+      senderPublic: jwk.rawPublic(sender.publicJwk),
+      alg: ALG_AUTHCRYPT,
+      apu: apuBytes,
+      apv: apvBytes,
+      ccTag: tag,
+    });
+  } else {
+    kek = await ecdhEs.recipientKekAnoncrypt({
+      recipientPrivate: recipientPriv,
+      ephemeralPublic,
+      alg: ALG_ANONCRYPT,
+      apu: apuBytes,
+      apv: apvBytes,
+    });
+  }
 
   // 5. Unwrap the CEK.
   const encryptedKey = b64u.decode(recipientEntry.encrypted_key);
   const cek = await aes.unwrapKey(kek, encryptedKey);
 
-  // 6. A256CBC-HS512 decrypt. AAD is the ASCII bytes of the
-  //    base64url protected header — same encoding as the sender
-  //    used.
-
+  // 6. A256CBC-HS512 decrypt.
   let plaintext;
   try {
-    plaintext = await a256cbcHs512.decrypt({
-      cek,
-      iv,
-      aad,
-      ciphertext,
-      tag,
-    });
+    plaintext = await a256cbcHs512.decrypt({ cek, iv, aad, ciphertext, tag });
   } catch (e) {
     throw new Error(`unpack: A256CBC-HS512 decrypt failed: ${e.message}`);
   } finally {
@@ -153,7 +145,7 @@ export async function unpack(jweJson, recipient, sender) {
     kek.fill(0);
   }
 
-  // 6. Parse the plaintext.
+  // 7. Parse the plaintext.
   let message;
   try {
     message = JSON.parse(new TextDecoder().decode(plaintext));
@@ -161,7 +153,11 @@ export async function unpack(jweJson, recipient, sender) {
     throw new Error(`unpack: plaintext not JSON: ${e.message}`);
   }
 
-  return { message, senderKid: header.skid };
+  return {
+    message,
+    senderKid: isAuthcrypt ? header.skid : undefined,
+    authenticated: isAuthcrypt,
+  };
 }
 
 function assertJweShape(jwe) {

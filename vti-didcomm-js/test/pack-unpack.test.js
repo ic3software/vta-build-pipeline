@@ -182,11 +182,13 @@ test("unpack with mismatched recipient kid throws", async () => {
 test("unpack rejects unsupported alg", async () => {
   const recipient = makeParty("did:key:zRecipient#x");
   const sender = makeParty("did:key:zSender#x");
-  // Build a JWE with the wrong alg in protected.
+  // Build a JWE with an unsupported alg in protected. (ECDH-1PU and
+  // ECDH-ES with A256KW are both supported now; use a key-wrap size
+  // we don't implement so the alg check fires.)
   const protectedHeader = {
     typ: "application/didcomm-encrypted+json",
-    alg: "ECDH-ES+A256KW", // ANONcrypt, not what we support
-    enc: "A256GCM",
+    alg: "ECDH-1PU+A128KW", // unsupported key-wrap size
+    enc: "A256CBC-HS512",
     apu: "",
     apv: "",
     skid: sender.kid,
