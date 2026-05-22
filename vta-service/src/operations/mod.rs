@@ -40,6 +40,7 @@ pub mod protocol;
 #[cfg(feature = "webvh")]
 pub mod provision_integration;
 pub mod seeds;
+pub mod step_up_approval;
 
 use crate::store::KeyspaceHandle;
 

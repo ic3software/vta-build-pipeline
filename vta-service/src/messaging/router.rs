@@ -440,6 +440,13 @@ pub fn build_handler(
         handler_fn(handlers::handle_provision_integration),
     )?;
 
+    // Step-up approval — the VTA vouches (signs as itself) that a holder
+    // may step up their session at a relying party. Always available.
+    router = router.route(
+        handlers::STEP_UP_APPROVE_REQUEST_TYPE,
+        handler_fn(handlers::handle_step_up_approve),
+    )?;
+
     // TEE attestation handlers (feature-gated)
     #[cfg(feature = "tee")]
     {

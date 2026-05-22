@@ -1547,6 +1547,108 @@ pub async fn handle_rotate_did_webvh_keys(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Step-up approval (VTA vouches a holder may step up at a relying party)
+// ---------------------------------------------------------------------------
+
+/// Inbound DIDComm message type for a step-up approval request. The
+/// authcrypt sender is the holder (`sub`); the body carries the RP DID +
+/// nonce. The plugin (Slice C) sends this.
+pub(crate) const STEP_UP_APPROVE_REQUEST_TYPE: &str =
+    "https://trusttasks.org/vta/step-up/approve-request/1.0";
+
+/// Outbound DIDComm message type carrying the signed approval token.
+pub(crate) const STEP_UP_APPROVE_RESPONSE_TYPE: &str =
+    "https://trusttasks.org/vta/step-up/approve-response/1.0";
+
+/// Request body for [`handle_step_up_approve`].
+#[derive(serde::Deserialize)]
+struct StepUpApproveRequestBody {
+    rp_did: String,
+    nonce: String,
+}
+
+/// Response body: the compact-JWS approval token the VTA signed.
+#[derive(serde::Serialize)]
+struct StepUpApproveResponseBody {
+    approval_token: String,
+}
+
+/// DIDComm handler for `step-up/approve-request/1.0`.
+///
+/// The authcrypt **sender DID** is the holder (`sub`). On success the VTA
+/// signs an approval token (`iss = vta_did`, `sub = holder`, `aud = rp_did`)
+/// with its `{vta_did}#key-0` key and returns it in a
+/// `step-up/approve-response/1.0` message.
+pub async fn handle_step_up_approve(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    // The holder is the authcrypt-authenticated sender DID. We don't
+    // require an ACL role — any authenticated holder may *request* a
+    // step-up; the policy gate below decides whether to vouch.
+    let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
+    let holder_did = auth.did.clone();
+
+    let body: StepUpApproveRequestBody =
+        serde_json::from_value(message.body).map_err(handler_err)?;
+
+    // Approval gate (stub — always approves for now).
+    if !operations::step_up_approval::step_up_policy_approve(&holder_did, &body.rp_did) {
+        return Ok(Some(app_err_to_response(AppError::Forbidden(format!(
+            "step-up approval denied for holder {holder_did} at {}",
+            body.rp_did
+        )))));
+    }
+
+    // The VTA's own DID — same source the WebVH handlers use.
+    let vta_did = match state.config.read().await.vta_did.clone() {
+        Some(d) => d,
+        None => {
+            return Ok(Some(app_err_to_response(AppError::Internal(
+                "VTA DID not configured; cannot issue step-up approval".into(),
+            ))));
+        }
+    };
+
+    let signing_key = app_try!(
+        operations::step_up_approval::load_vta_key0_signing_key(
+            &state.keys_ks,
+            &state.imported_ks,
+            &*state.seed_store,
+            &state.audit_ks,
+            &vta_did,
+        )
+        .await
+    );
+
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let approval_token = app_try!(operations::step_up_approval::build_vta_approval_token(
+        &vta_did,
+        &holder_did,
+        &body.rp_did,
+        &body.nonce,
+        iat,
+        &signing_key,
+    ));
+
+    info!(
+        holder = %holder_did,
+        rp = %body.rp_did,
+        "issued VTA step-up approval token via DIDComm"
+    );
+
+    response(
+        STEP_UP_APPROVE_RESPONSE_TYPE,
+        &StepUpApproveResponseBody { approval_token },
+    )
+}
+
 pub async fn handle_unknown(_ctx: HandlerContext, message: Message) -> HandlerResult {
     let from = message.from.as_deref().unwrap_or("unknown");
     let thid = message.thid.as_deref().unwrap_or("none");
