@@ -1,8 +1,10 @@
+use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use tracing::info;
 
 use crate::audit::{self, audit};
 use vta_sdk::protocols::acl_management::{
     create::CreateAclResultBody, delete::DeleteAclResultBody, list::ListAclResultBody,
+    swap::AclSwapPresentation,
 };
 
 use crate::acl::{
@@ -325,6 +327,96 @@ pub async fn delete_acl(
         did: did.to_string(),
         deleted: true,
     })
+}
+
+/// Atomic self-service key rotation. The authenticated caller (`auth.did` =
+/// the "old" DID) presents a VP-JWT proving control of a "new" DID; we verify
+/// it, then move the caller's ACL entry (same role + contexts) onto the new
+/// DID and delete the old one.
+///
+/// Self-service by design: no `require_manage()` — the caller only moves their
+/// *own* authorization to a new key, copying the existing role/contexts, so
+/// there's no privilege escalation. The new DID is proven (VP-JWT) rather than
+/// asserted, and the audience is bound to this VTA. Ordering is create-new →
+/// delete-old, so a failure after the first write leaves the old DID valid
+/// (never a lockout).
+#[allow(clippy::too_many_arguments)]
+pub async fn swap_acl(
+    acl_ks: &KeyspaceHandle,
+    audit_ks: &KeyspaceHandle,
+    auth: &AuthClaims,
+    presentation: &str,
+    did_resolver: &DIDCacheClient,
+    vta_did: &str,
+    channel: &str,
+) -> Result<CreateAclResultBody, AppError> {
+    // Resolve the *claimed* new DID so we can verify the proof was made by a
+    // key in its document. The claim is untrusted until `verify` succeeds.
+    let pres = AclSwapPresentation::new(presentation);
+    let claimed = pres
+        .peek_holder()
+        .map_err(|e| AppError::Authentication(format!("swap presentation: {e}")))?;
+    let resolved = did_resolver
+        .resolve(&claimed)
+        .await
+        .map_err(|e| AppError::Validation(format!("resolve new DID {claimed}: {e}")))?;
+    let doc = serde_json::to_value(&resolved.doc)?;
+
+    let now = now_epoch();
+    let verified = pres
+        .verify(&doc, vta_did, now)
+        .map_err(|e| AppError::Authentication(format!("swap presentation: {e}")))?;
+    let new_did = verified.holder().to_string();
+
+    if new_did == auth.did {
+        return Err(AppError::Conflict(
+            "new DID equals current DID; nothing to swap".into(),
+        ));
+    }
+
+    // The caller's own entry is what gets moved.
+    let old = get_acl_entry(acl_ks, &auth.did)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("no ACL entry for caller: {}", auth.did)))?;
+    if get_acl_entry(acl_ks, &new_did).await?.is_some() {
+        return Err(AppError::Conflict(format!(
+            "ACL entry already exists for DID: {new_did}"
+        )));
+    }
+
+    let entry = AclEntry {
+        did: new_did.clone(),
+        role: old.role.clone(),
+        label: old.label.clone(),
+        allowed_contexts: old.allowed_contexts.clone(),
+        created_at: now,
+        created_by: auth.did.clone(),
+        expires_at: old.expires_at,
+    };
+
+    // Create new before deleting old: a crash between the two leaves the old
+    // DID authoritative (stale, not locked out).
+    store_acl_entry(acl_ks, &entry).await?;
+    delete_acl_entry(acl_ks, &auth.did).await?;
+
+    info!(channel, old = %auth.did, new = %new_did, role = %entry.role, "ACL entry swapped");
+    audit!(
+        "acl.swap",
+        actor = &auth.did,
+        resource = &new_did,
+        outcome = "success"
+    );
+    let _ = audit::record(
+        audit_ks,
+        "acl.swap",
+        &auth.did,
+        Some(&new_did),
+        "success",
+        Some(channel),
+        None,
+    )
+    .await;
+    Ok(to_result_body(&entry))
 }
 
 #[cfg(test)]

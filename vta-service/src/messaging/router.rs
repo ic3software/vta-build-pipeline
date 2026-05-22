@@ -287,6 +287,10 @@ pub fn build_handler(
             acl_management::DELETE_ACL,
             handler_fn(handlers::handle_delete_acl),
         )?
+        .route(
+            acl_management::SWAP_ACL,
+            handler_fn(handlers::handle_swap_acl),
+        )?
         // Audit management
         .route(
             audit_management::LIST_LOGS,

@@ -2,6 +2,7 @@ pub mod create;
 pub mod delete;
 pub mod get;
 pub mod list;
+pub mod swap;
 pub mod update;
 
 pub const PROTOCOL_BASE: &str = "https://firstperson.network/protocols/acl-management/1.0";
@@ -25,3 +26,7 @@ pub const UPDATE_ACL_RESULT: &str =
 pub const DELETE_ACL: &str = "https://firstperson.network/protocols/acl-management/1.0/delete-acl";
 pub const DELETE_ACL_RESULT: &str =
     "https://firstperson.network/protocols/acl-management/1.0/delete-acl-result";
+
+pub const SWAP_ACL: &str = "https://firstperson.network/protocols/acl-management/1.0/swap-acl";
+pub const SWAP_ACL_RESULT: &str =
+    "https://firstperson.network/protocols/acl-management/1.0/swap-acl-result";

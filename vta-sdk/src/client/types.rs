@@ -341,6 +341,23 @@ impl CreateAclRequest {
     }
 }
 
+/// Request for `swap-acl` — atomic self-service key rotation. Carries the
+/// VP-JWT (compact Ed25519 JWS) proving control of the new DID; the caller's
+/// own ACL entry is moved onto the new DID server-side.
+#[derive(Debug, Serialize)]
+#[must_use]
+pub struct SwapAclRequest {
+    pub presentation: String,
+}
+
+impl SwapAclRequest {
+    pub fn new(presentation: impl Into<String>) -> Self {
+        Self {
+            presentation: presentation.into(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct UpdateAclRequest {
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -300,6 +300,9 @@ pub fn router_with_cors(allowed_origins: &[String]) -> Router<AppState> {
         )
         // ACL routes (flattened for consistency)
         .route("/acl", get(acl::list_acl).post(acl::create_acl))
+        // Static segment registered before `/acl/{did}` so it isn't captured
+        // as a DID. Self-service key rotation (any authenticated caller).
+        .route("/acl/swap", post(acl::swap_acl))
         .route(
             "/acl/{did}",
             get(acl::get_acl)

@@ -547,6 +547,41 @@ pub async fn handle_create_acl(
     response(acl_management::CREATE_ACL_RESULT, &result)
 }
 
+pub async fn handle_swap_acl(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    // No require_manage(): self-service rotation of the caller's own entry.
+    let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
+    let body: vta_sdk::protocols::acl_management::swap::SwapAclBody =
+        serde_json::from_value(message.body).map_err(handler_err)?;
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| handler_err("DID resolver not available"))?;
+    let vta_did = {
+        let config = state.config.read().await;
+        config
+            .vta_did
+            .clone()
+            .ok_or_else(|| handler_err("VTA DID not configured"))?
+    };
+    let result = app_try!(
+        operations::acl::swap_acl(
+            &state.acl_ks,
+            &state.audit_ks,
+            &auth,
+            &body.presentation,
+            did_resolver,
+            &vta_did,
+            "didcomm",
+        )
+        .await
+    );
+    response(acl_management::SWAP_ACL_RESULT, &result)
+}
+
 pub async fn handle_get_acl(
     _ctx: HandlerContext,
     message: Message,
