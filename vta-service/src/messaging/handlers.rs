@@ -1585,11 +1585,22 @@ pub async fn handle_step_up_approve(
     message: Message,
     Extension(state): Extension<Arc<VtaState>>,
 ) -> HandlerResult {
-    // The holder is the authcrypt-authenticated sender DID. We don't
-    // require an ACL role — any authenticated holder may *request* a
-    // step-up; the policy gate below decides whether to vouch.
-    let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
-    let holder_did = auth.did.clone();
+    // The holder is the authcrypt-authenticated sender DID (the transport
+    // only surfaces sender-authenticated authcrypt frames). We do NOT
+    // require VTA-side ACL membership: the VTA vouches for the sender's
+    // OWN DID (`sub` == sender), and that approval is only useful to a
+    // caller who *also* holds an aal1 session as that DID at the RP (which
+    // checks `sub` == its session DID). So getting an approval requires
+    // possessing the holder key either way — the `step_up_policy_approve`
+    // gate below is the authorization control, not an ACL lookup.
+    let holder_did = match message.from.as_deref() {
+        Some(d) => d.split('#').next().unwrap_or(d).to_string(),
+        None => {
+            return Ok(Some(app_err_to_response(AppError::Authentication(
+                "step-up approve request has no authenticated sender".into(),
+            ))));
+        }
+    };
 
     let body: StepUpApproveRequestBody =
         serde_json::from_value(message.body).map_err(handler_err)?;
