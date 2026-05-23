@@ -123,19 +123,22 @@ fn router_with_inner(
 /// per-mount override can land without changing this function's
 /// signature.
 fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
-    let auth_sessions_manage =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/sessions/manage/1.0")
-            .expect("static Trust-Task URL");
+    // Canonical cross-cutting auth tasks from trusttasks-tf. The legacy
+    // openvtc/vtc/auth/legacy/* slugs were VTC-specific reimplementations
+    // of primitives that VTA + did-hosting also have; consolidating here
+    // so a multi-service deployment can use one client library.
+    let auth_sessions_manage = TrustTask::new("https://trusttasks.org/spec/auth/sessions/list/0.1")
+        .expect("static Trust-Task URL");
     let auth_sessions_revoke =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/sessions/revoke/1.0")
+        TrustTask::new("https://trusttasks.org/spec/auth/revoke-session/0.1")
             .expect("static Trust-Task URL");
     // Browser-SPA convenience surface: `whoami` + `sign-out`. Both
     // are bound to the access-token session (cookie or bearer);
     // sign-out revokes the server-side session and clears the
     // browser cookies in one trip.
-    let auth_whoami = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/whoami/1.0")
+    let auth_whoami = TrustTask::new("https://trusttasks.org/spec/auth/whoami/0.1")
         .expect("static Trust-Task URL");
-    let auth_sign_out = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/sign-out/1.0")
+    let auth_sign_out = TrustTask::new("https://trusttasks.org/spec/auth/revoke-session/0.1")
         .expect("static Trust-Task URL");
     // Audit log list — super-admin only since envelopes carry
     // plaintext DIDs.
@@ -768,27 +771,28 @@ fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
 /// - Per-IP `tower-governor` (5 rps + 10 burst) via
 ///   [`SmartIpKeyExtractor`].
 fn build_unauth_routes() -> Router<AppState> {
-    let auth_challenge =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/challenge/1.0")
-            .expect("static Trust-Task URL");
-    let auth_authenticate =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/authenticate/1.0")
-            .expect("static Trust-Task URL");
-    let auth_refresh = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/legacy/refresh/1.0")
+    // Canonical cross-cutting auth tasks from trusttasks-tf.
+    let auth_challenge = TrustTask::new("https://trusttasks.org/spec/auth/challenge/0.1")
         .expect("static Trust-Task URL");
-    // Phase 5 M5.2.3 — admin SPA cookie-session mint endpoint.
-    // Same DIDComm auth flow as `/auth/`; response additionally
-    // carries `Set-Cookie` headers (vtc_admin_session + csrf).
+    let auth_authenticate = TrustTask::new("https://trusttasks.org/spec/auth/authenticate/0.1")
+        .expect("static Trust-Task URL");
+    let auth_refresh = TrustTask::new("https://trusttasks.org/spec/auth/refresh/0.1")
+        .expect("static Trust-Task URL");
+    // Phase 5 M5.2.3 — admin SPA cookie-session mint endpoint. VTC-
+    // specific because the response includes Set-Cookie semantics
+    // (vtc_admin_session + csrf) that the canonical authenticate
+    // doesn't define. Stays under openvtc/vtc/ until the cookie
+    // semantics are absorbed into a binding spec.
     let auth_admin_login =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/admin-login/1.0")
             .expect("static Trust-Task URL");
-    // Browser-friendly passkey login. Separate start/finish so the
-    // WebAuthn ceremony can persist the auth_state between calls.
+    // Browser-friendly passkey login — same canonical spec serves
+    // initial login and AAL step-up via the payload's `purpose` field.
     let auth_passkey_login_start =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/passkey-login/start/1.0")
+        TrustTask::new("https://trusttasks.org/spec/auth/passkey/login/start/0.1")
             .expect("static Trust-Task URL");
     let auth_passkey_login_finish =
-        TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/passkey-login/finish/1.0")
+        TrustTask::new("https://trusttasks.org/spec/auth/passkey/login/finish/0.1")
             .expect("static Trust-Task URL");
     let install_claim_start =
         TrustTask::new("https://trusttasks.org/openvtc/vtc/install/claim/start/1.0")
