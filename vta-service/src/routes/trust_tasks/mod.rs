@@ -483,7 +483,7 @@ mod tests {
         // (`vta/auth/revoke-session`) per SPEC.md slug grammar.
         let canonical = serde_json::json!({
             "id": "urn:uuid:00000000-0000-0000-0000-000000000001",
-            "type": "https://trusttasks.org/spec/vta/auth/revoke-session/1.0",
+            "type": "https://trusttasks.org/spec/auth/revoke-session/0.1",
             "issuer": "did:example:alice",
             "recipient": "did:example:vta",
             "issuedAt": "2026-05-20T00:00:00Z",

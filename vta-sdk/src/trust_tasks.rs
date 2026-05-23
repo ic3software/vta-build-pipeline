@@ -54,37 +54,41 @@
 //! Remaining slices (keys, contexts, ACL, services, etc., ~70 more
 //! URIs) land in Phase 3 of the migration initiative.
 
-// ─── Auth slice (spec/vta/auth/*) ────────────────────────────────────────
+// ─── Auth slice — canonical cross-cutting specs ──────────────────────────
+//
+// These point at the framework's `spec/auth/*/0.1` canonical specs in the
+// trusttasks-tf registry. VTA was the first implementer; the constant names
+// keep their `_1_0` suffix for cargo-grep continuity but the URIs are now
+// the canonical 0.1 specs. When the canonical specs cure to candidate /
+// standard the constants will follow with a `_0_1` rename pass.
 
-/// `spec/vta/auth/challenge/1.0` — request a nonce for a DID.
-pub const TASK_AUTH_CHALLENGE_1_0: &str = "https://trusttasks.org/spec/vta/auth/challenge/1.0";
+/// `spec/auth/challenge/0.1` — request a one-time nonce for a subject DID.
+pub const TASK_AUTH_CHALLENGE_1_0: &str = "https://trusttasks.org/spec/auth/challenge/0.1";
 
-/// `spec/vta/auth/authenticate/1.0` — sign the challenge with a
-/// DID-key JWS (legacy auth flow; passkey login uses
-/// `passkey-login-finish/1.0`).
-pub const TASK_AUTH_AUTHENTICATE_1_0: &str =
-    "https://trusttasks.org/spec/vta/auth/authenticate/1.0";
+/// `spec/auth/authenticate/0.1` — present the signed challenge inside a
+/// proof-bearing Trust Task document; the proof IS the authentication.
+pub const TASK_AUTH_AUTHENTICATE_1_0: &str = "https://trusttasks.org/spec/auth/authenticate/0.1";
 
-/// `spec/vta/auth/refresh/1.0` — refresh an access token.
-pub const TASK_AUTH_REFRESH_1_0: &str = "https://trusttasks.org/spec/vta/auth/refresh/1.0";
+/// `spec/auth/refresh/0.1` — exchange a refresh token for a fresh access
+/// token. Scope-monotonic.
+pub const TASK_AUTH_REFRESH_1_0: &str = "https://trusttasks.org/spec/auth/refresh/0.1";
 
-/// `spec/vta/auth/revoke-session/1.0` — revoke a session by id.
+/// `spec/auth/revoke-session/0.1` — revoke a session by id (or every
+/// session for the producer's subject).
 pub const TASK_AUTH_REVOKE_SESSION_1_0: &str =
-    "https://trusttasks.org/spec/vta/auth/revoke-session/1.0";
+    "https://trusttasks.org/spec/auth/revoke-session/0.1";
 
-/// `spec/vta/auth/passkey-login-start/1.0` — request a passkey-bound
-/// login challenge. Payload: `{ did }` → response: `{ session_id,
-/// challenge, allowCredentials[] }`.
+/// `spec/auth/passkey/login/start/0.1` — begin a WebAuthn assertion
+/// ceremony. Same wire form serves initial login AND AAL step-up via the
+/// payload's `purpose` field.
 pub const TASK_AUTH_PASSKEY_LOGIN_START_1_0: &str =
-    "https://trusttasks.org/spec/vta/auth/passkey-login-start/1.0";
+    "https://trusttasks.org/spec/auth/passkey/login/start/0.1";
 
-/// `spec/vta/auth/passkey-login-finish/1.0` — present a WebAuthn
-/// assertion against a DID-resolved VM. Payload carries assertion
-/// bytes (authenticatorData, clientDataJSON, signature, credential_id)
-/// plus `session_pubkey_b58btc` for DPoP-style binding of subsequent
-/// trust-task proofs to this session.
+/// `spec/auth/passkey/login/finish/0.1` — submit the WebAuthn assertion.
+/// On success the consumer issues a session (for `purpose: login`) or
+/// elevates an existing session's acr (for `purpose: step-up`).
 pub const TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0: &str =
-    "https://trusttasks.org/spec/vta/auth/passkey-login-finish/1.0";
+    "https://trusttasks.org/spec/auth/passkey/login/finish/0.1";
 
 // ─── ACL slice (spec/vta/acl/*) ──────────────────────────────────────────
 
@@ -715,11 +719,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_uri_in_vta_namespace() {
+    fn every_uri_in_canonical_namespace() {
+        // The auth/* slice now points at the framework's canonical
+        // /spec/auth/*/0.1 specs (cross-cutting primitives shared
+        // across VTA / VTC / did-hosting). The remaining VTA-specific
+        // operations stay under /spec/vta/. Either is acceptable.
         for uri in ALL_URIS {
             assert!(
-                uri.starts_with("https://trusttasks.org/spec/vta/"),
-                "VTA URI must be under /spec/vta/: {uri}"
+                uri.starts_with("https://trusttasks.org/spec/vta/")
+                    || uri.starts_with("https://trusttasks.org/spec/auth/"),
+                "URI must live under /spec/vta/ or /spec/auth/: {uri}"
             );
         }
     }
