@@ -63,31 +63,31 @@
 // standard the constants will follow with a `_0_1` rename pass.
 
 /// `spec/auth/challenge/0.1` — request a one-time nonce for a subject DID.
-pub const TASK_AUTH_CHALLENGE_1_0: &str = "https://trusttasks.org/spec/auth/challenge/0.1";
+pub const TASK_AUTH_CHALLENGE_0_1: &str = "https://trusttasks.org/spec/auth/challenge/0.1";
 
 /// `spec/auth/authenticate/0.1` — present the signed challenge inside a
 /// proof-bearing Trust Task document; the proof IS the authentication.
-pub const TASK_AUTH_AUTHENTICATE_1_0: &str = "https://trusttasks.org/spec/auth/authenticate/0.1";
+pub const TASK_AUTH_AUTHENTICATE_0_1: &str = "https://trusttasks.org/spec/auth/authenticate/0.1";
 
 /// `spec/auth/refresh/0.1` — exchange a refresh token for a fresh access
 /// token. Scope-monotonic.
-pub const TASK_AUTH_REFRESH_1_0: &str = "https://trusttasks.org/spec/auth/refresh/0.1";
+pub const TASK_AUTH_REFRESH_0_1: &str = "https://trusttasks.org/spec/auth/refresh/0.1";
 
 /// `spec/auth/revoke-session/0.1` — revoke a session by id (or every
 /// session for the producer's subject).
-pub const TASK_AUTH_REVOKE_SESSION_1_0: &str =
+pub const TASK_AUTH_REVOKE_SESSION_0_1: &str =
     "https://trusttasks.org/spec/auth/revoke-session/0.1";
 
 /// `spec/auth/passkey/login/start/0.1` — begin a WebAuthn assertion
 /// ceremony. Same wire form serves initial login AND AAL step-up via the
 /// payload's `purpose` field.
-pub const TASK_AUTH_PASSKEY_LOGIN_START_1_0: &str =
+pub const TASK_AUTH_PASSKEY_LOGIN_START_0_1: &str =
     "https://trusttasks.org/spec/auth/passkey/login/start/0.1";
 
 /// `spec/auth/passkey/login/finish/0.1` — submit the WebAuthn assertion.
 /// On success the consumer issues a session (for `purpose: login`) or
 /// elevates an existing session's acr (for `purpose: step-up`).
-pub const TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0: &str =
+pub const TASK_AUTH_PASSKEY_LOGIN_FINISH_0_1: &str =
     "https://trusttasks.org/spec/auth/passkey/login/finish/0.1";
 
 // ─── ACL slice (spec/vta/acl/*) ──────────────────────────────────────────
@@ -626,12 +626,12 @@ pub const TASK_ATTESTATION_REPORT_1_0: &str =
 /// the VTA's wire surface programmatically.
 pub const ALL_URIS: &[&str] = &[
     // Auth slice
-    TASK_AUTH_CHALLENGE_1_0,
-    TASK_AUTH_AUTHENTICATE_1_0,
-    TASK_AUTH_REFRESH_1_0,
-    TASK_AUTH_REVOKE_SESSION_1_0,
-    TASK_AUTH_PASSKEY_LOGIN_START_1_0,
-    TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0,
+    TASK_AUTH_CHALLENGE_0_1,
+    TASK_AUTH_AUTHENTICATE_0_1,
+    TASK_AUTH_REFRESH_0_1,
+    TASK_AUTH_REVOKE_SESSION_0_1,
+    TASK_AUTH_PASSKEY_LOGIN_START_0_1,
+    TASK_AUTH_PASSKEY_LOGIN_FINISH_0_1,
     // ACL slice
     TASK_ACL_LIST_1_0,
     TASK_ACL_CREATE_1_0,

@@ -1,8 +1,8 @@
 //! Passkey-based login wire types.
 //!
 //! Maps to the trust-task URIs declared in
-//! [`crate::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_1_0`] and
-//! [`crate::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0`].
+//! [`crate::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_0_1`] and
+//! [`crate::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_0_1`].
 //!
 //! ## Flow
 //!
@@ -26,11 +26,15 @@
 use serde::{Deserialize, Serialize};
 
 /// Client → server: request a passkey-login challenge.
+///
+/// Wire shape conforms to `spec/auth/passkey/login/start/0.1`: the
+/// `did` field serialises as `subject` per the canonical schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PasskeyLoginStartRequest {
     /// The DID the holder claims they control. Server resolves the
     /// DID document, locates passkey VMs, and returns their
     /// credential IDs as `allow_credentials`.
+    #[serde(rename = "subject", alias = "did")]
     pub did: String,
 }
 

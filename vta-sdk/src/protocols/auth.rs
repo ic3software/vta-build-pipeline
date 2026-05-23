@@ -1,8 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 /// Client sends to `POST /auth/challenge`.
+///
+/// Wire shape conforms to `spec/auth/challenge/0.1`: the `did` field
+/// serialises as `subject` per the canonical payload schema. The Rust
+/// identifier stays `did` for consistency with `AuthClaims.did` and
+/// the rest of the codebase. `alias = "did"` keeps clients that still
+/// send the legacy name working through one upgrade cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeRequest {
+    #[serde(rename = "subject", alias = "did")]
     pub did: String,
 }
 
@@ -138,11 +145,19 @@ mod tests {
 
     #[test]
     fn test_challenge_request_serialize() {
+        // Wire format conforms to spec/auth/challenge/0.1: the field
+        // is `subject` on the wire (canonical). `did` is accepted on
+        // input via `serde(alias)` for backwards compatibility.
         let req = ChallengeRequest {
             did: "did:key:z6Mk123".to_string(),
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["did"], "did:key:z6Mk123");
+        assert_eq!(json["subject"], "did:key:z6Mk123");
+        assert!(json.get("did").is_none());
+
+        // Legacy clients still sending `did` continue to parse.
+        let legacy: ChallengeRequest = serde_json::from_str(r#"{"did":"did:key:legacy"}"#).unwrap();
+        assert_eq!(legacy.did, "did:key:legacy");
     }
 
     #[test]

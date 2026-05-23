@@ -77,11 +77,11 @@ use trust_tasks_rs::RejectReason;
 #[allow(dead_code)] // consumed by the dispatcher's test-only parity harness
 const REST_ROUTED: &[&str] = &[
     // Auth (pre-login — no session, can't pass AuthClaims)
-    vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_1_0,
-    vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_1_0,
-    vta_sdk::trust_tasks::TASK_AUTH_REFRESH_1_0,
-    vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_1_0,
-    vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0,
+    vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_0_1,
+    vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_0_1,
+    vta_sdk::trust_tasks::TASK_AUTH_REFRESH_0_1,
+    vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_0_1,
+    vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_0_1,
     // Attestation (unauth — TEE proofs are publicly verifiable by design)
     vta_sdk::trust_tasks::TASK_ATTESTATION_STATUS_1_0,
     vta_sdk::trust_tasks::TASK_ATTESTATION_REPORT_1_0,
@@ -253,7 +253,7 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
     // The parity harness's `REST_ROUTED` allowlist tracks them.
     match type_uri.as_str() {
         // ─── Auth slice (authenticated operations) ───────────────────
-        vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_1_0 => {
+        vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_0_1 => {
             auth::handle_revoke_session(state, auth, doc).await
         }
         // ─── ACL slice ────────────────────────────────────────────────
@@ -520,12 +520,12 @@ mod tests {
         // Compile-time check: every URI we route in `dispatch_typed`
         // is declared in `vta-sdk::trust_tasks`. If a URI gets renamed
         // or removed in vta-sdk, this stops compiling.
-        let _ = vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_1_0;
-        let _ = vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_1_0;
-        let _ = vta_sdk::trust_tasks::TASK_AUTH_REFRESH_1_0;
-        let _ = vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_1_0;
-        let _ = vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_1_0;
-        let _ = vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_1_0;
+        let _ = vta_sdk::trust_tasks::TASK_AUTH_CHALLENGE_0_1;
+        let _ = vta_sdk::trust_tasks::TASK_AUTH_AUTHENTICATE_0_1;
+        let _ = vta_sdk::trust_tasks::TASK_AUTH_REFRESH_0_1;
+        let _ = vta_sdk::trust_tasks::TASK_AUTH_REVOKE_SESSION_0_1;
+        let _ = vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_START_0_1;
+        let _ = vta_sdk::trust_tasks::TASK_AUTH_PASSKEY_LOGIN_FINISH_0_1;
     }
 
     /// Cross-crate URI parity harness (mirrors webvh-service's T9
