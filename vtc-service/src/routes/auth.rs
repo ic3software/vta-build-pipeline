@@ -48,6 +48,9 @@ pub async fn challenge(
         refresh_expires_at: None,
         // VTC has no TEE attestation surface — always false here.
         tee_attested: false,
+        // AAL is unknown at challenge time; populated on authenticate.
+        amr: Vec::new(),
+        acr: String::new(),
     };
 
     let sessions = state.sessions_ks.clone();
@@ -194,10 +197,14 @@ async fn authenticate_and_mint(
     let refresh_token = Uuid::new_v4().to_string();
     let refresh_expires_at = now_epoch() + refresh_expiry;
 
-    // Update session to Authenticated
+    // Update session to Authenticated. Persist AAL on the row so the
+    // refresh handler re-mints at the same level instead of dropping
+    // to aal1 on every token rotation.
     session.state = SessionState::Authenticated;
     session.refresh_token = Some(refresh_token.clone());
     session.refresh_expires_at = Some(refresh_expires_at);
+    session.amr = claims.amr.clone();
+    session.acr = claims.acr.clone();
     update_session(&sessions, &session).await?;
 
     // Store reverse refresh index
@@ -437,9 +444,9 @@ pub async fn passkey_login_finish(
     let refresh_expires_at = now_epoch() + refresh_expiry;
 
     // Persist the session record so `/auth/sessions` lists it and
-    // refresh-token rotation finds it. Same shape the DIDComm
-    // authenticate path writes — keeps `delete_session` etc.
-    // working uniformly across both login origins.
+    // refresh-token rotation finds it. AAL is captured from the JWT
+    // claims so refresh keeps the holder at aal2 instead of dropping
+    // to aal1 on every token rotation.
     let session = Session {
         session_id: session_id.clone(),
         did: user.did.clone(),
@@ -449,6 +456,8 @@ pub async fn passkey_login_finish(
         refresh_token: Some(refresh_token.clone()),
         refresh_expires_at: Some(refresh_expires_at),
         tee_attested: false,
+        amr: claims.amr.clone(),
+        acr: claims.acr.clone(),
     };
     store_session(&state.sessions_ks, &session).await?;
     store_refresh_index(&state.sessions_ks, &refresh_token, &session_id).await?;
@@ -658,11 +667,19 @@ pub async fn refresh(
     let access_expiry = config.auth.access_token_expiry;
     drop(config);
 
-    // Refresh re-mints with the same nominal AAL the original
-    // authenticate set. The VTC Session doesn't persist amr/acr today
-    // so fallback to aal1 — same trade-off VTA's refresh handler
-    // makes; future Session-shape extension lets refresh preserve
-    // step-uped AAL across token rotation.
+    // Refresh re-mints with the AAL the session row carries. Sessions
+    // written before persistence landed have empty amr/acr and fall
+    // back to aal1 — matches pre-migration behaviour.
+    let preserved_amr = if session.amr.is_empty() {
+        vec!["did".to_string()]
+    } else {
+        session.amr.clone()
+    };
+    let preserved_acr = if session.acr.is_empty() {
+        "aal1".to_string()
+    } else {
+        session.acr.clone()
+    };
     let claims = jwt_keys
         .new_claims(
             session.did.clone(),
@@ -672,7 +689,7 @@ pub async fn refresh(
             access_expiry,
             false,
         )
-        .with_aal(vec!["did".to_string()], "aal1");
+        .with_aal(preserved_amr, preserved_acr);
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 

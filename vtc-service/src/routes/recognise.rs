@@ -207,7 +207,10 @@ pub async fn mint_recognised_session(
     // Mint the session. Mirror the existing
     // `authenticate` path: store a Session row + emit a JWT.
     // Skip the refresh token (cross-community sessions don't
-    // refresh — see module docs).
+    // refresh — see module docs). AAL is `did/aal1`: the foreign
+    // VEC verification is a single-factor proof of the subject
+    // DID; passkey or VTA step-up is not part of the recognise
+    // flow.
     let session_id = format!("xc-{}", Uuid::new_v4());
     let session = Session {
         session_id: session_id.clone(),
@@ -218,17 +221,21 @@ pub async fn mint_recognised_session(
         refresh_token: None,
         refresh_expires_at: None,
         tee_attested: false,
+        amr: vec!["did".to_string()],
+        acr: "aal1".to_string(),
     };
     store_session(&state.sessions_ks, &session).await?;
 
-    let claims = jwt_keys.new_claims(
-        verified.subject_did.clone(),
-        session_id.clone(),
-        mapped_role.clone(),
-        Vec::new(),
-        access_expiry,
-        false,
-    );
+    let claims = jwt_keys
+        .new_claims(
+            verified.subject_did.clone(),
+            session_id.clone(),
+            mapped_role.clone(),
+            Vec::new(),
+            access_expiry,
+            false,
+        )
+        .with_aal(vec!["did".to_string()], "aal1");
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 

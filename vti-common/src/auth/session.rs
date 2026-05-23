@@ -37,6 +37,22 @@ pub struct Session {
     /// field existed) deserialize as `false` — the conservative default.
     #[serde(default)]
     pub tee_attested: bool,
+    /// AAL claims persisted across token rotation. Mirrors the JWT's
+    /// `amr` / `acr` so [`/auth/refresh`] mints a new access token at
+    /// the same authentication-method-references and assurance level
+    /// the session was last issued at. Without this, a session that
+    /// was step-upped to `aal2` would be silently dropped back to
+    /// `aal1` on every 15-minute refresh.
+    ///
+    /// `#[serde(default)]` on both: a session row written before this
+    /// field landed deserialises with empty vectors / empty string,
+    /// which the refresh handler treats as "unknown AAL — fall back
+    /// to `aal1`". Same behaviour as pre-migration; the holder can
+    /// re-step-up if needed.
+    #[serde(default)]
+    pub amr: Vec<String>,
+    #[serde(default)]
+    pub acr: String,
 }
 
 impl std::fmt::Debug for Session {
@@ -53,6 +69,8 @@ impl std::fmt::Debug for Session {
             )
             .field("refresh_expires_at", &self.refresh_expires_at)
             .field("tee_attested", &self.tee_attested)
+            .field("amr", &self.amr)
+            .field("acr", &self.acr)
             .finish()
     }
 }
@@ -273,6 +291,8 @@ mod tests {
             refresh_token: None,
             refresh_expires_at: None,
             tee_attested: false,
+            amr: Vec::new(),
+            acr: String::new(),
         }
     }
 

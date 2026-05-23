@@ -134,6 +134,10 @@ pub async fn challenge(
         refresh_token: None,
         refresh_expires_at: None,
         tee_attested: attestation_succeeded,
+        // AAL is unknown at challenge time — populated when the
+        // session transitions to Authenticated.
+        amr: Vec::new(),
+        acr: String::new(),
     };
 
     store_session(&state.sessions_ks, &session).await?;
@@ -299,10 +303,15 @@ pub async fn authenticate(
     let refresh_token = Uuid::new_v4().to_string();
     let refresh_expires_at = now_epoch() + refresh_expiry;
 
-    // Update session to Authenticated
+    // Update session to Authenticated. Persist AAL alongside the
+    // refresh token so the refresh handler can re-mint at the same
+    // AAL the session is currently at (without this, a step-upped
+    // session silently drops back to aal1 on every refresh).
     session.state = SessionState::Authenticated;
     session.refresh_token = Some(refresh_token.clone());
     session.refresh_expires_at = Some(refresh_expires_at);
+    session.amr = claims.amr.clone();
+    session.acr = claims.acr.clone();
     update_session(&state.sessions_ks, &session).await?;
 
     // Store reverse refresh index
@@ -418,13 +427,20 @@ pub async fn refresh(
     // tee_attested is per-session — fixed at challenge time, not per-refresh.
     let tee_attested = session.tee_attested;
 
-    // Refresh re-mints with the same AAL the original authenticate
-    // recorded. The Session row doesn't carry amr/acr today, so
-    // fallback to aal1 (one DID factor) — accurate for any session
-    // born of the challenge-response path and lower-bound-safe for
-    // sessions that may have been step-uped to aal2 (the holder can
-    // re-step-up after refresh). A future Session-shape extension
-    // will let refresh preserve the elevated AAL across token rotation.
+    // Refresh re-mints with the same AAL the session row carries.
+    // Sessions written before the persistence landed have empty
+    // amr/acr and fall back to aal1 — matches the pre-migration
+    // refresh behaviour, so no surprises for those holders.
+    let preserved_amr = if session.amr.is_empty() {
+        vec!["did".to_string()]
+    } else {
+        session.amr.clone()
+    };
+    let preserved_acr = if session.acr.is_empty() {
+        "aal1".to_string()
+    } else {
+        session.acr.clone()
+    };
     let claims = jwt_keys
         .new_claims(
             session.did.clone(),
@@ -434,7 +450,7 @@ pub async fn refresh(
             access_expiry,
             tee_attested,
         )
-        .with_aal(vec!["did".to_string()], "aal1");
+        .with_aal(preserved_amr, preserved_acr);
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 
@@ -645,6 +661,11 @@ pub async fn passkey_login_start(
         refresh_token: None,
         refresh_expires_at: None,
         tee_attested: false,
+        // AAL is unknown at challenge time. passkey_login_finish sets
+        // it to amr=["did","passkey"], acr="aal2" when the assertion
+        // verifies and the session transitions to Authenticated.
+        amr: Vec::new(),
+        acr: String::new(),
     };
     store_session(&state.sessions_ks, &session).await?;
 
@@ -796,9 +817,13 @@ pub async fn passkey_login_finish(
     let refresh_token = Uuid::new_v4().to_string();
     let refresh_expires_at = now_epoch() + refresh_expiry;
 
+    // Persist AAL on the session row so a subsequent /auth/refresh
+    // re-mints at aal2 (rather than silently dropping back to aal1).
     session.state = SessionState::Authenticated;
     session.refresh_token = Some(refresh_token.clone());
     session.refresh_expires_at = Some(refresh_expires_at);
+    session.amr = claims.amr.clone();
+    session.acr = claims.acr.clone();
     update_session(&state.sessions_ks, &session).await?;
     store_refresh_index(&state.sessions_ks, &refresh_token, &session.session_id).await?;
 

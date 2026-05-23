@@ -245,6 +245,8 @@ async fn admin_token(fix: &Fixture) -> String {
         refresh_token: None,
         refresh_expires_at: None,
         tee_attested: false,
+        amr: Vec::new(),
+        acr: String::new(),
     };
     store_session(&fix.state.sessions_ks, &session)
         .await
@@ -271,6 +273,8 @@ async fn reader_token(fix: &Fixture) -> String {
         refresh_token: None,
         refresh_expires_at: None,
         tee_attested: false,
+        amr: Vec::new(),
+        acr: String::new(),
     };
     store_session(&fix.state.sessions_ks, &session)
         .await
