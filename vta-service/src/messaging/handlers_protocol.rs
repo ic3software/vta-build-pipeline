@@ -125,6 +125,7 @@ pub async fn handle_disable_didcomm(
         &state.audit_ks,
         &state.drains_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -225,6 +226,7 @@ pub async fn handle_update_didcomm(
         &state.audit_ks,
         &state.drains_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -416,6 +418,7 @@ pub async fn handle_enable_rest(
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -472,6 +475,7 @@ pub async fn handle_update_rest(
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -527,6 +531,7 @@ pub async fn handle_disable_rest(
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -585,6 +590,7 @@ pub async fn handle_rollback_rest(
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -668,6 +674,7 @@ pub async fn handle_rollback_didcomm(
         &state.audit_ks,
         &state.drains_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver

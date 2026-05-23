@@ -157,6 +157,7 @@ pub async fn disable_didcomm(
     audit_ks: &KeyspaceHandle,
     drains_ks: &KeyspaceHandle,
     snapshot_ks: &KeyspaceHandle,
+    service_state_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -219,11 +220,16 @@ pub async fn disable_didcomm(
     )
     .await?;
 
-    // Persist config: services.didcomm = false. Leave `messaging`
-    // intact so the drained listener can still reach the mediator
-    // until its TTL expires (cleared by a future `drain cancel` or
-    // expiry sweep).
-    persist_didcomm_disabled(config).await?;
+    // Persist: `services.didcomm = false` to fjall (authoritative runtime
+    // state) + mirror into the in-memory config. `messaging` stays intact so
+    // the drained listener can still reach the mediator until its TTL expires.
+    crate::operations::protocol::runtime_state::set_didcomm_enabled(service_state_ks, false)
+        .await
+        .map_err(|e| DisableDidcommError::ConfigPersistence(format!("runtime state: {e}")))?;
+    {
+        let mut cfg = config.write().await;
+        cfg.services.didcomm = false;
+    }
 
     // Schedule the drain or immediate teardown.
     let drains_until = if params.drain_ttl.is_zero() {
@@ -349,24 +355,6 @@ async fn read_preconditions(
     Ok((state.vta_did, state.scid, state.current_doc, prior_mediator))
 }
 
-async fn persist_didcomm_disabled(
-    config: &Arc<RwLock<AppConfig>>,
-) -> Result<(), DisableDidcommError> {
-    let (contents, path) = {
-        let mut cfg = config.write().await;
-        cfg.services.didcomm = false;
-        // `messaging` deliberately preserved so the drained
-        // listener can still resolve its mediator's endpoint.
-        let contents = toml::to_string_pretty(&*cfg)
-            .map_err(|e| DisableDidcommError::ConfigPersistence(e.to_string()))?;
-        let path = cfg.config_path.clone();
-        (contents, path)
-    };
-    std::fs::write(&path, contents)
-        .map_err(|e| DisableDidcommError::ConfigPersistence(e.to_string()))?;
-    Ok(())
-}
-
 async fn best_effort_endpoint(resolver: &DIDCacheClient, mediator_did: &str) -> String {
     match crate::messaging::handshake::resolve_mediator(resolver, mediator_did).await {
         Ok(r) => r.endpoint,
@@ -472,6 +460,7 @@ mod tests {
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -484,6 +473,7 @@ mod tests {
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -519,6 +509,7 @@ mod tests {
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -531,6 +522,7 @@ mod tests {
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -562,6 +554,7 @@ mod tests {
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -575,6 +568,7 @@ mod tests {
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -614,6 +608,7 @@ mod tests {
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -627,6 +622,7 @@ mod tests {
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -663,6 +659,7 @@ mod tests {
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -678,6 +675,7 @@ mod tests {
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -710,6 +708,7 @@ mod tests {
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let seed = dummy_seed(dir.path());
 
@@ -722,6 +721,7 @@ mod tests {
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,

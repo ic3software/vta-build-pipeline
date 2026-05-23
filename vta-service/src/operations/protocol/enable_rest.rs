@@ -127,6 +127,7 @@ pub async fn enable_rest(
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
     snapshot_ks: &KeyspaceHandle,
+    service_state_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -194,7 +195,13 @@ pub async fn enable_rest(
     //    same risk window as `disable_didcomm`'s
     //    `persist_didcomm_disabled`. Operator retries with the
     //    config in a known state.
-    persist_rest_enabled(config).await?;
+    crate::operations::protocol::runtime_state::set_rest_enabled(service_state_ks, true)
+        .await
+        .map_err(|e| EnableRestError::ConfigPersistence(format!("runtime state: {e}")))?;
+    {
+        let mut cfg = config.write().await;
+        cfg.services.rest = true;
+    }
 
     // 7. Telemetry. Channel and version-id let an external verifier
     //    join this event to chain history.
@@ -252,20 +259,6 @@ async fn read_preconditions(
     }
 
     Ok((state.vta_did, state.scid, state.current_doc))
-}
-
-async fn persist_rest_enabled(config: &Arc<RwLock<AppConfig>>) -> Result<(), EnableRestError> {
-    let (contents, path) = {
-        let mut cfg = config.write().await;
-        cfg.services.rest = true;
-        let contents = toml::to_string_pretty(&*cfg)
-            .map_err(|e| EnableRestError::ConfigPersistence(e.to_string()))?;
-        let path = cfg.config_path.clone();
-        (contents, path)
-    };
-    std::fs::write(&path, contents)
-        .map_err(|e| EnableRestError::ConfigPersistence(e.to_string()))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -360,19 +353,9 @@ mod tests {
         );
     }
 
-    /// `persist_rest_enabled` writes `services.rest = true` to the
-    /// config file. Read it back to confirm both in-memory and
-    /// on-disk state agree.
-    #[tokio::test]
-    async fn persist_rest_enabled_writes_rest_true_to_config_file() {
-        let fx = build_fixture(false);
-        assert!(!fx.config.read().await.services.rest);
-
-        persist_rest_enabled(&fx.config).await.unwrap();
-
-        assert!(fx.config.read().await.services.rest);
-        let on_disk = std::fs::read_to_string(&fx.config.read().await.config_path).unwrap();
-        let reparsed: AppConfig = toml::from_str(&on_disk).unwrap();
-        assert!(reparsed.services.rest);
-    }
+    // (Removed: `persist_rest_enabled_writes_rest_true_to_config_file`.
+    // The op now writes runtime state to fjall via
+    // `runtime_state::set_rest_enabled`, not to the config file on disk.
+    // The integration tests for the full `enable_rest` op cover that path
+    // end-to-end.)
 }

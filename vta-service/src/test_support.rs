@@ -69,6 +69,10 @@ pub struct TestStore {
     /// rollback (spec §3.5a). Required by every forward op + the
     /// rollback dispatchers.
     pub snapshot_ks: KeyspaceHandle,
+    /// Persistent runtime state for service enable/disable
+    /// (`operations::protocol::runtime_state`). Required by every
+    /// forward + rollback op.
+    pub service_state_ks: KeyspaceHandle,
     pub data_dir: PathBuf,
 }
 
@@ -93,6 +97,7 @@ pub async fn open_test_store() -> TestStore {
         snapshot_ks: store
             .keyspace(crate::operations::protocol::snapshot::KEYSPACE_NAME)
             .expect("snapshot ks"),
+        service_state_ks: store.keyspace("service_state").expect("service_state ks"),
         _dir: dir,
         _store: store,
         data_dir,
@@ -467,6 +472,7 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
     }
     let audit_ks = store.keyspace("audit").unwrap();
     let cache_ks = store.keyspace("cache").unwrap();
+    let service_state_ks = store.keyspace("service_state").unwrap();
     let imported_ks = store.keyspace("imported_secrets").unwrap();
     let sealed_nonces_ks = store.keyspace("sealed_nonces").unwrap();
     let backup_bundles_ks = store.keyspace("backup_bundles").unwrap();
@@ -534,6 +540,7 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         audit_ks,
         imported_ks,
         cache_ks,
+        service_state_ks,
         sealed_nonces_ks,
         backup_bundles_ks: backup_bundles_ks.clone(),
         backup_blob_dir: backup_blob_dir.clone(),

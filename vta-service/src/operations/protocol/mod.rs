@@ -23,6 +23,7 @@ pub mod report;
 pub mod rollback_didcomm;
 pub mod rollback_rest;
 pub mod rollback_webauthn;
+pub mod runtime_state;
 pub mod snapshot;
 pub mod update_didcomm;
 pub mod update_rest;

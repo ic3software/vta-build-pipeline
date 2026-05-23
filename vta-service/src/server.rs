@@ -80,6 +80,11 @@ pub struct AppState {
     pub audit_ks: KeyspaceHandle,
     pub imported_ks: KeyspaceHandle,
     pub cache_ks: KeyspaceHandle,
+    /// Persistent runtime state for service enable/disable
+    /// (`operations::protocol::runtime_state`). Replaces the legacy
+    /// `[services]` block in `config.toml` as the source of truth for whether
+    /// REST / DIDComm are currently active.
+    pub service_state_ks: KeyspaceHandle,
     /// Anti-replay log for sealed-bootstrap `bundle_id`s. One row per seal;
     /// `PersistentNonceStore` refuses duplicates.
     pub sealed_nonces_ks: KeyspaceHandle,
@@ -203,6 +208,9 @@ pub async fn build_app_state(
     let audit_ks = apply_encryption(store.keyspace("audit")?);
     let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
     let cache_ks = store.keyspace("cache")?;
+    // Persistent runtime state for service enable/disable. Encrypted because
+    // a couple of bool records are cheap and the keyspace may grow.
+    let service_state_ks = apply_encryption(store.keyspace("service_state")?);
     // Sealed-transfer anti-replay store. Bundle_ids are not secret and the
     // row is a one-byte sentinel, so the keyspace is intentionally
     // unencrypted — saves a decrypt hop on every request.
@@ -259,6 +267,7 @@ pub async fn build_app_state(
         audit_ks,
         imported_ks,
         cache_ks,
+        service_state_ks,
         sealed_nonces_ks,
         backup_bundles_ks,
         backup_blob_dir,
@@ -299,27 +308,56 @@ pub async fn build_app_state(
 }
 
 pub async fn run(
-    config: AppConfig,
+    mut config: AppConfig,
     store: Store,
     seed_store: Arc<dyn SeedStore>,
     storage_encryption_key: Option<[u8; 32]>,
     tee_context: Option<TeeContext>,
 ) -> Result<(), AppError> {
-    // Determine which services will actually start (feature flag AND config)
+    // Open the runtime-state keyspace once up front so the boot decisions
+    // below can read it (and the migration can seed it from the legacy
+    // `[services]` block on first boot post-upgrade). Same encryption policy
+    // as the rest of the keyspaces.
+    let boot_service_state_ks = {
+        let ks = store.keyspace("service_state")?;
+        match storage_encryption_key {
+            Some(key) => ks.with_encryption(key),
+            None => ks,
+        }
+    };
+    crate::operations::protocol::runtime_state::migrate_from_config(
+        &boot_service_state_ks,
+        &config,
+    )
+    .await?;
+
+    // Runtime state in fjall is authoritative; mirror it into the in-memory
+    // `config.services` so the existing readers across the codebase keep
+    // working unchanged. The on-disk `config.toml` [services] block is now
+    // legacy (consumed only by the first-boot migration above).
+    config.services.rest =
+        crate::operations::protocol::runtime_state::is_rest_enabled(&boot_service_state_ks).await?;
+    config.services.didcomm =
+        crate::operations::protocol::runtime_state::is_didcomm_enabled(&boot_service_state_ks)
+            .await?;
+
+    // Determine which services will actually start (feature flag AND
+    // persisted runtime state, the latter set by `pnm services {kind}
+    // {enable,disable}`).
     let rest_enabled = cfg!(feature = "rest") && config.services.rest;
     let didcomm_enabled = cfg!(feature = "didcomm") && config.services.didcomm;
 
     if !rest_enabled && !didcomm_enabled {
         return Err(AppError::Config(
             "no services enabled — enable at least one of REST or DIDComm \
-             (check [services] config and compile-time features)"
+             (compile-time feature flags + `pnm services {kind} enable`)"
                 .into(),
         ));
     }
 
     // Bind TCP listener once (persists across soft restarts)
     #[cfg(feature = "rest")]
-    let std_listener = if config.services.rest {
+    let std_listener = if rest_enabled {
         let addr = format!("{}:{}", config.server.host, config.server.port);
         let listener = std::net::TcpListener::bind(&addr).map_err(AppError::Io)?;
         listener.set_nonblocking(true).map_err(AppError::Io)?;
@@ -353,6 +391,7 @@ pub async fn run(
         let audit_ks = apply_encryption(store.keyspace("audit")?);
         let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
         let cache_ks = store.keyspace("cache")?;
+        let service_state_ks = apply_encryption(store.keyspace("service_state")?);
         let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
         let backup_bundles_ks = apply_encryption(store.keyspace("backup_bundles")?);
         let backup_blob_dir = config.store.data_dir.join("backups");
@@ -474,6 +513,7 @@ pub async fn run(
                 did_templates_ks: did_templates_ks.clone(),
                 audit_ks: audit_ks.clone(),
                 imported_ks: imported_ks.clone(),
+                service_state_ks: service_state_ks.clone(),
                 #[cfg(feature = "webvh")]
                 webvh_ks: webvh_ks.clone(),
                 sealed_nonces_ks: sealed_nonces_ks.clone(),
@@ -523,6 +563,7 @@ pub async fn run(
             audit_ks,
             imported_ks,
             cache_ks,
+            service_state_ks: service_state_ks.clone(),
             sealed_nonces_ks,
             backup_bundles_ks,
             backup_blob_dir,

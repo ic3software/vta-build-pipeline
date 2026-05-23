@@ -82,6 +82,7 @@ struct OfflineDeps {
     audit_ks: KeyspaceHandle,
     drains_ks: KeyspaceHandle,
     snapshot_ks: KeyspaceHandle,
+    service_state_ks: KeyspaceHandle,
     seed_store: PlaintextSeedStore,
     did_resolver: DIDCacheClient,
     didcomm_bridge: Arc<DIDCommBridge>,
@@ -127,6 +128,17 @@ async fn build_offline_deps(
     let webvh_ks = store.keyspace("webvh")?;
     let drains_ks = store.keyspace("drains")?;
     let snapshot_ks = store.keyspace(snapshot::KEYSPACE_NAME)?;
+    let service_state_ks = store.keyspace("service_state")?;
+    // Sync the in-memory config from fjall (authoritative) so the readers
+    // throughout the codebase see the current runtime state, not the legacy
+    // (possibly stale) [services] block on disk.
+    crate::operations::protocol::runtime_state::migrate_from_config(&service_state_ks, &config)
+        .await?;
+    let mut config = config;
+    config.services.rest =
+        crate::operations::protocol::runtime_state::is_rest_enabled(&service_state_ks).await?;
+    config.services.didcomm =
+        crate::operations::protocol::runtime_state::is_didcomm_enabled(&service_state_ks).await?;
 
     let seed_store = PlaintextSeedStore::new(&data_dir);
     let did_resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await?;
@@ -156,6 +168,7 @@ async fn build_offline_deps(
         audit_ks,
         drains_ks,
         snapshot_ks,
+        service_state_ks,
         seed_store,
         did_resolver,
         didcomm_bridge,
@@ -251,6 +264,7 @@ pub async fn run_services_rest_enable(config_path: Option<PathBuf>, url: String)
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -280,6 +294,7 @@ pub async fn run_services_rest_update(config_path: Option<PathBuf>, url: String)
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -310,6 +325,7 @@ pub async fn run_services_rest_disable(config_path: Option<PathBuf>) -> CliResul
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -339,6 +355,7 @@ pub async fn run_services_rest_rollback(config_path: Option<PathBuf>) -> CliResu
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -384,6 +401,7 @@ pub async fn run_services_didcomm_enable(
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -430,6 +448,7 @@ pub async fn run_services_didcomm_update(
         &d.audit_ks,
         &d.drains_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -475,6 +494,7 @@ pub async fn run_services_didcomm_disable(
         &d.audit_ks,
         &d.drains_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -527,6 +547,7 @@ pub async fn run_services_didcomm_rollback(
         &d.audit_ks,
         &d.drains_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,

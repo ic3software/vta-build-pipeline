@@ -130,6 +130,7 @@ pub async fn enable_didcomm(
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
     snapshot_ks: &KeyspaceHandle,
+    service_state_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -209,7 +210,15 @@ pub async fn enable_didcomm(
     )
     .await?;
 
-    // Persist config: services.didcomm = true and messaging.mediator_did.
+    // Persist:
+    //   * `services.didcomm = true` to fjall (authoritative runtime state) +
+    //     mirror into the in-memory config.
+    //   * `messaging.mediator_did` / `mediator_url` to disk — that's operator
+    //     config (the endpoint to register with), not runtime state, so it
+    //     belongs in config.toml.
+    crate::operations::protocol::runtime_state::set_didcomm_enabled(service_state_ks, true)
+        .await
+        .map_err(|e| EnableDidcommError::ConfigPersistence(format!("runtime state: {e}")))?;
     persist_didcomm_enabled(config, &resolved.mediator_did, &resolved.endpoint).await?;
 
     // Register the mediator as active. The caller (the route layer)
@@ -353,6 +362,7 @@ mod tests {
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
         let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state2, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -369,6 +379,7 @@ mod tests {
             &webvh_ks,
             &audit_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -405,6 +416,7 @@ mod tests {
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
         let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state2, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -421,6 +433,7 @@ mod tests {
             &webvh_ks,
             &audit_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -457,6 +470,7 @@ mod tests {
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
         let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state2, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -473,6 +487,7 @@ mod tests {
             &webvh_ks,
             &audit_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -516,6 +531,7 @@ mod tests {
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
         let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state2, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -535,6 +551,7 @@ mod tests {
             &webvh_ks,
             &audit_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,

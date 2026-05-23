@@ -46,6 +46,9 @@ pub struct VtaState {
     pub did_templates_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub imported_ks: KeyspaceHandle,
+    /// Persistent runtime state for service enable/disable
+    /// (`operations::protocol::runtime_state`). Mirrored from `AppState`.
+    pub service_state_ks: KeyspaceHandle,
     #[cfg(feature = "webvh")]
     pub webvh_ks: KeyspaceHandle,
     /// Anti-replay log for sealed-bootstrap `bundle_id`s — required by

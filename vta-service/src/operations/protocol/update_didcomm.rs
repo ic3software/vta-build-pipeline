@@ -173,6 +173,7 @@ pub async fn update_didcomm(
     audit_ks: &KeyspaceHandle,
     drains_ks: &KeyspaceHandle,
     snapshot_ks: &KeyspaceHandle,
+    service_state_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -490,6 +491,7 @@ mod tests {
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let prover = AlwaysOkProver;
         let seed = dummy_seed(dir.path());
@@ -503,6 +505,7 @@ mod tests {
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -534,6 +537,7 @@ mod tests {
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let prover = AlwaysOkProver;
         let seed = dummy_seed(dir.path());
@@ -547,6 +551,7 @@ mod tests {
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -580,6 +585,7 @@ mod tests {
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let prover = AlwaysOkProver;
         let seed = dummy_seed(dir.path());
@@ -613,6 +619,7 @@ mod tests {
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
