@@ -53,23 +53,37 @@ async fn mount_challenge(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/auth/challenge"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "challenge": "c-nonce-123",
             "sessionId": "sess-test",
-            "data": { "challenge": "c-nonce-123" }
+            "expiresAt": "2026-12-31T23:59:59Z"
         })))
         .mount(server)
         .await;
 }
 
+/// Mount the canonical `authenticate` response shape. The `expires_at`
+/// argument is the absolute Unix-second value the client should
+/// observe after parsing. We anchor `issuedAt` at the Unix epoch so
+/// `issuedAt + expiresIn == expires_at` arithmetic falls out
+/// trivially without parsing nuance.
 async fn mount_authenticate(server: &MockServer, expires_at: u64) {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sessionId": "sess-test",
-            "data": {
+            "session": {
+                "id": "sess-test",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "access-jwt",
-                "accessExpiresAt": expires_at,
+                "tokenType": "Bearer",
+                "expiresIn": expires_at,
                 "refreshToken": "refresh-tok",
-                "refreshExpiresAt": expires_at + 3600
+                "refreshExpiresIn": expires_at + 3600
             }
         })))
         .mount(server)
@@ -184,11 +198,20 @@ async fn refresh_token_success_rotates_tokens() {
     Mock::given(method("POST"))
         .and(path("/auth/refresh"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {
+            "session": {
+                "id": "sess-test",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "new-access",
-                "accessExpiresAt": 2_000_000_000_u64,
+                "tokenType": "Bearer",
+                "expiresIn": 2_000_000_000_u64,
                 "refreshToken": "new-refresh",
-                "refreshExpiresAt": 2_000_003_600_u64
+                "refreshExpiresIn": 2_000_003_600_u64
             }
         })))
         .mount(&server)
@@ -325,17 +348,26 @@ async fn ensure_token_valid_refreshes_expired_access_token() {
     let server = MockServer::start().await;
     mount_challenge(&server).await;
 
-    // Initial auth: access already expired (1970), refresh still good.
+    // Initial auth: access already expired, refresh still good.
+    // `issuedAt: 1970-01-01T00:00:00Z` makes expiresIn = absolute epoch.
     let future = now_secs() + 3600;
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sessionId": "sess",
-            "data": {
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "expired-access",
-                "accessExpiresAt": 100_u64,
+                "tokenType": "Bearer",
+                "expiresIn": 100_u64,
                 "refreshToken": "live-refresh",
-                "refreshExpiresAt": future
+                "refreshExpiresIn": future
             }
         })))
         .expect(1)
@@ -346,11 +378,20 @@ async fn ensure_token_valid_refreshes_expired_access_token() {
     Mock::given(method("POST"))
         .and(path("/auth/refresh"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "fresh-access",
-                "accessExpiresAt": future,
+                "tokenType": "Bearer",
+                "expiresIn": future,
                 "refreshToken": "newer-refresh",
-                "refreshExpiresAt": future + 3600
+                "refreshExpiresIn": future + 3600
             }
         })))
         .expect(1)
@@ -393,8 +434,9 @@ async fn ensure_token_valid_full_reauth_when_refresh_expired() {
     Mock::given(method("POST"))
         .and(path("/auth/challenge"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "challenge": "c",
             "sessionId": "sess",
-            "data": { "challenge": "c" }
+            "expiresAt": "2099-12-31T23:59:59Z"
         })))
         .expect(2)
         .mount(&server)
@@ -407,12 +449,20 @@ async fn ensure_token_valid_full_reauth_when_refresh_expired() {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sessionId": "sess",
-            "data": {
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "stale-access",
-                "accessExpiresAt": 100_u64,
+                "tokenType": "Bearer",
+                "expiresIn": 100_u64,
                 "refreshToken": "stale-refresh",
-                "refreshExpiresAt": 100_u64
+                "refreshExpiresIn": 100_u64
             }
         })))
         .up_to_n_times(1)
@@ -422,12 +472,20 @@ async fn ensure_token_valid_full_reauth_when_refresh_expired() {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sessionId": "sess",
-            "data": {
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "reauth-access",
-                "accessExpiresAt": future,
+                "tokenType": "Bearer",
+                "expiresIn": future,
                 "refreshToken": "reauth-refresh",
-                "refreshExpiresAt": future + 3600
+                "refreshExpiresIn": future + 3600
             }
         })))
         .expect(1)
@@ -463,8 +521,9 @@ async fn ensure_token_valid_falls_through_when_refresh_fails() {
     Mock::given(method("POST"))
         .and(path("/auth/challenge"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "challenge": "c",
             "sessionId": "sess",
-            "data": { "challenge": "c" }
+            "expiresAt": "2099-12-31T23:59:59Z"
         })))
         .expect(2)
         .mount(&server)
@@ -474,12 +533,20 @@ async fn ensure_token_valid_falls_through_when_refresh_fails() {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sessionId": "sess",
-            "data": {
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "expired",
-                "accessExpiresAt": 100_u64,
+                "tokenType": "Bearer",
+                "expiresIn": 100_u64,
                 "refreshToken": "live-but-server-rejects",
-                "refreshExpiresAt": future
+                "refreshExpiresIn": future
             }
         })))
         .up_to_n_times(1)
@@ -489,12 +556,20 @@ async fn ensure_token_valid_falls_through_when_refresh_fails() {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sessionId": "sess",
-            "data": {
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "fallback-access",
-                "accessExpiresAt": future,
+                "tokenType": "Bearer",
+                "expiresIn": future,
                 "refreshToken": "fallback-refresh",
-                "refreshExpiresAt": future + 3600
+                "refreshExpiresIn": future + 3600
             }
         })))
         .expect(1)

@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use vta_sdk::protocols::auth::{
-    AuthenticateData, AuthenticateResponse, ChallengeData, ChallengeRequest, ChallengeResponse,
+    AuthenticateResponse, ChallengeRequest, ChallengeResponse, Session as WireSession, TokenBundle,
+    epoch_to_rfc3339,
 };
 use vta_sdk::sealed_transfer::constant_time_eq;
 
@@ -145,12 +146,19 @@ pub async fn challenge(
         outcome = "success"
     );
 
+    // Canonical wire shape: flat { challenge, sessionId, expiresAt,
+    // teeAttestation? } per spec/auth/challenge/0.1#response. Challenge
+    // expiry mirrors the configured `auth.challenge_ttl_seconds` —
+    // typically 60 s, matching the framework recommendation of 30 s–
+    // 5 min.
+    let expires_at_epoch = session
+        .created_at
+        .saturating_add(state.config.read().await.auth.challenge_ttl);
     Ok(Json(ChallengeResponse {
+        challenge,
         session_id,
-        data: ChallengeData {
-            challenge,
-            tee_attestation,
-        },
+        expires_at: epoch_to_rfc3339(expires_at_epoch),
+        tee_attestation,
     }))
 }
 
@@ -308,13 +316,23 @@ pub async fn authenticate(
         outcome = "success"
     );
 
+    let issued_at_epoch = now_epoch();
     Ok(Json(AuthenticateResponse {
-        session_id: Some(session.session_id),
-        data: AuthenticateData {
+        session: WireSession {
+            id: session.session_id.clone(),
+            subject: session.did.clone(),
+            issued_at: epoch_to_rfc3339(issued_at_epoch),
+            expires_at: epoch_to_rfc3339(access_expires_at),
+            amr: claims.amr.clone(),
+            acr: claims.acr.clone(),
+        },
+        tokens: TokenBundle {
             access_token,
-            access_expires_at,
             refresh_token: Some(refresh_token),
-            refresh_expires_at: Some(refresh_expires_at),
+            token_type: "Bearer".to_string(),
+            expires_in: access_expires_at.saturating_sub(issued_at_epoch),
+            refresh_expires_in: Some(refresh_expires_at.saturating_sub(issued_at_epoch)),
+            scope: Vec::new(),
         },
     }))
 }
@@ -444,13 +462,23 @@ pub async fn refresh(
         outcome = "success"
     );
 
+    let issued_at_epoch = now_epoch();
     Ok(Json(AuthenticateResponse {
-        session_id: Some(session.session_id),
-        data: AuthenticateData {
+        session: WireSession {
+            id: session.session_id.clone(),
+            subject: session.did.clone(),
+            issued_at: epoch_to_rfc3339(issued_at_epoch),
+            expires_at: epoch_to_rfc3339(access_expires_at),
+            amr: claims.amr.clone(),
+            acr: claims.acr.clone(),
+        },
+        tokens: TokenBundle {
             access_token,
-            access_expires_at,
             refresh_token: Some(new_refresh_token),
-            refresh_expires_at: Some(new_refresh_expires_at),
+            token_type: "Bearer".to_string(),
+            expires_in: access_expires_at.saturating_sub(issued_at_epoch),
+            refresh_expires_in: Some(new_refresh_expires_at.saturating_sub(issued_at_epoch)),
+            scope: Vec::new(),
         },
     }))
 }
@@ -782,13 +810,23 @@ pub async fn passkey_login_finish(
         outcome = "success"
     );
 
+    let issued_at_epoch = now_epoch();
     Ok(Json(AuthenticateResponse {
-        session_id: Some(session.session_id),
-        data: AuthenticateData {
+        session: WireSession {
+            id: session.session_id.clone(),
+            subject: session.did.clone(),
+            issued_at: epoch_to_rfc3339(issued_at_epoch),
+            expires_at: epoch_to_rfc3339(access_expires_at),
+            amr: claims.amr.clone(),
+            acr: claims.acr.clone(),
+        },
+        tokens: TokenBundle {
             access_token,
-            access_expires_at,
             refresh_token: Some(refresh_token),
-            refresh_expires_at: Some(refresh_expires_at),
+            token_type: "Bearer".to_string(),
+            expires_in: access_expires_at.saturating_sub(issued_at_epoch),
+            refresh_expires_in: Some(refresh_expires_at.saturating_sub(issued_at_epoch)),
+            scope: Vec::new(),
         },
     }))
 }

@@ -60,7 +60,7 @@ pub async fn challenge_response_light(
     let packed = didcomm_light::pack_auth_message(
         "https://affinidi.com/atm/1.0/authenticate",
         serde_json::json!({
-            "challenge": challenge.data.challenge,
+            "challenge": challenge.challenge,
             "session_id": challenge.session_id,
         }),
         client_did,
@@ -86,11 +86,18 @@ pub async fn challenge_response_light(
 
     let auth_data: AuthenticateResponse = auth_resp.json().await?;
 
+    let access_expires_at = auth_data.access_expires_at_epoch().ok_or_else(|| {
+        VtaError::Validation(format!(
+            "VTA returned unparseable session.issuedAt: '{}'",
+            auth_data.session.issued_at
+        ))
+    })?;
+    let refresh_expires_at = auth_data.refresh_expires_at_epoch();
     Ok(AuthResult {
-        access_token: auth_data.data.access_token,
-        access_expires_at: auth_data.data.access_expires_at,
-        refresh_token: auth_data.data.refresh_token,
-        refresh_expires_at: auth_data.data.refresh_expires_at,
+        access_token: auth_data.tokens.access_token,
+        access_expires_at,
+        refresh_token: auth_data.tokens.refresh_token,
+        refresh_expires_at,
     })
 }
 
@@ -138,11 +145,18 @@ pub async fn refresh_token_light(
 
     let auth_data: AuthenticateResponse = resp.json().await?;
 
+    let access_expires_at = auth_data.access_expires_at_epoch().ok_or_else(|| {
+        VtaError::Validation(format!(
+            "VTA returned unparseable session.issuedAt: '{}'",
+            auth_data.session.issued_at
+        ))
+    })?;
+    let refresh_expires_at = auth_data.refresh_expires_at_epoch();
     Ok(AuthResult {
-        access_token: auth_data.data.access_token,
-        access_expires_at: auth_data.data.access_expires_at,
-        refresh_token: auth_data.data.refresh_token,
-        refresh_expires_at: auth_data.data.refresh_expires_at,
+        access_token: auth_data.tokens.access_token,
+        access_expires_at,
+        refresh_token: auth_data.tokens.refresh_token,
+        refresh_expires_at,
     })
 }
 

@@ -7,7 +7,8 @@ use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use vta_sdk::protocols::auth::{
-    AuthenticateData, AuthenticateResponse, ChallengeData, ChallengeRequest, ChallengeResponse,
+    AuthenticateResponse, ChallengeRequest, ChallengeResponse, Session as WireSession, TokenBundle,
+    epoch_to_rfc3339,
 };
 
 use crate::acl::{Role, check_acl, check_acl_full};
@@ -54,12 +55,16 @@ pub async fn challenge(
 
     info!(did = %session.did, session_id = %session.session_id, "auth challenge issued");
 
+    // Canonical wire: { challenge, sessionId, expiresAt }. Challenge
+    // expiry mirrors the configured challenge_ttl (default 60 s).
+    let expires_at_epoch = session
+        .created_at
+        .saturating_add(state.config.read().await.auth.challenge_ttl);
     Ok(Json(ChallengeResponse {
+        challenge,
         session_id,
-        data: ChallengeData {
-            challenge,
-            tee_attestation: None,
-        },
+        expires_at: epoch_to_rfc3339(expires_at_epoch),
+        tee_attestation: None,
     }))
 }
 
@@ -200,13 +205,23 @@ async fn authenticate_and_mint(
 
     info!(did = %session.did, session_id = %session.session_id, "authentication successful");
 
+    let issued_at_epoch = now_epoch();
     Ok(AuthenticateResponse {
-        session_id: Some(session.session_id),
-        data: AuthenticateData {
+        session: WireSession {
+            id: session.session_id.clone(),
+            subject: session.did.clone(),
+            issued_at: epoch_to_rfc3339(issued_at_epoch),
+            expires_at: epoch_to_rfc3339(access_expires_at),
+            amr: claims.amr.clone(),
+            acr: claims.acr.clone(),
+        },
+        tokens: TokenBundle {
             access_token,
-            access_expires_at,
             refresh_token: Some(refresh_token),
-            refresh_expires_at: Some(refresh_expires_at),
+            token_type: "Bearer".to_string(),
+            expires_in: access_expires_at.saturating_sub(issued_at_epoch),
+            refresh_expires_in: Some(refresh_expires_at.saturating_sub(issued_at_epoch)),
+            scope: Vec::new(),
         },
     })
 }
@@ -242,11 +257,15 @@ pub async fn admin_login(
 
     let resp = authenticate_and_mint(&state, &body).await?;
 
-    let max_age = resp
-        .data
-        .access_expires_at
-        .saturating_sub(now_epoch())
-        .max(1);
+    // Absolute expiry from canonical { session, tokens }: prefer the
+    // helper, fall back to tokens.expires_in (sec-from-issuance) for
+    // older clients of authenticate_and_mint that emit unparseable
+    // issuedAt (shouldn't happen — every minter goes through
+    // epoch_to_rfc3339).
+    let access_expires_at_epoch = resp
+        .access_expires_at_epoch()
+        .unwrap_or_else(|| now_epoch().saturating_add(resp.tokens.expires_in));
+    let max_age = access_expires_at_epoch.saturating_sub(now_epoch()).max(1);
 
     // Generate a 32-byte CSRF token, hex-encoded. The cookie is
     // JS-readable (HttpOnly off) so the SPA can echo it back via
@@ -256,7 +275,7 @@ pub async fn admin_login(
     rand::rng().fill(&mut csrf_bytes);
     let csrf = hex::encode(csrf_bytes);
 
-    let session_cookie = build_session_cookie(&resp.data.access_token, max_age);
+    let session_cookie = build_session_cookie(&resp.tokens.access_token, max_age);
     let csrf_cookie = build_csrf_cookie(&csrf, max_age);
 
     let session_cookie_hv = HeaderValue::try_from(session_cookie)
@@ -446,13 +465,23 @@ pub async fn passkey_login_finish(
     let csrf = hex::encode(csrf_bytes);
     let csrf_cookie = build_csrf_cookie(&csrf, max_age);
 
+    let issued_at_epoch = now_epoch();
     let resp = AuthenticateResponse {
-        session_id: Some(session_id),
-        data: AuthenticateData {
-            access_token,
-            access_expires_at,
+        session: WireSession {
+            id: session_id.clone(),
+            subject: user.did.clone(),
+            issued_at: epoch_to_rfc3339(issued_at_epoch),
+            expires_at: epoch_to_rfc3339(access_expires_at),
+            amr: claims.amr.clone(),
+            acr: claims.acr.clone(),
+        },
+        tokens: TokenBundle {
+            access_token: access_token.clone(),
             refresh_token: Some(refresh_token),
-            refresh_expires_at: Some(refresh_expires_at),
+            token_type: "Bearer".to_string(),
+            expires_in: access_expires_at.saturating_sub(issued_at_epoch),
+            refresh_expires_in: Some(refresh_expires_at.saturating_sub(issued_at_epoch)),
+            scope: Vec::new(),
         },
     };
 
