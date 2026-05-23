@@ -272,14 +272,19 @@ pub async fn authenticate(
     // through to an unattested challenge writes `false` here.
     let tee_attested = session.tee_attested;
 
-    let claims = jwt_keys.new_claims(
-        session.did.clone(),
-        session.session_id.clone(),
-        role.to_string(),
-        allowed_contexts,
-        access_expiry,
-        tee_attested,
-    );
+    // Challenge-response authenticate: one DID-key factor →
+    // amr=["did"], acr="aal1". Step-up to aal2 happens via the
+    // passkey-login handler below.
+    let claims = jwt_keys
+        .new_claims(
+            session.did.clone(),
+            session.session_id.clone(),
+            role.to_string(),
+            allowed_contexts,
+            access_expiry,
+            tee_attested,
+        )
+        .with_aal(vec!["did".to_string()], "aal1");
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 
@@ -395,14 +400,23 @@ pub async fn refresh(
     // tee_attested is per-session — fixed at challenge time, not per-refresh.
     let tee_attested = session.tee_attested;
 
-    let claims = jwt_keys.new_claims(
-        session.did.clone(),
-        session.session_id.clone(),
-        role.to_string(),
-        allowed_contexts,
-        access_expiry,
-        tee_attested,
-    );
+    // Refresh re-mints with the same AAL the original authenticate
+    // recorded. The Session row doesn't carry amr/acr today, so
+    // fallback to aal1 (one DID factor) — accurate for any session
+    // born of the challenge-response path and lower-bound-safe for
+    // sessions that may have been step-uped to aal2 (the holder can
+    // re-step-up after refresh). A future Session-shape extension
+    // will let refresh preserve the elevated AAL across token rotation.
+    let claims = jwt_keys
+        .new_claims(
+            session.did.clone(),
+            session.session_id.clone(),
+            role.to_string(),
+            allowed_contexts,
+            access_expiry,
+            tee_attested,
+        )
+        .with_aal(vec!["did".to_string()], "aal1");
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 
@@ -735,14 +749,20 @@ pub async fn passkey_login_finish(
     let tee_attested = session.tee_attested;
     #[cfg(not(feature = "tee"))]
     let tee_attested = false;
-    let claims = jwt_keys.new_claims(
-        session.did.clone(),
-        session.session_id.clone(),
-        role.to_string(),
-        allowed_contexts,
-        access_expiry,
-        tee_attested,
-    );
+    // Passkey-login is the second factor (DID-key challenged first via
+    // the challenge endpoint, then a WebAuthn assertion proves
+    // possession of a passkey VM). amr captures both, acr promotes to
+    // aal2.
+    let claims = jwt_keys
+        .new_claims(
+            session.did.clone(),
+            session.session_id.clone(),
+            role.to_string(),
+            allowed_contexts,
+            access_expiry,
+            tee_attested,
+        )
+        .with_aal(vec!["did".to_string(), "passkey".to_string()], "aal2");
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
     let refresh_token = Uuid::new_v4().to_string();

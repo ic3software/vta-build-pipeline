@@ -26,7 +26,7 @@ pub trait AuthState: Clone + Send + Sync + 'static {
 /// ```ignore
 /// async fn handler(_auth: AuthClaims, ...) { }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct AuthClaims {
     pub did: String,
     pub role: Role,
@@ -39,6 +39,14 @@ pub struct AuthClaims {
     /// `whoami`-style endpoints can return the access-token
     /// lifetime without re-decoding.
     pub access_expires_at: u64,
+    /// Authentication Methods References per [RFC 8176]. Mirrors
+    /// `Claims.amr` from the bearer JWT. Handlers gating sensitive
+    /// operations check this to decide whether a step-up is needed.
+    pub amr: Vec<String>,
+    /// Authentication Context Class Reference per OIDC Core §2.
+    /// Typical values: `"aal1"` / `"aal2"` / `"aal3"`. Handlers gating
+    /// step-up read this directly.
+    pub acr: String,
 }
 
 /// Name of the admin UX session cookie set by the VTC's
@@ -110,6 +118,8 @@ impl<S: AuthState> FromRequestParts<S> for AuthClaims {
             allowed_contexts: claims.contexts,
             session_id: claims.session_id,
             access_expires_at: claims.exp,
+            amr: claims.amr,
+            acr: claims.acr,
         })
     }
 }
@@ -156,6 +166,12 @@ impl AuthClaims {
             // visibly "no real expiry" to any log scraper.
             session_id: format!("cli:{channel}"),
             access_expires_at: 0,
+            // CLI synthesis is a process-local trust boundary; the auth
+            // method is the OS user, not a wire factor. Surface `"cli"`
+            // in amr so a downstream auditor distinguishes synthesized
+            // claims from real authenticated sessions.
+            amr: vec!["cli".to_string()],
+            acr: String::new(),
         }
     }
 

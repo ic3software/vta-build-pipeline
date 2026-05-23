@@ -170,14 +170,19 @@ async fn authenticate_and_mint(
     let refresh_expiry = config.auth.refresh_token_expiry;
     drop(config);
 
-    let claims = jwt_keys.new_claims(
-        session.did.clone(),
-        session.session_id.clone(),
-        role.to_string(),
-        allowed_contexts,
-        access_expiry,
-        false,
-    );
+    // Challenge-response authenticate via DIDComm — one DID-key
+    // factor → amr=["did"], acr="aal1". Step-up to aal2 happens via
+    // the passkey-login handler below.
+    let claims = jwt_keys
+        .new_claims(
+            session.did.clone(),
+            session.session_id.clone(),
+            role.to_string(),
+            allowed_contexts,
+            access_expiry,
+            false,
+        )
+        .with_aal(vec!["did".to_string()], "aal1");
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 
@@ -392,14 +397,20 @@ pub async fn passkey_login_finish(
     drop(config);
 
     let session_id = Uuid::new_v4().to_string();
-    let claims = jwt_keys.new_claims(
-        user.did.clone(),
-        session_id.clone(),
-        role.to_string(),
-        allowed_contexts,
-        access_expiry,
-        false,
-    );
+    // Passkey-login: WebAuthn assertion bound to the holder's
+    // registered credential. amr=["passkey"], acr="aal2" — the
+    // assertion alone is two factors (possession of the
+    // authenticator + user verification gesture / biometric).
+    let claims = jwt_keys
+        .new_claims(
+            user.did.clone(),
+            session_id.clone(),
+            role.to_string(),
+            allowed_contexts,
+            access_expiry,
+            false,
+        )
+        .with_aal(vec!["passkey".to_string()], "aal2");
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 
@@ -618,14 +629,21 @@ pub async fn refresh(
     let access_expiry = config.auth.access_token_expiry;
     drop(config);
 
-    let claims = jwt_keys.new_claims(
-        session.did.clone(),
-        session.session_id.clone(),
-        role.to_string(),
-        allowed_contexts,
-        access_expiry,
-        false,
-    );
+    // Refresh re-mints with the same nominal AAL the original
+    // authenticate set. The VTC Session doesn't persist amr/acr today
+    // so fallback to aal1 — same trade-off VTA's refresh handler
+    // makes; future Session-shape extension lets refresh preserve
+    // step-uped AAL across token rotation.
+    let claims = jwt_keys
+        .new_claims(
+            session.did.clone(),
+            session.session_id.clone(),
+            role.to_string(),
+            allowed_contexts,
+            access_expiry,
+            false,
+        )
+        .with_aal(vec!["did".to_string()], "aal1");
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 

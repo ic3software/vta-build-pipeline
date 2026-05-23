@@ -14,13 +14,19 @@ use crate::store::KeyspaceHandle;
 /// - **Application** — standard API access (sign, cache write) within allowed contexts
 /// - **Reader** — read-only access to keys, contexts, DIDs within allowed contexts
 /// - **Monitor** — infrastructure-only: metrics and health endpoints
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Admin,
     Initiator,
     Application,
     Reader,
+    /// `Monitor` is the least-privileged role and the natural default
+    /// for a `Default::default()` `AuthClaims` (typically used in tests
+    /// or pre-authentication scaffolding). A test fixture that leaks
+    /// past its expected reach now lands on the most-restricted role
+    /// rather than the most-privileged.
+    #[default]
     Monitor,
 }
 
@@ -253,6 +259,8 @@ mod tests {
             allowed_contexts: vec![],
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         }
     }
 
@@ -263,6 +271,8 @@ mod tests {
             allowed_contexts: contexts.iter().map(|s| s.to_string()).collect(),
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         }
     }
 
@@ -476,6 +486,8 @@ mod tests {
             allowed_contexts: vec!["ctx1".into()],
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
         let err = validate_role_assignment(&initiator, &Role::Admin)
             .expect_err("non-admin must not assign admin");
@@ -490,6 +502,8 @@ mod tests {
             allowed_contexts: vec!["ctx1".into()],
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
         for target in [
             Role::Admin,
@@ -512,6 +526,8 @@ mod tests {
             allowed_contexts: vec!["ctx1".into()],
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
         validate_role_assignment(&initiator, &Role::Reader).expect("initiator can assign reader");
         validate_role_assignment(&initiator, &Role::Application)

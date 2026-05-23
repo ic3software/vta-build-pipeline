@@ -478,6 +478,8 @@ mod tests {
             allowed_contexts: contexts.iter().map(|s| s.to_string()).collect(),
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         }
     }
 
@@ -635,6 +637,8 @@ mod tests {
             allowed_contexts: Vec::new(),
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
         let err = create_acl(
             &acl_ks,
@@ -665,6 +669,8 @@ mod tests {
             allowed_contexts: Vec::new(),
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
         let body = create_acl(
             &acl_ks,
@@ -702,6 +708,8 @@ mod tests {
             allowed_contexts: Vec::new(),
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
         let err = update_acl(
             &acl_ks,

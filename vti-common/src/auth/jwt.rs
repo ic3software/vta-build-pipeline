@@ -5,7 +5,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 /// JWT claims for VTA/VTC access tokens.
-#[derive(Debug, Serialize, Deserialize)]
+///
+/// Aligns with the OIDC Core §2 / RFC 8176 vocabulary so the same
+/// claim names other identity stacks emit work here unchanged:
+///
+/// - `amr` — *Authentication Methods References*. Per [RFC 8176]
+///   the canonical short strings are `pwd`, `hwk`, `swk`, `iris`,
+///   `face`, `sms`, etc.; the VTI vocabulary in current use is
+///   `"did"` (challenge-response), `"passkey"` (WebAuthn), `"vta"`
+///   (verifiable-trust-agent attestation). Multi-factor sessions
+///   list every method that contributed.
+/// - `acr` — *Authentication Context Class Reference*. The
+///   recommended set is `"aal1"` (single-factor DID), `"aal2"`
+///   (a second possession-or-biometric factor confirmed), `"aal3"`
+///   (hardware-bound second factor).
+///
+/// `Default` derives so test fixtures and follow-up constructions can
+/// use `Claims { aud: ..., ..Default::default() }` without listing
+/// every field — production minters still set the values that
+/// matter, but the boilerplate at non-load-bearing call sites
+/// (default-empty in tests, mocks, examples) stays out of the way.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Claims {
     pub aud: String,
     pub sub: String,
@@ -19,6 +39,15 @@ pub struct Claims {
     /// reduce token size.
     #[serde(default, skip_serializing_if = "is_false")]
     pub tee_attested: bool,
+    /// Authentication Methods References per [RFC 8176]. Empty when
+    /// the consumer's authentication path did not categorise the
+    /// factor (e.g. legacy tokens minted before AAL plumbing landed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub amr: Vec<String>,
+    /// Authentication Context Class Reference per OIDC Core §2.
+    /// Empty when not categorised.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub acr: String,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -121,7 +150,31 @@ impl JwtKeys {
             contexts,
             exp,
             tee_attested,
+            amr: Vec::new(),
+            acr: String::new(),
         }
+    }
+}
+
+impl Claims {
+    /// Builder-style setter for the `amr` + `acr` claims. Production
+    /// minters that know how the session was authenticated call this
+    /// after [`JwtKeys::new_claims`] to attach the AAL signal:
+    ///
+    /// ```ignore
+    /// let claims = jwt_keys.new_claims(/* ... */)
+    ///     .with_aal(vec!["did".into()], "aal1");
+    /// ```
+    ///
+    /// Step-up flows append a factor and raise the acr:
+    ///
+    /// ```ignore
+    /// claims = claims.with_aal(vec!["did".into(), "passkey".into()], "aal2");
+    /// ```
+    pub fn with_aal(mut self, amr: Vec<String>, acr: impl Into<String>) -> Self {
+        self.amr = amr;
+        self.acr = acr.into();
+        self
     }
 }
 
