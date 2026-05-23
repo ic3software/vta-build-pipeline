@@ -703,8 +703,11 @@ rather than being baked into the inner function directly:
     "serviceEndpoint": "<public_url>"
   }
   ```
-* Emitted iff `services.rest == true` AND `public_url` is set
-  (matrix test in `setup.rs:175`).
+* Emitted iff REST is enabled in runtime state AND `public_url` is set. At
+  setup time this is gated by the `[services] rest` seed value (matrix test in
+  `setup.rs:175`); at runtime it's gated by the
+  `operations::protocol::runtime_state` fjall record, mutated by
+  `services rest enable/disable`.
 * SDK resolves it via `find_service("vta-rest")` at
   `vta-sdk/src/session.rs:1100`. The resolve path is
   load-bearing for the SDK's own routing.
@@ -726,17 +729,19 @@ This **constrains** the runtime-mutation work in P1.3 / T2.4:
   against `document.rs:79` + `setup.rs:86`. T2.4 just locks this
   in via a render-layer test.
 
-**Initial state post-upgrade.** An upgraded VTA with
-`services.rest = true` + `public_url` set + `services.didcomm =
-true` boots in **S3** (both advertised) — there is no implicit
-state change from upgrade. Existing config drives the same shape
-the runtime commands produce. A VTA configured today with
-`services.rest = false` + `services.didcomm = false` is already
-unreachable (its DID doc has no transport service entries) —
-that's a pre-existing config foot-gun, not something this spec
-introduces. Per §3.2, the runtime commands enforce the
-"at-least-one" invariant going forward; existing misconfigured
-VTAs are not auto-repaired.
+**Initial state post-upgrade.** Runtime enable/disable state lives in the
+`service_state` fjall keyspace (`operations::protocol::runtime_state`), not in
+`config.toml`. On first boot post-upgrade,
+`runtime_state::migrate_from_config` seeds that keyspace from the legacy
+`[services]` block — so an upgraded VTA with `services.rest = true` +
+`public_url` set + `services.didcomm = true` boots in **S3** (both advertised)
+with no implicit state change. Subsequent boots ignore the legacy block; the
+runtime commands are the only path that mutates state. A VTA configured today
+with `services.rest = false` + `services.didcomm = false` is already
+unreachable (its DID doc has no transport service entries) — that's a
+pre-existing config foot-gun, not something this spec introduces. Per §3.2,
+the runtime commands enforce the "at-least-one" invariant going forward;
+existing misconfigured VTAs are not auto-repaired.
 
 ## 11. Lifecycle
 

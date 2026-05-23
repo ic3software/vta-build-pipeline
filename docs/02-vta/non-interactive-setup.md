@@ -106,7 +106,11 @@ summary.
 
 ### Sections
 
-- **`[services]`** — `rest = true` and `didcomm = true` by default.
+- **`[services]`** — `rest = true` and `didcomm = true` by default. Seeds the
+  *initial* enable state on first boot; subsequent runtime changes via
+  `pnm services {kind} {enable,disable}` persist to a fjall keyspace
+  (`service_state`), not back into `config.toml`. Hand-editing this block after
+  first boot has no effect — use the runtime commands.
 - **`[server]`** — `host = "0.0.0.0"`, `port = 8100`.
 - **`[log]`** — `level = "info"`, `format = "text"`.
 - **`[secrets]`** — required; tagged enum on `backend`. See below.
