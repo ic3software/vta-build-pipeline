@@ -146,6 +146,38 @@ impl KeyspaceHandle {
         }
     }
 
+    /// Atomic `GET` + `DELETE` — see
+    /// [`LocalKeyspaceHandle::take_raw`].
+    ///
+    /// On the [`KeyspaceHandle::Vsock`] variant the vsock RPC does
+    /// not yet carry a native `take` opcode. The fallback is
+    /// `get_raw` + `remove`, which has a TOCTOU window across two
+    /// vsock round-trips — two concurrent presenters could both
+    /// observe `Some`. The canonical refresh-token claim treats
+    /// this as a documented gap (TEE enclaves are single-replica,
+    /// so the window is per-connection rather than cross-replica)
+    /// and emits a `warn!` on every call so it stays visible
+    /// until the vsock proto gains a `take` opcode.
+    pub async fn take_raw(&self, key: impl Into<Vec<u8>>) -> Result<Option<Vec<u8>>, AppError> {
+        let key = key.into();
+        match self {
+            KeyspaceHandle::Local(h) => h.take_raw(key).await,
+            #[cfg(feature = "vsock-store")]
+            KeyspaceHandle::Vsock(h) => {
+                tracing::warn!(
+                    "KeyspaceHandle::Vsock::take_raw using non-atomic get+remove fallback; \
+                     vsock proto lacks a native take opcode. Single-replica TEE deployments \
+                     are unaffected in practice."
+                );
+                let val = h.get_raw(key.clone()).await?;
+                if val.is_some() {
+                    h.remove(key).await?;
+                }
+                Ok(val)
+            }
+        }
+    }
+
     pub async fn insert_raw(
         &self,
         key: impl Into<Vec<u8>>,
@@ -307,6 +339,39 @@ impl LocalKeyspaceHandle {
         let key = key.into();
         let ks = self.keyspace.clone();
         blocking_with_timeout(move || Ok(ks.remove(key)?)).await
+    }
+
+    /// Atomically `GET` + `DELETE` (the classic Redis `GETDEL`).
+    ///
+    /// Single-process fjall serialises writes per keyspace, so the
+    /// `get` and `remove` inside one `blocking_with_timeout` closure
+    /// are atomic with respect to any other `take_raw` racing on the
+    /// same key — exactly one caller observes `Some`.
+    ///
+    /// Used by the canonical refresh-token claim
+    /// ([`crate::auth::session::take_session_id_by_refresh`]) to
+    /// close the rotation TOCTOU: a leaked refresh token can be
+    /// presented exactly once even under concurrent retries.
+    pub async fn take_raw(&self, key: impl Into<Vec<u8>>) -> Result<Option<Vec<u8>>, AppError> {
+        let key = key.into();
+        let ks = self.keyspace.clone();
+        #[cfg(feature = "encryption")]
+        let enc_key = self.encryption_key.clone();
+        blocking_with_timeout(move || match ks.get(&key)? {
+            Some(bytes) => {
+                ks.remove(&key)?;
+                #[cfg(feature = "encryption")]
+                let bytes = {
+                    let k = enc_key.as_ref().map(|arc| &***arc);
+                    encryption::maybe_decrypt_bytes(k, &bytes)?
+                };
+                #[cfg(not(feature = "encryption"))]
+                let bytes = bytes.to_vec();
+                Ok(Some(bytes))
+            }
+            None => Ok(None),
+        })
+        .await
     }
 
     pub async fn insert_raw(

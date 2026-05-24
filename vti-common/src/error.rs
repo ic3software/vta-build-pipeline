@@ -112,6 +112,42 @@ impl AppError {
     }
 }
 
+/// Convert the canonical auth-flow errors into [`AppError`] so
+/// the route layer's existing `IntoResponse` plumbing renders
+/// them without backend-specific glue. Each variant lands on the
+/// HTTP status reflected in the [`crate::auth::AuthError`]
+/// doc-comments:
+///
+/// - `Forbidden`, `DidMethodRejected` → 403
+/// - `PendingChallengeLimitReached` → 429 via the Validation arm
+///   (route layer can return a typed 429 if needed; the canonical
+///   variant carries the rate-limit signal in the message).
+/// - `SessionNotFound`, `SessionStateMismatch`, `ChallengeMismatch`,
+///   `ChallengeExpired`, `SignerMismatch`, `StaleMessage`,
+///   `RefreshTokenInvalid`, `RefreshTokenExpired` → 401
+/// - `AttestationFailed` → 503 via Internal (TEE outages are not
+///   the caller's fault).
+/// - `Internal` → 500.
+impl From<crate::auth::backend::AuthError> for AppError {
+    fn from(e: crate::auth::backend::AuthError) -> Self {
+        use crate::auth::backend::AuthError as A;
+        match e {
+            A::Forbidden | A::DidMethodRejected => AppError::Forbidden(e.to_string()),
+            A::PendingChallengeLimitReached => AppError::Validation(e.to_string()),
+            A::SessionNotFound
+            | A::SessionStateMismatch
+            | A::ChallengeMismatch
+            | A::ChallengeExpired
+            | A::SignerMismatch
+            | A::StaleMessage
+            | A::RefreshTokenInvalid
+            | A::RefreshTokenExpired => AppError::Authentication(e.to_string()),
+            A::AttestationFailed(msg) => AppError::Internal(format!("tee attestation: {msg}")),
+            A::Internal(msg) => AppError::Internal(msg),
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self {

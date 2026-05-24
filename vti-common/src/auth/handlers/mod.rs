@@ -13,10 +13,12 @@
 pub mod authenticate;
 pub mod challenge;
 pub mod refresh;
+pub mod store;
 
-pub use authenticate::handle_authenticate;
+pub use authenticate::{handle_authenticate, handle_authenticate_with_aal};
 pub use challenge::handle_challenge;
 pub use refresh::handle_refresh;
+pub use store::KeyspaceSessionStore;
 
 use crate::auth::AuthError;
 use crate::auth::session::Session;

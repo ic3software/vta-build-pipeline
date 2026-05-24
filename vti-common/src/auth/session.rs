@@ -186,6 +186,59 @@ pub async fn delete_refresh_index(sessions: &KeyspaceHandle, token: &str) -> Res
     sessions.remove(refresh_key(token)).await
 }
 
+/// Atomically claim-and-delete the `refresh_token → session_id`
+/// reverse index. The classic Redis-`GETDEL` shape — exactly one
+/// concurrent caller observes `Some`, even under retries.
+///
+/// Used by the canonical `/auth/refresh` handler to close the
+/// rotation TOCTOU: a leaked refresh token cannot be presented
+/// twice. On single-process fjall the atomicity comes from
+/// running both ops in one `blocking_with_timeout` closure; on
+/// the vsock backend the fallback is non-atomic
+/// (see [`crate::store::KeyspaceHandle::take_raw`]).
+pub async fn take_session_id_by_refresh(
+    sessions: &KeyspaceHandle,
+    token: &str,
+) -> Result<Option<String>, AppError> {
+    match sessions.take_raw(refresh_key(token)).await? {
+        Some(bytes) => {
+            let session_id = String::from_utf8(bytes)
+                .map_err(|e| AppError::Internal(format!("invalid session_id bytes: {e}")))?;
+            Ok(Some(session_id))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Count `ChallengeSent` sessions belonging to `did`. The
+/// canonical `/auth/challenge` handler invokes this to enforce
+/// `AuthBackend::max_pending_challenges_per_did` and reject
+/// callers that try to exhaust the keyspace with a churn of
+/// pending challenges.
+///
+/// Default implementation is an O(N) prefix scan over `session:`.
+/// Backends with a per-DID tracker keyspace (like did-hosting's
+/// `pending_challenges:` index) can override the corresponding
+/// `SessionStore::count_pending_challenges` method to return O(1).
+/// Suitable for the current keyspace sizes vti-common consumers
+/// operate at; revisit when sessions cross five-figure cardinality.
+pub async fn count_pending_challenges(
+    sessions: &KeyspaceHandle,
+    did: &str,
+) -> Result<usize, AppError> {
+    let entries = sessions.prefix_iter_raw("session:").await?;
+    let mut count = 0usize;
+    for (_key, value) in entries {
+        if let Ok(s) = serde_json::from_slice::<Session>(&value)
+            && s.did == did
+            && s.state == SessionState::ChallengeSent
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Returns the current UNIX epoch timestamp in seconds.
 pub fn now_epoch() -> u64 {
     SystemTime::now()
