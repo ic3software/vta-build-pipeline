@@ -356,7 +356,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "vta-sdk 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "vta-sdk 0.6.0",
 ]
 
 [[package]]
@@ -2115,7 +2115,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vta-cli-common",
- "vta-sdk 0.6.0",
+ "vta-sdk 0.7.0",
 ]
 
 [[package]]
@@ -2889,7 +2889,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vta-sdk 0.6.0",
+ "vta-sdk 0.7.0",
 ]
 
 [[package]]
@@ -6152,7 +6152,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vta-cli-common",
- "vta-sdk 0.6.0",
+ "vta-sdk 0.7.0",
 ]
 
 [[package]]
@@ -9180,7 +9180,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
- "vta-sdk 0.6.0",
+ "vta-sdk 0.7.0",
  "x25519-dalek",
 ]
 
@@ -9202,6 +9202,34 @@ dependencies = [
 [[package]]
 name = "vta-sdk"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bff1e0c2c00bc1ccdc85d380f8f3a63b1f1a420ea9e8bda3da871aa5cb108e9"
+dependencies = [
+ "aes 0.9.0",
+ "aes-gcm",
+ "affinidi-did-resolver-cache-sdk",
+ "affinidi-tdk",
+ "base64 0.22.1",
+ "chrono",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "getrandom 0.4.2",
+ "multibase",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "vta-sdk"
+version = "0.7.0"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -9241,34 +9269,6 @@ dependencies = [
  "wiremock",
  "x25519-dalek",
  "zeroize",
-]
-
-[[package]]
-name = "vta-sdk"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bff1e0c2c00bc1ccdc85d380f8f3a63b1f1a420ea9e8bda3da871aa5cb108e9"
-dependencies = [
- "aes 0.9.0",
- "aes-gcm",
- "affinidi-did-resolver-cache-sdk",
- "affinidi-tdk",
- "base64 0.22.1",
- "chrono",
- "curve25519-dalek",
- "ed25519-dalek",
- "getrandom 0.4.2",
- "multibase",
- "reqwest 0.13.3",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
- "uuid",
- "x25519-dalek",
 ]
 
 [[package]]
@@ -9344,7 +9344,7 @@ dependencies = [
  "uuid",
  "vaultrs",
  "vta-cli-common",
- "vta-sdk 0.6.0",
+ "vta-sdk 0.7.0",
  "vta-service",
  "vti-common",
  "vti-webauthn",
@@ -9420,7 +9420,7 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
- "vta-sdk 0.6.0",
+ "vta-sdk 0.7.0",
  "vti-common",
  "webauthn-rs",
  "webauthn-rs-proto",
@@ -9461,7 +9461,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "vta-sdk 0.6.0",
+ "vta-sdk 0.7.0",
  "webauthn-rs",
  "zeroize",
 ]
@@ -9488,7 +9488,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "vta-sdk 0.6.0",
+ "vta-sdk 0.7.0",
  "vta-service",
  "vti-common",
 ]

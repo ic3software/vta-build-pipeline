@@ -64,7 +64,7 @@ vti-common = { path = "../vti-common", version = "0.7", features = [
   # the wizard calls into.
   "setup",
 ] }
-vta-sdk = { path = "../vta-sdk", version = "0.6", features = [
+vta-sdk = { path = "../vta-sdk", version = "0.7", features = [
   "didcomm",
   "session",
   "config-session",
