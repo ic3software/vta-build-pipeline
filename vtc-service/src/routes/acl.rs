@@ -241,6 +241,7 @@ fn as_vti_acl_entry(e: &VtcAclEntry) -> vti_common::acl::AclEntry {
         created_at: e.created_at,
         created_by: e.created_by.clone(),
         expires_at: e.expires_at,
+        version: 0,
     }
 }
 

@@ -172,6 +172,16 @@ pub struct ServicesConfig {
     pub rest: bool,
     #[serde(default = "default_true")]
     pub didcomm: bool,
+    /// WebAuthn-RP service — the dedicated `/auth/portal` +
+    /// `/auth/passkey-login/*` + `/did/verification-methods/passkey/*`
+    /// surface. Distinct from `rest` so an operator can run a
+    /// REST-less, browser-facing-only VTA (e.g. one that only
+    /// publishes WebAuthn flows for end-users plus DIDComm for
+    /// programmatic peers). Defaults to `false` because legacy
+    /// installs don't have this surface enabled; new installs that
+    /// want browser-side passkey login flip this on explicitly.
+    #[serde(default)]
+    pub webauthn: bool,
 }
 
 fn default_true() -> bool {
@@ -183,6 +193,7 @@ impl Default for ServicesConfig {
         Self {
             rest: true,
             didcomm: true,
+            webauthn: false,
         }
     }
 }
@@ -193,6 +204,41 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Origins permitted to make cross-origin requests against the
+    /// VTA's REST surface. Empty (default) disables the CORS layer
+    /// entirely — a fresh-install VTA refuses cross-origin requests
+    /// the way the legacy behaviour did. Production deployments
+    /// typically leave this empty (programmatic clients send the
+    /// bearer token directly and don't need browser-side CORS); the
+    /// demo at `examples/vta-auth-demo/` sets it to
+    /// `["http://localhost:8000"]` so an operator can drive the
+    /// auth flow from a browser running on a different localhost
+    /// port.
+    ///
+    /// Each entry is matched exactly against the request's `Origin`
+    /// header. Wildcards are not accepted — bearer credentials must
+    /// not flow to arbitrary origins.
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
+    /// Whether to trust `X-Forwarded-For` / `Forwarded` headers
+    /// for client-IP attribution in the per-IP rate limiter.
+    ///
+    /// Default `false` — the rate limiter keys on the socket
+    /// peer-IP (`PeerIpKeyExtractor`). This is the safe default
+    /// for direct-binding deployments where an attacker can spoof
+    /// `X-Forwarded-For` to evade rate limiting.
+    ///
+    /// Set `true` only when the VTA runs behind a trust-boundary
+    /// reverse proxy (Nginx, Envoy, ALB) that overwrites or
+    /// strips these headers from external requests — the rate
+    /// limiter switches to `SmartIpKeyExtractor` and walks the
+    /// `X-Forwarded-For` chain. Misconfiguring this (`trust_xff =
+    /// true` with no proxy, or a misconfigured proxy that doesn't
+    /// strip the header) is a silent rate-limit bypass.
+    ///
+    /// Closes L2 from the May 2026 security review.
+    #[serde(default)]
+    pub trust_xff: bool,
 }
 
 fn default_host() -> String {
@@ -218,6 +264,8 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            cors_origins: Vec::new(),
+            trust_xff: false,
         }
     }
 }

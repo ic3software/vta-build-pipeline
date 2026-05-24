@@ -3,17 +3,17 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use vta_sdk::protocols::auth::{
-    AuthenticateData, AuthenticateResponse, ChallengeData, ChallengeRequest, ChallengeResponse,
+    AuthenticateResponse, ChallengeRequest, ChallengeResponse, Session as WireSession, TokenBundle,
+    epoch_to_rfc3339,
 };
 
-use crate::acl::{Role, check_acl, check_acl_full};
+use crate::acl::{Role, check_acl_full};
 use crate::auth::session::{
-    Session, SessionState, delete_session, get_session, get_session_by_refresh, list_sessions,
-    now_epoch, store_refresh_index, store_session, update_session,
+    Session, SessionState, delete_session, get_session, list_sessions, now_epoch,
+    store_refresh_index, store_session,
 };
 use crate::auth::{AdminAuth, AuthClaims, ManageAuth};
 use crate::error::AppError;
@@ -22,45 +22,22 @@ use tracing::{info, warn};
 
 // ---------- POST /auth/challenge ----------
 
+/// Thin dispatcher — every substantive concern (ACL, rate
+/// limit, session persistence) lives in the canonical handler.
 pub async fn challenge(
     State(state): State<AppState>,
     Json(req): Json<ChallengeRequest>,
 ) -> Result<Json<ChallengeResponse>, AppError> {
-    // ACL enforcement: DID must be in the ACL to request a challenge
-    let acl = state.acl_ks.clone();
-    check_acl(&acl, &req.did).await?;
-
-    let session_id = Uuid::new_v4().to_string();
-
-    // Generate 32-byte random challenge as hex
-    let mut challenge_bytes = [0u8; 32];
-    rand::fill(&mut challenge_bytes);
-    let challenge = hex::encode(challenge_bytes);
-
-    let session = Session {
-        session_id: session_id.clone(),
-        did: req.did,
-        challenge: challenge.clone(),
-        state: SessionState::ChallengeSent,
-        created_at: now_epoch(),
-        refresh_token: None,
-        refresh_expires_at: None,
-        // VTC has no TEE attestation surface — always false here.
-        tee_attested: false,
-    };
-
-    let sessions = state.sessions_ks.clone();
-    store_session(&sessions, &session).await?;
-
-    info!(did = %session.did, session_id = %session.session_id, "auth challenge issued");
-
-    Ok(Json(ChallengeResponse {
-        session_id,
-        data: ChallengeData {
-            challenge,
-            tee_attestation: None,
+    let backend = crate::auth::VtcAuthBackend::from_state(&state).await?;
+    let resp = vti_common::auth::handlers::handle_challenge(
+        &backend,
+        vti_common::auth::ChallengeInput {
+            did: req.did,
+            session_pubkey_b58btc: None,
         },
-    }))
+    )
+    .await?;
+    Ok(Json(resp))
 }
 
 // ---------- POST /auth/ ----------
@@ -85,125 +62,58 @@ async fn authenticate_and_mint(
         .atm
         .as_ref()
         .ok_or_else(|| AppError::Authentication("ATM not configured".into()))?;
-    let jwt_keys = state
-        .jwt_keys
-        .as_ref()
-        .ok_or_else(|| AppError::Authentication("JWT keys not configured".into()))?;
 
-    // Unpack the DIDComm message
     let (msg, _metadata) = atm
         .unpack(body)
         .await
         .map_err(|e| AppError::Authentication(format!("failed to unpack message: {e}")))?;
 
-    // Validate message type
-    if msg.typ != "https://affinidi.com/atm/1.0/authenticate" {
+    // L4: accept both legacy and canonical Trust-Task URIs.
+    if !matches!(
+        msg.typ.as_str(),
+        "https://affinidi.com/atm/1.0/authenticate"
+            | "https://trusttasks.org/spec/auth/authenticate/0.1"
+    ) {
         return Err(AppError::Authentication(format!(
             "unexpected message type: {}",
             msg.typ
         )));
     }
 
-    // Extract challenge and session_id from body
     let challenge = msg.body["challenge"]
         .as_str()
-        .ok_or_else(|| AppError::Authentication("missing challenge in message body".into()))?;
+        .ok_or_else(|| AppError::Authentication("missing challenge in message body".into()))?
+        .to_string();
     let session_id = msg.body["session_id"]
         .as_str()
-        .ok_or_else(|| AppError::Authentication("missing session_id in message body".into()))?;
+        .ok_or_else(|| AppError::Authentication("missing session_id in message body".into()))?
+        .to_string();
 
-    // Validate sender DID
     let sender_did = msg
         .from
         .as_deref()
         .ok_or_else(|| AppError::Authentication("message has no sender (from)".into()))?;
+    let sender_base = sender_did
+        .split('#')
+        .next()
+        .unwrap_or(sender_did)
+        .to_string();
 
-    // Look up session and validate
-    let sessions = state.sessions_ks.clone();
-    let mut session = get_session(&sessions, session_id)
-        .await?
-        .ok_or_else(|| AppError::Authentication("session not found".into()))?;
-
-    if session.state != SessionState::ChallengeSent {
-        warn!(session_id, "authentication rejected: session replay");
-        return Err(AppError::Authentication(
-            "session already authenticated (replay)".into(),
-        ));
-    }
-    // Constant-time compare on the challenge bytes. `==` on a
-    // `String` short-circuits at the first mismatching byte, leaking
-    // prefix-match length via response timing. The challenge is
-    // server-generated 32-byte URL-safe base64, so the length check
-    // is effectively a no-op in practice but covers the
-    // wrong-length-attack edge.
-    if session.challenge.len() != challenge.len()
-        || !bool::from(session.challenge.as_bytes().ct_eq(challenge.as_bytes()))
-    {
-        warn!(session_id, "authentication rejected: challenge mismatch");
-        return Err(AppError::Authentication("challenge mismatch".into()));
-    }
-    // Match the DID (compare base DID, ignoring any fragment)
-    let sender_base = sender_did.split('#').next().unwrap_or(sender_did);
-    if session.did != sender_base {
-        warn!(session_id, sender = %sender_base, expected = %session.did, "authentication rejected: DID mismatch");
-        return Err(AppError::Authentication("DID mismatch".into()));
-    }
-
-    // Check challenge TTL
-    {
-        let config = state.config.read().await;
-        let challenge_ttl = config.auth.challenge_ttl;
-        drop(config);
-        if now_epoch().saturating_sub(session.created_at) > challenge_ttl {
-            warn!(session_id, "authentication rejected: challenge expired");
-            return Err(AppError::Authentication("challenge expired".into()));
-        }
-    }
-
-    // Look up ACL entry to get role and allowed contexts for the token
-    let acl = state.acl_ks.clone();
-    let (role, allowed_contexts) = check_acl_full(&acl, &session.did).await?;
-
-    // Generate tokens
-    let config = state.config.read().await;
-    let access_expiry = config.auth.access_token_expiry;
-    let refresh_expiry = config.auth.refresh_token_expiry;
-    drop(config);
-
-    let claims = jwt_keys.new_claims(
-        session.did.clone(),
-        session.session_id.clone(),
-        role.to_string(),
-        allowed_contexts,
-        access_expiry,
-        false,
-    );
-    let access_expires_at = claims.exp;
-    let access_token = jwt_keys.encode(&claims)?;
-
-    let refresh_token = Uuid::new_v4().to_string();
-    let refresh_expires_at = now_epoch() + refresh_expiry;
-
-    // Update session to Authenticated
-    session.state = SessionState::Authenticated;
-    session.refresh_token = Some(refresh_token.clone());
-    session.refresh_expires_at = Some(refresh_expires_at);
-    update_session(&sessions, &session).await?;
-
-    // Store reverse refresh index
-    store_refresh_index(&sessions, &refresh_token, &session.session_id).await?;
-
-    info!(did = %session.did, session_id = %session.session_id, "authentication successful");
-
-    Ok(AuthenticateResponse {
-        session_id: Some(session.session_id),
-        data: AuthenticateData {
-            access_token,
-            access_expires_at,
-            refresh_token: Some(refresh_token),
-            refresh_expires_at: Some(refresh_expires_at),
+    let backend = crate::auth::VtcAuthBackend::from_state(state).await?;
+    vti_common::auth::handlers::handle_authenticate(
+        &backend,
+        vti_common::auth::AuthenticateInput {
+            session_id,
+            challenge,
+            signer_did: sender_base,
+            // Freshness window enforcement: closes M3 — was
+            // previously passing `None`, skipping the
+            // `created_time` check entirely.
+            created_time: msg.created_time,
+            session_pubkey_b58btc: None,
         },
-    })
+    )
+    .await
 }
 
 // ---------- POST /auth/admin-login ----------
@@ -237,11 +147,15 @@ pub async fn admin_login(
 
     let resp = authenticate_and_mint(&state, &body).await?;
 
-    let max_age = resp
-        .data
-        .access_expires_at
-        .saturating_sub(now_epoch())
-        .max(1);
+    // Absolute expiry from canonical { session, tokens }: prefer the
+    // helper, fall back to tokens.expires_in (sec-from-issuance) for
+    // older clients of authenticate_and_mint that emit unparseable
+    // issuedAt (shouldn't happen — every minter goes through
+    // epoch_to_rfc3339).
+    let access_expires_at_epoch = resp
+        .access_expires_at_epoch()
+        .unwrap_or_else(|| now_epoch().saturating_add(resp.tokens.expires_in));
+    let max_age = access_expires_at_epoch.saturating_sub(now_epoch()).max(1);
 
     // Generate a 32-byte CSRF token, hex-encoded. The cookie is
     // JS-readable (HttpOnly off) so the SPA can echo it back via
@@ -251,7 +165,7 @@ pub async fn admin_login(
     rand::rng().fill(&mut csrf_bytes);
     let csrf = hex::encode(csrf_bytes);
 
-    let session_cookie = build_session_cookie(&resp.data.access_token, max_age);
+    let session_cookie = build_session_cookie(&resp.tokens.access_token, max_age);
     let csrf_cookie = build_csrf_cookie(&csrf, max_age);
 
     let session_cookie_hv = HeaderValue::try_from(session_cookie)
@@ -392,14 +306,20 @@ pub async fn passkey_login_finish(
     drop(config);
 
     let session_id = Uuid::new_v4().to_string();
-    let claims = jwt_keys.new_claims(
-        user.did.clone(),
-        session_id.clone(),
-        role.to_string(),
-        allowed_contexts,
-        access_expiry,
-        false,
-    );
+    // Passkey-login: WebAuthn assertion bound to the holder's
+    // registered credential. amr=["passkey"], acr="aal2" — the
+    // assertion alone is two factors (possession of the
+    // authenticator + user verification gesture / biometric).
+    let claims = jwt_keys
+        .new_claims(
+            user.did.clone(),
+            session_id.clone(),
+            role.to_string(),
+            allowed_contexts,
+            access_expiry,
+            false,
+        )
+        .with_aal(vec!["passkey".to_string()], "aal2");
     let access_expires_at = claims.exp;
     let access_token = jwt_keys.encode(&claims)?;
 
@@ -407,9 +327,9 @@ pub async fn passkey_login_finish(
     let refresh_expires_at = now_epoch() + refresh_expiry;
 
     // Persist the session record so `/auth/sessions` lists it and
-    // refresh-token rotation finds it. Same shape the DIDComm
-    // authenticate path writes — keeps `delete_session` etc.
-    // working uniformly across both login origins.
+    // refresh-token rotation finds it. AAL is captured from the JWT
+    // claims so refresh keeps the holder at aal2 instead of dropping
+    // to aal1 on every token rotation.
     let session = Session {
         session_id: session_id.clone(),
         did: user.did.clone(),
@@ -419,6 +339,10 @@ pub async fn passkey_login_finish(
         refresh_token: Some(refresh_token.clone()),
         refresh_expires_at: Some(refresh_expires_at),
         tee_attested: false,
+        amr: claims.amr.clone(),
+        acr: claims.acr.clone(),
+        token_id: None,
+        session_pubkey_b58btc: None,
     };
     store_session(&state.sessions_ks, &session).await?;
     store_refresh_index(&state.sessions_ks, &refresh_token, &session_id).await?;
@@ -435,13 +359,23 @@ pub async fn passkey_login_finish(
     let csrf = hex::encode(csrf_bytes);
     let csrf_cookie = build_csrf_cookie(&csrf, max_age);
 
+    let issued_at_epoch = now_epoch();
     let resp = AuthenticateResponse {
-        session_id: Some(session_id),
-        data: AuthenticateData {
-            access_token,
-            access_expires_at,
+        session: WireSession {
+            id: session_id.clone(),
+            subject: user.did.clone(),
+            issued_at: epoch_to_rfc3339(issued_at_epoch),
+            expires_at: epoch_to_rfc3339(access_expires_at),
+            amr: claims.amr.clone(),
+            acr: claims.acr.clone(),
+        },
+        tokens: TokenBundle {
+            access_token: access_token.clone(),
             refresh_token: Some(refresh_token),
-            refresh_expires_at: Some(refresh_expires_at),
+            token_type: "Bearer".to_string(),
+            expires_in: access_expires_at.saturating_sub(issued_at_epoch),
+            refresh_expires_in: Some(refresh_expires_at.saturating_sub(issued_at_epoch)),
+            scope: Vec::new(),
         },
     };
 
@@ -542,102 +476,59 @@ mod cookie_format_tests {
 
 // ---------- POST /auth/refresh ----------
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RefreshResponse {
-    pub session_id: String,
-    pub data: RefreshData,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RefreshData {
-    pub access_token: String,
-    pub access_expires_at: u64,
-}
-
+/// `POST /v1/auth/refresh` — exchange the presented refresh
+/// token for a new access + refresh pair.
+///
+/// Returns the canonical `AuthenticateResponse { session, tokens }`
+/// shape (replaces the legacy `{ sessionId, data: { accessToken,
+/// accessExpiresAt } }`). The full token-rotation logic — atomic
+/// claim, refresh-expiry check, ACL re-look-up, AAL preservation
+/// across rotation, RFC 6749 §10.4 rotation semantics — lives in
+/// the canonical handler in vti-common.
 pub async fn refresh(
     State(state): State<AppState>,
     body: String,
-) -> Result<Json<RefreshResponse>, AppError> {
+) -> Result<Json<AuthenticateResponse>, AppError> {
     let atm = state
         .atm
         .as_ref()
         .ok_or_else(|| AppError::Authentication("ATM not configured".into()))?;
-    let jwt_keys = state
-        .jwt_keys
-        .as_ref()
-        .ok_or_else(|| AppError::Authentication("JWT keys not configured".into()))?;
 
-    // Unpack the DIDComm message
     let (msg, _metadata) = atm
         .unpack(&body)
         .await
         .map_err(|e| AppError::Authentication(format!("failed to unpack message: {e}")))?;
 
-    // Validate message type
-    if msg.typ != "https://affinidi.com/atm/1.0/authenticate/refresh" {
+    if !matches!(
+        msg.typ.as_str(),
+        "https://affinidi.com/atm/1.0/authenticate/refresh"
+            | "https://trusttasks.org/spec/auth/refresh/0.1"
+    ) {
         return Err(AppError::Authentication(format!(
             "unexpected message type: {}",
             msg.typ
         )));
     }
 
-    // Extract refresh_token from body
     let refresh_token = msg.body["refresh_token"]
         .as_str()
-        .ok_or_else(|| AppError::Authentication("missing refresh_token in message body".into()))?;
+        .ok_or_else(|| AppError::Authentication("missing refresh_token in message body".into()))?
+        .to_string();
+    let sender_base = msg
+        .from
+        .as_deref()
+        .map(|s| s.split('#').next().unwrap_or(s).to_string());
 
-    // Look up session by refresh token
-    let sessions = state.sessions_ks.clone();
-    let session_id = get_session_by_refresh(&sessions, refresh_token)
-        .await?
-        .ok_or_else(|| AppError::Authentication("refresh token not found".into()))?;
-
-    let session = get_session(&sessions, &session_id)
-        .await?
-        .ok_or_else(|| AppError::Authentication("session not found".into()))?;
-
-    if session.state != SessionState::Authenticated {
-        return Err(AppError::Authentication("session not authenticated".into()));
-    }
-
-    // Verify refresh token hasn't expired
-    if let Some(expires_at) = session.refresh_expires_at
-        && now_epoch() > expires_at
-    {
-        return Err(AppError::Authentication("refresh token expired".into()));
-    }
-
-    // Look up current ACL role and contexts (propagates changes at refresh time)
-    let acl = state.acl_ks.clone();
-    let (role, allowed_contexts) = check_acl_full(&acl, &session.did).await?;
-
-    // Generate new access token
-    let config = state.config.read().await;
-    let access_expiry = config.auth.access_token_expiry;
-    drop(config);
-
-    let claims = jwt_keys.new_claims(
-        session.did.clone(),
-        session.session_id.clone(),
-        role.to_string(),
-        allowed_contexts,
-        access_expiry,
-        false,
-    );
-    let access_expires_at = claims.exp;
-    let access_token = jwt_keys.encode(&claims)?;
-
-    info!(did = %session.did, session_id = %session.session_id, "token refreshed");
-
-    Ok(Json(RefreshResponse {
-        session_id: session.session_id,
-        data: RefreshData {
-            access_token,
-            access_expires_at,
+    let backend = crate::auth::VtcAuthBackend::from_state(&state).await?;
+    let resp = vti_common::auth::handlers::handle_refresh(
+        &backend,
+        vti_common::auth::RefreshInput {
+            refresh_token,
+            signer_did: sender_base,
         },
-    }))
+    )
+    .await?;
+    Ok(Json(resp))
 }
 
 // ---------- GET /auth/sessions ----------

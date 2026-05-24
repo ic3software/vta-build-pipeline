@@ -52,6 +52,7 @@ pub const KEYSPACE_NAME: &str = "service_prev_config";
 pub enum ServiceKind {
     Rest,
     Didcomm,
+    Webauthn,
 }
 
 impl ServiceKind {
@@ -61,6 +62,7 @@ impl ServiceKind {
         match self {
             ServiceKind::Rest => "rest",
             ServiceKind::Didcomm => "didcomm",
+            ServiceKind::Webauthn => "webauthn",
         }
     }
 }
@@ -76,6 +78,7 @@ impl ServiceKind {
 pub enum ServiceConfigSnapshot {
     Rest(RestSnapshot),
     Didcomm(DidcommSnapshot),
+    Webauthn(WebauthnSnapshot),
 }
 
 impl ServiceConfigSnapshot {
@@ -83,6 +86,7 @@ impl ServiceConfigSnapshot {
         match self {
             ServiceConfigSnapshot::Rest(_) => ServiceKind::Rest,
             ServiceConfigSnapshot::Didcomm(_) => ServiceKind::Didcomm,
+            ServiceConfigSnapshot::Webauthn(_) => ServiceKind::Webauthn,
         }
     }
 }
@@ -109,6 +113,17 @@ pub enum DidcommSnapshot {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         routing_keys: Vec<String>,
     },
+    Disabled,
+}
+
+/// Pre-mutation state for the WebAuthn-RP kind. Mirrors
+/// [`RestSnapshot`] — the WebAuthn surface has the same single-URL
+/// shape on the DID document, just under a different fragment and
+/// type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum WebauthnSnapshot {
+    Enabled { url: String },
     Disabled,
 }
 

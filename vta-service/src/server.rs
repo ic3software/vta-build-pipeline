@@ -80,11 +80,38 @@ pub struct AppState {
     pub audit_ks: KeyspaceHandle,
     pub imported_ks: KeyspaceHandle,
     pub cache_ks: KeyspaceHandle,
+    /// Persistent runtime state for service enable/disable
+    /// (`operations::protocol::runtime_state`). Replaces the legacy
+    /// `[services]` block in `config.toml` as the source of truth for whether
+    /// REST / DIDComm are currently active.
+    pub service_state_ks: KeyspaceHandle,
     /// Anti-replay log for sealed-bootstrap `bundle_id`s. One row per seal;
     /// `PersistentNonceStore` refuses duplicates.
     pub sealed_nonces_ks: KeyspaceHandle,
+    /// In-flight backup-bundle records for the descriptor-pattern
+    /// export/import slice (see
+    /// `docs/05-design-notes/backup-descriptor-pattern.md`). Holds
+    /// only the control-plane state — `.vtabak` bytes live on disk
+    /// under [`Self::backup_blob_dir`]. Encrypted at rest (records
+    /// include hashed bearer tokens; nothing useful leaks if the
+    /// keyspace is read, but encrypting it keeps storage-layer
+    /// invariants uniform across slices).
+    pub backup_bundles_ks: KeyspaceHandle,
+    /// Filesystem directory under which `.vtabak` byte blobs are
+    /// staged for in-flight backup bundles. Created lazily at first
+    /// `initiate-*` call. Permissions: 0700 (owner-only). Each
+    /// blob is at `{backup_blob_dir}/{bundle_id}.vtabak` with mode
+    /// 0600. The sweeper deletes both the file and the record
+    /// when a bundle ages out.
+    pub backup_blob_dir: std::path::PathBuf,
     #[cfg(feature = "webvh")]
     pub webvh_ks: KeyspaceHandle,
+    /// In-flight WebAuthn registration state for the
+    /// passkey-as-verificationMethod enrolment ceremony. Holds
+    /// `PasskeyRegistration` keyed by ceremony id; consumed (taken)
+    /// at finish.
+    #[cfg(feature = "webvh")]
+    pub passkey_vms_ks: KeyspaceHandle,
     /// Persisted drain set for the protocol-management feature
     /// (`docs/05-design-notes/didcomm-protocol-management.md`).
     /// Keyed by mediator DID; replayed at boot.
@@ -99,6 +126,13 @@ pub struct AppState {
     /// active/drain state machine.
     #[cfg(feature = "webvh")]
     pub mediator_registry: Arc<crate::messaging::registry::MediatorListenerRegistry>,
+    /// Per-webvh-server async mutex registry for serializing
+    /// daemon-REST auth-cache read-modify-writes. Two concurrent
+    /// operations against the same server can't both refresh and
+    /// last-writer-wins; locks are keyed by server id so unrelated
+    /// servers don't contend.
+    #[cfg(feature = "webvh")]
+    pub webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks,
     /// Per-mediator TTL sweeper. Arms a `tokio::time::sleep_until`
     /// task per drain entry; on expiry, calls
     /// `record_expiries_persisted` and signals upstream listener
@@ -174,12 +208,24 @@ pub async fn build_app_state(
     let audit_ks = apply_encryption(store.keyspace("audit")?);
     let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
     let cache_ks = store.keyspace("cache")?;
+    // Persistent runtime state for service enable/disable. Encrypted because
+    // a couple of bool records are cheap and the keyspace may grow.
+    let service_state_ks = apply_encryption(store.keyspace("service_state")?);
     // Sealed-transfer anti-replay store. Bundle_ids are not secret and the
     // row is a one-byte sentinel, so the keyspace is intentionally
     // unencrypted — saves a decrypt hop on every request.
     let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
+    let backup_bundles_ks = apply_encryption(store.keyspace("backup_bundles")?);
+    // Stage `.vtabak` blobs under `{data_dir}/backups`. Created lazily
+    // by the op layer at first `initiate-*` call (so a VTA that never
+    // does backups doesn't get an empty directory). See
+    // `docs/05-design-notes/backup-descriptor-pattern.md` §"State
+    // machine" for the file-system layout.
+    let backup_blob_dir = config.store.data_dir.join("backups");
     #[cfg(feature = "webvh")]
     let webvh_ks = apply_encryption(store.keyspace("webvh")?);
+    #[cfg(feature = "webvh")]
+    let passkey_vms_ks = apply_encryption(store.keyspace("passkey_vms")?);
     #[cfg(feature = "webvh")]
     let drains_ks = apply_encryption(store.keyspace("drains")?);
     #[cfg(feature = "webvh")]
@@ -221,9 +267,14 @@ pub async fn build_app_state(
         audit_ks,
         imported_ks,
         cache_ks,
+        service_state_ks,
         sealed_nonces_ks,
+        backup_bundles_ks,
+        backup_blob_dir,
         #[cfg(feature = "webvh")]
         webvh_ks,
+        #[cfg(feature = "webvh")]
+        passkey_vms_ks,
         #[cfg(feature = "webvh")]
         drains_ks,
         #[cfg(feature = "webvh")]
@@ -232,6 +283,8 @@ pub async fn build_app_state(
         mediator_registry,
         #[cfg(feature = "webvh")]
         drain_sweeper,
+        #[cfg(feature = "webvh")]
+        webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks::new(),
         telemetry,
         wrapping_cache: crate::keys::wrapping::WrappingKeyCache::new(),
         config: Arc::new(RwLock::new(config)),
@@ -255,27 +308,72 @@ pub async fn build_app_state(
 }
 
 pub async fn run(
-    config: AppConfig,
+    mut config: AppConfig,
     store: Store,
     seed_store: Arc<dyn SeedStore>,
     storage_encryption_key: Option<[u8; 32]>,
     tee_context: Option<TeeContext>,
 ) -> Result<(), AppError> {
-    // Determine which services will actually start (feature flag AND config)
+    // Open the runtime-state keyspace once up front so the boot decisions
+    // below can read it (and the migration can seed it from the legacy
+    // `[services]` block on first boot post-upgrade). Same encryption policy
+    // as the rest of the keyspaces.
+    let boot_service_state_ks = {
+        let ks = store.keyspace("service_state")?;
+        match storage_encryption_key {
+            Some(key) => ks.with_encryption(key),
+            None => ks,
+        }
+    };
+    // Runtime-state-to-fjall migration + read-back lives in
+    // `operations::protocol`, which is `#[cfg(feature = "webvh")]`-
+    // gated (the protocol-management surface that owns service
+    // toggles only exists in webvh builds). Without webvh the
+    // boot path falls back to reading `config.services.*` directly
+    // from `config.toml` — the legacy behaviour, still useful for
+    // headless / secrets-only builds in the CI feature-combos
+    // matrix.
+    #[cfg(feature = "webvh")]
+    {
+        crate::operations::protocol::runtime_state::migrate_from_config(
+            &boot_service_state_ks,
+            &config,
+        )
+        .await?;
+
+        // Runtime state in fjall is authoritative; mirror it into the in-memory
+        // `config.services` so the existing readers across the codebase keep
+        // working unchanged. The on-disk `config.toml` [services] block is now
+        // legacy (consumed only by the first-boot migration above).
+        config.services.rest =
+            crate::operations::protocol::runtime_state::is_rest_enabled(&boot_service_state_ks)
+                .await?;
+        config.services.didcomm =
+            crate::operations::protocol::runtime_state::is_didcomm_enabled(&boot_service_state_ks)
+                .await?;
+    }
+    #[cfg(not(feature = "webvh"))]
+    {
+        let _ = &boot_service_state_ks;
+    }
+
+    // Determine which services will actually start (feature flag AND
+    // persisted runtime state, the latter set by `pnm services {kind}
+    // {enable,disable}`).
     let rest_enabled = cfg!(feature = "rest") && config.services.rest;
     let didcomm_enabled = cfg!(feature = "didcomm") && config.services.didcomm;
 
     if !rest_enabled && !didcomm_enabled {
         return Err(AppError::Config(
             "no services enabled — enable at least one of REST or DIDComm \
-             (check [services] config and compile-time features)"
+             (compile-time feature flags + `pnm services {kind} enable`)"
                 .into(),
         ));
     }
 
     // Bind TCP listener once (persists across soft restarts)
     #[cfg(feature = "rest")]
-    let std_listener = if config.services.rest {
+    let std_listener = if rest_enabled {
         let addr = format!("{}:{}", config.server.host, config.server.port);
         let listener = std::net::TcpListener::bind(&addr).map_err(AppError::Io)?;
         listener.set_nonblocking(true).map_err(AppError::Io)?;
@@ -309,9 +407,14 @@ pub async fn run(
         let audit_ks = apply_encryption(store.keyspace("audit")?);
         let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
         let cache_ks = store.keyspace("cache")?;
+        let service_state_ks = apply_encryption(store.keyspace("service_state")?);
         let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
+        let backup_bundles_ks = apply_encryption(store.keyspace("backup_bundles")?);
+        let backup_blob_dir = config.store.data_dir.join("backups");
         #[cfg(feature = "webvh")]
         let webvh_ks = apply_encryption(store.keyspace("webvh")?);
+        #[cfg(feature = "webvh")]
+        let passkey_vms_ks = apply_encryption(store.keyspace("passkey_vms")?);
         #[cfg(feature = "webvh")]
         let drains_ks = apply_encryption(store.keyspace("drains")?);
         #[cfg(feature = "webvh")]
@@ -405,6 +508,8 @@ pub async fn run(
         let storage_sessions_ks = sessions_ks.clone();
         let storage_audit_ks = audit_ks.clone();
         let storage_acl_ks = acl_ks.clone();
+        let storage_backup_bundles_ks = backup_bundles_ks.clone();
+        let storage_backup_blob_dir = backup_blob_dir.clone();
         let storage_audit_config = config.audit.clone();
         let storage_auth_config = config.auth.clone();
         let has_auth = auth.jwt_keys.is_some();
@@ -424,6 +529,7 @@ pub async fn run(
                 did_templates_ks: did_templates_ks.clone(),
                 audit_ks: audit_ks.clone(),
                 imported_ks: imported_ks.clone(),
+                service_state_ks: service_state_ks.clone(),
                 #[cfg(feature = "webvh")]
                 webvh_ks: webvh_ks.clone(),
                 sealed_nonces_ks: sealed_nonces_ks.clone(),
@@ -435,6 +541,8 @@ pub async fn run(
                 mediator_registry: Arc::clone(&mediator_registry),
                 #[cfg(feature = "webvh")]
                 drain_sweeper: Arc::clone(&drain_sweeper),
+                #[cfg(feature = "webvh")]
+                webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks::new(),
                 telemetry: Arc::clone(&telemetry),
                 seed_store: seed_store.clone(),
                 config: Arc::new(RwLock::new(config.clone())),
@@ -451,51 +559,69 @@ pub async fn run(
             None
         };
 
+        // Build the shared `AppState` once, before the REST thread spawn.
+        // Both the REST front-end and the DIDComm → trust-task dispatch
+        // bridge need it; constructing it here (rather than inside the
+        // REST block) keeps a single owned copy in scope that each
+        // consumer clones. `AppState` is `Clone`.
+        #[cfg(any(feature = "rest", feature = "didcomm"))]
+        let wrapping_cache = crate::keys::wrapping::WrappingKeyCache::new();
+        #[cfg(any(feature = "rest", feature = "didcomm"))]
+        wrapping_cache.clone().spawn_reaper();
+
+        #[cfg(any(feature = "rest", feature = "didcomm"))]
+        let app_state = AppState {
+            keys_ks,
+            sessions_ks,
+            acl_ks,
+            contexts_ks,
+            did_templates_ks,
+            audit_ks,
+            imported_ks,
+            cache_ks,
+            service_state_ks: service_state_ks.clone(),
+            sealed_nonces_ks,
+            backup_bundles_ks,
+            backup_blob_dir,
+            #[cfg(feature = "webvh")]
+            webvh_ks,
+            #[cfg(feature = "webvh")]
+            passkey_vms_ks,
+            #[cfg(feature = "webvh")]
+            drains_ks,
+            #[cfg(feature = "webvh")]
+            snapshot_ks,
+            #[cfg(feature = "webvh")]
+            mediator_registry: Arc::clone(&mediator_registry),
+            #[cfg(feature = "webvh")]
+            drain_sweeper: Arc::clone(&drain_sweeper),
+            #[cfg(feature = "webvh")]
+            webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks::new(),
+            telemetry: Arc::clone(&telemetry),
+            wrapping_cache,
+            config: Arc::new(RwLock::new(config.clone())),
+            seed_store: seed_store.clone(),
+            did_resolver: auth.did_resolver,
+            secrets_resolver: auth.secrets_resolver.clone(),
+            #[cfg(feature = "didcomm")]
+            signing_vm_id: auth.signing_vm_id.clone(),
+            #[cfg(feature = "didcomm")]
+            ka_vm_id: auth.ka_vm_id.clone(),
+            #[cfg(feature = "didcomm")]
+            didcomm_bridge: didcomm_bridge.clone(),
+            jwt_keys: auth.jwt_keys,
+            atm: auth.atm,
+            tee: tee_context.clone(),
+            restart_tx: restart_tx.clone(),
+            #[cfg(feature = "rest")]
+            metrics_handle: None, // Set in REST thread after install
+        };
+
         // Spawn REST thread (conditional)
         #[cfg(feature = "rest")]
         let rest_handle = if let Some(ref listener_ref) = std_listener {
             let listener = listener_ref.try_clone().map_err(AppError::Io)?;
-            let wrapping_cache = crate::keys::wrapping::WrappingKeyCache::new();
-            wrapping_cache.clone().spawn_reaper();
-
-            let state = AppState {
-                keys_ks,
-                sessions_ks,
-                acl_ks,
-                contexts_ks,
-                did_templates_ks,
-                audit_ks,
-                imported_ks,
-                cache_ks,
-                sealed_nonces_ks,
-                #[cfg(feature = "webvh")]
-                webvh_ks,
-                #[cfg(feature = "webvh")]
-                drains_ks,
-                #[cfg(feature = "webvh")]
-                snapshot_ks,
-                #[cfg(feature = "webvh")]
-                mediator_registry: Arc::clone(&mediator_registry),
-                #[cfg(feature = "webvh")]
-                drain_sweeper: Arc::clone(&drain_sweeper),
-                telemetry: Arc::clone(&telemetry),
-                wrapping_cache,
-                config: Arc::new(RwLock::new(config.clone())),
-                seed_store: seed_store.clone(),
-                did_resolver: auth.did_resolver,
-                secrets_resolver: auth.secrets_resolver.clone(),
-                #[cfg(feature = "didcomm")]
-                signing_vm_id: auth.signing_vm_id.clone(),
-                #[cfg(feature = "didcomm")]
-                ka_vm_id: auth.ka_vm_id.clone(),
-                #[cfg(feature = "didcomm")]
-                didcomm_bridge: didcomm_bridge.clone(),
-                jwt_keys: auth.jwt_keys,
-                atm: auth.atm,
-                tee: tee_context.clone(),
-                restart_tx: restart_tx.clone(),
-                metrics_handle: None, // Set in REST thread after install
-            };
+            let state = app_state.clone();
             let mut rest_shutdown_rx = shutdown_rx.clone();
             Some(
                 std::thread::Builder::new()
@@ -566,6 +692,7 @@ pub async fn run(
 
                     let handler = messaging::router::build_handler(
                         Arc::clone(vta_state),
+                        app_state.clone(),
                         didcomm_bridge.clone(),
                     )
                     .map_err(|e| {
@@ -680,6 +807,8 @@ pub async fn run(
                     storage_sessions_ks,
                     storage_audit_ks,
                     storage_acl_ks,
+                    storage_backup_bundles_ks,
+                    storage_backup_blob_dir,
                     storage_audit_config,
                     storage_auth_config,
                     has_auth,
@@ -769,11 +898,14 @@ pub async fn run(
 
 /// Storage thread: runs session cleanup loop and persists the store on shutdown.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_storage_thread(
     store: Store,
     sessions_ks: KeyspaceHandle,
     audit_ks: KeyspaceHandle,
     acl_ks: KeyspaceHandle,
+    backup_bundles_ks_storage: KeyspaceHandle,
+    backup_blob_dir_storage: std::path::PathBuf,
     audit_config: crate::config::AuditConfig,
     auth_config: AuthConfig,
     has_auth: bool,
@@ -807,6 +939,19 @@ fn run_storage_thread(
                         // Prune expired AclEntry rows and PendingBootstrap rows.
                         if let Err(e) = crate::acl_sweeper::sweep_expired(&acl_ks).await {
                             warn!("acl sweeper error: {e}");
+                        }
+                        // Expire & retention-prune in-flight backup
+                        // bundles (descriptor-pattern slice). TTL
+                        // pass transitions stale non-terminal records
+                        // to Expired; retention pass deletes terminal
+                        // records older than the 24h audit window.
+                        if let Err(e) = crate::backup_bundle_sweeper::sweep_bundles(
+                            &backup_bundles_ks_storage,
+                            &backup_blob_dir_storage,
+                        )
+                        .await
+                        {
+                            warn!("backup bundle sweeper error: {e}");
                         }
                     }
                     _ = shutdown_rx.changed() => {
@@ -852,7 +997,16 @@ fn run_rest_thread(
         let listener = tokio::net::TcpListener::from_std(std_listener)
             .expect("failed to convert std TcpListener to tokio TcpListener");
 
-        let traced_routes = routes::router()
+        // Snapshot the CORS origins for the router build. The config
+        // is reloadable, but a router rebuild requires a full
+        // service restart (which the operator triggers via
+        // /vta/restart after editing the file), so reading the
+        // current values here is correct.
+        let (cors_origins, trust_xff) = {
+            let cfg = state.config.read().await;
+            (cfg.server.cors_origins.clone(), cfg.server.trust_xff)
+        };
+        let traced_routes = routes::router_with_cors(&cors_origins, trust_xff)
             .with_state(state.clone())
             .layer(axum::middleware::from_fn(crate::metrics::track_metrics))
             .layer(
@@ -862,7 +1016,12 @@ fn run_rest_thread(
                     .on_response(DefaultOnResponse::new().level(Level::INFO)),
             );
 
-        let app = traced_routes.merge(routes::health_router().with_state(state));
+        // `/health` stays out of the trace + metrics layers (it's a
+        // high-frequency probe), but still needs the API's CORS policy
+        // so browser tools can run their cross-origin connectivity
+        // check against it.
+        let app =
+            traced_routes.merge(routes::health_router_with_cors(&cors_origins).with_state(state));
 
         let shutdown_rx = shutdown_rx.clone();
         axum::serve(

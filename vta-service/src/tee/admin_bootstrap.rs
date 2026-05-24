@@ -122,6 +122,7 @@ pub async fn maybe_bootstrap_admin(
             created_at: now_epoch(),
             created_by: "tee:bootstrap".to_string(),
             expires_at: None,
+            version: 0,
         };
         store_acl_entry(&acl_ks, &entry).await?;
 

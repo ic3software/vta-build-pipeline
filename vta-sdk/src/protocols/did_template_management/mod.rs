@@ -1,7 +1,37 @@
-//! Protocol constants for DID template management.
+//! Wire-format protocol bodies and DIDComm message-type constants
+//! for DID-template management.
 //!
-//! Phase 2 carries these over REST only. The constants are in place so a
-//! future DIDComm path can slot in without a naming change.
+//! Each operation lives in its own submodule (`list`, `create`,
+//! `get`, `update`, `delete`, `render`). Each module defines two
+//! body types when relevant: a **global**-scope variant
+//! (`*DidTemplateBody`) and a **context**-scope variant
+//! (`*ContextDidTemplateBody`). The context-scope variant carries
+//! a required `context_id: String`; the global variant doesn't.
+//!
+//! The split is deliberate. Global and context templates are not
+//! the same resource filtered differently — they have different
+//! owners (super-admin vs context-admin), different lifecycles, and
+//! different visibility scopes. Modelling them as distinct wire
+//! types makes the auth contract self-documenting from the
+//! payload, mirrors the URI hierarchy
+//! (`spec/vta/did-templates/*` vs `spec/vta/contexts/did-templates/*`),
+//! and removes the need for slice handlers to branch on
+//! `Option<String>`.
+//!
+//! Trust-task URIs are declared in
+//! [`crate::trust_tasks`] under the `TASK_DID_TEMPLATES_*` and
+//! `TASK_CONTEXTS_DID_TEMPLATES_*` prefixes.
+//!
+//! Legacy DIDComm protocol constants are also reused over REST
+//! today; they're kept here in case a DIDComm transport for
+//! template management ships later.
+
+pub mod create;
+pub mod delete;
+pub mod get;
+pub mod list;
+pub mod render;
+pub mod update;
 
 pub const PROTOCOL_BASE: &str = "https://firstperson.network/protocols/did-template-management/1.0";
 

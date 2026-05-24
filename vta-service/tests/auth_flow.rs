@@ -70,6 +70,7 @@ async fn challenge_endpoint_issues_session_and_persists_it() {
         created_at: 1,
         created_by: "test".into(),
         expires_at: None,
+        version: 0,
     };
     vti_common::acl::store_acl_entry(&ctx.acl_ks, &entry)
         .await
@@ -82,10 +83,14 @@ async fn challenge_endpoint_issues_session_and_persists_it() {
         "challenge issuance must succeed for an ACL-permitted DID; got body: {body}"
     );
 
+    // Canonical wire shape: { challenge, sessionId, expiresAt } per
+    // spec/auth/challenge/0.1#response — no `data` envelope.
     let session_id = body["sessionId"].as_str().expect("sessionId in response");
-    let challenge = body["data"]["challenge"]
-        .as_str()
-        .expect("challenge in response.data");
+    let challenge = body["challenge"].as_str().expect("challenge in response");
+    assert!(
+        body["expiresAt"].as_str().is_some(),
+        "canonical shape includes expiresAt: {body}"
+    );
     assert!(!session_id.is_empty(), "session_id must be non-empty");
     assert!(!challenge.is_empty(), "challenge must be non-empty");
 

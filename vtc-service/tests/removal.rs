@@ -148,6 +148,10 @@ async fn build_fixture() -> Fixture {
             refresh_token: None,
             refresh_expires_at: None,
             tee_attested: false,
+            amr: Vec::new(),
+            acr: String::new(),
+            token_id: None,
+            session_pubkey_b58btc: None,
         },
     )
     .await
@@ -266,6 +270,10 @@ async fn seed_member_with_session(fix: &Fixture, did: &str, role: VtcRole) -> St
             refresh_token: None,
             refresh_expires_at: None,
             tee_attested: false,
+            amr: Vec::new(),
+            acr: String::new(),
+            token_id: None,
+            session_pubkey_b58btc: None,
         },
     )
     .await

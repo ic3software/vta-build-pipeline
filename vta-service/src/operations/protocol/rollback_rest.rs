@@ -158,19 +158,23 @@ impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn rollback_rest(
     config: &Arc<RwLock<AppConfig>>,
     keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
     snapshot_ks: &KeyspaceHandle,
+    service_state_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
     telemetry: &SharedTelemetrySink,
     auth: &AuthClaims,
     _params: RollbackRestParams,
+    webvh_auth_locks: &crate::operations::did_webvh::WebvhAuthLocks,
     channel: &str,
 ) -> Result<RollbackRestResult, RollbackRestError> {
     auth.require_super_admin()
@@ -216,10 +220,12 @@ pub async fn rollback_rest(
             let result = disable_rest(
                 config,
                 keys_ks,
+                imported_ks,
                 contexts_ks,
                 webvh_ks,
                 audit_ks,
                 snapshot_ks,
+                service_state_ks,
                 seed_store,
                 did_resolver,
                 didcomm_bridge,
@@ -227,6 +233,7 @@ pub async fn rollback_rest(
                 auth,
                 DisableRestParams,
                 OpContext::Rollback,
+                webvh_auth_locks,
                 channel,
             )
             .await?;
@@ -243,10 +250,12 @@ pub async fn rollback_rest(
             let result = enable_rest(
                 config,
                 keys_ks,
+                imported_ks,
                 contexts_ks,
                 webvh_ks,
                 audit_ks,
                 snapshot_ks,
+                service_state_ks,
                 seed_store,
                 did_resolver,
                 didcomm_bridge,
@@ -254,6 +263,7 @@ pub async fn rollback_rest(
                 auth,
                 EnableRestParams { url: url.clone() },
                 OpContext::Rollback,
+                webvh_auth_locks,
                 channel,
             )
             .await?;
@@ -271,10 +281,12 @@ pub async fn rollback_rest(
             let result = update_rest(
                 config,
                 keys_ks,
+                imported_ks,
                 contexts_ks,
                 webvh_ks,
                 audit_ks,
                 snapshot_ks,
+                service_state_ks,
                 seed_store,
                 did_resolver,
                 didcomm_bridge,
@@ -282,6 +294,7 @@ pub async fn rollback_rest(
                 auth,
                 UpdateRestParams { url: url.clone() },
                 OpContext::Rollback,
+                webvh_auth_locks,
                 channel,
             )
             .await?;

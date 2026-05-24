@@ -39,6 +39,11 @@ pub async fn auth_from_message(
         // is the "no JWT expiry" sentinel — DIDComm doesn't carry one.
         session_id: format!("didcomm:{base_did}"),
         access_expires_at: 0,
+        // DIDComm authcrypt-sender authentication is a single DID-key
+        // factor with no JWT-bound expiry. Mark amr accordingly so
+        // handlers gating on AAL see this as aal1-equivalent.
+        amr: vec!["did".to_string()],
+        acr: "aal1".to_string(),
     })
 }
 
@@ -90,6 +95,7 @@ mod tests {
                 created_at: now_epoch().saturating_sub(7200),
                 created_by: "test".into(),
                 expires_at: Some(now_epoch().saturating_sub(60)), // expired one minute ago
+                version: 0,
             },
         )
         .await
@@ -119,6 +125,7 @@ mod tests {
                 created_at: now_epoch(),
                 created_by: "test".into(),
                 expires_at: Some(now_epoch() + 3600),
+                version: 0,
             },
         )
         .await
@@ -147,6 +154,7 @@ mod tests {
                 created_at: now_epoch(),
                 created_by: "test".into(),
                 expires_at: None,
+                version: 0,
             },
         )
         .await

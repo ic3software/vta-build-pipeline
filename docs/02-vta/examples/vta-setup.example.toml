@@ -52,7 +52,11 @@ admin_label = "ops-bootstrap"
 # ---------------------------------------------------------------------------
 
 [services]
-# Defaults: both true. Disable one if you only need the other.
+# Initial enable state at first boot. Both true by default; disable one if
+# you only need the other. Runtime changes go through
+# `pnm services {kind} {enable,disable}` and persist to a fjall keyspace —
+# this block is read ONCE on first boot to seed that state, and never again.
+# Hand-editing it later has no effect.
 rest    = true
 didcomm = true
 

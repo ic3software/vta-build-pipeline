@@ -26,15 +26,26 @@ use crate::audit;
 use crate::auth::AuthClaims;
 use crate::didcomm_bridge::DIDCommBridge;
 use crate::keys::seed_store::SeedStore;
-use crate::operations::did_webvh::WebvhTransport;
+use crate::operations::did_webvh::concurrency::RecordSnapshot;
 use crate::operations::did_webvh::webvh_keys::{self, WebvhKeyHandle, WebvhKeyRole};
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
 
 /// Drive a webvh DID update end-to-end. See module docs.
+///
+/// New parameters compared with the pre-PR-113 signature:
+/// - `imported_ks` — needed by the daemon-REST auth flow (step 13)
+///   to load the VTA's signing key via `get_key_secret_internal`.
+/// - `vta_did` — the running VTA's DID (read from `AppConfig::
+///   vta_did` at the call site). `None` means "no VTA identity
+///   configured" — server-managed DID publishes will fail loudly
+///   with `Publish("…")` rather than silently 401.
+/// - `auth_locks` — per-server async mutex for serialising
+///   auth-cache reads. Lives on `AppState`.
 #[allow(clippy::too_many_arguments)]
 pub async fn update_did_webvh(
     keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
@@ -44,13 +55,24 @@ pub async fn update_did_webvh(
     opts: UpdateDidWebvhOptions,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
+    vta_did: Option<&str>,
+    auth_locks: &super::super::WebvhAuthLocks,
     channel: &str,
 ) -> Result<UpdateDidWebvhResult, UpdateDidWebvhError> {
-    // 1. Resolve SCID → record.
+    // 1. Resolve SCID → record. Snapshot the version-vector fields
+    //    immediately. The snapshot is consulted just before the
+    //    final store (step 11) to catch any concurrent record
+    //    mutation — not just log_entry_count changes (which this
+    //    op makes itself) but `server_id` / `updated_at` changes
+    //    too, since a concurrent `register_did_with_server` flipping
+    //    `server_id` from `serverless` → `webvh-prod` is a real
+    //    race that the previous ad-hoc `log_entry_count` check
+    //    silently missed.
     let mut record = find_record_by_scid(webvh_ks, scid)
         .await?
         .ok_or_else(|| UpdateDidWebvhError::NotFound(format!("SCID {scid} not found")))?;
     let initial_log_entry_count = record.log_entry_count;
+    let snapshot = RecordSnapshot::capture(&record);
 
     // 2. Auth gate. Forbidden + NotFound both surface as 404 at the
     //    wire boundary — see `From<UpdateDidWebvhError> for AppError`.
@@ -246,19 +268,24 @@ pub async fn update_did_webvh(
     let new_log_entry_str = serde_json::to_string(new_log_entry)
         .map_err(|e| UpdateDidWebvhError::Persistence(format!("serialize new entry: {e}")))?;
 
-    // 11. Optimistic concurrency check before persisting.
+    // 11. Optimistic concurrency check before persisting. Uses the
+    //     shared `RecordSnapshot` machinery so we catch *every* kind
+    //     of concurrent mutation (log_entry_count, updated_at, AND
+    //     server_id) rather than just log_entry_count growth. The
+    //     server_id case is the one the ad-hoc check missed:
+    //     `register_did_with_server` flipping `server_id` from
+    //     `serverless` → `webvh-prod` between step 1 and here used
+    //     to slip past unchallenged, then step 12 would clobber the
+    //     newer record with our stale `serverless` value.
     let current = webvh_store::get_did(webvh_ks, &record.did)
         .await
         .map_err(|e| UpdateDidWebvhError::Persistence(format!("get_did: {e}")))?
         .ok_or_else(|| {
             UpdateDidWebvhError::NotFound(format!("DID {} disappeared mid-update", record.did))
         })?;
-    if current.log_entry_count != initial_log_entry_count {
-        return Err(UpdateDidWebvhError::Conflict(format!(
-            "DID {} was updated concurrently (expected log_entry_count {}, got {})",
-            record.did, initial_log_entry_count, current.log_entry_count
-        )));
-    }
+    snapshot
+        .assert_unchanged(&current)
+        .map_err(|race| UpdateDidWebvhError::Conflict(race.to_string()))?;
 
     // 12. Persist new log + new key handles + updated record.
     let new_log_jsonl = state_to_jsonl(result.state())?;
@@ -345,12 +372,18 @@ pub async fn update_did_webvh(
         .map_err(|e| UpdateDidWebvhError::Persistence(format!("store_did: {e}")))?;
 
     // 13. Publish the new log to the hosting server for non-serverless
-    //     DIDs. The webvh server's `PUT /api/dids/{mnemonic}` is
-    //     idempotent and accepts the full updated JSONL — same call
-    //     shape as create. Local state is already committed, so a
-    //     publish failure surfaces as `Publish` (HTTP 500) but doesn't
-    //     undo the local update; operators can retry the publish
-    //     out-of-band by re-issuing the same update.
+    //     DIDs. Uses the auth-cache orchestration helper which:
+    //       - loads the VTA's signing identity for the daemon REST
+    //         auth handshake (no-op for DIDComm transport),
+    //       - reads `server-auth:{id}` under the per-server async
+    //         mutex; refreshes or re-authenticates if stale,
+    //       - publishes with one-shot 401 retry (token revoked
+    //         mid-window).
+    //
+    //     Local state is already committed, so a publish failure
+    //     surfaces as `Publish` (HTTP 500) but doesn't undo the
+    //     local update; operators can retry the publish out-of-band
+    //     by re-issuing the same update.
     if record.server_id != "serverless" {
         let server = webvh_store::get_server(webvh_ks, &record.server_id)
             .await
@@ -361,13 +394,29 @@ pub async fn update_did_webvh(
                     record.server_id
                 ))
             })?;
-        let transport = WebvhTransport::from_server(&server, did_resolver, didcomm_bridge)
-            .await
-            .map_err(|e| UpdateDidWebvhError::Publish(format!("transport: {e}")))?;
-        transport
-            .publish_did(&record.mnemonic, &new_log_jsonl)
-            .await
-            .map_err(|e| UpdateDidWebvhError::Publish(format!("publish_did: {e}")))?;
+        let vta_did = vta_did.ok_or_else(|| {
+            UpdateDidWebvhError::Publish(
+                "VTA DID is not configured — cannot authenticate to webvh hosting server. \
+                 Complete `vta setup` before publishing to a server-managed DID."
+                    .to_string(),
+            )
+        })?;
+        super::super::publish_log_to_server(
+            keys_ks,
+            imported_ks,
+            audit_ks,
+            webvh_ks,
+            seed_store,
+            did_resolver,
+            didcomm_bridge,
+            auth_locks,
+            vta_did,
+            &server,
+            &record.mnemonic,
+            &new_log_jsonl,
+        )
+        .await
+        .map_err(|e| UpdateDidWebvhError::Publish(format!("publish_did: {e}")))?;
     }
 
     // 14. Audit emission. Best-effort — a missing audit row should

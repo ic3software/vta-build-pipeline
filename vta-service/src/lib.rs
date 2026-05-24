@@ -10,6 +10,8 @@ pub mod acl;
 pub mod acl_sweeper;
 pub mod audit;
 pub mod auth;
+pub mod backup_bundle_store;
+pub mod backup_bundle_sweeper;
 pub mod config;
 pub mod contexts;
 pub mod did_templates;
@@ -30,6 +32,8 @@ pub mod status;
 pub mod store;
 #[cfg(feature = "tee")]
 pub mod tee;
+#[cfg(feature = "webvh")]
+pub mod webvh_auth;
 #[cfg(feature = "webvh")]
 pub mod webvh_client;
 #[cfg(feature = "webvh")]

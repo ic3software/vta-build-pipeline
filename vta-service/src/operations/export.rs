@@ -321,6 +321,8 @@ mod tests {
             allowed_contexts: Vec::new(),
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         }
     }
 

@@ -1,0 +1,394 @@
+<!doctype html>
+<!--
+  VTA auth portal — popup target for cross-origin WebAuthn flows.
+
+  Served by `GET /auth/portal`. Same-origin with the VTA, which is the
+  only place WebAuthn will surface a passkey bound to the VTA's RP ID.
+
+  Driven by URL query parameters:
+    - mode=login|enrol       — which ceremony to run
+    - origin=<parent>        — parent window origin for postMessage
+    - nonce=<opaque string>  — caller-supplied, echoed in result
+    - did=<did>              — target DID
+    - label=<string>         — optional, enrol only
+
+  The server validates `origin` against `cors_origins` BEFORE serving
+  this page; a request from a non-allowed origin gets 403 instead of
+  the HTML. Defensive client-side checks below cover the rest.
+
+  Wire (postMessage from this page to window.opener):
+    { type: 'vta-portal-result', nonce, mode, ok: true,
+      jwt?, sessionId?, did?, accessExpiresAt?,  // login
+      verificationMethod?, webvhVersion?         // enrol
+    }
+    { type: 'vta-portal-result', nonce, mode, ok: false, error }
+
+  For enrol, this page asks the opener for a bearer token first:
+    Out: { type: 'vta-portal-ready', nonce, mode: 'enrol' }
+    In:  { type: 'vta-portal-config', nonce, token }
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VTA Auth Portal</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #1a1d24;
+      --text: #e6e8eb;
+      --muted: #888f9b;
+      --accent: #6aa8ff;
+      --ok: #5eb87a;
+      --err: #d65a5a;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      display: flex;
+      min-height: 100vh;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+    .card {
+      max-width: 480px;
+      width: 100%;
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 1.5rem;
+    }
+    h1 { margin: 0 0 0.5rem; font-size: 1.1rem; }
+    .sub { color: var(--muted); margin: 0 0 1rem; font-size: 0.85rem; }
+    .status { padding: 0.5rem 0.75rem; border-radius: 4px; background: #0a0c10; margin: 0.5rem 0; }
+    .status.ok { border-left: 3px solid var(--ok); }
+    .status.err { border-left: 3px solid var(--err); }
+    .status.pending { border-left: 3px solid var(--accent); }
+    code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    .small { font-size: 0.8rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 id="title">VTA Auth Portal</h1>
+    <p class="sub" id="subtitle">Initialising…</p>
+    <div id="status" class="status pending">Loading…</div>
+    <p class="small" id="footer"></p>
+  </div>
+
+  <script>
+    // ─── Setup ────────────────────────────────────────────────────────
+
+    const params = new URLSearchParams(location.search);
+    const mode = params.get("mode");
+    const opener_origin = params.get("origin");
+    const nonce = params.get("nonce");
+    const targetDid = params.get("did");
+    const label = params.get("label");
+
+    const els = {
+      title: document.getElementById("title"),
+      subtitle: document.getElementById("subtitle"),
+      status: document.getElementById("status"),
+      footer: document.getElementById("footer"),
+    };
+
+    function setStatus(text, kind = "pending") {
+      els.status.textContent = text;
+      els.status.className = `status ${kind}`;
+    }
+
+    function postResult(payload) {
+      if (window.opener && opener_origin) {
+        window.opener.postMessage(
+          { type: "vta-portal-result", nonce, mode, ...payload },
+          opener_origin,
+        );
+      }
+    }
+
+    function fail(message) {
+      setStatus(`Error: ${message}`, "err");
+      postResult({ ok: false, error: message });
+    }
+
+    function done(payload) {
+      setStatus("Success — handing control back to the parent window.", "ok");
+      postResult({ ok: true, ...payload });
+      // Close shortly so the operator can see the status. If the
+      // popup was opened from a same-origin page the parent will
+      // typically close us programmatically anyway.
+      setTimeout(() => window.close(), 600);
+    }
+
+    // ─── Validation ───────────────────────────────────────────────────
+
+    if (!mode || !["login", "enrol"].includes(mode)) {
+      fail("invalid `mode` query param (must be `login` or `enrol`)");
+    } else if (!opener_origin) {
+      fail("missing `origin` query param");
+    } else if (!nonce) {
+      fail("missing `nonce` query param");
+    } else if (!targetDid) {
+      fail("missing `did` query param");
+    } else if (!window.opener) {
+      fail("this page must be opened in a popup from a trusted parent window");
+    } else {
+      els.title.textContent =
+        mode === "login" ? "Sign in with passkey" : "Enrol a new passkey";
+      els.subtitle.textContent = `DID: ${targetDid}`;
+      els.footer.textContent = `Will return to ${opener_origin}`;
+      run().catch((e) => fail(e?.message ?? String(e)));
+    }
+
+    // ─── Crypto + encoding helpers ────────────────────────────────────
+
+    function b64urlEncode(bytes) {
+      let bin = "";
+      bytes.forEach((b) => (bin += String.fromCharCode(b)));
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    function b64urlDecode(s) {
+      const pad = (s.length % 4 === 0) ? "" : "=".repeat(4 - (s.length % 4));
+      const std = (s + pad).replace(/-/g, "+").replace(/_/g, "/");
+      const bin = atob(std);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    function hexToBytes(hex) {
+      if (hex.length % 2 !== 0) throw new Error("hex string has odd length");
+      const out = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < out.length; i++) {
+        out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      }
+      return out;
+    }
+
+    // ─── ES256 → multikey ─────────────────────────────────────────────
+
+    const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    function base58btcEncode(bytes) {
+      if (bytes.length === 0) return "";
+      let zeros = 0;
+      while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+      const digits = [];
+      for (let i = zeros; i < bytes.length; i++) {
+        let carry = bytes[i];
+        for (let j = 0; j < digits.length; j++) {
+          carry += digits[j] << 8;
+          digits[j] = carry % 58;
+          carry = (carry / 58) | 0;
+        }
+        while (carry > 0) {
+          digits.push(carry % 58);
+          carry = (carry / 58) | 0;
+        }
+      }
+      let s = "";
+      for (let i = 0; i < zeros; i++) s += "1";
+      for (let i = digits.length - 1; i >= 0; i--) s += B58[digits[i]];
+      return s;
+    }
+
+    function p256AttestationToMultikey(response) {
+      const spki = new Uint8Array(response.getPublicKey());
+      if (spki.length < 66) {
+        throw new Error(`SPKI too short for P-256 (${spki.length} bytes)`);
+      }
+      const tail = spki.slice(spki.length - 66);
+      if (tail[0] !== 0x03 || tail[1] !== 0x42 || tail[2] !== 0x00 || tail[3] !== 0x04) {
+        throw new Error("SPKI tail doesn't match P-256 BIT STRING shape");
+      }
+      const sec1 = tail.slice(3); // 04 X Y
+      const y = sec1.slice(33, 65);
+      const compressed = new Uint8Array(33);
+      compressed[0] = (y[31] & 1) === 0 ? 0x02 : 0x03;
+      compressed.set(sec1.slice(1, 33), 1);
+      const multikey = new Uint8Array(2 + compressed.length);
+      multikey[0] = 0x80;
+      multikey[1] = 0x24; // multicodec p256-pub = 0x1200
+      multikey.set(compressed, 2);
+      return "z" + base58btcEncode(multikey);
+    }
+
+    // ─── HTTP helper ──────────────────────────────────────────────────
+
+    async function vtaFetch(path, opts = {}) {
+      const res = await fetch(path, opts);
+      const text = await res.text();
+      let body;
+      try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+      if (!res.ok) {
+        const detail = typeof body === "string" ? body : JSON.stringify(body);
+        throw new Error(`HTTP ${res.status} ${res.statusText} — ${detail}`);
+      }
+      return body;
+    }
+
+    // ─── Token retrieval from opener (enrol mode only) ────────────────
+
+    function requestTokenFromOpener() {
+      return new Promise((resolve, reject) => {
+        const handler = (event) => {
+          if (event.origin !== opener_origin) return;
+          const msg = event.data;
+          if (!msg || msg.type !== "vta-portal-config" || msg.nonce !== nonce) return;
+          window.removeEventListener("message", handler);
+          if (!msg.token) {
+            reject(new Error("parent did not supply a bearer token"));
+            return;
+          }
+          resolve(msg.token);
+        };
+        window.addEventListener("message", handler);
+        window.opener.postMessage(
+          { type: "vta-portal-ready", nonce, mode },
+          opener_origin,
+        );
+        // Don't hang forever — give the opener 10s to respond.
+        setTimeout(() => {
+          window.removeEventListener("message", handler);
+          reject(new Error("timed out waiting for parent to supply a token"));
+        }, 10_000);
+      });
+    }
+
+    // ─── Login ceremony ───────────────────────────────────────────────
+
+    async function runLogin() {
+      setStatus("Requesting challenge…");
+      const start = await vtaFetch("/auth/passkey-login/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ did: targetDid }),
+      });
+
+      setStatus("Waiting for your authenticator…");
+      const allowCredentials = (start.allowCredentials || []).map((id) => ({
+        id: b64urlDecode(id),
+        type: "public-key",
+      }));
+      const assertion = await navigator.credentials.get({
+        publicKey: {
+          challenge: hexToBytes(start.challenge),
+          allowCredentials,
+          userVerification: "preferred",
+          timeout: 60_000,
+        },
+      });
+      if (!assertion) throw new Error("browser returned no credential");
+
+      setStatus("Submitting assertion…");
+      const finish = await vtaFetch("/auth/passkey-login/finish", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionId: start.sessionId,
+          credentialId: b64urlEncode(new Uint8Array(assertion.rawId)),
+          authenticatorData: b64urlEncode(new Uint8Array(assertion.response.authenticatorData)),
+          clientDataJSON: b64urlEncode(new Uint8Array(assertion.response.clientDataJSON)),
+          signature: b64urlEncode(new Uint8Array(assertion.response.signature)),
+          verificationMethod: "",
+        }),
+      });
+
+      done({
+        jwt: finish.data.accessToken,
+        sessionId: finish.sessionId,
+        did: targetDid,
+        accessExpiresAt: finish.data.accessExpiresAt,
+      });
+    }
+
+    // ─── Enrol ceremony ───────────────────────────────────────────────
+
+    async function runEnrol() {
+      setStatus("Requesting bearer token from parent…");
+      const token = await requestTokenFromOpener();
+
+      setStatus("Requesting registration challenge…");
+      const ceremony = await vtaFetch(
+        `/did/verification-methods/passkey/challenge?did=${encodeURIComponent(targetDid)}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ did: targetDid, label }),
+        },
+      );
+
+      setStatus("Waiting for your authenticator (registration)…");
+      const credential = await navigator.credentials.create({
+        publicKey: {
+          challenge: b64urlDecode(ceremony.challenge),
+          rp: { id: ceremony.rpId, name: ceremony.rpName },
+          user: {
+            id: b64urlDecode(ceremony.userHandle),
+            name: ceremony.userName,
+            displayName: ceremony.userDisplayName,
+          },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }], // ES256
+          timeout: ceremony.timeoutMs || 60_000,
+          authenticatorSelection: {
+            userVerification: "preferred",
+            residentKey: "preferred",
+          },
+          attestation: "none",
+        },
+      });
+      if (!credential) throw new Error("browser returned no credential");
+
+      const alg = credential.response.getPublicKeyAlgorithm();
+      if (alg !== -7) {
+        throw new Error(
+          `This portal only supports ES256 (-7). Authenticator returned ${alg}.`,
+        );
+      }
+      const publicKeyMultibase = p256AttestationToMultikey(credential.response);
+
+      setStatus("Submitting attestation…");
+      const submit = await vtaFetch("/did/verification-methods/passkey", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          did: targetDid,
+          ceremonyId: ceremony.ceremonyId,
+          credentialId: b64urlEncode(new Uint8Array(credential.rawId)),
+          publicKeyMultibase,
+          coseAlgorithm: alg,
+          attestationObject: b64urlEncode(new Uint8Array(credential.response.attestationObject)),
+          clientDataJson: b64urlEncode(new Uint8Array(credential.response.clientDataJSON)),
+          authenticatorData: b64urlEncode(new Uint8Array(credential.response.getAuthenticatorData())),
+          transports:
+            typeof credential.response.getTransports === "function"
+              ? credential.response.getTransports()
+              : [],
+          label,
+        }),
+      });
+
+      done({
+        verificationMethod: submit.verificationMethod,
+        webvhVersion: submit.webvhVersion,
+      });
+    }
+
+    async function run() {
+      if (mode === "login") return runLogin();
+      if (mode === "enrol") return runEnrol();
+    }
+  </script>
+</body>
+</html>

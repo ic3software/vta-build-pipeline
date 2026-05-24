@@ -37,6 +37,45 @@ pub struct Session {
     /// field existed) deserialize as `false` — the conservative default.
     #[serde(default)]
     pub tee_attested: bool,
+    /// AAL claims persisted across token rotation. Mirrors the JWT's
+    /// `amr` / `acr` so [`/auth/refresh`] mints a new access token at
+    /// the same authentication-method-references and assurance level
+    /// the session was last issued at. Without this, a session that
+    /// was step-upped to `aal2` would be silently dropped back to
+    /// `aal1` on every 15-minute refresh.
+    ///
+    /// `#[serde(default)]` on both: a session row written before this
+    /// field landed deserialises with empty vectors / empty string,
+    /// which the refresh handler treats as "unknown AAL — fall back
+    /// to `aal1`". Same behaviour as pre-migration; the holder can
+    /// re-step-up if needed.
+    #[serde(default)]
+    pub amr: Vec<String>,
+    #[serde(default)]
+    pub acr: String,
+    /// JWT `jti` rotation pin. Set per-token-issue so old JWTs are
+    /// immediately invalidated when a new token is minted for the
+    /// same session — the `AuthClaims` extractor compares the JWT's
+    /// `jti` against this field and rejects mismatches.
+    ///
+    /// Optional because not every consumer uses per-token-issue
+    /// rotation; the canonical extractor checks this only when
+    /// `Some(_)`. `#[skip_serializing_if = "Option::is_none"]`
+    /// keeps the field out of the serialised form when unused so
+    /// existing storage rows do not gain a `token_id: null` column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
+    /// Ephemeral session pubkey for Data Integrity proof binding
+    /// (`eddsa-jcs-2022`). Ed25519 multikey, base58btc with the
+    /// `z` prefix (e.g. `z6MkfBwQrx…`). The corresponding
+    /// `did:key:<this>` is the verificationMethod the holder uses
+    /// when signing trust-task envelopes for this session.
+    ///
+    /// `None` for clients that did not register a session pubkey;
+    /// REQUIRED-spec dispatch then rejects proofless envelopes per
+    /// the trust-task framework's IS_PROOF_REQUIRED gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_pubkey_b58btc: Option<String>,
 }
 
 impl std::fmt::Debug for Session {
@@ -44,7 +83,7 @@ impl std::fmt::Debug for Session {
         f.debug_struct("Session")
             .field("session_id", &self.session_id)
             .field("did", &self.did)
-            .field("challenge", &self.challenge)
+            .field("challenge", &"<redacted>")
             .field("state", &self.state)
             .field("created_at", &self.created_at)
             .field(
@@ -53,6 +92,10 @@ impl std::fmt::Debug for Session {
             )
             .field("refresh_expires_at", &self.refresh_expires_at)
             .field("tee_attested", &self.tee_attested)
+            .field("amr", &self.amr)
+            .field("acr", &self.acr)
+            .field("token_id", &self.token_id.as_ref().map(|_| "<redacted>"))
+            .field("session_pubkey_b58btc", &self.session_pubkey_b58btc)
             .finish()
     }
 }
@@ -141,6 +184,59 @@ pub async fn get_session_by_refresh(
 /// then-revoked token.
 pub async fn delete_refresh_index(sessions: &KeyspaceHandle, token: &str) -> Result<(), AppError> {
     sessions.remove(refresh_key(token)).await
+}
+
+/// Atomically claim-and-delete the `refresh_token → session_id`
+/// reverse index. The classic Redis-`GETDEL` shape — exactly one
+/// concurrent caller observes `Some`, even under retries.
+///
+/// Used by the canonical `/auth/refresh` handler to close the
+/// rotation TOCTOU: a leaked refresh token cannot be presented
+/// twice. On single-process fjall the atomicity comes from
+/// running both ops in one `blocking_with_timeout` closure; on
+/// the vsock backend the fallback is non-atomic
+/// (see [`crate::store::KeyspaceHandle::take_raw`]).
+pub async fn take_session_id_by_refresh(
+    sessions: &KeyspaceHandle,
+    token: &str,
+) -> Result<Option<String>, AppError> {
+    match sessions.take_raw(refresh_key(token)).await? {
+        Some(bytes) => {
+            let session_id = String::from_utf8(bytes)
+                .map_err(|e| AppError::Internal(format!("invalid session_id bytes: {e}")))?;
+            Ok(Some(session_id))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Count `ChallengeSent` sessions belonging to `did`. The
+/// canonical `/auth/challenge` handler invokes this to enforce
+/// `AuthBackend::max_pending_challenges_per_did` and reject
+/// callers that try to exhaust the keyspace with a churn of
+/// pending challenges.
+///
+/// Default implementation is an O(N) prefix scan over `session:`.
+/// Backends with a per-DID tracker keyspace (like did-hosting's
+/// `pending_challenges:` index) can override the corresponding
+/// `SessionStore::count_pending_challenges` method to return O(1).
+/// Suitable for the current keyspace sizes vti-common consumers
+/// operate at; revisit when sessions cross five-figure cardinality.
+pub async fn count_pending_challenges(
+    sessions: &KeyspaceHandle,
+    did: &str,
+) -> Result<usize, AppError> {
+    let entries = sessions.prefix_iter_raw("session:").await?;
+    let mut count = 0usize;
+    for (_key, value) in entries {
+        if let Ok(s) = serde_json::from_slice::<Session>(&value)
+            && s.did == did
+            && s.state == SessionState::ChallengeSent
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// Returns the current UNIX epoch timestamp in seconds.
@@ -273,6 +369,10 @@ mod tests {
             refresh_token: None,
             refresh_expires_at: None,
             tee_attested: false,
+            amr: Vec::new(),
+            acr: String::new(),
+            token_id: None,
+            session_pubkey_b58btc: None,
         }
     }
 

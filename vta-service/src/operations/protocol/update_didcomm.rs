@@ -167,11 +167,13 @@ impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
 pub async fn update_didcomm(
     config: &Arc<RwLock<AppConfig>>,
     keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
     drains_ks: &KeyspaceHandle,
     snapshot_ks: &KeyspaceHandle,
+    service_state_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -182,6 +184,7 @@ pub async fn update_didcomm(
     auth: &AuthClaims,
     params: UpdateDidcommParams,
     ctx: OpContext,
+    webvh_auth_locks: &crate::operations::did_webvh::WebvhAuthLocks,
     channel: &str,
 ) -> Result<UpdateDidcommResult, UpdateDidcommError> {
     auth.require_super_admin()
@@ -250,6 +253,7 @@ pub async fn update_didcomm(
     // Publish new LogEntry.
     let update_result = update_did_webvh(
         keys_ks,
+        imported_ks,
         contexts_ks,
         webvh_ks,
         audit_ks,
@@ -262,6 +266,8 @@ pub async fn update_didcomm(
         },
         did_resolver,
         didcomm_bridge,
+        Some(vta_did.as_str()),
+        webvh_auth_locks,
         channel,
     )
     .await?;
@@ -479,11 +485,13 @@ mod tests {
         let config = fresh_config(dir.path(), /* didcomm = */ false);
         let (bridge, reg, sink) = registry();
         let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_dimp, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_d2, contexts_ks) = empty_keyspace("contexts").await;
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let prover = AlwaysOkProver;
         let seed = dummy_seed(dir.path());
@@ -491,11 +499,13 @@ mod tests {
         let err = update_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -506,6 +516,7 @@ mod tests {
             &super_admin(),
             forward_params("did:m:B"),
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -520,11 +531,13 @@ mod tests {
         config.write().await.vta_did = None;
         let (bridge, reg, sink) = registry();
         let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_dimp, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_d2, contexts_ks) = empty_keyspace("contexts").await;
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let prover = AlwaysOkProver;
         let seed = dummy_seed(dir.path());
@@ -532,11 +545,13 @@ mod tests {
         let err = update_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -547,6 +562,7 @@ mod tests {
             &super_admin(),
             forward_params("did:m:B"),
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await
@@ -563,11 +579,13 @@ mod tests {
         let config = fresh_config(dir.path(), true);
         let (bridge, reg, sink) = registry();
         let (_d1, keys_ks) = empty_keyspace("keys").await;
+        let (_dimp, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_d2, contexts_ks) = empty_keyspace("contexts").await;
         let (_d3, webvh_ks) = empty_keyspace("webvh").await;
         let (_d4, audit_ks) = empty_keyspace("audit").await;
         let (_d5, drains_ks) = empty_keyspace("drains").await;
         let (_d6, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = resolver().await;
         let prover = AlwaysOkProver;
         let seed = dummy_seed(dir.path());
@@ -595,11 +613,13 @@ mod tests {
         let err = update_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
             &drains_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -610,6 +630,7 @@ mod tests {
             &super_admin(),
             forward_params("did:m:B"),
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await

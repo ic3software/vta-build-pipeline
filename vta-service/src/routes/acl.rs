@@ -6,7 +6,7 @@ use serde::Deserialize;
 use vta_sdk::protocols::acl_management::{create::CreateAclResultBody, list::ListAclResultBody};
 
 use crate::acl::Role;
-use crate::auth::{AdminAuth, ManageAuth};
+use crate::auth::{AdminAuth, AuthClaims, ManageAuth};
 use crate::error::AppError;
 use crate::operations;
 use crate::server::AppState;
@@ -113,4 +113,42 @@ pub async fn delete_acl(
 ) -> Result<StatusCode, AppError> {
     operations::acl::delete_acl(&state.acl_ks, &state.audit_ks, &auth.0, &did, "rest").await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SwapAclRequest {
+    /// Compact Ed25519 JWS (VP-JWT) proving control of the new DID.
+    pub presentation: String,
+}
+
+/// POST /acl/swap — atomically rotate the caller's own ACL entry onto a new
+/// DID proven by the presentation. Auth: any authenticated caller (the swap is
+/// self-service — it only moves the caller's own grant, copying role+contexts).
+pub async fn swap_acl(
+    auth: AuthClaims,
+    State(state): State<AppState>,
+    Json(req): Json<SwapAclRequest>,
+) -> Result<Json<CreateAclResultBody>, AppError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let vta_did = {
+        let config = state.config.read().await;
+        config
+            .vta_did
+            .clone()
+            .ok_or_else(|| AppError::Internal("VTA DID not configured".into()))?
+    };
+    let result = operations::acl::swap_acl(
+        &state.acl_ks,
+        &state.audit_ks,
+        &auth,
+        &req.presentation,
+        did_resolver,
+        &vta_did,
+        "rest",
+    )
+    .await?;
+    Ok(Json(result))
 }

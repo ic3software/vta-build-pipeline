@@ -14,8 +14,27 @@ use didwebvh_rs::witness::Witnesses;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// Wire types canonically live in vta-sdk per
+// `memory::feedback-wire-types-in-sdk`. Re-export from there so
+// existing op-layer call sites (and any external `pub use` consumers)
+// keep working unchanged.
+pub use vta_sdk::protocols::did_management::update::{
+    RotateDidWebvhKeysBody as RotateDidWebvhKeysOptions,
+    UpdateDidWebvhResultBody as UpdateDidWebvhResult,
+};
+
 /// Caller-supplied parameters for
 /// [`crate::operations::did_webvh::update::update_did_webvh`].
+///
+/// This is the **op-layer-internal** representation — `witnesses` is
+/// the typed `didwebvh_rs::Witnesses` enum so the update flow can
+/// operate on it directly. The wire-format body
+/// (`vta_sdk::protocols::did_management::update::UpdateDidWebvhBody`)
+/// carries the same shape but with `witnesses: Option<Value>`; route /
+/// dispatcher handlers deserialise the SDK body and convert to this
+/// struct at intake. Keeping the typed shape internal isolates
+/// `didwebvh-rs` as a dependency of the op layer rather than vta-sdk
+/// (a leaf crate).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct UpdateDidWebvhOptions {
     /// New DID document. `None` = keep existing. When `Some`, forces a
@@ -49,23 +68,11 @@ pub struct UpdateDidWebvhOptions {
     pub expected_version_id: Option<String>,
 }
 
-/// Result of a successful update.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateDidWebvhResult {
-    pub did: String,
-    pub new_version_id: String,
-    pub new_scid: String,
-    pub new_log_entry: String,
-    pub update_keys_count: u32,
-    pub pre_rotation_key_count: u32,
-    /// True when the DID's `server_id` is `"serverless"` — the new
-    /// LogEntry was persisted locally but NOT published to any
-    /// webvh host. Surfaced upward so route + DIDComm response
-    /// shapes can tell the operator they need to fetch the updated
-    /// log and redeploy. Mirrors the same-named wire field on
-    /// `UpdateDidWebvhResultBody`.
-    pub serverless: bool,
-}
+// `UpdateDidWebvhResult` is now an alias for
+// `vta_sdk::...::UpdateDidWebvhResultBody` (re-exported above). The
+// types had identical fields; consolidating to a single source of
+// truth in vta-sdk. Op-layer call sites continue to work via the
+// `pub use ... as UpdateDidWebvhResult` re-export.
 
 /// A freshly-derived webvh key. Not yet persisted — the caller installs
 /// it via
@@ -93,15 +100,6 @@ pub(in crate::operations::did_webvh) struct DerivedWebvhKey {
 pub(in crate::operations::did_webvh) const WITNESS_RESOLVE_TIMEOUT: Duration =
     Duration::from_secs(5);
 
-/// Caller-supplied parameters for
-/// [`crate::operations::did_webvh::update::rotate_did_webvh_keys`].
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct RotateDidWebvhKeysOptions {
-    /// Override pre-rotation count for the new commitment set.
-    /// `None` = keep current.
-    #[serde(default)]
-    pub pre_rotation_count: Option<u32>,
-    /// Operator-facing label for audit. Optional.
-    #[serde(default)]
-    pub label: Option<String>,
-}
+// `RotateDidWebvhKeysOptions` is now an alias for
+// `vta_sdk::...::RotateDidWebvhKeysBody` (re-exported above). Same
+// fields; consolidating to a single source of truth in vta-sdk.

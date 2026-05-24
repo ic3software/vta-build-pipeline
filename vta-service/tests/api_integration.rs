@@ -83,6 +83,10 @@ impl TestContext {
             refresh_token: None,
             refresh_expires_at: None,
             tee_attested: false,
+            amr: Vec::new(),
+            acr: String::new(),
+            token_id: None,
+            session_pubkey_b58btc: None,
         };
         store_session(self.sessions_ks(), &session)
             .await
@@ -137,6 +141,7 @@ impl TestContext {
             created_at: now_epoch(),
             created_by: "test".to_string(),
             expires_at: None,
+            version: 0,
         };
         self.acl_ks()
             .insert(format!("acl:{did}"), &entry)

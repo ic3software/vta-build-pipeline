@@ -46,9 +46,6 @@ pub async fn add_webvh_server(
         id: id.to_string(),
         did: server_did.to_string(),
         label,
-        access_token: None,
-        access_expires_at: None,
-        refresh_token: None,
         created_at: now,
         updated_at: now,
     };
@@ -116,7 +113,11 @@ pub async fn remove_webvh_server(
 
 /// Validate that a DID resolves and has at least one supported WebVH service.
 ///
-/// Checks for either `DIDCommMessaging` or `WebVHHostingService`.
+/// Accepts any of the types listed in
+/// [`super::transport::SUPPORTED_TYPES_HUMAN`]. Delegates to
+/// [`super::transport::resolve_server_transport`] so the accepted-types
+/// set is defined in exactly one place — adding or removing a type
+/// changes both validation and runtime selection together.
 pub(super) async fn validate_server_did(
     did_resolver: &DIDCacheClient,
     server_did: &str,
@@ -125,15 +126,10 @@ pub(super) async fn validate_server_did(
         AppError::Validation(format!("failed to resolve server DID {server_did}: {e}"))
     })?;
 
-    let has_supported_service = resolved.doc.service.iter().any(|svc| {
-        svc.type_
-            .iter()
-            .any(|t| t == "WebVHHostingService" || t == "DIDCommMessaging")
-    });
-
-    if !has_supported_service {
+    if super::transport::resolve_server_transport(&resolved.doc.service).is_none() {
         return Err(AppError::Validation(format!(
-            "server DID {server_did} has no WebVHHostingService or DIDCommMessaging service endpoint"
+            "server DID {server_did} has no supported webvh endpoint (expected: {})",
+            super::transport::SUPPORTED_TYPES_HUMAN,
         )));
     }
 

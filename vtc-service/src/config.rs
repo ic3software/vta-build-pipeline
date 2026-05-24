@@ -399,6 +399,22 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Whether to trust `X-Forwarded-For` / `Forwarded` headers
+    /// for client-IP attribution in the per-IP rate limiter
+    /// (`build_unauth_routes`).
+    ///
+    /// Default `false` — the rate limiter keys on the socket
+    /// peer-IP. Safe for direct-binding deployments; not
+    /// bypassable by header spoofing.
+    ///
+    /// Set `true` only when the VTC runs behind a trust-boundary
+    /// reverse proxy that overwrites or strips these headers
+    /// from external requests. Misconfiguring this is a silent
+    /// rate-limit bypass.
+    ///
+    /// Closes L2 from the May 2026 security review.
+    #[serde(default)]
+    pub trust_xff: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -586,6 +602,7 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            trust_xff: false,
         }
     }
 }

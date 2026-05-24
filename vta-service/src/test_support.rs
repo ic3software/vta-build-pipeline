@@ -69,6 +69,10 @@ pub struct TestStore {
     /// rollback (spec §3.5a). Required by every forward op + the
     /// rollback dispatchers.
     pub snapshot_ks: KeyspaceHandle,
+    /// Persistent runtime state for service enable/disable
+    /// (`operations::protocol::runtime_state`). Required by every
+    /// forward + rollback op.
+    pub service_state_ks: KeyspaceHandle,
     pub data_dir: PathBuf,
 }
 
@@ -93,6 +97,7 @@ pub async fn open_test_store() -> TestStore {
         snapshot_ks: store
             .keyspace(crate::operations::protocol::snapshot::KEYSPACE_NAME)
             .expect("snapshot ks"),
+        service_state_ks: store.keyspace("service_state").expect("service_state ks"),
         _dir: dir,
         _store: store,
         data_dir,
@@ -151,6 +156,8 @@ pub fn super_admin_claims() -> AuthClaims {
         allowed_contexts: Vec::new(),
         session_id: "test-session".into(),
         access_expires_at: 0,
+        amr: Vec::new(),
+        acr: String::new(),
     }
 }
 
@@ -406,6 +413,8 @@ pub struct TestAppContext {
     pub sessions_ks: KeyspaceHandle,
     pub acl_ks: KeyspaceHandle,
     pub keys_ks: KeyspaceHandle,
+    pub backup_bundles_ks: KeyspaceHandle,
+    pub backup_blob_dir: std::path::PathBuf,
     pub config: Arc<RwLock<AppConfig>>,
     /// Owns the on-disk fjall data dir. When this drops, files are
     /// removed; the caller MUST keep it alive for the duration of the
@@ -465,11 +474,16 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
     }
     let audit_ks = store.keyspace("audit").unwrap();
     let cache_ks = store.keyspace("cache").unwrap();
+    let service_state_ks = store.keyspace("service_state").unwrap();
     let imported_ks = store.keyspace("imported_secrets").unwrap();
     let sealed_nonces_ks = store.keyspace("sealed_nonces").unwrap();
+    let backup_bundles_ks = store.keyspace("backup_bundles").unwrap();
+    let backup_blob_dir = dir.path().join("backups");
     let did_templates_ks = store.keyspace("did_templates").unwrap();
     #[cfg(feature = "webvh")]
     let webvh_ks = store.keyspace("webvh").unwrap();
+    #[cfg(feature = "webvh")]
+    let passkey_vms_ks = store.keyspace("passkey_vms").unwrap();
     #[cfg(feature = "webvh")]
     let drains_ks = store.keyspace("drains").unwrap();
     #[cfg(feature = "webvh")]
@@ -528,9 +542,14 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         audit_ks,
         imported_ks,
         cache_ks,
+        service_state_ks,
         sealed_nonces_ks,
+        backup_bundles_ks: backup_bundles_ks.clone(),
+        backup_blob_dir: backup_blob_dir.clone(),
         #[cfg(feature = "webvh")]
         webvh_ks,
+        #[cfg(feature = "webvh")]
+        passkey_vms_ks,
         #[cfg(feature = "webvh")]
         drains_ks,
         #[cfg(feature = "webvh")]
@@ -539,6 +558,8 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         mediator_registry,
         #[cfg(feature = "webvh")]
         drain_sweeper,
+        #[cfg(feature = "webvh")]
+        webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks::new(),
         telemetry,
         wrapping_cache: crate::keys::wrapping::WrappingKeyCache::new(),
         config: config.clone(),
@@ -560,7 +581,14 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         metrics_handle: None,
     };
 
-    let router = crate::routes::router()
+    // Test harness uses `trust_xff = true` so the per-IP rate
+    // limiter falls back to `X-Forwarded-For` when there's no
+    // socket peer-IP (tower::oneshot doesn't carry one). The
+    // existing rate-limit regression test
+    // (`unauth_endpoint_rate_limit_returns_429_after_burst`)
+    // sets `x-forwarded-for: 192.0.2.1` so all calls hash to the
+    // same bucket and trip the burst within 20 requests.
+    let router = crate::routes::router_with_cors(&[], true)
         .with_state(state.clone())
         .merge(crate::routes::health_router().with_state(state));
 
@@ -569,6 +597,8 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         sessions_ks,
         acl_ks,
         keys_ks,
+        backup_bundles_ks,
+        backup_blob_dir,
         config,
         _dir: dir,
     };

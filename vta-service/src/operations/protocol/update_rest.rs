@@ -121,10 +121,12 @@ impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
 pub async fn update_rest(
     config: &Arc<RwLock<AppConfig>>,
     keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
     snapshot_ks: &KeyspaceHandle,
+    service_state_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -132,6 +134,7 @@ pub async fn update_rest(
     auth: &AuthClaims,
     params: UpdateRestParams,
     ctx: OpContext,
+    webvh_auth_locks: &crate::operations::did_webvh::WebvhAuthLocks,
     channel: &str,
 ) -> Result<UpdateRestResult, UpdateRestError> {
     auth.require_super_admin()
@@ -169,6 +172,7 @@ pub async fn update_rest(
     // 5. Publish via update_did_webvh.
     let update_result = update_did_webvh(
         keys_ks,
+        imported_ks,
         contexts_ks,
         webvh_ks,
         audit_ks,
@@ -181,6 +185,8 @@ pub async fn update_rest(
         },
         did_resolver,
         didcomm_bridge,
+        Some(vta_did.as_str()),
+        webvh_auth_locks,
         channel,
     )
     .await?;

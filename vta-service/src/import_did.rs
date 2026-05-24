@@ -65,6 +65,7 @@ pub async fn run_import_did(args: ImportDidArgs) -> Result<(), Box<dyn std::erro
             .as_secs(),
         created_by: "cli:import-did".into(),
         expires_at: None,
+        version: 0,
     };
 
     store_acl_entry(&acl_ks, &entry).await?;

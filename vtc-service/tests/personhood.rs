@@ -158,6 +158,10 @@ async fn build_fixture() -> Fixture {
             refresh_token: None,
             refresh_expires_at: None,
             tee_attested: false,
+            amr: Vec::new(),
+            acr: String::new(),
+            token_id: None,
+            session_pubkey_b58btc: None,
         };
         let sessions = sessions_ks.clone();
         let claims = jwt_keys.new_claims(did.into(), session_id, role.into(), vec![], 3600, true);
@@ -184,6 +188,10 @@ async fn build_fixture() -> Fixture {
                 refresh_token: None,
                 refresh_expires_at: None,
                 tee_attested: false,
+                amr: Vec::new(),
+                acr: String::new(),
+                token_id: None,
+                session_pubkey_b58btc: None,
             },
         )
         .await
@@ -211,6 +219,10 @@ async fn build_fixture() -> Fixture {
                 refresh_token: None,
                 refresh_expires_at: None,
                 tee_attested: false,
+                amr: Vec::new(),
+                acr: String::new(),
+                token_id: None,
+                session_pubkey_b58btc: None,
             },
         )
         .await
@@ -238,6 +250,10 @@ async fn build_fixture() -> Fixture {
                 refresh_token: None,
                 refresh_expires_at: None,
                 tee_attested: false,
+                amr: Vec::new(),
+                acr: String::new(),
+                token_id: None,
+                session_pubkey_b58btc: None,
             },
         )
         .await

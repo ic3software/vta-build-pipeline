@@ -1,8 +1,8 @@
 //! ACL methods on [`VtaClient`].
 
 use super::{
-    AclEntryResponse, AclListResponse, CreateAclRequest, UpdateAclRequest, VtaClient,
-    encode_path_segment,
+    AclEntryResponse, AclListResponse, CreateAclRequest, SwapAclRequest, UpdateAclRequest,
+    VtaClient, encode_path_segment,
 };
 use crate::error::VtaError;
 
@@ -80,6 +80,19 @@ impl VtaClient {
             acl_management::DELETE_ACL_RESULT,
             30,
             |c, url| c.delete(format!("{url}/acl/{}", encode_path_segment(did))),
+        )
+        .await
+    }
+
+    /// Atomic self-service key rotation: move the caller's own ACL entry onto
+    /// the DID proven by `req.presentation` (a VP-JWT). Returns the new entry.
+    pub async fn swap_acl(&self, req: SwapAclRequest) -> Result<AclEntryResponse, VtaError> {
+        self.rpc(
+            acl_management::SWAP_ACL,
+            serde_json::to_value(&req)?,
+            acl_management::SWAP_ACL_RESULT,
+            30,
+            |c, url| c.post(format!("{url}/acl/swap")).json(&req),
         )
         .await
     }

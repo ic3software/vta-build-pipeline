@@ -724,6 +724,8 @@ pub async fn run_setup_wizard(
         server: ServerConfig {
             host: host.clone(),
             port,
+            cors_origins: Vec::new(),
+            trust_xff: false,
         },
         log: LogConfig::default(),
         store: StoreConfig {
@@ -801,7 +803,12 @@ pub async fn run_setup_wizard(
         vta_did,
         vta_name,
         public_url: public_url.clone(),
-        server: ServerConfig { host, port },
+        server: ServerConfig {
+            host,
+            port,
+            cors_origins: Vec::new(),
+            trust_xff: false,
+        },
         log: LogConfig {
             level: log_level,
             format: log_format,
@@ -812,6 +819,11 @@ pub async fn run_setup_wizard(
         services: ServicesConfig {
             rest: enable_rest,
             didcomm: enable_didcomm,
+            // WebAuthn-RP service defaults off at setup. The
+            // operator enables it later via
+            // `pnm services webauthn enable --url <portal-url>`
+            // once they're ready to wire up a browser flow.
+            webauthn: false,
         },
         messaging,
         auth: AuthConfig {

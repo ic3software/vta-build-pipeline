@@ -142,10 +142,12 @@ impl From<VtaError> for DisableRestError {
 pub async fn disable_rest(
     config: &Arc<RwLock<AppConfig>>,
     keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
     snapshot_ks: &KeyspaceHandle,
+    service_state_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -153,6 +155,7 @@ pub async fn disable_rest(
     auth: &AuthClaims,
     _params: DisableRestParams,
     ctx: OpContext,
+    webvh_auth_locks: &crate::operations::did_webvh::WebvhAuthLocks,
     channel: &str,
 ) -> Result<DisableRestResult, DisableRestError> {
     auth.require_super_admin()
@@ -165,15 +168,15 @@ pub async fn disable_rest(
     //    order, where the §3.2 invariant is checked before reading
     //    the webvh log. The prior_url for the snapshot is captured
     //    later, after the brick check has already passed.
-    let didcomm_enabled = {
+    let (didcomm_enabled, webauthn_enabled) = {
         let cfg = config.read().await;
         if !cfg.services.rest {
             return Err(DisableRestError::ServiceNotPresent);
         }
-        cfg.services.didcomm
+        (cfg.services.didcomm, cfg.services.webauthn)
     };
     would_violate_last_service(
-        &CurrentServices::new(true, didcomm_enabled),
+        &CurrentServices::new(true, didcomm_enabled, webauthn_enabled),
         ProposedOp::disable(ServiceKind::Rest),
     )?;
 
@@ -200,6 +203,7 @@ pub async fn disable_rest(
     // 5. Publish via update_did_webvh.
     let update_result = update_did_webvh(
         keys_ks,
+        imported_ks,
         contexts_ks,
         webvh_ks,
         audit_ks,
@@ -212,13 +216,23 @@ pub async fn disable_rest(
         },
         did_resolver,
         didcomm_bridge,
+        Some(vta_did.as_str()),
+        webvh_auth_locks,
         channel,
     )
     .await?;
 
-    // 6. Persist services.rest = false. Same risk window as the
-    //    other ops if this fails after publish — operator retries.
-    persist_rest_disabled(config).await?;
+    // 6. Persist services.rest = false to fjall (authoritative runtime state)
+    //    + mirror into the in-memory config so existing readers see it. Same
+    //    risk window as the other ops if this fails after publish — operator
+    //    retries.
+    crate::operations::protocol::runtime_state::set_rest_enabled(service_state_ks, false)
+        .await
+        .map_err(|e| DisableRestError::Storage(format!("runtime state: {e}")))?;
+    {
+        let mut cfg = config.write().await;
+        cfg.services.rest = false;
+    }
 
     // 7. Telemetry. Prior URL is included so an external verifier
     //    knows what URL just stopped being advertised.
@@ -282,20 +296,6 @@ async fn read_preconditions(
         prior_url,
         didcomm_enabled,
     ))
-}
-
-async fn persist_rest_disabled(config: &Arc<RwLock<AppConfig>>) -> Result<(), DisableRestError> {
-    let (contents, path) = {
-        let mut cfg = config.write().await;
-        cfg.services.rest = false;
-        let contents = toml::to_string_pretty(&*cfg)
-            .map_err(|e| DisableRestError::ConfigPersistence(e.to_string()))?;
-        let path = cfg.config_path.clone();
-        (contents, path)
-    };
-    std::fs::write(&path, contents)
-        .map_err(|e| DisableRestError::ConfigPersistence(e.to_string()))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn brick_prevention_rejects_disable_rest_when_didcomm_off() {
         let result = would_violate_last_service(
-            &CurrentServices::new(true, false),
+            &CurrentServices::new(true, false, false),
             ProposedOp::disable(ServiceKind::Rest),
         );
         let err = DisableRestError::from(result.unwrap_err());
@@ -378,26 +378,27 @@ mod tests {
     #[test]
     fn brick_prevention_allows_disable_rest_when_didcomm_on() {
         let result = would_violate_last_service(
-            &CurrentServices::new(true, true),
+            &CurrentServices::new(true, true, false),
             ProposedOp::disable(ServiceKind::Rest),
         );
         assert!(result.is_ok());
     }
 
-    /// `persist_rest_disabled` writes services.rest = false to
-    /// both the in-memory config and the on-disk file.
-    #[tokio::test]
-    async fn persist_rest_disabled_flips_config_to_false() {
-        let fx = build_fixture(true, true);
-        assert!(fx.config.read().await.services.rest);
-
-        persist_rest_disabled(&fx.config).await.unwrap();
-
-        assert!(!fx.config.read().await.services.rest);
-        let on_disk = std::fs::read_to_string(&fx.config.read().await.config_path).unwrap();
-        let reparsed: AppConfig = toml::from_str(&on_disk).unwrap();
-        assert!(!reparsed.services.rest);
+    /// Disabling REST is also allowed when WebAuthn alone is on
+    /// — WebAuthn counts as a transport for invariant purposes.
+    #[test]
+    fn brick_prevention_allows_disable_rest_when_webauthn_on() {
+        let result = would_violate_last_service(
+            &CurrentServices::new(true, false, true),
+            ProposedOp::disable(ServiceKind::Rest),
+        );
+        assert!(result.is_ok());
     }
+
+    // (Removed: `persist_rest_disabled_flips_config_to_false`. The op now
+    // writes runtime state to fjall via `runtime_state::set_rest_enabled`,
+    // not to the config file on disk. The integration tests for the full
+    // `disable_rest` op cover that path end-to-end.)
 
     /// Confirms the typed `From<VtaError>` path: the helper's
     /// `LastServiceRefused` round-trips into our error variant

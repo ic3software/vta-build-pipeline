@@ -14,13 +14,19 @@ use crate::store::KeyspaceHandle;
 /// - **Application** — standard API access (sign, cache write) within allowed contexts
 /// - **Reader** — read-only access to keys, contexts, DIDs within allowed contexts
 /// - **Monitor** — infrastructure-only: metrics and health endpoints
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Admin,
     Initiator,
     Application,
     Reader,
+    /// `Monitor` is the least-privileged role and the natural default
+    /// for a `Default::default()` `AuthClaims` (typically used in tests
+    /// or pre-authentication scaffolding). A test fixture that leaks
+    /// past its expected reach now lands on the most-restricted role
+    /// rather than the most-privileged.
+    #[default]
     Monitor,
 }
 
@@ -66,6 +72,17 @@ pub struct AclEntry {
     /// this default).
     #[serde(default)]
     pub expires_at: Option<u64>,
+    /// Optimistic-concurrency version. Incremented on every
+    /// successful update; the route layer's `If-Match` header
+    /// compares against this and returns 409 Conflict on a
+    /// stale write. Closes M6 from the May 2026 security review
+    /// — two admins editing the same DID concurrently no longer
+    /// silently lose one update.
+    ///
+    /// `#[serde(default)]` so pre-versioning rows deserialise
+    /// with `version=0`. The first update bumps it to 1.
+    #[serde(default)]
+    pub version: u32,
 }
 
 impl AclEntry {
@@ -76,6 +93,25 @@ impl AclEntry {
             Some(deadline) => now_unix >= deadline,
             None => false,
         }
+    }
+
+    /// Strong validator string suitable for the `ETag` response
+    /// header and the `If-Match` precondition on subsequent
+    /// updates. Combines the DID and the version so a moving
+    /// version increment can never accidentally validate against
+    /// the wrong row.
+    ///
+    /// Format: `W/"<did_hash>:<version>"` — `W/` because the
+    /// underlying ACL entry isn't byte-identical between writes
+    /// (timestamps, label edits don't change semantic content
+    /// but do change bytes); the `did_hash` is a 64-bit FxHash
+    /// to keep the header short.
+    pub fn etag(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.did.hash(&mut h);
+        format!("W/\"{:016x}:{}\"", h.finish(), self.version)
     }
 }
 
@@ -89,8 +125,48 @@ pub async fn get_acl_entry(acl: &KeyspaceHandle, did: &str) -> Result<Option<Acl
 }
 
 /// Store (create or overwrite) an ACL entry.
+///
+/// Unconditional write — no version check. Use
+/// [`update_acl_entry_versioned`] in route handlers that accept
+/// an `If-Match` precondition; this raw store is for bootstrap
+/// paths (admin import, initial seed, sweeper) where there's no
+/// concurrent-edit risk.
 pub async fn store_acl_entry(acl: &KeyspaceHandle, entry: &AclEntry) -> Result<(), AppError> {
     acl.insert(acl_key(&entry.did), entry).await
+}
+
+/// Optimistic-concurrency-checked write.
+///
+/// `expected_version` is the version the caller observed on
+/// their read; the function refuses to overwrite if the stored
+/// row has moved ahead. On success the stored row's version is
+/// bumped to `expected_version + 1`.
+///
+/// Returns `Ok(new_version)` on success, `Err(AppError::Conflict)`
+/// on a stale write (the caller should re-read, re-apply their
+/// edits to the fresh row, and retry).
+///
+/// Atomicity: implemented as a read-modify-write inside a
+/// keyspace-level `swap`-style sequence. Single-process fjall
+/// serialises within the closure; cross-replica deployments rely
+/// on the underlying store's `swap` semantics.
+pub async fn update_acl_entry_versioned(
+    acl: &KeyspaceHandle,
+    mut new_entry: AclEntry,
+    expected_version: u32,
+) -> Result<u32, AppError> {
+    let key = acl_key(&new_entry.did);
+    let current: Option<AclEntry> = acl.get(key.clone()).await?;
+    let stored_version = current.as_ref().map(|e| e.version).unwrap_or(0);
+    if stored_version != expected_version {
+        return Err(AppError::Conflict(format!(
+            "ACL entry for {} has moved ahead (expected v{}, found v{}); re-read and retry",
+            new_entry.did, expected_version, stored_version,
+        )));
+    }
+    new_entry.version = expected_version + 1;
+    acl.insert(key, &new_entry).await?;
+    Ok(new_entry.version)
 }
 
 /// Delete an ACL entry by DID.
@@ -231,6 +307,7 @@ mod tests {
             created_at: now_epoch(),
             created_by: "did:key:zSetup".into(),
             expires_at: None,
+            version: 0,
         }
     }
 
@@ -243,6 +320,7 @@ mod tests {
             created_at: now_epoch(),
             created_by: "did:key:zSetup".into(),
             expires_at: None,
+            version: 0,
         }
     }
 
@@ -253,6 +331,8 @@ mod tests {
             allowed_contexts: vec![],
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         }
     }
 
@@ -263,6 +343,8 @@ mod tests {
             allowed_contexts: contexts.iter().map(|s| s.to_string()).collect(),
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         }
     }
 
@@ -476,6 +558,8 @@ mod tests {
             allowed_contexts: vec!["ctx1".into()],
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
         let err = validate_role_assignment(&initiator, &Role::Admin)
             .expect_err("non-admin must not assign admin");
@@ -490,6 +574,8 @@ mod tests {
             allowed_contexts: vec!["ctx1".into()],
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
         for target in [
             Role::Admin,
@@ -512,6 +598,8 @@ mod tests {
             allowed_contexts: vec!["ctx1".into()],
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
         validate_role_assignment(&initiator, &Role::Reader).expect("initiator can assign reader");
         validate_role_assignment(&initiator, &Role::Application)

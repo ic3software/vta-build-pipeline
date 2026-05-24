@@ -18,6 +18,7 @@ use affinidi_did_resolver_cache_sdk::DIDCacheClient;
 use crate::config::AppConfig;
 use crate::didcomm_bridge::DIDCommBridge;
 use crate::keys::seed_store::SeedStore;
+use crate::server::AppState;
 use crate::store::KeyspaceHandle;
 
 use super::handlers;
@@ -45,6 +46,9 @@ pub struct VtaState {
     pub did_templates_ks: KeyspaceHandle,
     pub audit_ks: KeyspaceHandle,
     pub imported_ks: KeyspaceHandle,
+    /// Persistent runtime state for service enable/disable
+    /// (`operations::protocol::runtime_state`). Mirrored from `AppState`.
+    pub service_state_ks: KeyspaceHandle,
     #[cfg(feature = "webvh")]
     pub webvh_ks: KeyspaceHandle,
     /// Anti-replay log for sealed-bootstrap `bundle_id`s — required by
@@ -69,6 +73,11 @@ pub struct VtaState {
     /// Per-mediator TTL sweeper.
     #[cfg(feature = "webvh")]
     pub drain_sweeper: Arc<crate::messaging::drain_sweeper::DrainSweeper>,
+    /// Per-webvh-server async mutex registry. Mirrored from
+    /// `AppState` so DIDComm-transport handlers serialise the same
+    /// daemon-REST auth-cache reads as REST handlers.
+    #[cfg(feature = "webvh")]
+    pub webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks,
     /// Pluggable telemetry sink — driven by both REST and DIDComm
     /// transport handlers so `mediator report` is consistent
     /// regardless of which transport posted the inbound event.
@@ -174,13 +183,25 @@ impl affinidi_messaging_didcomm_service::DIDCommHandler for BridgeHandler {
 /// outbound request-response routing via the shared [`DIDCommBridge`].
 pub fn build_handler(
     state: Arc<VtaState>,
+    app_state: AppState,
     bridge: Arc<DIDCommBridge>,
 ) -> Result<BridgeHandler, DIDCommServiceError> {
     let mut router = Router::new()
         .extension(state)
+        // Full REST `AppState`, injected so the generic trust-task
+        // handler can drive the shared `dispatch_trust_task_core`
+        // (which needs keyspaces not mirrored onto `VtaState`).
+        .extension(app_state)
         // Built-in protocol handlers
         .route(TRUST_PING_TYPE, handler_fn(trust_ping_handler))?
         .route(MESSAGE_PICKUP_STATUS_TYPE, handler_fn(ignore_handler))?
+        // Trust-Tasks: one binding envelope type carries every slice's
+        // `TrustTask<P>` in its body; the handler dispatches on the
+        // inner envelope's own `type` via the shared REST dispatcher.
+        .route(
+            handlers::TRUST_TASK_ENVELOPE_TYPE,
+            handler_fn(handlers::handle_trust_task),
+        )?
         // Key management
         .route(
             key_management::CREATE_KEY,
@@ -268,6 +289,10 @@ pub fn build_handler(
         .route(
             acl_management::DELETE_ACL,
             handler_fn(handlers::handle_delete_acl),
+        )?
+        .route(
+            acl_management::SWAP_ACL,
+            handler_fn(handlers::handle_swap_acl),
         )?
         // Audit management
         .route(
@@ -420,6 +445,13 @@ pub fn build_handler(
     router = router.route(
         provision_integration_management::PROVISION_INTEGRATION,
         handler_fn(handlers::handle_provision_integration),
+    )?;
+
+    // Step-up approval — the VTA vouches (signs as itself) that a holder
+    // may step up their session at a relying party. Always available.
+    router = router.route(
+        handlers::STEP_UP_APPROVE_REQUEST_TYPE,
+        handler_fn(handlers::handle_step_up_approve),
     )?;
 
     // TEE attestation handlers (feature-gated)

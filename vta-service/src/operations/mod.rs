@@ -18,6 +18,16 @@ pub mod did_webvh;
 pub mod export;
 pub mod internal_authority;
 pub mod keys;
+/// Passkey login — DID-VM-resolved WebAuthn assertion verification.
+/// Drives `vta/auth/passkey-login-{start,finish}/1.0` trust-tasks.
+/// Distinct from [`passkey_vms`] which handles VM *enrolment*.
+pub mod passkey_login;
+/// Passkey-as-verificationMethod enrolment. Lets a browser wallet
+/// (`pnm-browser-plugin`) add a WebAuthn passkey as a Multikey VM
+/// (purpose `authentication`) on a VTA-managed webvh DID. See
+/// `docs/02-vta/passkey-verification-methods.md`.
+#[cfg(feature = "webvh")]
+pub mod passkey_vms;
 /// DIDComm protocol management: enable/disable/migrate operations that
 /// patch the VTA's own DID document service array. See
 /// `docs/05-design-notes/didcomm-protocol-management.md`.
@@ -30,6 +40,7 @@ pub mod protocol;
 #[cfg(feature = "webvh")]
 pub mod provision_integration;
 pub mod seeds;
+pub mod step_up_approval;
 
 use crate::store::KeyspaceHandle;
 

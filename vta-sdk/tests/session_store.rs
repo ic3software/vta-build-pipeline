@@ -173,21 +173,33 @@ async fn mount_challenge(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/auth/challenge"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "challenge": "c-nonce",
             "sessionId": "sess",
-            "data": { "challenge": "c-nonce" }
+            "expiresAt": "2099-12-31T23:59:59Z"
         })))
         .mount(server)
         .await;
 }
 
+/// Mount the canonical authenticate response. `issuedAt: 1970-01-01`
+/// anchors the absolute access-expiry epoch at `expiresIn` so test
+/// assertions on `access_expires_at` see exactly `expires_at`.
 async fn mount_authenticate(server: &MockServer, expires_at: u64) {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sessionId": "sess",
-            "data": {
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "access-jwt",
-                "accessExpiresAt": expires_at
+                "tokenType": "Bearer",
+                "expiresIn": expires_at
             }
         })))
         .mount(server)
@@ -275,7 +287,19 @@ async fn ensure_authenticated_re_authenticates_when_token_expired() {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "accessToken": "expired", "accessExpiresAt": 100_u64 }
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
+                "accessToken": "expired",
+                "tokenType": "Bearer",
+                "expiresIn": 100_u64
+            }
         })))
         .up_to_n_times(1)
         .mount(&server)
@@ -284,7 +308,19 @@ async fn ensure_authenticated_re_authenticates_when_token_expired() {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "accessToken": "fresh", "accessExpiresAt": future }
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
+                "accessToken": "fresh",
+                "tokenType": "Bearer",
+                "expiresIn": future
+            }
         })))
         .mount(&server)
         .await;
@@ -348,7 +384,19 @@ async fn ensure_authenticated_runs_full_rotation_flow() {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "accessToken": "temp-token", "accessExpiresAt": future }
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
+                "accessToken": "temp-token",
+                "tokenType": "Bearer",
+                "expiresIn": future
+            }
         })))
         .up_to_n_times(1)
         .mount(&server)
@@ -356,7 +404,19 @@ async fn ensure_authenticated_runs_full_rotation_flow() {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "accessToken": "rotated-token", "accessExpiresAt": future }
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
+                "accessToken": "rotated-token",
+                "tokenType": "Bearer",
+                "expiresIn": future
+            }
         })))
         .mount(&server)
         .await;
@@ -469,7 +529,19 @@ async fn connect_with_url_override_uses_rest_and_attaches_token() {
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "accessToken": "connect-token", "accessExpiresAt": future }
+            "session": {
+                "id": "sess",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
+                "accessToken": "connect-token",
+                "tokenType": "Bearer",
+                "expiresIn": future
+            }
         })))
         .mount(&server)
         .await;

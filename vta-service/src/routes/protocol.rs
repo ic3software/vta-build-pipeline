@@ -25,10 +25,16 @@ use crate::operations::protocol::disable_didcomm::{
 use crate::operations::protocol::disable_rest::{
     DisableRestError, DisableRestParams, disable_rest,
 };
+use crate::operations::protocol::disable_webauthn::{
+    DisableWebauthnError, DisableWebauthnParams, disable_webauthn,
+};
 use crate::operations::protocol::enable_didcomm::{
     EnableDidcommError, EnableDidcommParams, enable_didcomm,
 };
 use crate::operations::protocol::enable_rest::{EnableRestError, EnableRestParams, enable_rest};
+use crate::operations::protocol::enable_webauthn::{
+    EnableWebauthnError, EnableWebauthnParams, enable_webauthn,
+};
 use crate::operations::protocol::rollback_didcomm::{
     RollbackDidcommError, RollbackDidcommParams, RollbackKind as DidcommRollbackKind,
     rollback_didcomm,
@@ -36,10 +42,17 @@ use crate::operations::protocol::rollback_didcomm::{
 use crate::operations::protocol::rollback_rest::{
     RollbackKind as RestRollbackKind, RollbackRestError, RollbackRestParams, rollback_rest,
 };
+use crate::operations::protocol::rollback_webauthn::{
+    RollbackKind as WebauthnRollbackKind, RollbackWebauthnError, RollbackWebauthnParams,
+    rollback_webauthn,
+};
 use crate::operations::protocol::update_didcomm::{
     MigrateAuditKind, UpdateDidcommError, UpdateDidcommParams, update_didcomm,
 };
 use crate::operations::protocol::update_rest::{UpdateRestError, UpdateRestParams, update_rest};
+use crate::operations::protocol::update_webauthn::{
+    UpdateWebauthnError, UpdateWebauthnParams, update_webauthn,
+};
 use crate::server::AppState;
 
 /// Default trust-ping round-trip timeout for first-enable when the
@@ -127,10 +140,12 @@ pub async fn enable_didcomm_handler(
     let result = enable_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         &did_resolver,
         &bridge,
@@ -144,6 +159,7 @@ pub async fn enable_didcomm_handler(
             handshake_timeout: timeout,
         },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -382,11 +398,13 @@ pub async fn disable_didcomm_handler(
     let result = disable_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.drains_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         &did_resolver,
         &bridge,
@@ -399,6 +417,7 @@ pub async fn disable_didcomm_handler(
             transport: DisableTransport::Rest,
         },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -670,11 +689,13 @@ pub async fn update_didcomm_handler(
     let result = update_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.drains_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         &did_resolver,
         &bridge,
@@ -692,6 +713,7 @@ pub async fn update_didcomm_handler(
             transport: crate::operations::protocol::disable_didcomm::DisableTransport::Rest,
         },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1234,10 +1256,12 @@ pub async fn enable_rest_handler(
     let result = enable_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         &did_resolver,
         &state.didcomm_bridge,
@@ -1245,6 +1269,7 @@ pub async fn enable_rest_handler(
         &auth.0,
         EnableRestParams { url: req.url },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1275,10 +1300,12 @@ pub async fn update_rest_handler(
     let result = update_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         &did_resolver,
         &state.didcomm_bridge,
@@ -1286,6 +1313,7 @@ pub async fn update_rest_handler(
         &auth.0,
         UpdateRestParams { url: req.url },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1316,10 +1344,12 @@ pub async fn disable_rest_handler(
     let result = disable_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         &did_resolver,
         &state.didcomm_bridge,
@@ -1327,6 +1357,7 @@ pub async fn disable_rest_handler(
         &auth.0,
         DisableRestParams,
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1571,16 +1602,19 @@ pub async fn rollback_rest_handler(
     let result = rollback_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         &did_resolver,
         &state.didcomm_bridge,
         &state.telemetry,
         &auth.0,
         RollbackRestParams,
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1634,11 +1668,13 @@ pub async fn rollback_didcomm_handler(
     let result = rollback_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.drains_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         &did_resolver,
         &bridge,
@@ -1651,6 +1687,7 @@ pub async fn rollback_didcomm_handler(
             drain_ttl,
             transport: DidcommTransport::Rest,
         },
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -1964,6 +2001,313 @@ impl IntoResponse for ListDrainHttpError {
                 ErrorBody {
                     error: "list_drain_failed",
                     message: other.to_string(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+        };
+        (status, Json(body)).into_response()
+    }
+}
+
+// ─── WebAuthn-service handlers ────────────────────────────────────────
+
+/// `POST /services/webauthn/enable` — add a `#vta-webauthn` service
+/// entry to the VTA's DID document. Auth: super-admin.
+pub async fn enable_webauthn_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Json(req): Json<vta_sdk::protocol::services::EnableWebauthnRequest>,
+) -> Result<Json<vta_sdk::protocol::services::ServiceMutationResponse>, WebauthnServiceHttpError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or(WebauthnServiceHttpError::DidResolverUnavailable)?
+        .clone();
+    let result = enable_webauthn(
+        &state.config,
+        &state.keys_ks,
+        &state.imported_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.snapshot_ks,
+        &state.service_state_ks,
+        &*state.seed_store,
+        &did_resolver,
+        &state.didcomm_bridge,
+        &state.telemetry,
+        &auth.0,
+        EnableWebauthnParams { url: req.url },
+        OpContext::Direct,
+        &state.webvh_auth_locks,
+        "rest",
+    )
+    .await?;
+    Ok(Json(vta_sdk::protocol::services::ServiceMutationResponse {
+        log_entry_version_id: result.new_version_id,
+        effective_at: chrono::Utc::now().to_rfc3339(),
+        drain_until: None,
+        vta_did: result.vta_did,
+        serverless: result.serverless,
+    }))
+}
+
+/// `POST /services/webauthn/update` — replace the URL.
+pub async fn update_webauthn_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Json(req): Json<vta_sdk::protocol::services::UpdateWebauthnRequest>,
+) -> Result<Json<vta_sdk::protocol::services::ServiceMutationResponse>, WebauthnServiceHttpError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or(WebauthnServiceHttpError::DidResolverUnavailable)?
+        .clone();
+    let result = update_webauthn(
+        &state.config,
+        &state.keys_ks,
+        &state.imported_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.snapshot_ks,
+        &state.service_state_ks,
+        &*state.seed_store,
+        &did_resolver,
+        &state.didcomm_bridge,
+        &state.telemetry,
+        &auth.0,
+        UpdateWebauthnParams { url: req.url },
+        OpContext::Direct,
+        &state.webvh_auth_locks,
+        "rest",
+    )
+    .await?;
+    Ok(Json(vta_sdk::protocol::services::ServiceMutationResponse {
+        log_entry_version_id: result.new_version_id,
+        effective_at: chrono::Utc::now().to_rfc3339(),
+        drain_until: None,
+        vta_did: result.vta_did,
+        serverless: result.serverless,
+    }))
+}
+
+/// `POST /services/webauthn/disable` — remove the `#vta-webauthn`
+/// entry **and** strip passkey VMs from every DID this VTA
+/// controls. Auth: super-admin.
+pub async fn disable_webauthn_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Json(_req): Json<vta_sdk::protocol::services::DisableWebauthnRequest>,
+) -> Result<Json<vta_sdk::protocol::services::ServiceMutationResponse>, WebauthnServiceHttpError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or(WebauthnServiceHttpError::DidResolverUnavailable)?
+        .clone();
+    let result = disable_webauthn(
+        &state.config,
+        &state.keys_ks,
+        &state.imported_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.snapshot_ks,
+        &state.service_state_ks,
+        &*state.seed_store,
+        &did_resolver,
+        &state.didcomm_bridge,
+        &state.telemetry,
+        &auth.0,
+        DisableWebauthnParams::default(),
+        OpContext::Direct,
+        &state.webvh_auth_locks,
+        "rest",
+    )
+    .await?;
+    Ok(Json(vta_sdk::protocol::services::ServiceMutationResponse {
+        log_entry_version_id: result.new_version_id,
+        effective_at: chrono::Utc::now().to_rfc3339(),
+        drain_until: None,
+        vta_did: result.vta_did,
+        serverless: result.serverless,
+    }))
+}
+
+/// `POST /services/webauthn/rollback` — fail-forward dispatch.
+pub async fn rollback_webauthn_handler(
+    auth: SuperAdminAuth,
+    State(state): State<AppState>,
+    Json(_req): Json<vta_sdk::protocol::services::RollbackWebauthnRequest>,
+) -> Result<Json<vta_sdk::protocol::services::RollbackResponse>, WebauthnServiceHttpError> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or(WebauthnServiceHttpError::DidResolverUnavailable)?
+        .clone();
+    let result = rollback_webauthn(
+        &state.config,
+        &state.keys_ks,
+        &state.imported_ks,
+        &state.contexts_ks,
+        &state.webvh_ks,
+        &state.audit_ks,
+        &state.snapshot_ks,
+        &state.service_state_ks,
+        &*state.seed_store,
+        &did_resolver,
+        &state.didcomm_bridge,
+        &state.telemetry,
+        &auth.0,
+        RollbackWebauthnParams,
+        &state.webvh_auth_locks,
+        "rest",
+    )
+    .await?;
+    let kind_str = match result.kind {
+        WebauthnRollbackKind::Disabled => "disabled",
+        WebauthnRollbackKind::Enabled => "enabled",
+        WebauthnRollbackKind::Updated => "updated",
+        WebauthnRollbackKind::NoOp => "no_op",
+    };
+    Ok(Json(vta_sdk::protocol::services::RollbackResponse {
+        log_entry_version_id: result.new_version_id.unwrap_or_default(),
+        effective_at: chrono::Utc::now().to_rfc3339(),
+        kind: kind_str.into(),
+        drain_until: None,
+        draining_mediator: None,
+        vta_did: result.vta_did,
+        serverless: result.serverless,
+    }))
+}
+
+#[derive(Debug)]
+pub enum WebauthnServiceHttpError {
+    Enable(EnableWebauthnError),
+    Update(UpdateWebauthnError),
+    Disable(DisableWebauthnError),
+    Rollback(RollbackWebauthnError),
+    DidResolverUnavailable,
+}
+impl From<EnableWebauthnError> for WebauthnServiceHttpError {
+    fn from(value: EnableWebauthnError) -> Self {
+        Self::Enable(value)
+    }
+}
+impl From<UpdateWebauthnError> for WebauthnServiceHttpError {
+    fn from(value: UpdateWebauthnError) -> Self {
+        Self::Update(value)
+    }
+}
+impl From<DisableWebauthnError> for WebauthnServiceHttpError {
+    fn from(value: DisableWebauthnError) -> Self {
+        Self::Disable(value)
+    }
+}
+impl From<RollbackWebauthnError> for WebauthnServiceHttpError {
+    fn from(value: RollbackWebauthnError) -> Self {
+        Self::Rollback(value)
+    }
+}
+impl IntoResponse for WebauthnServiceHttpError {
+    fn into_response(self) -> Response {
+        let (status, body) = match self {
+            Self::Enable(EnableWebauthnError::ServiceAlreadyEnabled) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "service_already_enabled",
+                    message: "WebAuthn is already enabled.".into(),
+                    suggested_fix: Some(
+                        "Use `pnm services webauthn update --url <url>` to change it.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Enable(EnableWebauthnError::Validation(msg))
+            | Self::Update(UpdateWebauthnError::Validation(msg)) => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "invalid_url",
+                    message: msg,
+                    suggested_fix: Some("URL must be https://, parsable, with no fragment.".into()),
+                    stage: None,
+                },
+            ),
+            Self::Update(UpdateWebauthnError::ServiceNotPresent)
+            | Self::Disable(DisableWebauthnError::ServiceNotPresent) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "service_not_present",
+                    message: "WebAuthn is not currently enabled.".into(),
+                    suggested_fix: Some(
+                        "Run `pnm services webauthn enable --url <url>` first.".into(),
+                    ),
+                    stage: None,
+                },
+            ),
+            Self::Disable(DisableWebauthnError::LastServiceRefused)
+            | Self::Rollback(RollbackWebauthnError::DisableForward(
+                DisableWebauthnError::LastServiceRefused,
+            )) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "last_service_refused",
+                    message: "Refusing — at least one transport must remain advertised.".into(),
+                    suggested_fix: Some("Enable REST or DIDComm before disabling WebAuthn.".into()),
+                    stage: None,
+                },
+            ),
+            Self::Rollback(RollbackWebauthnError::NoPriorMutation) => (
+                StatusCode::CONFLICT,
+                ErrorBody {
+                    error: "no_prior_mutation",
+                    message: "No prior `services webauthn` mutation to roll back.".into(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+            Self::DidResolverUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorBody {
+                    error: "did_resolver_unavailable",
+                    message: "DID resolver not configured.".into(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+            Self::Enable(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "enable_webauthn_failed",
+                    message: e.to_string(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+            Self::Update(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "update_webauthn_failed",
+                    message: e.to_string(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+            Self::Disable(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "disable_webauthn_failed",
+                    message: e.to_string(),
+                    suggested_fix: None,
+                    stage: None,
+                },
+            ),
+            Self::Rollback(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "rollback_webauthn_failed",
+                    message: e.to_string(),
                     suggested_fix: None,
                     stage: None,
                 },

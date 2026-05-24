@@ -27,7 +27,9 @@ use vta_sdk::protocol::services::{ServiceState, ServicesListResponse};
 use crate::auth::AuthClaims;
 use crate::config::AppConfig;
 use crate::error::AppError;
-use crate::operations::protocol::document::{current_didcomm_service, current_rest_service};
+use crate::operations::protocol::document::{
+    current_didcomm_service, current_rest_service, current_webauthn_service,
+};
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
 
@@ -72,6 +74,7 @@ pub async fn list_services(
         ConfigView {
             rest_enabled: cfg.services.rest,
             didcomm_enabled: cfg.services.didcomm,
+            webauthn_enabled: cfg.services.webauthn,
             vta_did: cfg.vta_did.clone(),
         }
     };
@@ -91,15 +94,16 @@ pub async fn list_services(
     // Pull the kind-specific config from the on-chain doc — it's
     // the source of truth for what SDK consumers will resolve.
     let rest_url = current_rest_service(&current_doc).map(|s| s.url);
+    let webauthn_url = current_webauthn_service(&current_doc).map(|s| s.url);
     let didcomm = current_didcomm_service(&current_doc);
     let (didcomm_mediator, didcomm_routing_keys) = match didcomm {
         Some(svc) => (Some(svc.mediator_did), svc.routing_keys),
         None => (None, Vec::new()),
     };
 
-    // Canonical order: DIDComm first when present, REST second.
-    // Empty kinds (disabled in both config and the doc) still
-    // appear so the operator gets a uniform shape.
+    // Canonical order: DIDComm first when present, REST second,
+    // WebAuthn third. Empty kinds (disabled in both config and the
+    // doc) still appear so the operator gets a uniform shape.
     let services = vec![
         ServiceState::Didcomm {
             enabled: cfg_view.didcomm_enabled && didcomm_mediator.is_some(),
@@ -110,6 +114,10 @@ pub async fn list_services(
             enabled: cfg_view.rest_enabled && rest_url.is_some(),
             url: rest_url,
         },
+        ServiceState::Webauthn {
+            enabled: cfg_view.webauthn_enabled && webauthn_url.is_some(),
+            url: webauthn_url,
+        },
     ];
 
     Ok(ServicesListResponse { services })
@@ -118,6 +126,7 @@ pub async fn list_services(
 struct ConfigView {
     rest_enabled: bool,
     didcomm_enabled: bool,
+    webauthn_enabled: bool,
     vta_did: Option<String>,
 }
 
@@ -164,6 +173,8 @@ mod tests {
             allowed_contexts: vec!["vta".into()],
             session_id: "test-session".into(),
             access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
         };
 
         let err = list_services(&config, &webvh_ks, &context_admin)
@@ -281,8 +292,8 @@ mod tests {
 
         assert_eq!(
             response.services.len(),
-            2,
-            "expected one entry per kind; got {response:?}"
+            3,
+            "expected one entry per kind (DIDComm + REST + WebAuthn); got {response:?}"
         );
         // Canonical order: DIDComm first.
         match &response.services[0] {
@@ -302,6 +313,15 @@ mod tests {
                 assert_eq!(url.as_deref(), Some("https://vta.example/api"));
             }
             other => panic!("expected REST second; got {other:?}"),
+        }
+        match &response.services[2] {
+            ServiceState::Webauthn { enabled, url } => {
+                // Test fixture doesn't publish a WebAuthn service
+                // entry; assert the "disabled, no URL" baseline.
+                assert!(!enabled);
+                assert!(url.is_none());
+            }
+            other => panic!("expected WebAuthn third; got {other:?}"),
         }
     }
 }

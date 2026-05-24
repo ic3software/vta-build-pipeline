@@ -1,3 +1,4 @@
+pub mod descriptors;
 pub mod types;
 
 pub const PROTOCOL_BASE: &str = "https://firstperson.network/protocols/backup-management/1.0";

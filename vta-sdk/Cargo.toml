@@ -17,12 +17,11 @@ client = [
   "dep:tracing",
   "dep:uuid",
   "dep:affinidi-tdk",
+  "dep:affinidi-messaging-didcomm",
+  "dep:didwebvh-rs",
   "dep:tokio",
   "dep:ed25519-dalek",
-  "dep:x25519-dalek",
   "dep:curve25519-dalek",
-  "dep:aes-gcm",
-  "dep:aes",
   "dep:sha2",
 ]
 session = [
@@ -119,11 +118,20 @@ azure_security_keyvault_secrets = { workspace = true, optional = true }
 azure_identity = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
+# Used by `sealed-transfer` (HPKE keypair handling) only — the
+# client/didcomm-light path now goes through `affinidi-messaging-didcomm`'s
+# `PublicKeyAgreement` and doesn't take this dependency directly.
 x25519-dalek = { workspace = true, optional = true }
 curve25519-dalek = { version = "4", optional = true }
-aes-gcm = { workspace = true, optional = true }
-aes = { version = "0.9", optional = true }
 sha2 = { workspace = true, optional = true }
+# Used by `client` (didcomm_light::pack_anoncrypt) to produce JWEs the
+# workspace's pinned DIDComm decrypt path will accept (ECDH-ES+A256KW +
+# A256CBC-HS512). Same pinned version as `vta-service`.
+affinidi-messaging-didcomm = { version = "0.13", optional = true }
+# Used by `client` (didcomm_light::resolve_vta_keyagreement) to resolve
+# `did:webvh:` VTAs without pulling in the heavyweight TDK runtime. Same
+# workspace-pinned version as `vta-service`.
+didwebvh-rs = { workspace = true, optional = true }
 hpke = { version = "0.13", optional = true }
 affinidi-crypto = { workspace = true, optional = true }
 affinidi-vc = { workspace = true, optional = true }
@@ -161,6 +169,11 @@ required-features = ["sealed-transfer", "provision-integration"]
 tokio = { workspace = true }
 tempfile = "3"
 wiremock = "0.6"
+# Framework type-uri parser — used only by the trust-task URI
+# registry test (`every_uri_parses_as_framework_type_uri`) to pin
+# framework canonical-form conformance. Dev-only so the published
+# artifact stays slim.
+trust-tasks-rs = { workspace = true }
 # Examples need direct access to crypto primitives the SDK normally
 # encapsulates — pulled into dev-deps only so the published artifact
 # stays slim.

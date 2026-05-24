@@ -117,6 +117,9 @@ pub mod provision_integration;
 pub mod sealed_transfer;
 #[cfg(feature = "session")]
 pub mod session;
+/// Canonical Trust-Task URLs for VTA operations. Mirrors
+/// `did-hosting-common::did_hosting_tasks` for the webvh-service side.
+pub mod trust_tasks;
 pub mod webvh;
 
 #[cfg(feature = "integration")]

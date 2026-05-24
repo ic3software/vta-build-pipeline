@@ -69,6 +69,6 @@ cargo fmt --check   # check only
 ## Rust Configuration
 
 - **Edition**: 2024
-- **Minimum Rust version**: 1.94.0
+- **Minimum Rust version**: 1.95.0
 - **Resolver**: 3
 - **License**: Apache-2.0

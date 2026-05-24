@@ -161,6 +161,7 @@ async fn build_fixture(with_audit: bool) -> Fixture {
         created_at: now_epoch(),
         created_by: "did:key:vtc-install".into(),
         expires_at: None,
+        version: 0,
     };
     store_acl_entry(&acl_ks, &acl_entry).await.unwrap();
 
@@ -245,6 +246,10 @@ async fn admin_token(fix: &Fixture) -> String {
         refresh_token: None,
         refresh_expires_at: None,
         tee_attested: false,
+        amr: Vec::new(),
+        acr: String::new(),
+        token_id: None,
+        session_pubkey_b58btc: None,
     };
     store_session(&fix.state.sessions_ks, &session)
         .await
@@ -271,6 +276,10 @@ async fn reader_token(fix: &Fixture) -> String {
         refresh_token: None,
         refresh_expires_at: None,
         tee_attested: false,
+        amr: Vec::new(),
+        acr: String::new(),
+        token_id: None,
+        session_pubkey_b58btc: None,
     };
     store_session(&fix.state.sessions_ks, &session)
         .await

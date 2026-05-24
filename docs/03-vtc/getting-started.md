@@ -44,7 +44,7 @@ A running `vtc` binary on port 8200 with:
   will host this VTC. The PNM CLI prints one during the VTC setup
   wizard; you'll paste it into `pnm acl create --did ... --role
   admin --contexts <ctx> --expires 1h`.
-- Rust 1.94.0+ + `cargo` on your local box.
+- Rust 1.95.0+ + `cargo` on your local box.
 - OS keyring support (default — see the alternatives in the
   [secret backends doc](../02-vta/secret-backends.md), which apply
   equally to the VTC).

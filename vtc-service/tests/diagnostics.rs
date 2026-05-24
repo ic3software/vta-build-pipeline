@@ -146,6 +146,10 @@ async fn token_for(fix: &Fixture, role: &str) -> String {
         refresh_token: None,
         refresh_expires_at: None,
         tee_attested: false,
+        amr: Vec::new(),
+        acr: String::new(),
+        token_id: None,
+        session_pubkey_b58btc: None,
     };
     store_session(&fix.state.sessions_ks, &session)
         .await

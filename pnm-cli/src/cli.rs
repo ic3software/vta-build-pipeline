@@ -479,6 +479,13 @@ pub(crate) enum BackupCommands {
         /// Output file path (default: `vta-backup-<timestamp>.vtabak`)
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
+        /// Use the new descriptor-pattern trust-task flow instead of
+        /// the legacy inline `/backup/export` REST route. Off by
+        /// default during the transition window; will flip to on by
+        /// default in a future release. See
+        /// `docs/05-design-notes/backup-descriptor-pattern.md`.
+        #[arg(long)]
+        use_trust_task: bool,
     },
     /// Import VTA state from an encrypted backup file
     Import {
@@ -487,6 +494,11 @@ pub(crate) enum BackupCommands {
         /// Preview only — show what would be imported without applying
         #[arg(long)]
         preview: bool,
+        /// Use the new descriptor-pattern trust-task flow instead of
+        /// the legacy inline `/backup/import` REST route. Off by
+        /// default during the transition window.
+        #[arg(long)]
+        use_trust_task: bool,
     },
 }
 
@@ -718,6 +730,14 @@ pub(crate) enum AuthCommands {
         /// unseal`).
         challenge: String,
     },
+    /// Print the current access token (JWT) to stdout. Use only for
+    /// debugging or for pasting into a tool that needs a bearer
+    /// credential (e.g. the `examples/vta-auth-demo/` browser
+    /// harness). The token is sensitive — don't share it.
+    ///
+    /// If no token is cached, performs a fresh authentication first.
+    /// Fails if PNM hasn't been set up (`pnm setup`).
+    ShowToken,
 }
 
 #[derive(Subcommand)]
@@ -759,6 +779,13 @@ pub(crate) enum ServicesCommands {
         #[command(subcommand)]
         command: DidcommCommands,
     },
+    /// Manage WebAuthn-RP advertisement (the browser-facing
+    /// passkey-login surface advertised at `#vta-webauthn` on the
+    /// VTA's DID document).
+    Webauthn {
+        #[command(subcommand)]
+        command: WebauthnCommands,
+    },
     /// Show inbound-message attribution by mediator and sender.
     /// (Replaces `pnm mediator report`.)
     Report {
@@ -791,6 +818,30 @@ pub(crate) enum RestCommands {
     Disable,
     /// Fail-forward the most recent REST mutation by re-applying
     /// the snapshotted prior state (spec §3.5a).
+    Rollback,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum WebauthnCommands {
+    /// Add a `#vta-webauthn` service entry advertising `--url`
+    /// (typically the auth-portal URL, e.g.
+    /// `https://vta.example.com/auth/portal`).
+    Enable {
+        #[arg(long)]
+        url: String,
+    },
+    /// Replace the URL on the existing `#vta-webauthn` entry.
+    Update {
+        #[arg(long)]
+        url: String,
+    },
+    /// Remove the `#vta-webauthn` entry AND strip every passkey
+    /// verificationMethod from the DIDs this VTA controls. Operators
+    /// must re-enrol passkeys after re-enabling. Refused when
+    /// disabling WebAuthn would leave no transport advertised.
+    Disable,
+    /// Fail-forward the most recent WebAuthn mutation by re-applying
+    /// the snapshotted prior state.
     Rollback,
 }
 

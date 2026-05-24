@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VTA auth demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>VTA Auth Demo</h1>
+    <p class="sub">A static-file harness for exercising the VTA's auth surface from a browser.</p>
+  </header>
+
+  <section class="settings card">
+    <h2>1. Connect</h2>
+    <label>
+      VTA base URL
+      <input id="vtaUrl" type="text" value="http://localhost:8100" placeholder="http://localhost:8100">
+    </label>
+    <p class="hint">Must be reachable from this page. The VTA must include this page's origin in <code>[server] cors_origins</code> — see the README.</p>
+    <div class="row">
+      <button id="checkHealth">Check /health</button>
+      <span id="healthStatus" class="status muted"></span>
+    </div>
+  </section>
+
+  <section class="bootstrap card">
+    <h2>2. Bootstrap auth (paste JWT)</h2>
+    <p class="hint">First-time setup: get a JWT from <code>pnm auth show-token</code>, paste it here. Unlocks Step 3 (enrol passkey) and Step 5 (sessions + trust-tasks) without going through passkey login.</p>
+    <label>
+      Access token (JWT)
+      <textarea id="bootstrapJwt" rows="3" spellcheck="false" placeholder="eyJhbGciOi…"></textarea>
+    </label>
+    <div class="row">
+      <button id="bootstrapApply">Use this token</button>
+      <span id="bootstrapStatus" class="status muted"></span>
+    </div>
+  </section>
+
+  <section class="enrol card">
+    <h2>3. Enrol a passkey VM</h2>
+    <p class="hint">Adds a WebAuthn passkey as a <code>verificationMethod</code> on a WebVH-managed DID. Requires an admin JWT (from Step 2). The browser drives <code>navigator.credentials.create</code>; the VTA publishes the new VM via a WebVH LogEntry.</p>
+    <label>
+      Target DID
+      <input id="enrolDid" type="text" placeholder="did:webvh:example.com:alice">
+    </label>
+    <label>
+      Label (optional, e.g. "MacBook Touch ID")
+      <input id="enrolLabel" type="text" placeholder="demo-key">
+    </label>
+    <div class="row">
+      <button id="enrolStart">Enrol passkey</button>
+    </div>
+    <pre id="enrolOutput" class="output"></pre>
+  </section>
+
+  <section class="passkey card">
+    <h2>4. Passkey login</h2>
+    <p class="hint">Once a DID has a passkey VM (from Step 3 or already enrolled), use it to obtain a JWT directly — no DIDComm round-trip.</p>
+    <label>
+      DID
+      <input id="loginDid" type="text" placeholder="did:webvh:example.com:alice">
+    </label>
+    <div class="row">
+      <button id="loginStart">Start (request challenge)</button>
+      <button id="loginFinish" disabled>Finish (sign + send assertion)</button>
+    </div>
+    <pre id="loginOutput" class="output"></pre>
+  </section>
+
+  <section class="session card hidden" id="sessionSection">
+    <h2>5. Session inspection</h2>
+    <div class="kv">
+      <div><span class="label">Access token:</span> <code id="tokenDisplay" class="ellipsis"></code></div>
+      <div><span class="label">Session id:</span> <code id="sessionIdDisplay"></code></div>
+      <div><span class="label">Role:</span> <code id="roleDisplay"></code></div>
+      <div><span class="label">Expires in:</span> <span id="expiresIn">—</span></div>
+    </div>
+    <div class="row">
+      <button id="listSessions">List active sessions</button>
+      <button id="revokeCurrent" class="warn">Revoke current session</button>
+      <button id="signOut" class="warn">Sign out (clear local state)</button>
+    </div>
+    <pre id="sessionsOutput" class="output"></pre>
+  </section>
+
+  <section class="trust-tasks card hidden" id="trustTasksSection">
+    <h2>6. Trust-task dispatch</h2>
+    <p class="hint">POSTs a typed trust-task envelope to <code>/api/trust-tasks</code>. Select a known URI from the dropdown or edit the payload directly.</p>
+    <label>
+      Type URI
+      <select id="taskUri"></select>
+    </label>
+    <label>
+      Payload (JSON)
+      <textarea id="taskPayload" rows="6">{}</textarea>
+    </label>
+    <div class="row">
+      <button id="sendTask">Send</button>
+    </div>
+    <pre id="taskOutput" class="output"></pre>
+  </section>
+
+  <section class="didcomm card">
+    <h2>7. DIDComm primitives (vti-didcomm-js)</h2>
+    <p class="hint">Smoke-test for the browser-side DIDComm v2 stack — resolves a DID, generates an ephemeral sender key, and packs an authcrypt JWE. No VTA round-trip; the JWE is just shown, not delivered. Works with <code>did:key:z…</code> (offline) and <code>did:webvh:…</code> (fetches the log over HTTPS).</p>
+    <label>
+      Recipient DID
+      <input id="dcRecipientDid" type="text" placeholder="did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp">
+    </label>
+    <label>
+      Message body (JSON, optional)
+      <textarea id="dcBody" rows="3" spellcheck="false">{"hello":"world"}</textarea>
+    </label>
+    <div class="row">
+      <button id="dcResolve">Resolve DID</button>
+      <button id="dcPack">Resolve + pack</button>
+    </div>
+    <pre id="dcOutput" class="output"></pre>
+  </section>
+
+  <section class="didcomm-auth card">
+    <h2>8. DIDComm auth — POST /auth/ (vti-didcomm-js)</h2>
+    <p class="hint">Drives the full <em>legacy</em> auth flow that previously required <code>pnm auth</code>: requests a challenge, authcrypt-packs a DIDComm response to the VTA's keyAgreement key, POSTs it to <code>/auth/</code>, and stores the returned JWT. The ephemeral client DID must already be in the VTA's ACL (the demo prints it so you can run <code>pnm acl create --did &lt;that&gt; --role admin</code> first). Successful auth populates Step 5/6 just like passkey login.</p>
+    <label>
+      VTA DID (paste the value from <code>pnm webvh list-dids</code> / the running VTA)
+      <input id="daVtaDid" type="text" placeholder="did:webvh:scid:vta.example">
+    </label>
+    <div class="row">
+      <button id="daGenerate">Generate ephemeral client DID</button>
+      <button id="daAuthenticate" disabled>Authenticate</button>
+      <button id="daRefresh" disabled>Refresh access token</button>
+    </div>
+    <pre id="daOutput" class="output"></pre>
+  </section>
+
+  <section class="didcomm-mediator card">
+    <h2>9. DIDComm via mediator (vti-didcomm-js)</h2>
+    <p class="hint">The <em>VTA-not-reachable</em> path: instead of POSTing to the VTA's REST API, this routes a DIDComm message <strong>browser → mediator → VTA → mediator → browser</strong> over a live WebSocket. It authenticates to the mediator (subprotocol-bearer WS), enables message-pickup 3.0 live delivery, sends a <code>trust-ping</code> wrapped in <code>routing/2.0/forward</code> addressed to the VTA, and awaits the thid-correlated <code>ping-response</code>. Reuses the ephemeral client DID from Step 8. Trust-ping needs no VTA ACL — only that the mediator lets the client connect.</p>
+    <label>
+      VTA DID
+      <input id="dmVtaDid" type="text" placeholder="did:webvh:…:glenn-vta">
+    </label>
+    <label>
+      Mediator DID (leave blank to auto-derive from the VTA's <code>#vta-didcomm</code> service)
+      <input id="dmMediatorDid" type="text" placeholder="(auto)">
+    </label>
+    <div class="row">
+      <button id="dmConnect" disabled>Connect via mediator + trust-ping</button>
+    </div>
+    <pre id="dmOutput" class="output"></pre>
+  </section>
+
+  <footer>
+    <p>Source: <code>examples/vta-auth-demo/</code> · See the in-tree <a href="./README.md">README</a> for run instructions and the auth-flow notes.</p>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

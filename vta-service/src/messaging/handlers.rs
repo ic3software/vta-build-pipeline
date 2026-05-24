@@ -21,6 +21,7 @@ use crate::acl::Role;
 use crate::error::AppError;
 use crate::messaging::auth::auth_from_message;
 use crate::operations;
+use crate::server::AppState;
 
 use super::router::VtaState;
 
@@ -88,6 +89,72 @@ fn response<T: serde::Serialize>(
 ) -> Result<Option<DIDCommResponse>, DIDCommServiceError> {
     let body = serde_json::to_value(result).map_err(handler_err)?;
     Ok(Some(DIDCommResponse::new(msg_type, body)))
+}
+
+/// DIDComm `type` for Trust-Tasks envelopes, per the framework binding
+/// `https://trusttasks.org/binding/didcomm/0.1`: a single reserved type
+/// whose `body` carries the full `TrustTask<P>` JSON. Conformant
+/// consumers reject any other type. Mirrors
+/// `trust_tasks_didcomm::ENVELOPE_TYPE`; defined locally to avoid taking
+/// a dependency on the binding crate for one constant.
+pub(crate) const TRUST_TASK_ENVELOPE_TYPE: &str =
+    "https://trusttasks.org/binding/didcomm/0.1/envelope";
+
+/// Generic DIDComm handler for the Trust-Tasks surface.
+///
+/// Routed at the single binding envelope type [`TRUST_TASK_ENVELOPE_TYPE`];
+/// the message body carries the full `TrustTask<Value>` envelope
+/// (identical to the REST `POST /api/trust-tasks` body, whose own `type`
+/// field selects the operation). The authcrypt sender is the
+/// authenticated caller.
+///
+/// Delegates to the shared `dispatch_trust_task_core` so REST and
+/// DIDComm run byte-identical routing + authorization, then returns the
+/// framework result/error document — itself a trust-task envelope — as
+/// the reply body. The document is self-describing (its own `type` +
+/// status `code`), so the HTTP status the core attaches is dropped on
+/// the DIDComm wire.
+pub async fn handle_trust_task(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(app_state): Extension<AppState>,
+) -> HandlerResult {
+    // The DIDComm message body IS the trust-task envelope.
+    let body = serde_json::to_vec(&message.body).map_err(handler_err)?;
+
+    // Authenticate the authcrypt sender → AuthClaims (role + allowed
+    // contexts resolved from the ACL, expiry enforced — same as REST). On
+    // failure (e.g. the peer has no ACL entry) reply with a Trust-Task
+    // `permission_denied` *envelope*, not a DIDComm problem-report — a
+    // conformant Trust-Task client only understands binding envelopes.
+    let response = match auth_from_message(&message, &app_state.acl_ks).await {
+        Ok(auth) => {
+            crate::routes::trust_tasks::dispatch_trust_task_core(&app_state, &auth, &body).await
+        }
+        Err(e) => crate::routes::trust_tasks::reject_trust_task(
+            &body,
+            trust_tasks_rs::RejectReason::PermissionDenied {
+                reason: e.to_string(),
+            },
+        ),
+    };
+
+    let doc = response_into_json(response).await?;
+
+    // The reply is itself a trust-task envelope; the service sets `thid`
+    // from the inbound message id for client correlation.
+    Ok(Some(DIDCommResponse::new(TRUST_TASK_ENVELOPE_TYPE, doc)))
+}
+
+/// Decompose an axum `Response` (the shared core's return) into its JSON
+/// body. The body is always a serialised framework trust-task document.
+async fn response_into_json(
+    resp: axum::response::Response,
+) -> Result<serde_json::Value, DIDCommServiceError> {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .map_err(handler_err)?;
+    serde_json::from_slice(&bytes).map_err(handler_err)
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +547,41 @@ pub async fn handle_create_acl(
     response(acl_management::CREATE_ACL_RESULT, &result)
 }
 
+pub async fn handle_swap_acl(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    // No require_manage(): self-service rotation of the caller's own entry.
+    let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
+    let body: vta_sdk::protocols::acl_management::swap::SwapAclBody =
+        serde_json::from_value(message.body).map_err(handler_err)?;
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| handler_err("DID resolver not available"))?;
+    let vta_did = {
+        let config = state.config.read().await;
+        config
+            .vta_did
+            .clone()
+            .ok_or_else(|| handler_err("VTA DID not configured"))?
+    };
+    let result = app_try!(
+        operations::acl::swap_acl(
+            &state.acl_ks,
+            &state.audit_ks,
+            &auth,
+            &body.presentation,
+            did_resolver,
+            &vta_did,
+            "didcomm",
+        )
+        .await
+    );
+    response(acl_management::SWAP_ACL_RESULT, &result)
+}
+
 pub async fn handle_get_acl(
     _ctx: HandlerContext,
     message: Message,
@@ -761,21 +863,24 @@ pub async fn handle_delete_did_webvh(
     let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
     let body: vta_sdk::protocols::did_management::delete::DeleteDidWebvhBody =
         serde_json::from_value(message.body).map_err(handler_err)?;
-    let config = state.config.read().await;
     let did_resolver = state
         .did_resolver
         .as_ref()
         .ok_or_else(|| handler_err("DID resolver not available"))?;
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = app_try!(
         operations::did_webvh::delete_did_webvh(
             &state.webvh_ks,
             &state.keys_ks,
+            &state.imported_ks,
+            &state.audit_ks,
             &*state.seed_store,
-            &config,
             &auth,
             &body.did,
             did_resolver,
             &state.didcomm_bridge,
+            vta_did.as_deref(),
+            &state.webvh_auth_locks,
             "didcomm",
         )
         .await
@@ -894,10 +999,14 @@ pub async fn handle_register_did_with_server(
         .did_resolver
         .as_ref()
         .ok_or_else(|| handler_err("DID resolver not available"))?;
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = app_try!(
         operations::did_webvh::register_did_with_server(
             &state.webvh_ks,
+            &state.keys_ks,
+            &state.imported_ks,
             &state.audit_ks,
+            &*state.seed_store,
             &auth,
             did_resolver,
             &state.didcomm_bridge,
@@ -906,6 +1015,8 @@ pub async fn handle_register_did_with_server(
                 server_id: body.server_id,
                 force: body.force,
             },
+            vta_did.as_deref(),
+            &state.webvh_auth_locks,
             "didcomm",
         )
         .await
@@ -1379,9 +1490,11 @@ pub async fn handle_update_did_webvh(
         expected_version_id: env.body.expected_version_id,
     };
 
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = app_try!(
         operations::did_webvh::update_did_webvh(
             &state.keys_ks,
+            &state.imported_ks,
             &state.contexts_ks,
             &state.webvh_ks,
             &state.audit_ks,
@@ -1391,6 +1504,8 @@ pub async fn handle_update_did_webvh(
             opts,
             did_resolver,
             &state.didcomm_bridge,
+            vta_did.as_deref(),
+            &state.webvh_auth_locks,
             "didcomm",
         )
         .await
@@ -1431,9 +1546,11 @@ pub async fn handle_rotate_did_webvh_keys(
         label: env.body.label,
     };
 
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = app_try!(
         operations::did_webvh::rotate_did_webvh_keys(
             &state.keys_ks,
+            &state.imported_ks,
             &state.contexts_ks,
             &state.webvh_ks,
             &state.audit_ks,
@@ -1443,6 +1560,8 @@ pub async fn handle_rotate_did_webvh_keys(
             opts,
             did_resolver,
             &state.didcomm_bridge,
+            vta_did.as_deref(),
+            &state.webvh_auth_locks,
             "didcomm",
         )
         .await
@@ -1460,6 +1579,119 @@ pub async fn handle_rotate_did_webvh_keys(
     response(
         vta_sdk::protocols::did_management::ROTATE_DID_WEBVH_KEYS_RESULT,
         &body,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Step-up approval (VTA vouches a holder may step up at a relying party)
+// ---------------------------------------------------------------------------
+
+/// Inbound DIDComm message type for a step-up approval request. The
+/// authcrypt sender is the holder (`sub`); the body carries the RP DID +
+/// nonce. The plugin (Slice C) sends this.
+pub(crate) const STEP_UP_APPROVE_REQUEST_TYPE: &str =
+    "https://trusttasks.org/vta/step-up/approve-request/1.0";
+
+/// Outbound DIDComm message type carrying the signed approval token.
+pub(crate) const STEP_UP_APPROVE_RESPONSE_TYPE: &str =
+    "https://trusttasks.org/vta/step-up/approve-response/1.0";
+
+/// Request body for [`handle_step_up_approve`].
+#[derive(serde::Deserialize)]
+struct StepUpApproveRequestBody {
+    rp_did: String,
+    nonce: String,
+}
+
+/// Response body: the compact-JWS approval token the VTA signed.
+#[derive(serde::Serialize)]
+struct StepUpApproveResponseBody {
+    approval_token: String,
+}
+
+/// DIDComm handler for `step-up/approve-request/1.0`.
+///
+/// The authcrypt **sender DID** is the holder (`sub`). On success the VTA
+/// signs an approval token (`iss = vta_did`, `sub = holder`, `aud = rp_did`)
+/// with its `{vta_did}#key-0` key and returns it in a
+/// `step-up/approve-response/1.0` message.
+pub async fn handle_step_up_approve(
+    _ctx: HandlerContext,
+    message: Message,
+    Extension(state): Extension<Arc<VtaState>>,
+) -> HandlerResult {
+    // The holder is the authcrypt-authenticated sender DID (the transport
+    // only surfaces sender-authenticated authcrypt frames). We do NOT
+    // require VTA-side ACL membership: the VTA vouches for the sender's
+    // OWN DID (`sub` == sender), and that approval is only useful to a
+    // caller who *also* holds an aal1 session as that DID at the RP (which
+    // checks `sub` == its session DID). So getting an approval requires
+    // possessing the holder key either way — the `step_up_policy_approve`
+    // gate below is the authorization control, not an ACL lookup.
+    let holder_did = match message.from.as_deref() {
+        Some(d) => d.split('#').next().unwrap_or(d).to_string(),
+        None => {
+            return Ok(Some(app_err_to_response(AppError::Authentication(
+                "step-up approve request has no authenticated sender".into(),
+            ))));
+        }
+    };
+
+    let body: StepUpApproveRequestBody =
+        serde_json::from_value(message.body).map_err(handler_err)?;
+
+    // Approval gate (stub — always approves for now).
+    if !operations::step_up_approval::step_up_policy_approve(&holder_did, &body.rp_did) {
+        return Ok(Some(app_err_to_response(AppError::Forbidden(format!(
+            "step-up approval denied for holder {holder_did} at {}",
+            body.rp_did
+        )))));
+    }
+
+    // The VTA's own DID — same source the WebVH handlers use.
+    let vta_did = match state.config.read().await.vta_did.clone() {
+        Some(d) => d,
+        None => {
+            return Ok(Some(app_err_to_response(AppError::Internal(
+                "VTA DID not configured; cannot issue step-up approval".into(),
+            ))));
+        }
+    };
+
+    let signing_key = app_try!(
+        operations::step_up_approval::load_vta_key0_signing_key(
+            &state.keys_ks,
+            &state.imported_ks,
+            &*state.seed_store,
+            &state.audit_ks,
+            &vta_did,
+        )
+        .await
+    );
+
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let approval_token = app_try!(operations::step_up_approval::build_vta_approval_token(
+        &vta_did,
+        &holder_did,
+        &body.rp_did,
+        &body.nonce,
+        iat,
+        &signing_key,
+    ));
+
+    info!(
+        holder = %holder_did,
+        rp = %body.rp_did,
+        "issued VTA step-up approval token via DIDComm"
+    );
+
+    response(
+        STEP_UP_APPROVE_RESPONSE_TYPE,
+        &StepUpApproveResponseBody { approval_token },
     )
 }
 

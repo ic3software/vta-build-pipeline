@@ -26,7 +26,7 @@ pub trait AuthState: Clone + Send + Sync + 'static {
 /// ```ignore
 /// async fn handler(_auth: AuthClaims, ...) { }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct AuthClaims {
     pub did: String,
     pub role: Role,
@@ -39,6 +39,14 @@ pub struct AuthClaims {
     /// `whoami`-style endpoints can return the access-token
     /// lifetime without re-decoding.
     pub access_expires_at: u64,
+    /// Authentication Methods References per [RFC 8176]. Mirrors
+    /// `Claims.amr` from the bearer JWT. Handlers gating sensitive
+    /// operations check this to decide whether a step-up is needed.
+    pub amr: Vec<String>,
+    /// Authentication Context Class Reference per OIDC Core §2.
+    /// Typical values: `"aal1"` / `"aal2"` / `"aal3"`. Handlers gating
+    /// step-up read this directly.
+    pub acr: String,
 }
 
 /// Name of the admin UX session cookie set by the VTC's
@@ -110,6 +118,8 @@ impl<S: AuthState> FromRequestParts<S> for AuthClaims {
             allowed_contexts: claims.contexts,
             session_id: claims.session_id,
             access_expires_at: claims.exp,
+            amr: claims.amr,
+            acr: claims.acr,
         })
     }
 }
@@ -156,6 +166,12 @@ impl AuthClaims {
             // visibly "no real expiry" to any log scraper.
             session_id: format!("cli:{channel}"),
             access_expires_at: 0,
+            // CLI synthesis is a process-local trust boundary; the auth
+            // method is the OS user, not a wire factor. Surface `"cli"`
+            // in amr so a downstream auditor distinguishes synthesized
+            // claims from real authenticated sessions.
+            amr: vec!["cli".to_string()],
+            acr: String::new(),
         }
     }
 
@@ -291,6 +307,55 @@ impl<S: AuthState> FromRequestParts<S> for AdminAuth {
                 warn!(did = %claims.did, role = %claims.role, "auth rejected: admin role required");
                 Err(AppError::Forbidden("admin role required".into()))
             }
+        }
+    }
+}
+
+/// Extractor that requires a **stepped-up** session (JWT `acr == "aal2"`).
+///
+/// Use on routes that demand a second factor beyond the base DID
+/// challenge-response (`aal1`) — typical examples: ACL edits,
+/// key rotation, backup export, anything that lets an attacker
+/// with a leaked `aal1` token pivot to a long-lived foothold.
+///
+/// ```ignore
+/// async fn rotate_keys(auth: StepUpAuth, ...) { /* aal2 enforced */ }
+/// ```
+///
+/// A request with a lower `acr` is rejected with
+/// [`AppError::StepUpRequired`] (403 + body
+/// `{ "error": "step_up_required", "requiredAcr": "aal2" }`). The
+/// wallet uses that signal to trigger a passkey-login or
+/// VTA-approval ceremony — distinct from a generic `forbidden`
+/// it would get from a role gate.
+///
+/// **Trust model**: the gate reads `acr` from the JWT claims the
+/// `AuthClaims` extractor already verified (signature, expiry,
+/// session existence). Step-up tokens are stateless during their
+/// access-window; the canonical refresh handler preserves `acr`
+/// across rotation. If a step-up access-token leaks, the only
+/// brake is the short access-token TTL (or [`M2`] — shorter TTL
+/// when `acr=aal2`).
+#[derive(Debug, Clone)]
+pub struct StepUpAuth(pub AuthClaims);
+
+impl<S: AuthState> FromRequestParts<S> for StepUpAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let claims = AuthClaims::from_request_parts(parts, state).await?;
+
+        if claims.acr == "aal2" {
+            Ok(StepUpAuth(claims))
+        } else {
+            warn!(
+                did = %claims.did,
+                acr = %claims.acr,
+                "auth rejected: step-up (aal2) required",
+            );
+            Err(AppError::StepUpRequired(
+                "operation requires a stepped-up (aal2) session".into(),
+            ))
         }
     }
 }

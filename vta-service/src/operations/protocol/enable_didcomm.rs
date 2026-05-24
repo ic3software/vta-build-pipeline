@@ -125,10 +125,12 @@ impl From<crate::operations::protocol::preconditions::ProtocolPreconditionError>
 pub async fn enable_didcomm(
     config: &Arc<RwLock<AppConfig>>,
     keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
     contexts_ks: &KeyspaceHandle,
     webvh_ks: &KeyspaceHandle,
     audit_ks: &KeyspaceHandle,
     snapshot_ks: &KeyspaceHandle,
+    service_state_ks: &KeyspaceHandle,
     seed_store: &dyn SeedStore,
     did_resolver: &DIDCacheClient,
     didcomm_bridge: &Arc<DIDCommBridge>,
@@ -138,6 +140,7 @@ pub async fn enable_didcomm(
     auth: &AuthClaims,
     params: EnableDidcommParams,
     ctx: OpContext,
+    webvh_auth_locks: &crate::operations::did_webvh::WebvhAuthLocks,
     channel: &str,
 ) -> Result<EnableDidcommResult, EnableDidcommError> {
     auth.require_super_admin()
@@ -188,6 +191,7 @@ pub async fn enable_didcomm(
     // verificationMethod.
     let update_result = update_did_webvh(
         keys_ks,
+        imported_ks,
         contexts_ks,
         webvh_ks,
         audit_ks,
@@ -200,11 +204,21 @@ pub async fn enable_didcomm(
         },
         did_resolver,
         didcomm_bridge,
+        Some(vta_did.as_str()),
+        webvh_auth_locks,
         channel,
     )
     .await?;
 
-    // Persist config: services.didcomm = true and messaging.mediator_did.
+    // Persist:
+    //   * `services.didcomm = true` to fjall (authoritative runtime state) +
+    //     mirror into the in-memory config.
+    //   * `messaging.mediator_did` / `mediator_url` to disk — that's operator
+    //     config (the endpoint to register with), not runtime state, so it
+    //     belongs in config.toml.
+    crate::operations::protocol::runtime_state::set_didcomm_enabled(service_state_ks, true)
+        .await
+        .map_err(|e| EnableDidcommError::ConfigPersistence(format!("runtime state: {e}")))?;
     persist_didcomm_enabled(config, &resolved.mediator_did, &resolved.endpoint).await?;
 
     // Register the mediator as active. The caller (the route layer)
@@ -343,10 +357,12 @@ mod tests {
         config.write().await.services.didcomm = true;
         let (bridge, registry, sink) = mocks();
         let (_kd, keys_ks) = empty_keyspace("keys").await;
+        let (_imp_d, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_cd, contexts_ks) = empty_keyspace("contexts").await;
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
         let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state2, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -358,10 +374,12 @@ mod tests {
         let result = enable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -375,6 +393,7 @@ mod tests {
                 handshake_timeout: Duration::from_secs(1),
             },
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await;
@@ -392,10 +411,12 @@ mod tests {
         config.write().await.vta_did = None;
         let (bridge, registry, sink) = mocks();
         let (_kd, keys_ks) = empty_keyspace("keys").await;
+        let (_imp_d, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_cd, contexts_ks) = empty_keyspace("contexts").await;
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
         let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state2, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -407,10 +428,12 @@ mod tests {
         let result = enable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -424,6 +447,7 @@ mod tests {
                 handshake_timeout: Duration::from_secs(1),
             },
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await;
@@ -441,10 +465,12 @@ mod tests {
         let config = fresh_config(dir.path());
         let (bridge, registry, sink) = mocks();
         let (_kd, keys_ks) = empty_keyspace("keys").await;
+        let (_imp_d, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_cd, contexts_ks) = empty_keyspace("contexts").await;
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
         let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state2, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -456,10 +482,12 @@ mod tests {
         let result = enable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -473,6 +501,7 @@ mod tests {
                 handshake_timeout: Duration::from_secs(1),
             },
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await;
@@ -497,10 +526,12 @@ mod tests {
         let config = fresh_config(dir.path());
         let (bridge, registry, sink) = mocks();
         let (_kd, keys_ks) = empty_keyspace("keys").await;
+        let (_imp_d, imported_ks) = empty_keyspace("imported_secrets").await;
         let (_cd, contexts_ks) = empty_keyspace("contexts").await;
         let (_wd, webvh_ks) = empty_keyspace("webvh").await;
         let (_ad, audit_ks) = empty_keyspace("audit").await;
         let (_sd, snapshot_ks) = empty_keyspace(snapshot::KEYSPACE_NAME).await;
+        let (_d_svc_state2, service_state_ks) = empty_keyspace("service_state").await;
         let resolver = DIDCacheClient::new(
             affinidi_did_resolver_cache_sdk::config::DIDCacheConfigBuilder::default().build(),
         )
@@ -515,10 +546,12 @@ mod tests {
         let _ = enable_didcomm(
             &config,
             &keys_ks,
+            &imported_ks,
             &contexts_ks,
             &webvh_ks,
             &audit_ks,
             &snapshot_ks,
+            &service_state_ks,
             &*seed,
             &resolver,
             &bridge,
@@ -532,6 +565,7 @@ mod tests {
                 handshake_timeout: Duration::from_secs(1),
             },
             OpContext::Direct,
+            &crate::operations::did_webvh::WebvhAuthLocks::new(),
             "test",
         )
         .await;

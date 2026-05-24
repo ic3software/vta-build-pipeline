@@ -1,0 +1,783 @@
+//! Canonical Trust-Task URIs for every VTA operation.
+//!
+//! One `pub const` per registered URI; grep `TASK_*` to enumerate the
+//! full wire surface. Each URI is routed both on REST (via the
+//! trust-task envelope's `type` field on `POST /api/trust-tasks` or
+//! a dedicated unauth route) and on DIDComm (via the inbound message
+//! `type`).
+//!
+//! ## URI shape (framework-canonical)
+//!
+//! ```text
+//! https://trusttasks.org/spec/{namespace}/{op-path}/{maj}.{min}
+//! ```
+//!
+//! Per framework SPEC.md §6.1 + the `slug` grammar in
+//! `dtgwg-trust-tasks-tf/specs/spec.meta.schema.json` — hierarchical
+//! slugs with `/`-delimited path segments are supported (the spec's
+//! own example is `acl/grant`). The `/spec/` segment is mandatory;
+//! `TypeUri::from_str` rejects URIs missing it (pinned by the
+//! `framework_requires_canonical_uri_in_wire_type_field` test in
+//! `vta-service::routes::trust_tasks`).
+//!
+//! Earlier drafts of this workspace used a flat form (no `/spec/`),
+//! which deserialised cleanly as a Rust `&'static str` but failed
+//! `serde_json::from_slice::<TrustTask<Value>>`. Resolved by adopting
+//! the framework's canonical hierarchical-slug form throughout —
+//! breaking change made before any external clients existed.
+//!
+//! ## Namespace
+//!
+//! - `https://trusttasks.org/spec/vta/...` — VTA operations (this module).
+//! - `https://trusttasks.org/spec/did-hosting/...` — webvh-service.
+//! - `https://trusttasks.org/spec/webvh/...` — webvh-protocol ops.
+//!
+//! ## Versioning
+//!
+//! `{maj}.{min}` only per the canonical Trust-Tasks spec — no patch
+//! component. Bumping requires registering a NEW const at a new URL;
+//! the old URL keeps routing to its handler until removed in a future
+//! release. The router does NOT do version-family matching — `1.0` and
+//! `1.1` are completely separate identifiers.
+//!
+//! ## Cross-crate consistency
+//!
+//! Every const here is reflected in the migration mapping in
+//! `docs/05-design-notes/trust-task-uri-registry.md`. A parity harness
+//! in `vta-service::routes::trust_tasks` confirms the dispatcher knows
+//! about every const declared here.
+//!
+//! ## What lives here vs is planned
+//!
+//! v0.1 of this module ships the **auth slice only** — the six URIs
+//! needed for the trust-task migration's Phase 2 "first-light" gate.
+//! Remaining slices (keys, contexts, ACL, services, etc., ~70 more
+//! URIs) land in Phase 3 of the migration initiative.
+
+// ─── Auth slice — canonical cross-cutting specs ──────────────────────────
+//
+// These point at the framework's `spec/auth/*/0.1` canonical specs in the
+// trusttasks-tf registry. VTA was the first implementer; the constant names
+// keep their `_1_0` suffix for cargo-grep continuity but the URIs are now
+// the canonical 0.1 specs. When the canonical specs cure to candidate /
+// standard the constants will follow with a `_0_1` rename pass.
+
+/// `spec/auth/challenge/0.1` — request a one-time nonce for a subject DID.
+pub const TASK_AUTH_CHALLENGE_0_1: &str = "https://trusttasks.org/spec/auth/challenge/0.1";
+
+/// `spec/auth/authenticate/0.1` — present the signed challenge inside a
+/// proof-bearing Trust Task document; the proof IS the authentication.
+pub const TASK_AUTH_AUTHENTICATE_0_1: &str = "https://trusttasks.org/spec/auth/authenticate/0.1";
+
+/// `spec/auth/refresh/0.1` — exchange a refresh token for a fresh access
+/// token. Scope-monotonic.
+pub const TASK_AUTH_REFRESH_0_1: &str = "https://trusttasks.org/spec/auth/refresh/0.1";
+
+/// `spec/auth/revoke-session/0.1` — revoke a session by id (or every
+/// session for the producer's subject).
+pub const TASK_AUTH_REVOKE_SESSION_0_1: &str =
+    "https://trusttasks.org/spec/auth/revoke-session/0.1";
+
+/// `spec/auth/passkey/login/start/0.1` — begin a WebAuthn assertion
+/// ceremony. Same wire form serves initial login AND AAL step-up via the
+/// payload's `purpose` field.
+pub const TASK_AUTH_PASSKEY_LOGIN_START_0_1: &str =
+    "https://trusttasks.org/spec/auth/passkey/login/start/0.1";
+
+/// `spec/auth/passkey/login/finish/0.1` — submit the WebAuthn assertion.
+/// On success the consumer issues a session (for `purpose: login`) or
+/// elevates an existing session's acr (for `purpose: step-up`).
+pub const TASK_AUTH_PASSKEY_LOGIN_FINISH_0_1: &str =
+    "https://trusttasks.org/spec/auth/passkey/login/finish/0.1";
+
+// ─── ACL slice (spec/vta/acl/*) ──────────────────────────────────────────
+
+/// `spec/vta/acl/list/1.0` — list ACL entries, optionally filtered by
+/// context. Payload: [`crate::protocols::acl_management::list::ListAclBody`].
+pub const TASK_ACL_LIST_1_0: &str = "https://trusttasks.org/spec/vta/acl/list/1.0";
+
+/// `spec/vta/acl/create/1.0` — add an ACL entry. Payload:
+/// [`crate::protocols::acl_management::create::CreateAclBody`].
+/// Auth: Admin or Initiator.
+pub const TASK_ACL_CREATE_1_0: &str = "https://trusttasks.org/spec/vta/acl/create/1.0";
+
+/// `spec/vta/acl/get/1.0` — retrieve a single entry. Payload:
+/// [`crate::protocols::acl_management::get::GetAclBody`].
+pub const TASK_ACL_GET_1_0: &str = "https://trusttasks.org/spec/vta/acl/get/1.0";
+
+/// `spec/vta/acl/update/1.0` — patch role, label, or allowed contexts.
+/// Payload: [`crate::protocols::acl_management::update::UpdateAclBody`].
+/// Auth: Admin only.
+pub const TASK_ACL_UPDATE_1_0: &str = "https://trusttasks.org/spec/vta/acl/update/1.0";
+
+/// `spec/vta/acl/delete/1.0` — remove an entry. Payload:
+/// [`crate::protocols::acl_management::delete::DeleteAclBody`].
+/// Auth: Admin or Initiator.
+pub const TASK_ACL_DELETE_1_0: &str = "https://trusttasks.org/spec/vta/acl/delete/1.0";
+
+// ─── Contexts slice (spec/vta/contexts/*) ────────────────────────────────
+
+/// `spec/vta/contexts/list/1.0` — list contexts visible to caller.
+/// Payload: [`crate::protocols::context_management::list::ListContextsBody`]
+/// (empty). Auth: any authenticated user.
+pub const TASK_CONTEXTS_LIST_1_0: &str = "https://trusttasks.org/spec/vta/contexts/list/1.0";
+
+/// `spec/vta/contexts/create/1.0` — create a new context. Payload:
+/// [`crate::protocols::context_management::create::CreateContextBody`].
+/// Auth: Super Admin only.
+pub const TASK_CONTEXTS_CREATE_1_0: &str = "https://trusttasks.org/spec/vta/contexts/create/1.0";
+
+/// `spec/vta/contexts/get/1.0` — retrieve a context by id. Payload:
+/// [`crate::protocols::context_management::get::GetContextBody`].
+pub const TASK_CONTEXTS_GET_1_0: &str = "https://trusttasks.org/spec/vta/contexts/get/1.0";
+
+/// `spec/vta/contexts/update/1.0` — update name/did/description.
+/// Payload: [`crate::protocols::context_management::update::UpdateContextBody`].
+/// Auth: Super Admin only.
+pub const TASK_CONTEXTS_UPDATE_1_0: &str = "https://trusttasks.org/spec/vta/contexts/update/1.0";
+
+/// `spec/vta/contexts/update-did/1.0` — set the context's bound DID.
+/// Payload:
+/// [`crate::protocols::context_management::update_did::UpdateContextDidBody`].
+/// Auth: Admin with context access.
+pub const TASK_CONTEXTS_UPDATE_DID_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/update-did/1.0";
+
+/// `spec/vta/contexts/preview-delete/1.0` — preview resources affected
+/// by deletion. Payload:
+/// [`crate::protocols::context_management::delete::DeleteContextPreviewBody`].
+/// Auth: Super Admin only.
+pub const TASK_CONTEXTS_PREVIEW_DELETE_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/preview-delete/1.0";
+
+/// `spec/vta/contexts/delete/1.0` — delete a context and its
+/// associated resources. Payload:
+/// [`crate::protocols::context_management::delete::DeleteContextBody`].
+/// Auth: Super Admin only.
+pub const TASK_CONTEXTS_DELETE_1_0: &str = "https://trusttasks.org/spec/vta/contexts/delete/1.0";
+
+// ─── Keys slice (spec/vta/keys/*) ────────────────────────────────────────
+
+/// `spec/vta/keys/list/1.0` — list key records (paginated, filterable).
+/// Payload: [`crate::protocols::key_management::list::ListKeysBody`].
+pub const TASK_KEYS_LIST_1_0: &str = "https://trusttasks.org/spec/vta/keys/list/1.0";
+
+/// `spec/vta/keys/create/1.0` — derive a new key from the active seed.
+/// Payload: [`crate::protocols::key_management::create::CreateKeyBody`].
+/// Auth: Admin.
+pub const TASK_KEYS_CREATE_1_0: &str = "https://trusttasks.org/spec/vta/keys/create/1.0";
+
+/// `spec/vta/keys/get/1.0` — retrieve a single key record.
+/// Payload: [`crate::protocols::key_management::get::GetKeyBody`].
+pub const TASK_KEYS_GET_1_0: &str = "https://trusttasks.org/spec/vta/keys/get/1.0";
+
+/// `spec/vta/keys/rename/1.0` — rename a key's identifier.
+/// Payload: [`crate::protocols::key_management::rename::RenameKeyBody`].
+/// Auth: Admin.
+pub const TASK_KEYS_RENAME_1_0: &str = "https://trusttasks.org/spec/vta/keys/rename/1.0";
+
+/// `spec/vta/keys/revoke/1.0` — invalidate a key.
+/// Payload: [`crate::protocols::key_management::revoke::RevokeKeyBody`].
+/// Auth: Admin.
+pub const TASK_KEYS_REVOKE_1_0: &str = "https://trusttasks.org/spec/vta/keys/revoke/1.0";
+
+/// `spec/vta/keys/sign/1.0` — sign a base64url-encoded payload with a
+/// stored key (raw-bytes signing oracle).
+/// Payload: [`crate::protocols::key_management::sign::SignRequestBody`].
+/// Auth: write (Application or higher).
+pub const TASK_KEYS_SIGN_1_0: &str = "https://trusttasks.org/spec/vta/keys/sign/1.0";
+
+// ─── Seeds slice (spec/vta/seeds/*) ──────────────────────────────────────
+
+/// `spec/vta/seeds/list/1.0` — list all seed records.
+/// Payload: [`crate::protocols::seed_management::list::ListSeedsBody`]
+/// (empty). Auth: Admin.
+pub const TASK_SEEDS_LIST_1_0: &str = "https://trusttasks.org/spec/vta/seeds/list/1.0";
+
+/// `spec/vta/seeds/rotate/1.0` — rotate the active seed, optionally
+/// supplying a new mnemonic.
+/// Payload: [`crate::protocols::seed_management::rotate::RotateSeedBody`].
+/// Auth: Admin.
+pub const TASK_SEEDS_ROTATE_1_0: &str = "https://trusttasks.org/spec/vta/seeds/rotate/1.0";
+
+/// `spec/vta/seeds/export-mnemonic/1.0` — one-shot BIP-39 mnemonic
+/// export under `MnemonicExportGuard`. Was `/keys/{id}/secret` in
+/// the legacy REST surface — relocated to the seeds slice because it
+/// operates on the seed identifier, not an individual key.
+/// Payload: [`crate::protocols::key_management::secret::GetKeySecretBody`].
+/// Auth: Admin only. Zeroized on drop.
+pub const TASK_SEEDS_EXPORT_MNEMONIC_1_0: &str =
+    "https://trusttasks.org/spec/vta/seeds/export-mnemonic/1.0";
+
+// ─── Audit slice (spec/vta/audit/*) ──────────────────────────────────────
+
+/// `spec/vta/audit/list-logs/1.0` — list audit log entries (paginated,
+/// filterable). Payload:
+/// [`crate::protocols::audit_management::list::ListAuditLogsBody`].
+/// Auth: Admin.
+pub const TASK_AUDIT_LIST_LOGS_1_0: &str = "https://trusttasks.org/spec/vta/audit/list-logs/1.0";
+
+/// `spec/vta/audit/get-retention/1.0` — read the current retention
+/// period. Payload:
+/// [`crate::protocols::audit_management::retention::GetRetentionBody`]
+/// (empty). Auth: Admin.
+pub const TASK_AUDIT_GET_RETENTION_1_0: &str =
+    "https://trusttasks.org/spec/vta/audit/get-retention/1.0";
+
+/// `spec/vta/audit/update-retention/1.0` — update retention period.
+/// Payload:
+/// [`crate::protocols::audit_management::retention::UpdateRetentionBody`].
+/// Auth: Super Admin only.
+pub const TASK_AUDIT_UPDATE_RETENTION_1_0: &str =
+    "https://trusttasks.org/spec/vta/audit/update-retention/1.0";
+
+/// `spec/vta/discovery/capabilities/1.0` — describe VTA features,
+/// services, and configured webvh hosts. Payload: empty
+/// (`ListSeedsBody`-style — no input required). Auth: any
+/// authenticated user.
+pub const TASK_DISCOVERY_CAPABILITIES_1_0: &str =
+    "https://trusttasks.org/spec/vta/discovery/capabilities/1.0";
+
+// ─── Config slice (spec/vta/config/*) ────────────────────────────────────
+
+/// `spec/vta/config/get/1.0` — read the current VTA configuration
+/// (VTA DID, name, public URL).
+/// Payload: [`crate::protocols::vta_management::get_config::GetConfigBody`]
+/// (empty). Auth: any authenticated user.
+pub const TASK_CONFIG_GET_1_0: &str = "https://trusttasks.org/spec/vta/config/get/1.0";
+
+/// `spec/vta/config/update/1.0` — patch VTA DID, name, or public URL.
+/// Payload: [`crate::protocols::vta_management::update_config::UpdateConfigBody`].
+/// Auth: Super Admin only.
+pub const TASK_CONFIG_UPDATE_1_0: &str = "https://trusttasks.org/spec/vta/config/update/1.0";
+
+// ─── Management slice (spec/vta/management/*) ────────────────────────────
+
+/// `spec/vta/management/reload-services/1.0` — tear down and
+/// re-initialise REST + DIDComm + storage threads with the current
+/// config. Does NOT restart the process. Use after a
+/// `config/update/1.0` to pick up the new values.
+/// Payload: [`crate::protocols::vta_management::restart::ReloadServicesBody`]
+/// (empty). Auth: Super Admin only.
+pub const TASK_MANAGEMENT_RELOAD_SERVICES_1_0: &str =
+    "https://trusttasks.org/spec/vta/management/reload-services/1.0";
+
+// ─── Passkey-VMs slice (spec/vta/passkey-vms/*) ──────────────────────────
+//
+// Feature-gated: handlers require BOTH `webvh` (DID-doc mutation +
+// log entries) AND `didcomm` (mediator push for the updated DID).
+// URIs are declared unconditionally here so client SDKs can probe;
+// the dispatcher's `KNOWN_FEATURE_GATED_URIS` allowlist tracks them
+// for builds where the features are off.
+
+/// `spec/vta/passkey-vms/enroll-challenge/1.0` — request a fresh
+/// WebAuthn registration challenge for a DID. Payload:
+/// [`crate::protocols::did_management::passkey_vms::EnrollPasskeyChallengeBody`].
+/// Auth: Admin role on the DID's context.
+pub const TASK_PASSKEY_VMS_ENROLL_CHALLENGE_1_0: &str =
+    "https://trusttasks.org/spec/vta/passkey-vms/enroll-challenge/1.0";
+
+/// `spec/vta/passkey-vms/enroll-submit/1.0` — finalise enrolment with
+/// the browser-supplied attestation bundle. Payload:
+/// [`crate::protocols::did_management::passkey_vms::EnrollPasskeySubmitBody`].
+/// Auth: Admin role on the DID's context. The handler appends the
+/// new VM to the DID document via a WebVH LogEntry and pushes to the
+/// configured mediator.
+pub const TASK_PASSKEY_VMS_ENROLL_SUBMIT_1_0: &str =
+    "https://trusttasks.org/spec/vta/passkey-vms/enroll-submit/1.0";
+
+/// `spec/vta/passkey-vms/list/1.0` — list every passkey VM currently
+/// published on a DID. Payload:
+/// [`crate::protocols::did_management::passkey_vms::ListPasskeyVmsBody`].
+/// Auth: Admin role on the DID's context.
+pub const TASK_PASSKEY_VMS_LIST_1_0: &str = "https://trusttasks.org/spec/vta/passkey-vms/list/1.0";
+
+/// `spec/vta/passkey-vms/revoke/1.0` — remove a passkey VM by fragment.
+/// Payload:
+/// [`crate::protocols::did_management::passkey_vms::RevokePasskeyVmBody`].
+/// Auth: Admin role on the DID's context.
+pub const TASK_PASSKEY_VMS_REVOKE_1_0: &str =
+    "https://trusttasks.org/spec/vta/passkey-vms/revoke/1.0";
+
+// ─── Provision-integration (spec/vta/provision-integration/*) ───────────
+//
+// Feature-gated: handler requires `webvh` (DID-doc mutation + log
+// entries). The legacy REST handler is at
+// `POST /bootstrap/provision-integration`; the trust-task envelope
+// carries the same request/response shapes the SDK already exports
+// under `vta_sdk::provision_integration::http`.
+
+/// `spec/vta/provision-integration/request/1.0` — submit a VP-framed
+/// `BootstrapRequest` plus provisioning options to the VTA; receive a
+/// sealed `TemplateBootstrap` bundle back. Payload:
+/// [`crate::provision_integration::http::ProvisionIntegrationRequest`].
+/// Auth: Admin role on the target context (super-admin to use
+/// `create_context: true`).
+pub const TASK_PROVISION_INTEGRATION_REQUEST_1_0: &str =
+    "https://trusttasks.org/spec/vta/provision-integration/request/1.0";
+
+// ─── WebVH-DID-lifecycle slice (spec/vta/webvh/*) ────────────────────────
+//
+// Feature-gated: every handler requires `webvh` (the entire op layer
+// for DID-doc creation, update, deletion, and host registration lives
+// under `cfg(feature = "webvh")`). URIs are still declared here
+// unconditionally so client SDKs can probe; the dispatcher's
+// `KNOWN_FEATURE_GATED_URIS` allowlist tracks them for builds where
+// `webvh` is off.
+//
+// The boundary between `spec/vta/webvh/*` (VTA-controlled WebVH ops)
+// and `spec/did-hosting/*` (webvh-service hosting ops) is in
+// `docs/05-design-notes/trust-task-uri-registry.md` §"Boundary".
+//
+// Note: `GET /did/{did}/log` (public, unauth) is intentionally NOT
+// reified as a trust task — it stays plain REST so any DID resolver
+// can fall back to the minting VTA when the hosting server drops a
+// LogEntry. The authed admin equivalent IS migrated (see
+// `TASK_WEBVH_DIDS_GET_LOG_1_0` below).
+
+// Server CRUD on the VTA's known-webvh-hosts table.
+
+/// `spec/vta/webvh/servers/list/1.0` — list registered webvh hosts.
+/// Payload:
+/// [`crate::protocols::did_management::servers::ListWebvhServersBody`]
+/// (empty). Auth: any authenticated user.
+pub const TASK_WEBVH_SERVERS_LIST_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/servers/list/1.0";
+
+/// `spec/vta/webvh/servers/add/1.0` — register a new webvh host.
+/// Payload:
+/// [`crate::protocols::did_management::servers::AddWebvhServerBody`].
+/// Auth: Super Admin.
+pub const TASK_WEBVH_SERVERS_ADD_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/servers/add/1.0";
+
+/// `spec/vta/webvh/servers/update/1.0` — patch a registered webvh
+/// host's label. Payload:
+/// [`crate::protocols::did_management::servers::UpdateWebvhServerBody`].
+/// Auth: Super Admin.
+pub const TASK_WEBVH_SERVERS_UPDATE_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/servers/update/1.0";
+
+/// `spec/vta/webvh/servers/remove/1.0` — deregister a webvh host.
+/// Payload:
+/// [`crate::protocols::did_management::servers::RemoveWebvhServerBody`].
+/// Auth: Super Admin.
+pub const TASK_WEBVH_SERVERS_REMOVE_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/servers/remove/1.0";
+
+// DID lifecycle on the VTA's known-DIDs table. Every mutation appends
+// a fresh WebVH LogEntry to the DID's `did.jsonl` and (when the DID is
+// hosted) publishes the entry to the registered server.
+
+/// `spec/vta/webvh/dids/list/1.0` — list DIDs known to this VTA,
+/// optionally filtered by context or server. Payload:
+/// [`crate::protocols::did_management::list::ListDidsWebvhBody`].
+/// Auth: any authenticated user.
+pub const TASK_WEBVH_DIDS_LIST_1_0: &str = "https://trusttasks.org/spec/vta/webvh/dids/list/1.0";
+
+/// `spec/vta/webvh/dids/create/1.0` — mint a new DID via a DID
+/// template and (optionally) register it with a webvh host. Payload:
+/// [`crate::protocols::did_management::create::CreateDidWebvhBody`].
+/// Auth: Admin role on the target context.
+pub const TASK_WEBVH_DIDS_CREATE_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/dids/create/1.0";
+
+/// `spec/vta/webvh/dids/get/1.0` — fetch the local record (context,
+/// server, key handles) for a DID this VTA knows. Payload:
+/// [`crate::protocols::did_management::get::GetDidWebvhBody`].
+/// Auth: any authenticated user with access to the DID's context.
+pub const TASK_WEBVH_DIDS_GET_1_0: &str = "https://trusttasks.org/spec/vta/webvh/dids/get/1.0";
+
+/// `spec/vta/webvh/dids/get-log/1.0` — fetch the raw `did.jsonl`
+/// log for an authed caller. The unauthenticated public mirror
+/// (`GET /did/{did}/log`) is deliberately NOT trust-task-wrapped —
+/// it's load-bearing as the DID-resolver failover path and stays
+/// plain REST forever (see §"Why REST stays" in the registry doc).
+/// Payload:
+/// [`crate::protocols::did_management::lifecycle::GetDidWebvhLogBody`].
+/// Auth: any authenticated user with access to the DID's context.
+pub const TASK_WEBVH_DIDS_GET_LOG_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/dids/get-log/1.0";
+
+/// `spec/vta/webvh/dids/delete/1.0` — delete a DID locally and, if
+/// hosted, on the webvh server. Payload:
+/// [`crate::protocols::did_management::delete::DeleteDidWebvhBody`].
+/// Auth: Admin role on the DID's context.
+pub const TASK_WEBVH_DIDS_DELETE_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/dids/delete/1.0";
+
+/// `spec/vta/webvh/dids/update/1.0` — apply a generic DID-document
+/// patch (rotate update_keys, swap pre-rotation commitments, change
+/// witnesses / watchers / ttl). Payload:
+/// [`crate::protocols::did_management::update::UpdateDidWebvhBody`].
+/// The `payload` carries a wire-format witnesses field (opaque
+/// JSON); the handler deserialises it into the typed
+/// `didwebvh_rs::Witnesses` enum at intake. Auth: Admin role on the
+/// DID's context.
+pub const TASK_WEBVH_DIDS_UPDATE_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/dids/update/1.0";
+
+/// `spec/vta/webvh/dids/rotate-keys/1.0` — rotate every
+/// verificationMethod's key bytes on a DID and apply the
+/// resulting document change as a single update. Payload:
+/// [`crate::protocols::did_management::update::RotateDidWebvhKeysBody`].
+/// Auth: Admin role on the DID's context.
+pub const TASK_WEBVH_DIDS_ROTATE_KEYS_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/dids/rotate-keys/1.0";
+
+/// `spec/vta/webvh/dids/register-with-server/1.0` — promote a
+/// serverless DID to a server-managed one, atomically pushing the
+/// existing local `did.jsonl` to the host and flipping the local
+/// record's `server_id` from `"serverless"` to the registered host
+/// id. One-way (re-pointing a hosted DID at a different host is
+/// intentionally out of scope). Payload:
+/// [`crate::protocols::did_management::servers::RegisterDidWithServerBody`].
+/// Auth: Super Admin.
+pub const TASK_WEBVH_DIDS_REGISTER_WITH_SERVER_1_0: &str =
+    "https://trusttasks.org/spec/vta/webvh/dids/register-with-server/1.0";
+
+// ─── DID-templates slice (spec/vta/did-templates/*) ──────────────────────
+//
+// Global-scope template CRUD + render. Mirrored under
+// `spec/vta/contexts/did-templates/*` below for the context-scoped
+// resource. The two URI hierarchies are intentionally separate —
+// global templates and context templates have different owners and
+// lifecycles (super-admin vs context-admin), and the URI carries
+// that distinction directly so the auth contract is self-evident
+// from the wire `type` field.
+
+/// `spec/vta/did-templates/list/1.0` — list all global templates.
+/// Payload:
+/// [`crate::protocols::did_template_management::list::ListDidTemplatesBody`]
+/// (empty). Auth: any authenticated user.
+pub const TASK_DID_TEMPLATES_LIST_1_0: &str =
+    "https://trusttasks.org/spec/vta/did-templates/list/1.0";
+
+/// `spec/vta/did-templates/create/1.0` — create a new global
+/// template. Payload:
+/// [`crate::protocols::did_template_management::create::CreateDidTemplateBody`].
+/// Auth: Super Admin only.
+pub const TASK_DID_TEMPLATES_CREATE_1_0: &str =
+    "https://trusttasks.org/spec/vta/did-templates/create/1.0";
+
+/// `spec/vta/did-templates/get/1.0` — fetch one global template by
+/// name. Payload:
+/// [`crate::protocols::did_template_management::get::GetDidTemplateBody`].
+/// Auth: any authenticated user.
+pub const TASK_DID_TEMPLATES_GET_1_0: &str =
+    "https://trusttasks.org/spec/vta/did-templates/get/1.0";
+
+/// `spec/vta/did-templates/update/1.0` — replace a global template.
+/// Payload:
+/// [`crate::protocols::did_template_management::update::UpdateDidTemplateBody`].
+/// Auth: Super Admin only.
+pub const TASK_DID_TEMPLATES_UPDATE_1_0: &str =
+    "https://trusttasks.org/spec/vta/did-templates/update/1.0";
+
+/// `spec/vta/did-templates/delete/1.0` — delete a global template.
+/// Payload:
+/// [`crate::protocols::did_template_management::delete::DeleteDidTemplateBody`].
+/// Auth: Super Admin only.
+pub const TASK_DID_TEMPLATES_DELETE_1_0: &str =
+    "https://trusttasks.org/spec/vta/did-templates/delete/1.0";
+
+/// `spec/vta/did-templates/render/1.0` — render a global template
+/// with caller-supplied variables. Server injects ambient vars
+/// (`VTA_DID`, `NOW`, …). Payload:
+/// [`crate::protocols::did_template_management::render::RenderDidTemplateBody`].
+/// Auth: any authenticated user.
+pub const TASK_DID_TEMPLATES_RENDER_1_0: &str =
+    "https://trusttasks.org/spec/vta/did-templates/render/1.0";
+
+// ─── Context-scoped DID-templates (spec/vta/contexts/did-templates/*) ────
+
+/// `spec/vta/contexts/did-templates/list/1.0` — list templates
+/// scoped to a specific context. Payload:
+/// [`crate::protocols::did_template_management::list::ListContextDidTemplatesBody`].
+/// Auth: any authenticated user with access to the context.
+pub const TASK_CONTEXTS_DID_TEMPLATES_LIST_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/did-templates/list/1.0";
+
+/// `spec/vta/contexts/did-templates/create/1.0` — create a
+/// context-scoped template. Payload:
+/// [`crate::protocols::did_template_management::create::CreateContextDidTemplateBody`].
+/// Auth: Super Admin OR Admin-with-context.
+pub const TASK_CONTEXTS_DID_TEMPLATES_CREATE_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/did-templates/create/1.0";
+
+/// `spec/vta/contexts/did-templates/get/1.0` — fetch one
+/// context-scoped template. Payload:
+/// [`crate::protocols::did_template_management::get::GetContextDidTemplateBody`].
+/// Auth: any authenticated user with access to the context.
+pub const TASK_CONTEXTS_DID_TEMPLATES_GET_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/did-templates/get/1.0";
+
+/// `spec/vta/contexts/did-templates/update/1.0` — replace a
+/// context-scoped template. Payload:
+/// [`crate::protocols::did_template_management::update::UpdateContextDidTemplateBody`].
+/// Auth: Super Admin OR Admin-with-context.
+pub const TASK_CONTEXTS_DID_TEMPLATES_UPDATE_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/did-templates/update/1.0";
+
+/// `spec/vta/contexts/did-templates/delete/1.0` — delete a
+/// context-scoped template. Payload:
+/// [`crate::protocols::did_template_management::delete::DeleteContextDidTemplateBody`].
+/// Auth: Super Admin OR Admin-with-context.
+pub const TASK_CONTEXTS_DID_TEMPLATES_DELETE_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/did-templates/delete/1.0";
+
+/// `spec/vta/contexts/did-templates/render/1.0` — render a
+/// context-scoped template (or fall through to a global template
+/// of the same name, per the op layer's scope-fallback rule).
+/// Payload:
+/// [`crate::protocols::did_template_management::render::RenderContextDidTemplateBody`].
+/// Auth: any authenticated user with access to the context.
+pub const TASK_CONTEXTS_DID_TEMPLATES_RENDER_1_0: &str =
+    "https://trusttasks.org/spec/vta/contexts/did-templates/render/1.0";
+
+// ─── Backup slice (spec/vta/backup/*) ────────────────────────────────────
+//
+// 3-phase descriptor pattern — see
+// `docs/05-design-notes/backup-descriptor-pattern.md`. The
+// trust-task envelope carries the control plane only; the bulk
+// encrypted bytes flow over `GET / POST /backup/blob/{bundle_id}`
+// (deliberately REST-only, like the public DID log mirror —
+// bulk transport is wrong on top of a JSON envelope).
+//
+// All five URIs require super-admin authentication. Additionally
+// every non-`initiate-*` URI checks caller-DID-owns-bundle so a
+// second super-admin can't snoop on the first's in-flight backup.
+//
+// Slice handlers, op-layer functions, blob REST routes, and the
+// background sweeper land in follow-on commits per the rollout
+// plan in the design doc. URIs are declared here unconditionally
+// so client SDKs can probe; the dispatcher's
+// `KNOWN_FEATURE_GATED_URIS` allowlist will track them until the
+// slice ships.
+
+/// `spec/vta/backup/initiate-export/1.0` — mint an export bundle;
+/// return a [`BundleDescriptor`](crate::protocols::backup_management::descriptors::BundleDescriptor)
+/// pointing at the blob endpoint. Payload:
+/// [`crate::protocols::backup_management::descriptors::InitiateExportBody`].
+/// Auth: super-admin.
+pub const TASK_BACKUP_INITIATE_EXPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/backup/initiate-export/1.0";
+
+/// `spec/vta/backup/complete-export/1.0` — optional ack from the
+/// client after a successful download. Payload:
+/// [`crate::protocols::backup_management::descriptors::CompleteExportBody`].
+/// Auth: super-admin (must match the initiator's DID).
+pub const TASK_BACKUP_COMPLETE_EXPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/backup/complete-export/1.0";
+
+/// `spec/vta/backup/initiate-import/1.0` — mint an upload slot;
+/// return a descriptor for the client to POST bytes to. Payload:
+/// [`crate::protocols::backup_management::descriptors::InitiateImportBody`].
+/// Auth: super-admin.
+pub const TASK_BACKUP_INITIATE_IMPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/backup/initiate-import/1.0";
+
+/// `spec/vta/backup/finalize-import/1.0` — apply uploaded bytes
+/// (or run in preview mode). Payload:
+/// [`crate::protocols::backup_management::descriptors::FinalizeImportBody`].
+/// Auth: super-admin (must match the initiator's DID).
+pub const TASK_BACKUP_FINALIZE_IMPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/backup/finalize-import/1.0";
+
+/// `spec/vta/backup/abort/1.0` — cancel an in-flight bundle in
+/// any non-terminal state. Payload:
+/// [`crate::protocols::backup_management::descriptors::AbortBundleBody`].
+/// Auth: super-admin (must match the initiator's DID).
+pub const TASK_BACKUP_ABORT_1_0: &str = "https://trusttasks.org/spec/vta/backup/abort/1.0";
+
+// ─── Attestation slice (spec/vta/attestation/*) ──────────────────────────
+//
+// TEE-feature-gated and DELIBERATELY UNAUTHENTICATED on the wire
+// (the existing legacy `/attestation/status` + `/attestation/report`
+// REST routes don't take `AuthClaims`). Operators rely on TEE proofs
+// being publicly verifiable. These URIs live on the REST_ROUTED
+// allowlist for the parity harness; the dispatcher never sees them.
+
+/// `spec/vta/attestation/status/1.0` — return the VTA's TEE detection
+/// status (`tee_present`, attestation provider, etc.). No request
+/// body. Unauthenticated. TEE-feature-gated; returns
+/// `tee_attestation_error` when the binary lacks the `tee` feature.
+pub const TASK_ATTESTATION_STATUS_1_0: &str =
+    "https://trusttasks.org/spec/vta/attestation/status/1.0";
+
+/// `spec/vta/attestation/report/1.0` — produce a fresh attestation
+/// report with a client-supplied nonce. Unauthenticated.
+/// TEE-feature-gated.
+pub const TASK_ATTESTATION_REPORT_1_0: &str =
+    "https://trusttasks.org/spec/vta/attestation/report/1.0";
+
+// ─── Future slices ───────────────────────────────────────────────────────
+//
+// attestation, services, webvh, did-templates, passkey-vms, backup,
+// config, management, join-requests, bootstrap. Keys import + wrapping-
+// key defer to follow-on work (transport-unwrap complexity).
+//
+// Each slice ships in its own Phase 3 PR. The migration mapping table
+// in docs/05-design-notes/trust-task-uri-registry.md enumerates the
+// full target surface (~75 URIs).
+
+/// Every URI registered in this module — handy for the dispatcher's
+/// parity harness and for operator tooling that wants to enumerate
+/// the VTA's wire surface programmatically.
+pub const ALL_URIS: &[&str] = &[
+    // Auth slice
+    TASK_AUTH_CHALLENGE_0_1,
+    TASK_AUTH_AUTHENTICATE_0_1,
+    TASK_AUTH_REFRESH_0_1,
+    TASK_AUTH_REVOKE_SESSION_0_1,
+    TASK_AUTH_PASSKEY_LOGIN_START_0_1,
+    TASK_AUTH_PASSKEY_LOGIN_FINISH_0_1,
+    // ACL slice
+    TASK_ACL_LIST_1_0,
+    TASK_ACL_CREATE_1_0,
+    TASK_ACL_GET_1_0,
+    TASK_ACL_UPDATE_1_0,
+    TASK_ACL_DELETE_1_0,
+    // Contexts slice
+    TASK_CONTEXTS_LIST_1_0,
+    TASK_CONTEXTS_CREATE_1_0,
+    TASK_CONTEXTS_GET_1_0,
+    TASK_CONTEXTS_UPDATE_1_0,
+    TASK_CONTEXTS_UPDATE_DID_1_0,
+    TASK_CONTEXTS_PREVIEW_DELETE_1_0,
+    TASK_CONTEXTS_DELETE_1_0,
+    // Keys slice
+    TASK_KEYS_LIST_1_0,
+    TASK_KEYS_CREATE_1_0,
+    TASK_KEYS_GET_1_0,
+    TASK_KEYS_RENAME_1_0,
+    TASK_KEYS_REVOKE_1_0,
+    TASK_KEYS_SIGN_1_0,
+    // Seeds slice
+    TASK_SEEDS_LIST_1_0,
+    TASK_SEEDS_ROTATE_1_0,
+    TASK_SEEDS_EXPORT_MNEMONIC_1_0,
+    // Audit slice
+    TASK_AUDIT_LIST_LOGS_1_0,
+    TASK_AUDIT_GET_RETENTION_1_0,
+    TASK_AUDIT_UPDATE_RETENTION_1_0,
+    // Discovery
+    TASK_DISCOVERY_CAPABILITIES_1_0,
+    // Config slice
+    TASK_CONFIG_GET_1_0,
+    TASK_CONFIG_UPDATE_1_0,
+    // Management slice
+    TASK_MANAGEMENT_RELOAD_SERVICES_1_0,
+    // Passkey-VMs slice (feature-gated: webvh + didcomm)
+    TASK_PASSKEY_VMS_ENROLL_CHALLENGE_1_0,
+    TASK_PASSKEY_VMS_ENROLL_SUBMIT_1_0,
+    TASK_PASSKEY_VMS_LIST_1_0,
+    TASK_PASSKEY_VMS_REVOKE_1_0,
+    // Provision-integration (feature-gated: webvh)
+    TASK_PROVISION_INTEGRATION_REQUEST_1_0,
+    // WebVH-DID-lifecycle slice (feature-gated: webvh)
+    TASK_WEBVH_SERVERS_LIST_1_0,
+    TASK_WEBVH_SERVERS_ADD_1_0,
+    TASK_WEBVH_SERVERS_UPDATE_1_0,
+    TASK_WEBVH_SERVERS_REMOVE_1_0,
+    TASK_WEBVH_DIDS_LIST_1_0,
+    TASK_WEBVH_DIDS_CREATE_1_0,
+    TASK_WEBVH_DIDS_GET_1_0,
+    TASK_WEBVH_DIDS_GET_LOG_1_0,
+    TASK_WEBVH_DIDS_DELETE_1_0,
+    TASK_WEBVH_DIDS_UPDATE_1_0,
+    TASK_WEBVH_DIDS_ROTATE_KEYS_1_0,
+    TASK_WEBVH_DIDS_REGISTER_WITH_SERVER_1_0,
+    // DID-templates slice (global)
+    TASK_DID_TEMPLATES_LIST_1_0,
+    TASK_DID_TEMPLATES_CREATE_1_0,
+    TASK_DID_TEMPLATES_GET_1_0,
+    TASK_DID_TEMPLATES_UPDATE_1_0,
+    TASK_DID_TEMPLATES_DELETE_1_0,
+    TASK_DID_TEMPLATES_RENDER_1_0,
+    // DID-templates slice (context-scoped)
+    TASK_CONTEXTS_DID_TEMPLATES_LIST_1_0,
+    TASK_CONTEXTS_DID_TEMPLATES_CREATE_1_0,
+    TASK_CONTEXTS_DID_TEMPLATES_GET_1_0,
+    TASK_CONTEXTS_DID_TEMPLATES_UPDATE_1_0,
+    TASK_CONTEXTS_DID_TEMPLATES_DELETE_1_0,
+    TASK_CONTEXTS_DID_TEMPLATES_RENDER_1_0,
+    // Backup slice (descriptor pattern). URIs land in ALL_URIS now
+    // that the trust-task slice is wired in vta-service.
+    TASK_BACKUP_INITIATE_EXPORT_1_0,
+    TASK_BACKUP_COMPLETE_EXPORT_1_0,
+    TASK_BACKUP_INITIATE_IMPORT_1_0,
+    TASK_BACKUP_FINALIZE_IMPORT_1_0,
+    TASK_BACKUP_ABORT_1_0,
+    // Attestation slice (REST-routed, unauthenticated)
+    TASK_ATTESTATION_STATUS_1_0,
+    TASK_ATTESTATION_REPORT_1_0,
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_uri_in_canonical_namespace() {
+        // The auth/* slice now points at the framework's canonical
+        // /spec/auth/*/0.1 specs (cross-cutting primitives shared
+        // across VTA / VTC / did-hosting). The remaining VTA-specific
+        // operations stay under /spec/vta/. Either is acceptable.
+        for uri in ALL_URIS {
+            assert!(
+                uri.starts_with("https://trusttasks.org/spec/vta/")
+                    || uri.starts_with("https://trusttasks.org/spec/auth/"),
+                "URI must live under /spec/vta/ or /spec/auth/: {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_uri_has_maj_min_version_suffix() {
+        for uri in ALL_URIS {
+            let tail = uri.rsplit('/').next().unwrap();
+            let parts: Vec<&str> = tail.split('.').collect();
+            assert_eq!(parts.len(), 2, "version must be maj.min only: {uri}");
+            assert!(
+                parts[0].chars().all(|c| c.is_ascii_digit())
+                    && parts[1].chars().all(|c| c.is_ascii_digit()),
+                "version components must be digits: {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_duplicate_uris() {
+        let mut sorted: Vec<&str> = ALL_URIS.to_vec();
+        sorted.sort();
+        for window in sorted.windows(2) {
+            assert_ne!(window[0], window[1], "duplicate URI: {}", window[0]);
+        }
+    }
+
+    /// Every URI must round-trip through the framework's TypeUri
+    /// deserialiser — the wire-format `type` field on a trust-task
+    /// document goes through this path. Catches a regression where a
+    /// future const is added that doesn't match the framework's
+    /// canonical shape.
+    #[test]
+    fn every_uri_parses_as_framework_type_uri() {
+        use std::str::FromStr;
+        for uri in ALL_URIS {
+            let parsed = trust_tasks_rs::TypeUri::from_str(uri);
+            assert!(
+                parsed.is_ok(),
+                "URI must parse as framework TypeUri: {uri}, error: {:?}",
+                parsed.err()
+            );
+            let parsed = parsed.unwrap();
+            // Round-trip via Display must equal the input byte-for-byte.
+            assert_eq!(
+                parsed.to_string(),
+                *uri,
+                "URI must round-trip through TypeUri::Display unchanged"
+            );
+        }
+    }
+}

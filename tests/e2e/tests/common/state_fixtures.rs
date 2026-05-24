@@ -118,7 +118,11 @@ pub async fn setup_vta_in_state(state: ServiceState) -> StateFixture {
         ServiceState::S2 => (false, true),
         ServiceState::S3 => (true, true),
     };
-    config.services = ServicesConfig { rest, didcomm };
+    config.services = ServicesConfig {
+        rest,
+        didcomm,
+        webauthn: false,
+    };
     config.vta_did = Some("did:webvh:scid123:host:vta".into());
 
     let assumed_mediator_did = "did:peer:2.testmediator".to_string();

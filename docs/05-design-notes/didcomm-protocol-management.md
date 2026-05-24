@@ -402,10 +402,11 @@ test environment:
    document has no `#didcomm` service; listener is still active.
    After 60s, listener is closed, `mediator.drain.expire` event is
    audited, and a fresh inbound attempt fails to connect.
-3. **Disable refused.** Disable REST first (hypothetically), then run
-   `pnm services disable didcomm` — must fail with the suggested-fix
-   error. (Or: from a stock setup, hand-edit config to `services.rest =
-   false` for the test, then assert.)
+3. **Disable refused.** Disable REST first via `pnm services rest disable`,
+   then run `pnm services disable didcomm` — must fail with the
+   suggested-fix error. (Hand-editing the legacy `config.toml [services]`
+   block is no longer effective at runtime — runtime state lives in the
+   `service_state` fjall keyspace.)
 4. **Migrate.** With mediator A active, run `pnm mediator migrate --to
    <B> --drain-ttl 1h`. Assert: DID doc's `#didcomm` is now B; both
    listeners are connected; inbound messages from senders that still

@@ -99,6 +99,7 @@ pub use types::*;
 
 mod acl;
 mod backup;
+mod backup_descriptors;
 mod bootstrap;
 mod contexts;
 mod did_templates;

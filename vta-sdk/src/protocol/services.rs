@@ -143,6 +143,70 @@ pub struct DisableRestRequest {}
 #[must_use]
 pub struct RollbackRestRequest {}
 
+/// Request body for `POST /services/webauthn/enable`.
+///
+/// Adds a `#vta-webauthn` service entry to the VTA's DID document
+/// pointing at `url`. Refused with `ServiceAlreadyEnabled` if the
+/// WebAuthn-RP surface is already advertised. The wire shape
+/// rendered into the DID document — `id: "{DID}#vta-webauthn"`,
+/// `type: "WebAuthnRP"` — is preserved by the operation layer.
+///
+/// Distinct from `EnableRestRequest` because the WebAuthn-RP
+/// surface has different availability semantics: it can be
+/// toggled independently of the general REST API and is the entry
+/// point browsers discover for the auth portal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[must_use]
+pub struct EnableWebauthnRequest {
+    pub url: String,
+}
+
+impl EnableWebauthnRequest {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into() }
+    }
+}
+
+/// Request body for `POST /services/webauthn/update`.
+///
+/// Replaces the URL on the existing `#vta-webauthn` entry. Refused
+/// with `ServiceNotPresent` if the WebAuthn surface is not currently
+/// advertised.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[must_use]
+pub struct UpdateWebauthnRequest {
+    pub url: String,
+}
+
+impl UpdateWebauthnRequest {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into() }
+    }
+}
+
+/// Request body for `POST /services/webauthn/disable`.
+///
+/// Removes the `#vta-webauthn` entry **and** any passkey
+/// verificationMethods published on the VTA's DID document — the
+/// operator chose hard-disable semantics so a disabled WebAuthn-RP
+/// surface doesn't leave dangling VMs claiming to authenticate
+/// against an unreachable RP.
+///
+/// Refused with `LastServiceRefused` when removing WebAuthn would
+/// leave no transport advertised at all (spec §3.2; WebAuthn counts
+/// as a transport for this invariant).
+///
+/// No fields today — serializes as `{}`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[must_use]
+pub struct DisableWebauthnRequest {}
+
+/// Request body for `POST /services/webauthn/rollback`. Symmetric
+/// with [`RollbackRestRequest`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[must_use]
+pub struct RollbackWebauthnRequest {}
+
 /// Request body for `POST /services/didcomm/rollback`.
 ///
 /// Threads `drain_ttl_secs` through to the dispatched forward op
@@ -237,9 +301,9 @@ pub struct ServicesListResponse {
 }
 
 /// State of a single transport kind. The `kind` discriminator is
-/// `"rest"` or `"didcomm"` on the wire (kebab-case to align with
-/// the rest of the runtime service-management surface). When
-/// `enabled` is `false`, the kind-specific config fields are
+/// `"rest"`, `"didcomm"`, or `"webauthn"` on the wire (kebab-case to
+/// align with the rest of the runtime service-management surface).
+/// When `enabled` is `false`, the kind-specific config fields are
 /// absent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -263,6 +327,14 @@ pub enum ServiceState {
         /// service entry currently doesn't).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         routing_keys: Vec<String>,
+    },
+    Webauthn {
+        enabled: bool,
+        /// Currently-published WebAuthn-RP URL — typically the
+        /// operator-facing auth portal. `None` when the WebAuthn
+        /// service is disabled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
     },
 }
 

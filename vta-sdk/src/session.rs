@@ -957,7 +957,7 @@ pub async fn challenge_response(
     })?;
     debug!(
         session_id = %challenge.session_id,
-        challenge = %challenge.data.challenge,
+        challenge = %challenge.challenge,
         "challenge received"
     );
 
@@ -1004,7 +1004,7 @@ pub async fn challenge_response(
         uuid::Uuid::new_v4().to_string(),
         "https://affinidi.com/atm/1.0/authenticate".to_string(),
         serde_json::json!({
-            "challenge": challenge.data.challenge,
+            "challenge": challenge.challenge,
             "session_id": challenge.session_id,
         }),
     )
@@ -1046,14 +1046,17 @@ pub async fn challenge_response(
     let auth_data: AuthenticateResponse = serde_json::from_str(&auth_text).map_err(|e| {
         format!("unexpected response from VTA at {auth_url} (is this a VTA server?): {e}")
     })?;
-    debug!(
-        expires_at = auth_data.data.access_expires_at,
-        "authentication successful"
-    );
+    let access_expires_at = auth_data.access_expires_at_epoch().ok_or_else(|| {
+        format!(
+            "VTA returned unparseable session.issuedAt: '{}'",
+            auth_data.session.issued_at
+        )
+    })?;
+    debug!(expires_at = access_expires_at, "authentication successful");
 
     Ok(TokenResult {
-        access_token: auth_data.data.access_token,
-        access_expires_at: auth_data.data.access_expires_at,
+        access_token: auth_data.tokens.access_token,
+        access_expires_at,
     })
 }
 

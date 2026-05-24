@@ -119,11 +119,13 @@ pub async fn handle_disable_didcomm(
     let result = disable_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.drains_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -141,6 +143,7 @@ pub async fn handle_disable_didcomm(
             transport: DisableTransport::Didcomm,
         },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "didcomm",
     )
     .await;
@@ -217,11 +220,13 @@ pub async fn handle_update_didcomm(
     let result = update_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.drains_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -242,6 +247,7 @@ pub async fn handle_update_didcomm(
             transport: crate::operations::protocol::disable_didcomm::DisableTransport::Didcomm,
         },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "didcomm",
     )
     .await;
@@ -407,10 +413,12 @@ pub async fn handle_enable_rest(
     let result = enable_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -421,6 +429,7 @@ pub async fn handle_enable_rest(
         &auth,
         EnableRestParams { url },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "didcomm",
     )
     .await;
@@ -461,10 +470,12 @@ pub async fn handle_update_rest(
     let result = update_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -475,6 +486,7 @@ pub async fn handle_update_rest(
         &auth,
         UpdateRestParams { url },
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "didcomm",
     )
     .await;
@@ -514,10 +526,12 @@ pub async fn handle_disable_rest(
     let result = disable_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -528,6 +542,7 @@ pub async fn handle_disable_rest(
         &auth,
         DisableRestParams,
         OpContext::Direct,
+        &state.webvh_auth_locks,
         "didcomm",
     )
     .await;
@@ -570,10 +585,12 @@ pub async fn handle_rollback_rest(
     let result = rollback_rest(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -583,6 +600,7 @@ pub async fn handle_rollback_rest(
         &state.telemetry,
         &auth,
         RollbackRestParams,
+        &state.webvh_auth_locks,
         "didcomm",
     )
     .await;
@@ -650,11 +668,13 @@ pub async fn handle_rollback_didcomm(
     let result = rollback_didcomm(
         &state.config,
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
         &state.drains_ks,
         &state.snapshot_ks,
+        &state.service_state_ks,
         &*state.seed_store,
         state
             .did_resolver
@@ -673,6 +693,7 @@ pub async fn handle_rollback_didcomm(
             // the dispatch ends up in disable_didcomm.
             transport: DisableTransport::Didcomm,
         },
+        &state.webvh_auth_locks,
         "didcomm",
     )
     .await;

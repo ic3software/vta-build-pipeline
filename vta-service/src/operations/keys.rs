@@ -630,7 +630,7 @@ pub async fn get_key_secret(
 pub async fn get_key_secret_internal(
     keys_ks: &KeyspaceHandle,
     imported_ks: &KeyspaceHandle,
-    seed_store: &Arc<dyn SeedStore>,
+    seed_store: &dyn SeedStore,
     audit_ks: &KeyspaceHandle,
     authority: super::internal_authority::InternalAuthority,
     key_id: &str,
@@ -646,7 +646,7 @@ pub async fn get_key_secret_internal(
 
     let (public_key_multibase, private_key_multibase) = match record.origin {
         KeyOrigin::Imported => {
-            let seed = load_seed_bytes(keys_ks, &**seed_store, None)
+            let seed = load_seed_bytes(keys_ks, seed_store, None)
                 .await
                 .map_err(|e| AppError::Internal(format!("{e}")))?;
             let mut secret_bytes = imported::load_secret(
@@ -662,7 +662,7 @@ pub async fn get_key_secret_internal(
             (record.public_key.clone(), priv_mb)
         }
         KeyOrigin::Derived => {
-            let seed = load_seed_bytes(keys_ks, &**seed_store, record.seed_id)
+            let seed = load_seed_bytes(keys_ks, seed_store, record.seed_id)
                 .await
                 .map_err(|e| AppError::Internal(format!("{e}")))?;
             let bip32 = ed25519_dalek_bip32::ExtendedSigningKey::from_seed(&seed).map_err(|e| {
@@ -949,6 +949,8 @@ mod tests {
                 allowed_contexts: vec![], // empty = super admin
                 session_id: "test-session".into(),
                 access_expires_at: 0,
+                amr: Vec::new(),
+                acr: String::new(),
             }
         }
     }

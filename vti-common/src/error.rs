@@ -41,6 +41,20 @@ pub enum AppError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    /// Operation requires a stepped-up (`acr=aal2`) session, but
+    /// the caller's JWT carries a lower acr (typically `aal1`).
+    /// Distinct from [`Self::Forbidden`] so wallets can react —
+    /// `step_up_required` is the operator-friendly signal to
+    /// trigger a passkey-login or VTA-approval ceremony, not a
+    /// hard rejection.
+    ///
+    /// Rendered as **403 Forbidden** with body
+    /// `{ "error": "step_up_required", "message": "...",
+    ///   "requiredAcr": "aal2" }` so clients can distinguish it
+    /// from a role-based rejection without parsing English.
+    #[error("step-up required: {0}")]
+    StepUpRequired(String),
+
     #[error("validation error: {0}")]
     Validation(String),
 
@@ -112,6 +126,42 @@ impl AppError {
     }
 }
 
+/// Convert the canonical auth-flow errors into [`AppError`] so
+/// the route layer's existing `IntoResponse` plumbing renders
+/// them without backend-specific glue. Each variant lands on the
+/// HTTP status reflected in the [`crate::auth::AuthError`]
+/// doc-comments:
+///
+/// - `Forbidden`, `DidMethodRejected` → 403
+/// - `PendingChallengeLimitReached` → 429 via the Validation arm
+///   (route layer can return a typed 429 if needed; the canonical
+///   variant carries the rate-limit signal in the message).
+/// - `SessionNotFound`, `SessionStateMismatch`, `ChallengeMismatch`,
+///   `ChallengeExpired`, `SignerMismatch`, `StaleMessage`,
+///   `RefreshTokenInvalid`, `RefreshTokenExpired` → 401
+/// - `AttestationFailed` → 503 via Internal (TEE outages are not
+///   the caller's fault).
+/// - `Internal` → 500.
+impl From<crate::auth::backend::AuthError> for AppError {
+    fn from(e: crate::auth::backend::AuthError) -> Self {
+        use crate::auth::backend::AuthError as A;
+        match e {
+            A::Forbidden | A::DidMethodRejected => AppError::Forbidden(e.to_string()),
+            A::PendingChallengeLimitReached => AppError::Validation(e.to_string()),
+            A::SessionNotFound
+            | A::SessionStateMismatch
+            | A::ChallengeMismatch
+            | A::ChallengeExpired
+            | A::SignerMismatch
+            | A::StaleMessage
+            | A::RefreshTokenInvalid
+            | A::RefreshTokenExpired => AppError::Authentication(e.to_string()),
+            A::AttestationFailed(msg) => AppError::Internal(format!("tee attestation: {msg}")),
+            A::Internal(msg) => AppError::Internal(msg),
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self {
@@ -127,6 +177,7 @@ impl IntoResponse for AppError {
             AppError::Authentication(_) => StatusCode::UNAUTHORIZED,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+            AppError::StepUpRequired(_) => StatusCode::FORBIDDEN,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::TrustTaskMissing => StatusCode::BAD_REQUEST,
             AppError::TrustTaskMismatch { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -166,6 +217,11 @@ impl IntoResponse for AppError {
             AppError::IdempotencyKeyConflict => serde_json::json!({
                 "error": "IdempotencyKeyConflict",
                 "message": self.to_string(),
+            }),
+            AppError::StepUpRequired(msg) => serde_json::json!({
+                "error": "step_up_required",
+                "message": msg,
+                "requiredAcr": "aal2",
             }),
             _ => serde_json::json!({ "error": self.to_string() }),
         };

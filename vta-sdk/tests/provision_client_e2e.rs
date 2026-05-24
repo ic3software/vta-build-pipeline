@@ -209,17 +209,27 @@ async fn mount_auth_mocks(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/auth/challenge"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "challenge": "test-challenge",
             "sessionId": "test-session",
-            "data": { "challenge": "test-challenge" }
+            "expiresAt": "2099-12-31T23:59:59Z"
         })))
         .mount(server)
         .await;
     Mock::given(method("POST"))
         .and(path("/auth/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {
+            "session": {
+                "id": "test-session",
+                "subject": "did:example:caller",
+                "issuedAt": "1970-01-01T00:00:00Z",
+                "expiresAt": "2099-12-31T23:59:59Z",
+                "amr": ["did"],
+                "acr": "aal1"
+            },
+            "tokens": {
                 "accessToken": "test-access-token",
-                "accessExpiresAt": 9999999999u64
+                "tokenType": "Bearer",
+                "expiresIn": 9999999999_u64
             }
         })))
         .mount(server)

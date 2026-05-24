@@ -255,6 +255,82 @@ impl VtaClient {
         .await
     }
 
+    // ── WebAuthn service-management client methods ─────────────────
+
+    /// Enable WebAuthn-RP advertisement on the VTA's DID document by
+    /// publishing a `#vta-webauthn` service entry.
+    pub async fn enable_webauthn(
+        &self,
+        req: services::EnableWebauthnRequest,
+    ) -> Result<services::ServiceMutationResponse, VtaError> {
+        self.rpc(
+            protocol_management::ENABLE_WEBAUTHN,
+            serde_json::to_value(&req)?,
+            protocol_management::ENABLE_WEBAUTHN_RESULT,
+            30,
+            |c, url| c.post(format!("{url}/services/webauthn/enable")).json(&req),
+        )
+        .await
+    }
+
+    /// Update the URL on the existing `#vta-webauthn` entry.
+    pub async fn update_webauthn(
+        &self,
+        req: services::UpdateWebauthnRequest,
+    ) -> Result<services::ServiceMutationResponse, VtaError> {
+        self.rpc(
+            protocol_management::UPDATE_WEBAUTHN,
+            serde_json::to_value(&req)?,
+            protocol_management::UPDATE_WEBAUTHN_RESULT,
+            30,
+            |c, url| c.post(format!("{url}/services/webauthn/update")).json(&req),
+        )
+        .await
+    }
+
+    /// Remove the `#vta-webauthn` entry AND strip passkey VMs from
+    /// every DID this VTA controls (hard-disable semantics).
+    /// Refused with `LastServiceRefused` when removing WebAuthn
+    /// would leave no transport advertised.
+    pub async fn disable_webauthn(
+        &self,
+        req: services::DisableWebauthnRequest,
+    ) -> Result<services::ServiceMutationResponse, VtaError> {
+        // Longer timeout than REST/DIDComm disable because the
+        // passkey-VM cleanup iterates every DID this VTA controls
+        // and publishes a WebVH update per affected DID.
+        self.rpc(
+            protocol_management::DISABLE_WEBAUTHN,
+            serde_json::to_value(&req)?,
+            protocol_management::DISABLE_WEBAUTHN_RESULT,
+            300,
+            |c, url| {
+                c.post(format!("{url}/services/webauthn/disable"))
+                    .json(&req)
+            },
+        )
+        .await
+    }
+
+    /// Fail-forward the most recent WebAuthn mutation by re-applying
+    /// the snapshotted prior state.
+    pub async fn rollback_webauthn(
+        &self,
+        req: services::RollbackWebauthnRequest,
+    ) -> Result<services::RollbackResponse, VtaError> {
+        self.rpc(
+            protocol_management::ROLLBACK_WEBAUTHN,
+            serde_json::to_value(&req)?,
+            protocol_management::ROLLBACK_WEBAUTHN_RESULT,
+            300,
+            |c, url| {
+                c.post(format!("{url}/services/webauthn/rollback"))
+                    .json(&req)
+            },
+        )
+        .await
+    }
+
     /// Fail-forward the most recent DIDComm mutation. Threads
     /// `drain_ttl_secs` through to the dispatched forward op for
     /// the disable / update arms.

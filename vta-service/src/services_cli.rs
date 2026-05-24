@@ -76,11 +76,13 @@ struct OfflineDeps {
     config: Arc<RwLock<AppConfig>>,
     _store: Store,
     keys_ks: KeyspaceHandle,
+    imported_ks: KeyspaceHandle,
     contexts_ks: KeyspaceHandle,
     webvh_ks: KeyspaceHandle,
     audit_ks: KeyspaceHandle,
     drains_ks: KeyspaceHandle,
     snapshot_ks: KeyspaceHandle,
+    service_state_ks: KeyspaceHandle,
     seed_store: PlaintextSeedStore,
     did_resolver: DIDCacheClient,
     didcomm_bridge: Arc<DIDCommBridge>,
@@ -88,6 +90,11 @@ struct OfflineDeps {
     registry: Arc<MediatorListenerRegistry>,
     sweeper: Arc<DrainSweeper>,
     auth: AuthClaims,
+    /// Fresh per-invocation auth-locks. The offline CLI is a
+    /// single short-lived process; concurrent webvh ops aren't
+    /// possible here because the fjall store requires exclusive
+    /// access. A throwaway map suffices.
+    webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks,
 }
 
 /// Open the local VTA state for offline service-management.
@@ -115,11 +122,23 @@ async fn build_offline_deps(
     })?;
 
     let keys_ks = store.keyspace("keys")?;
+    let imported_ks = store.keyspace("imported_secrets")?;
     let contexts_ks = store.keyspace("contexts")?;
     let audit_ks = store.keyspace("audit")?;
     let webvh_ks = store.keyspace("webvh")?;
     let drains_ks = store.keyspace("drains")?;
     let snapshot_ks = store.keyspace(snapshot::KEYSPACE_NAME)?;
+    let service_state_ks = store.keyspace("service_state")?;
+    // Sync the in-memory config from fjall (authoritative) so the readers
+    // throughout the codebase see the current runtime state, not the legacy
+    // (possibly stale) [services] block on disk.
+    crate::operations::protocol::runtime_state::migrate_from_config(&service_state_ks, &config)
+        .await?;
+    let mut config = config;
+    config.services.rest =
+        crate::operations::protocol::runtime_state::is_rest_enabled(&service_state_ks).await?;
+    config.services.didcomm =
+        crate::operations::protocol::runtime_state::is_didcomm_enabled(&service_state_ks).await?;
 
     let seed_store = PlaintextSeedStore::new(&data_dir);
     let did_resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await?;
@@ -143,11 +162,13 @@ async fn build_offline_deps(
         config: Arc::new(RwLock::new(config)),
         _store: store,
         keys_ks,
+        imported_ks,
         contexts_ks,
         webvh_ks,
         audit_ks,
         drains_ks,
         snapshot_ks,
+        service_state_ks,
         seed_store,
         did_resolver,
         didcomm_bridge,
@@ -155,6 +176,7 @@ async fn build_offline_deps(
         registry,
         sweeper,
         auth,
+        webvh_auth_locks: crate::operations::did_webvh::WebvhAuthLocks::new(),
     })
 }
 
@@ -219,6 +241,12 @@ pub async fn run_services_list(config_path: Option<PathBuf>) -> CliResult {
                     println!("    URL:          {u}");
                 }
             }
+            vta_sdk::protocol::services::ServiceState::Webauthn { enabled, url } => {
+                println!("  WebAuthn: {}", if *enabled { "on" } else { "off" });
+                if let Some(u) = url {
+                    println!("    URL:          {u}");
+                }
+            }
         }
     }
     Ok(())
@@ -231,10 +259,12 @@ pub async fn run_services_rest_enable(config_path: Option<PathBuf>, url: String)
     let result = enable_rest(
         &d.config,
         &d.keys_ks,
+        &d.imported_ks,
         &d.contexts_ks,
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -242,6 +272,7 @@ pub async fn run_services_rest_enable(config_path: Option<PathBuf>, url: String)
         &d.auth,
         EnableRestParams { url },
         OpContext::Direct,
+        &d.webvh_auth_locks,
         "vta-cli-offline",
     )
     .await
@@ -258,10 +289,12 @@ pub async fn run_services_rest_update(config_path: Option<PathBuf>, url: String)
     let result = update_rest(
         &d.config,
         &d.keys_ks,
+        &d.imported_ks,
         &d.contexts_ks,
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -269,6 +302,7 @@ pub async fn run_services_rest_update(config_path: Option<PathBuf>, url: String)
         &d.auth,
         UpdateRestParams { url },
         OpContext::Direct,
+        &d.webvh_auth_locks,
         "vta-cli-offline",
     )
     .await
@@ -286,10 +320,12 @@ pub async fn run_services_rest_disable(config_path: Option<PathBuf>) -> CliResul
     let result = disable_rest(
         &d.config,
         &d.keys_ks,
+        &d.imported_ks,
         &d.contexts_ks,
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -297,6 +333,7 @@ pub async fn run_services_rest_disable(config_path: Option<PathBuf>) -> CliResul
         &d.auth,
         DisableRestParams,
         OpContext::Direct,
+        &d.webvh_auth_locks,
         "vta-cli-offline",
     )
     .await
@@ -313,16 +350,19 @@ pub async fn run_services_rest_rollback(config_path: Option<PathBuf>) -> CliResu
     let result = rollback_rest(
         &d.config,
         &d.keys_ks,
+        &d.imported_ks,
         &d.contexts_ks,
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
         &d.telemetry,
         &d.auth,
         RollbackRestParams,
+        &d.webvh_auth_locks,
         "vta-cli-offline",
     )
     .await
@@ -356,10 +396,12 @@ pub async fn run_services_didcomm_enable(
     let result = enable_didcomm(
         &d.config,
         &d.keys_ks,
+        &d.imported_ks,
         &d.contexts_ks,
         &d.webvh_ks,
         &d.audit_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -373,6 +415,7 @@ pub async fn run_services_didcomm_enable(
             handshake_timeout: timeout,
         },
         OpContext::Direct,
+        &d.webvh_auth_locks,
         "vta-cli-offline",
     )
     .await
@@ -399,11 +442,13 @@ pub async fn run_services_didcomm_update(
     let result = update_didcomm(
         &d.config,
         &d.keys_ks,
+        &d.imported_ks,
         &d.contexts_ks,
         &d.webvh_ks,
         &d.audit_ks,
         &d.drains_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -421,6 +466,7 @@ pub async fn run_services_didcomm_update(
             transport: crate::operations::protocol::disable_didcomm::DisableTransport::Rest,
         },
         OpContext::Direct,
+        &d.webvh_auth_locks,
         "vta-cli-offline",
     )
     .await
@@ -442,11 +488,13 @@ pub async fn run_services_didcomm_disable(
     let result = disable_didcomm(
         &d.config,
         &d.keys_ks,
+        &d.imported_ks,
         &d.contexts_ks,
         &d.webvh_ks,
         &d.audit_ks,
         &d.drains_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -462,6 +510,7 @@ pub async fn run_services_didcomm_disable(
             transport: DisableTransport::Rest,
         },
         OpContext::Direct,
+        &d.webvh_auth_locks,
         "vta-cli-offline",
     )
     .await
@@ -492,11 +541,13 @@ pub async fn run_services_didcomm_rollback(
     let result = rollback_didcomm(
         &d.config,
         &d.keys_ks,
+        &d.imported_ks,
         &d.contexts_ks,
         &d.webvh_ks,
         &d.audit_ks,
         &d.drains_ks,
         &d.snapshot_ks,
+        &d.service_state_ks,
         &d.seed_store,
         &d.did_resolver,
         &d.didcomm_bridge,
@@ -509,6 +560,7 @@ pub async fn run_services_didcomm_rollback(
             drain_ttl: std::time::Duration::from_secs(drain_ttl_secs.unwrap_or(86_400)),
             transport: DisableTransport::Rest,
         },
+        &d.webvh_auth_locks,
         "vta-cli-offline",
     )
     .await

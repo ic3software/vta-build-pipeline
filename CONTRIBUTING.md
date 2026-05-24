@@ -9,7 +9,7 @@ Thank you for contributing! Before you contribute, we ask some things of you:
 
 ### Prerequisites
 
-- **Rust 1.94.0+** (`rustup default stable`)
+- **Rust 1.95.0+** (`rustup default stable`)
 - **libdbus-1-dev** (Linux) or equivalent (for keyring feature)
 - **Docker** (for enclave builds only)
 

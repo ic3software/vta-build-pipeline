@@ -6,7 +6,7 @@
 use crate::auth;
 use crate::cli::AuthCommands;
 
-pub(crate) fn run(
+pub(crate) async fn run(
     keyring_key: &str,
     command: AuthCommands,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -22,5 +22,6 @@ pub(crate) fn run(
         AuthCommands::SignChallenge { challenge } => {
             auth::sign_unseal_challenge(keyring_key, &challenge)
         }
+        AuthCommands::ShowToken => auth::show_token(keyring_key).await,
     }
 }

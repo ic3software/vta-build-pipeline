@@ -11,14 +11,14 @@ use crate::auth::AuthClaims;
 use crate::error::AppError;
 use crate::store::KeyspaceHandle;
 use crate::webvh_store;
+use vta_sdk::protocols::did_management::lifecycle::GetDidWebvhLogResultBody;
 use vta_sdk::protocols::did_management::list::ListDidsWebvhResultBody;
 use vta_sdk::webvh::WebvhDidRecord;
 
-#[derive(Debug, serde::Serialize)]
-pub struct GetDidWebvhLogResult {
-    pub did: String,
-    pub log: Option<String>,
-}
+// Wire types canonically live in vta-sdk per
+// `memory::feedback-wire-types-in-sdk`. Re-export from there so
+// existing op-layer call sites keep working unchanged.
+pub use vta_sdk::protocols::did_management::lifecycle::GetDidWebvhLogResultBody as GetDidWebvhLogResult;
 
 pub async fn get_did_webvh(
     webvh_ks: &KeyspaceHandle,
@@ -46,7 +46,7 @@ pub async fn get_did_webvh_log(
     auth.require_context(&record.context_id)?;
     let log = webvh_store::get_did_log(webvh_ks, did).await?;
     info!(channel, did = %did, "webvh DID log retrieved");
-    Ok(GetDidWebvhLogResult {
+    Ok(GetDidWebvhLogResultBody {
         did: did.to_string(),
         log,
     })

@@ -68,8 +68,23 @@ path = "src/main.rs"
 required-features = ["cli-synthesis"]
 
 [dependencies]
-vti-common = { path = "../vti-common", version = "0.6", features = ["encryption"] }
+vti-common = { path = "../vti-common", version = "0.7", features = ["encryption", "passkey"] }
 vta-sdk = { path = "../vta-sdk", version = "0.6", features = ["didcomm", "sealed-transfer", "provision-integration"] }
+# DID-VM-resolved WebAuthn assertion verifier — drives the new
+# `vta/auth/passkey-login-{start,finish}/1.0` trust-task handlers.
+# Distinct from `webauthn-rs` (which drives the passkey *enrolment*
+# ceremony in `operations::passkey_vms`); this crate handles the
+# *assertion* (login) path against DID-document VMs.
+vti-webauthn = { path = "../vti-webauthn", version = "0.1" }
+# Trust-Tasks framework — wire-envelope for the trust-task migration.
+# `trust-tasks-rs` provides TrustTask<P>, Proof, dispatcher types.
+# `trust-tasks-https` provides the HttpsHandler adapter + status-code
+# mapping for the framework's error vocabulary.
+# `trust-tasks-proof` provides AffinidiVerifier for embedded
+# Data-Integrity proofs on trust-tasks themselves.
+trust-tasks-rs = { workspace = true }
+trust-tasks-https = { workspace = true }
+trust-tasks-proof = { workspace = true }
 # Shared CLI helpers for the consumer side of sealed-transfer (request
 # generation, bundle opening). Used by `vta bootstrap request` /
 # `vta bootstrap open` so cold-start clients can run the offline flow
@@ -95,7 +110,7 @@ axum-extra = { workspace = true }
 jsonwebtoken = { workspace = true }
 fjall = { workspace = true }
 toml = { workspace = true }
-tower-http = { workspace = true, features = ["trace", "limit"] }
+tower-http = { workspace = true, features = ["trace", "limit", "cors"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -131,11 +146,23 @@ azure_identity = { workspace = true, optional = true }
 # vaultrs's default TLS backend, matching the rest of the workspace.
 vaultrs = { version = "0.8", optional = true }
 sha2 = { workspace = true }
+# Constant-time byte equality. Used by `backup_bundle_store` to
+# verify backup-bundle bearer tokens against their stored
+# `SHA-256(token)` hash without leaking byte-position via timing.
+subtle = { workspace = true }
 cbc = { version = "0.2", optional = true }
 aes = { version = "0.9", optional = true }
 x25519-dalek = { workspace = true }
 multibase = { workspace = true }
 p256 = "0.13"
+# WebAuthn — used by `operations::passkey_vms` to drive the
+# registration ceremony for passkey-as-verificationMethod enrolment.
+webauthn-rs = { workspace = true }
+webauthn-rs-proto = "0.5"
+# CBOR decoder for parsing the WebAuthn attestationObject's authData
+# so the VTA can re-derive the COSE public key and reject any
+# tampered browser-supplied multikey.
+ciborium = "0.2"
 url = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 tempfile = { version = "3", optional = true }
@@ -169,6 +196,13 @@ urlencoding = "2"
 # without each having to copy ~140 LoC of AppState-wiring boilerplate.
 # Production builds remain unaffected — this is dev-deps only.
 vta-service = { path = ".", features = ["test-support"] }
+# Mock HTTP server for the webvh-daemon REST auth flow tests. Each
+# test spins up a real local server bound to a random port, validates
+# the JWS-signed request bodies the daemon would see, and serves
+# canned responses — same wire protocol as production, but no daemon
+# binary required. Loopback HTTP is accepted by `WebvhClient::new`'s
+# HTTPS policy, so no insecure-test knob is needed.
+wiremock = "0.6"
 
 [lints]
 workspace = true

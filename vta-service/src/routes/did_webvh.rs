@@ -199,20 +199,23 @@ pub async fn delete_did_handler(
     State(state): State<AppState>,
     Path(did): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let config = state.config.read().await;
     let did_resolver = state
         .did_resolver
         .as_ref()
         .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let vta_did = state.config.read().await.vta_did.clone();
     operations::did_webvh::delete_did_webvh(
         &state.webvh_ks,
         &state.keys_ks,
+        &state.imported_ks,
+        &state.audit_ks,
         &*state.seed_store,
-        &config,
         &auth.0,
         &did,
         did_resolver,
         &state.didcomm_bridge,
+        vta_did.as_deref(),
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -233,8 +236,10 @@ pub async fn update_did_handler(
         .did_resolver
         .as_ref()
         .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = operations::did_webvh::update_did_webvh(
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -244,6 +249,8 @@ pub async fn update_did_handler(
         body,
         did_resolver,
         &state.didcomm_bridge,
+        vta_did.as_deref(),
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -263,8 +270,10 @@ pub async fn rotate_did_keys_handler(
         .did_resolver
         .as_ref()
         .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = operations::did_webvh::rotate_did_webvh_keys(
         &state.keys_ks,
+        &state.imported_ks,
         &state.contexts_ks,
         &state.webvh_ks,
         &state.audit_ks,
@@ -274,6 +283,8 @@ pub async fn rotate_did_keys_handler(
         body,
         did_resolver,
         &state.didcomm_bridge,
+        vta_did.as_deref(),
+        &state.webvh_auth_locks,
         "rest",
     )
     .await?;
@@ -300,9 +311,13 @@ pub async fn register_did_with_server_handler(
         .did_resolver
         .as_ref()
         .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let vta_did = state.config.read().await.vta_did.clone();
     let result = register_did_with_server(
         &state.webvh_ks,
+        &state.keys_ks,
+        &state.imported_ks,
         &state.audit_ks,
+        &*state.seed_store,
         &auth.0,
         did_resolver,
         &state.didcomm_bridge,
@@ -311,6 +326,8 @@ pub async fn register_did_with_server_handler(
             server_id: body.server_id,
             force: body.force,
         },
+        vta_did.as_deref(),
+        &state.webvh_auth_locks,
         "rest",
     )
     .await

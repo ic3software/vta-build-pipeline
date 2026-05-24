@@ -3,7 +3,9 @@ mod acl;
 mod attestation;
 mod audit;
 mod auth;
+mod auth_portal;
 mod backup;
+mod backup_blob;
 mod bootstrap;
 mod cache;
 mod capabilities;
@@ -15,16 +17,21 @@ mod did_webvh;
 mod health;
 pub mod keys;
 #[cfg(feature = "webvh")]
+mod passkey_vms;
+#[cfg(feature = "webvh")]
 mod protocol;
+pub(crate) mod trust_tasks;
 mod vta;
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderName, HeaderValue, Method};
 use axum::routing::{delete, get, post, put};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::server::AppState;
 
@@ -38,6 +45,20 @@ const MAX_BODY_SIZE: usize = 1024 * 1024;
 /// JWE / sealed-transfer payload but reject 1 MB blob floods that the
 /// rate limiter alone cannot starve out.
 const UNAUTH_BODY_SIZE: usize = 64 * 1024;
+
+/// Body-size cap for the backup-descriptor blob endpoints. The whole
+/// point of the descriptor pattern is to escape the trust-task
+/// envelope's 1 MB cap, so this needs a much larger budget. 100 MB
+/// covers a typical-to-large VTA's full backup (keys + ACL +
+/// contexts + WebVH DID logs + audit). A future enhancement could
+/// make this config-driven, but baking the conservative ceiling in
+/// avoids an operator footgun (set-to-10-GB).
+///
+/// `pub(super)` so the blob route handler can pass it to
+/// `axum::body::to_bytes` — the per-handler cap is the canonical
+/// source of truth; the router-level layer is disabled (see
+/// `backup_blob_router` construction below).
+pub(super) const BACKUP_BLOB_BODY_SIZE: usize = 100 * 1024 * 1024;
 
 /// Per-client-IP rate-limit budget for unauthenticated endpoints.
 ///
@@ -55,24 +76,113 @@ pub fn health_router() -> Router<AppState> {
     Router::new().route("/health", get(health::health))
 }
 
+/// Health-check route with the same CORS policy as the API surface.
+///
+/// `/health` is deliberately kept out of the trace + metrics layers
+/// (it's a high-frequency liveness probe and would swamp the logs),
+/// which is why `server.rs` merges it *after* those layers are applied
+/// to the main router. CORS, however, must still cover it: browser
+/// tools (e.g. `examples/vta-auth-demo`) probe `/health` cross-origin
+/// as their first connectivity check, and without an
+/// `Access-Control-Allow-Origin` header the browser blocks the read
+/// with an opaque "Failed to fetch". Apply the same origin allowlist
+/// here so the probe works whenever the API CORS is configured; an
+/// empty allowlist yields no layer (legacy no-cross-origin behaviour).
+pub fn health_router_with_cors(allowed_origins: &[String]) -> Router<AppState> {
+    let router = health_router();
+    match build_cors_layer(allowed_origins) {
+        Some(cors) => router.layer(cors),
+        None => router,
+    }
+}
+
+/// Build a CORS layer from a list of allowed origins. Returns
+/// `None` when the list is empty — the caller must skip the layer
+/// in that case so a fresh-install VTA keeps the legacy
+/// no-cross-origin behaviour.
+///
+/// Cross-origin requests with `Authorization` headers don't carry
+/// browser credentials (no `allow_credentials`), so the bearer
+/// token is the only client-side state in the cross-origin path.
+/// Wildcard origins are deliberately not accepted — every allowed
+/// origin must be explicit so a misconfiguration can't let
+/// arbitrary sites borrow operator tokens.
+fn build_cors_layer(allowed_origins: &[String]) -> Option<CorsLayer> {
+    if allowed_origins.is_empty() {
+        return None;
+    }
+    // Filter:
+    //   - `*` — tower-http's `AllowOrigin::list` panics on the
+    //     wildcard. We deliberately don't fall through to
+    //     `AllowOrigin::any()` either; explicit origins only.
+    //   - malformed values that can't be parsed as a header value.
+    let parsed: Vec<HeaderValue> = allowed_origins
+        .iter()
+        .filter(|o| !o.is_empty() && *o != "*")
+        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .collect();
+    if parsed.is_empty() {
+        // Either an operator passed only invalid entries (a
+        // typo'd config that should be visible in startup logs)
+        // or the original list was filtered down to nothing. Skip
+        // the layer rather than partially-apply CORS — a
+        // half-configured CORS surface is worse than none.
+        return None;
+    }
+    Some(
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(parsed))
+            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH])
+            .allow_headers([
+                HeaderName::from_static("content-type"),
+                HeaderName::from_static("authorization"),
+                HeaderName::from_static("x-backup-token"),
+            ])
+            .max_age(std::time::Duration::from_secs(60)),
+    )
+}
+
 pub fn router() -> Router<AppState> {
+    router_with_cors(&[], false)
+}
+
+/// Build the router and conditionally apply a CORS layer for the
+/// given list of allowed origins. Wraps [`router()`] for callers
+/// (production VTA front-ends) that already hold a config; empty
+/// list = no layer = legacy behaviour.
+///
+/// `trust_xff` selects the rate-limiter's IP-attribution
+/// strategy (L2 from the May 2026 security review):
+///
+/// - `false` (default) → `PeerIpKeyExtractor` keys on the socket
+///   peer. Safe for direct-binding deployments; not bypassable
+///   by header spoofing.
+/// - `true` → `SmartIpKeyExtractor` honours `X-Forwarded-For` /
+///   `Forwarded`. Only safe behind a trust-boundary reverse
+///   proxy that overwrites or strips these headers from external
+///   requests. Misconfiguring this is a silent rate-limit bypass.
+pub fn router_with_cors(allowed_origins: &[String], trust_xff: bool) -> Router<AppState> {
     // Per-IP rate-limit layer applied to every unauthenticated endpoint.
     // Authenticated routes stay unthrottled — JWT auth is itself a gate,
     // and legitimate operator traffic against the management plane
     // shouldn't be rate-limited.
-    let governor_config = Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(UNAUTH_RPS)
-            .burst_size(UNAUTH_BURST)
-            .key_extractor(tower_governor::key_extractor::SmartIpKeyExtractor)
-            .finish()
-            .expect("governor config values are static and non-zero"),
-    );
-    let unauth_layer = GovernorLayer::new(governor_config);
-
+    //
+    // The branches build the layer separately because the two key
+    // extractors instantiate `GovernorConfig` at distinct generic
+    // types — the layer itself is type-erased via the axum
+    // dispatcher so the downstream router shape stays uniform.
     let unauth = Router::new()
         // Sealed-transfer bootstrap (token or attestation gated inside)
         .route("/bootstrap/request", post(bootstrap::request))
+        // Passkey login (DID-VM-resolved WebAuthn assertions).
+        // Trust-task URIs: vta/auth/passkey-login-{start,finish}/1.0.
+        // Unauthenticated — the user has no session before
+        // passkey-login-finish issues the JWT.
+        .route("/auth/passkey-login/start", post(auth::passkey_login_start))
+        .route(
+            "/auth/passkey-login/finish",
+            post(auth::passkey_login_finish),
+        )
         // Auth flow entry points
         .route("/auth/challenge", post(auth::challenge))
         .route("/auth/", post(auth::authenticate))
@@ -89,7 +199,44 @@ pub fn router() -> Router<AppState> {
         // limited via the same governor layer as the other unauth
         // endpoints.
         .route("/did/{did}/log", get(did_webvh::get_did_log_public_handler));
-    let unauth = unauth.layer(unauth_layer);
+    // Apply the rate-limit layer in a branch so the two key
+    // extractors' distinct generic types don't pollute the
+    // `unauth` shape. The layered router is type-erased on the
+    // axum side once we hand it off.
+    let unauth = if trust_xff {
+        let cfg = Arc::new(
+            GovernorConfigBuilder::default()
+                .per_second(UNAUTH_RPS)
+                .burst_size(UNAUTH_BURST)
+                .key_extractor(tower_governor::key_extractor::SmartIpKeyExtractor)
+                .finish()
+                .expect("governor config values are static and non-zero"),
+        );
+        unauth.layer(GovernorLayer::new(cfg))
+    } else {
+        let cfg = Arc::new(
+            GovernorConfigBuilder::default()
+                .per_second(UNAUTH_RPS)
+                .burst_size(UNAUTH_BURST)
+                .key_extractor(tower_governor::key_extractor::PeerIpKeyExtractor)
+                .finish()
+                .expect("governor config values are static and non-zero"),
+        );
+        unauth.layer(GovernorLayer::new(cfg))
+    };
+
+    // Auth portal — same-origin popup target for cross-origin WebAuthn
+    // flows. Sits on its own router branch so:
+    //  - It's NOT behind the rate-limit layer (operator may refresh
+    //    repeatedly while testing).
+    //  - It's NOT behind UNAUTH_BODY_SIZE (the HTML response is
+    //    bigger than that; the cap is for inbound bodies but separate
+    //    branches keep the contract obvious).
+    //  - It's NOT behind CORS itself — the response is meant to be
+    //    loaded directly into a popup window same-origin, not fetched
+    //    cross-origin.
+    // See `routes::auth_portal` for the full security model.
+    let auth_portal_router = Router::new().route("/auth/portal", get(auth_portal::portal_handler));
 
     // Authenticated provision-integration (context-admin gated). Kept
     // separate from `unauth` so the rate-limiter doesn't apply — the
@@ -103,6 +250,7 @@ pub fn router() -> Router<AppState> {
     let router = Router::new().merge(unauth);
     #[cfg(feature = "webvh")]
     let router = router.merge(auth_provision);
+    let router = router.merge(auth_portal_router);
 
     let router = router
         .route(
@@ -110,6 +258,10 @@ pub fn router() -> Router<AppState> {
             get(auth::session_list).delete(auth::revoke_sessions_by_did),
         )
         .route("/auth/sessions/{session_id}", delete(auth::revoke_session))
+        // Trust-task envelope dispatcher (per
+        // docs/05-design-notes/trust-task-uri-registry.md). Phase 2
+        // scaffold; handlers register per Phase 3 slice.
+        .route("/api/trust-tasks", post(trust_tasks::dispatch_trust_task))
         .route(
             "/config",
             get(config::get_config).patch(config::update_config),
@@ -178,6 +330,9 @@ pub fn router() -> Router<AppState> {
         )
         // ACL routes (flattened for consistency)
         .route("/acl", get(acl::list_acl).post(acl::create_acl))
+        // Static segment registered before `/acl/{did}` so it isn't captured
+        // as a DID. Self-service key rotation (any authenticated caller).
+        .route("/acl/swap", post(acl::swap_acl))
         .route(
             "/acl/{did}",
             get(acl::get_acl)
@@ -240,6 +395,22 @@ pub fn router() -> Router<AppState> {
             "/services/rest/rollback",
             post(protocol::rollback_rest_handler),
         )
+        .route(
+            "/services/webauthn/enable",
+            post(protocol::enable_webauthn_handler),
+        )
+        .route(
+            "/services/webauthn/update",
+            post(protocol::update_webauthn_handler),
+        )
+        .route(
+            "/services/webauthn/disable",
+            post(protocol::disable_webauthn_handler),
+        )
+        .route(
+            "/services/webauthn/rollback",
+            post(protocol::rollback_webauthn_handler),
+        )
         .route("/services", get(protocol::list_services_handler))
         .route("/services/didcomm/drain", get(protocol::list_drain_handler))
         .route(
@@ -288,6 +459,23 @@ pub fn router() -> Router<AppState> {
         .route(
             "/contexts/{ctx_id}/dids/{scid}/rotate-keys",
             post(did_webvh::rotate_did_keys_handler),
+        )
+        // Passkey-as-verificationMethod enrolment. See
+        // `docs/02-vta/passkey-verification-methods.md` (forthcoming).
+        // First-time enrolment expects a short-lived enrolment-scope
+        // JWT minted by `pnm passkey-enroll-token`; subsequent calls
+        // use a passkey-derived session JWT.
+        .route(
+            "/did/verification-methods/passkey/challenge",
+            post(passkey_vms::enroll_challenge_handler),
+        )
+        .route(
+            "/did/verification-methods/passkey",
+            post(passkey_vms::enroll_submit_handler).get(passkey_vms::list_passkeys_handler),
+        )
+        .route(
+            "/did/verification-methods/passkey/{fragment}",
+            delete(passkey_vms::revoke_passkey_handler),
         );
 
     // VTA management routes
@@ -297,11 +485,112 @@ pub fn router() -> Router<AppState> {
         .route("/backup/export", post(backup::export))
         .route("/backup/import", post(backup::import));
 
+    // Backup-descriptor blob endpoints. NOT JWT-gated — the
+    // `X-Backup-Token` header IS the credential (one-shot for
+    // GET, bound to bundle_id, hashed server-side). Justified
+    // in `docs/05-design-notes/backup-descriptor-pattern.md`
+    // §"Auth model".
+    //
+    // Body limit is disabled at the router level so the global
+    // `MAX_BODY_SIZE` (1 MB) doesn't constrain backups, which
+    // legitimately need 10s of MB. The handler enforces a
+    // `BACKUP_BLOB_BODY_SIZE` (100 MB) ceiling itself via
+    // `axum::body::to_bytes` so we still reject pathological
+    // uploads; doing it inside the handler keeps the limit
+    // visible in one place (not split between two layers with
+    // ambiguous override semantics).
+    let backup_blob_router = Router::new()
+        .route(
+            "/backup/blob/{bundle_id}",
+            get(backup_blob::get_blob).post(backup_blob::post_blob),
+        )
+        .layer(DefaultBodyLimit::disable());
+    let router = router.merge(backup_blob_router);
+
     // Authenticated health details and capabilities
     let router = router
         .route("/health/details", get(health::health_details))
         .route("/capabilities", get(capabilities::capabilities));
 
     // Apply global request body size limit to protect enclave memory
-    router.layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+    let router = router.layer(DefaultBodyLimit::max(MAX_BODY_SIZE));
+
+    // Apply CORS conditionally — empty origin list = no layer at all
+    // (preserves the legacy no-cross-origin behaviour for production
+    // deployments that don't need browser-side fetch).
+    match build_cors_layer(allowed_origins) {
+        Some(cors) => router.layer(cors),
+        None => router,
+    }
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+
+    #[test]
+    fn empty_list_disables_cors_entirely() {
+        assert!(build_cors_layer(&[]).is_none());
+    }
+
+    #[test]
+    fn explicit_origin_produces_layer() {
+        let layer = build_cors_layer(&["http://localhost:8000".to_string()]);
+        assert!(layer.is_some());
+    }
+
+    #[test]
+    fn invalid_origin_filtered_out_and_empty_result_returns_none() {
+        // `\n` is invalid in a header value. If it's the only entry,
+        // the filter empties the list and we end up at the
+        // no-layer branch — a fresh-install VTA shouldn't get a
+        // partially-applied CORS surface just because a config typo
+        // got past serde.
+        let bad_origin = "http://localhost:8000\n".to_string();
+        assert!(build_cors_layer(&[bad_origin]).is_none());
+    }
+
+    #[test]
+    fn wildcard_alone_yields_no_layer() {
+        // tower-http's `AllowOrigin::list` PANICS on the literal
+        // `*`. The build_cors_layer filter strips wildcards
+        // explicitly so an operator typo can't bring down the
+        // VTA at startup. (Wildcards would also expose bearer
+        // tokens to any origin, which is exactly the kind of
+        // config error we want to refuse — better empty than
+        // permissive.)
+        assert!(
+            build_cors_layer(&["*".to_string()]).is_none(),
+            "wildcard must be filtered to None, never partial-applied"
+        );
+    }
+
+    #[test]
+    fn wildcard_mixed_with_explicit_origins_drops_wildcard_keeps_others() {
+        // Defensive: a mixed list shouldn't break the layer
+        // build — the wildcard is dropped and the explicit
+        // entries remain.
+        let layer = build_cors_layer(&["*".to_string(), "http://localhost:8000".to_string()]);
+        assert!(layer.is_some());
+    }
+
+    #[test]
+    fn empty_origin_string_filtered() {
+        // Operator pastes a blank line into config — should be
+        // skipped, not turned into an empty header value.
+        let layer = build_cors_layer(&["".to_string(), "http://x".to_string()]);
+        assert!(layer.is_some());
+    }
+
+    #[test]
+    fn health_router_with_cors_builds_both_branches() {
+        // Both the with-origins (layer applied) and empty (no layer)
+        // branches must construct without panicking. `.layer(cors)`
+        // on a wildcard would panic inside tower-http, but
+        // `build_cors_layer` filters wildcards to `None` first — this
+        // guards the wiring that depends on that invariant.
+        let _with = health_router_with_cors(&["http://localhost:8000".to_string()]);
+        let _without = health_router_with_cors(&[]);
+        let _wildcard_only = health_router_with_cors(&["*".to_string()]);
+    }
 }
