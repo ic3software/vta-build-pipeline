@@ -68,7 +68,12 @@ async fn authenticate_and_mint(
         .await
         .map_err(|e| AppError::Authentication(format!("failed to unpack message: {e}")))?;
 
-    if msg.typ != "https://affinidi.com/atm/1.0/authenticate" {
+    // L4: accept both legacy and canonical Trust-Task URIs.
+    if !matches!(
+        msg.typ.as_str(),
+        "https://affinidi.com/atm/1.0/authenticate"
+            | "https://trusttasks.org/spec/auth/authenticate/0.1"
+    ) {
         return Err(AppError::Authentication(format!(
             "unexpected message type: {}",
             msg.typ
@@ -101,7 +106,10 @@ async fn authenticate_and_mint(
             session_id,
             challenge,
             signer_did: sender_base,
-            created_time: None,
+            // Freshness window enforcement: closes M3 — was
+            // previously passing `None`, skipping the
+            // `created_time` check entirely.
+            created_time: msg.created_time,
             session_pubkey_b58btc: None,
         },
     )
@@ -491,7 +499,11 @@ pub async fn refresh(
         .await
         .map_err(|e| AppError::Authentication(format!("failed to unpack message: {e}")))?;
 
-    if msg.typ != "https://affinidi.com/atm/1.0/authenticate/refresh" {
+    if !matches!(
+        msg.typ.as_str(),
+        "https://affinidi.com/atm/1.0/authenticate/refresh"
+            | "https://trusttasks.org/spec/auth/refresh/0.1"
+    ) {
         return Err(AppError::Authentication(format!(
             "unexpected message type: {}",
             msg.typ

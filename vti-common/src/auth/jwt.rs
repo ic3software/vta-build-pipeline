@@ -34,6 +34,18 @@ pub struct Claims {
     #[serde(default)]
     pub contexts: Vec<String>,
     pub exp: u64,
+    /// Issued-at, Unix seconds. Mirrors OIDC Core §2 / RFC 7519
+    /// §4.1.6. The extractor doesn't gate on it directly — `exp`
+    /// is the only mandatory freshness check — but `iat` lets
+    /// audit logs and downstream consumers distinguish a re-issued
+    /// token from the original mint, and lets clock-skew analysis
+    /// detect a stuck issuer.
+    ///
+    /// `#[serde(default)]` so tokens minted before `iat` landed
+    /// deserialise as `iat=0` — never confused with a fresh mint
+    /// because `iat==0` is older than any real session.
+    #[serde(default)]
+    pub iat: u64,
     /// Indicates the service is running inside a Trusted Execution Environment.
     /// Only present (and `true`) when TEE is active; omitted when false to
     /// reduce token size.
@@ -149,6 +161,7 @@ impl JwtKeys {
             role,
             contexts,
             exp,
+            iat: now_secs,
             tee_attested,
             amr: Vec::new(),
             acr: String::new(),

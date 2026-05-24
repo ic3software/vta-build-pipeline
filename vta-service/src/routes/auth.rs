@@ -79,7 +79,17 @@ pub async fn authenticate(
         .await
         .map_err(|e| AppError::Authentication(format!("failed to unpack message: {e}")))?;
 
-    if msg.typ != "https://affinidi.com/atm/1.0/authenticate" {
+    // Accept both the legacy `affinidi.com/atm/1.0/authenticate`
+    // alias and the canonical
+    // `trusttasks.org/spec/auth/authenticate/0.1` Trust-Task URI.
+    // Closes L4 from the May 2026 security review during the
+    // canonical-task migration window. Drop the legacy alias one
+    // minor release after every client upgrades.
+    if !matches!(
+        msg.typ.as_str(),
+        "https://affinidi.com/atm/1.0/authenticate"
+            | "https://trusttasks.org/spec/auth/authenticate/0.1"
+    ) {
         return Err(AppError::Authentication(format!(
             "unexpected message type: {}",
             msg.typ
@@ -112,12 +122,12 @@ pub async fn authenticate(
             session_id: session_id.clone(),
             challenge,
             signer_did: sender_base.clone(),
-            // ATM-unpacked DIDComm v2 envelopes don't surface
-            // `created_time` on this code path today; the canonical
-            // handler skips freshness when `None` is passed. Tracked
-            // for a follow-up that threads it through the ATM
-            // unpack metadata.
-            created_time: None,
+            // DIDComm v2 envelopes carry `created_time` on the
+            // ATM-unpacked Message; the canonical handler
+            // enforces a 60s freshness window against the
+            // session's `created_at`. Closes M3 from the May
+            // 2026 security review.
+            created_time: msg.created_time,
             session_pubkey_b58btc: None,
         },
     )
@@ -159,7 +169,11 @@ pub async fn refresh(
         .await
         .map_err(|e| AppError::Authentication(format!("failed to unpack message: {e}")))?;
 
-    if msg.typ != "https://affinidi.com/atm/1.0/authenticate/refresh" {
+    if !matches!(
+        msg.typ.as_str(),
+        "https://affinidi.com/atm/1.0/authenticate/refresh"
+            | "https://trusttasks.org/spec/auth/refresh/0.1"
+    ) {
         return Err(AppError::Authentication(format!(
             "unexpected message type: {}",
             msg.typ
