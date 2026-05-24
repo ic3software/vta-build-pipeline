@@ -205,7 +205,30 @@ pub(crate) async fn dispatch_trust_task_core(
         Err(e) => return body_parse_error_response(&e.to_string()),
     };
 
-    // 2. Session-pubkey binding pre-check.
+    // 2. Framework §7.2 items 4 + 5 — expiry + recipient
+    //    enforcement. Closes L5 from the May 2026 security
+    //    review: the hand-rolled dispatcher previously skipped
+    //    these, so a Trust-Task envelope addressed at a
+    //    different recipient would be silently accepted and an
+    //    expired envelope would be honoured.
+    //
+    //    Audience binding (proof + recipient required for non-
+    //    bearer specs, framework §7.2 item 8) is typed —
+    //    `enforce_audience_binding` needs `P: Payload`, so each
+    //    slice's typed handler runs it after `parse_payload`.
+    {
+        let vta_did = state.config.read().await.vta_did.clone();
+        if let Some(my_vid) = vta_did.as_deref() {
+            if let Err(reason) = doc.validate_basic(chrono::Utc::now(), my_vid) {
+                return reject_with(&doc, reason);
+            }
+        }
+        // No vta_did configured → service is in setup; skip
+        // the recipient check (no identity to bind against).
+        // Production VTAs always have vta_did set by `vta setup`.
+    }
+
+    // 3. Session-pubkey binding pre-check.
     //
     // Once `AuthClaims` carries `session_pubkey_b58btc` (Phase 3 work,
     // mirrors `webvh-service`'s pattern) the dispatcher will enforce
@@ -214,7 +237,7 @@ pub(crate) async fn dispatch_trust_task_core(
     // no passkey-bound sessions exist yet on the VTA side.
     let _ = auth;
 
-    // 3. Dispatch by type URI.
+    // 4. Dispatch by type URI.
     dispatch_typed(state, auth, doc).await
 }
 
