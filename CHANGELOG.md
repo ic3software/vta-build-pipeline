@@ -2,6 +2,158 @@
 
 ## Unreleased
 
+### Auth-architecture consolidation (S1+S2+S3)
+
+A cross-repo consolidation of the `/auth/*` surface. Five
+near-duplicate implementations (VTA REST + DIDComm, VTC REST +
+DIDComm, did-hosting control SIOPv2, did-hosting server
+DIDComm, webvh-witness DIDComm) collapse into thin route
+dispatchers around a canonical handler in `vti_common::auth::
+handlers`. Closes the structural follow-ups from the May 2026
+cross-system security review.
+
+#### Added
+
+- **Canonical `Session` superset** — `vti_common::auth::Session`
+  is now the single source of truth for the wallet/holder
+  session row across both repos. Adds `token_id` (per-token
+  rotation pin) and `session_pubkey_b58btc` (ephemeral
+  Ed25519 multikey for Data-Integrity-proof binding) on top
+  of the existing `tee_attested` + `amr` + `acr`. did-hosting's
+  `Session` is deleted; the type re-exports from vti-common via
+  a cross-repo dep.
+- **`vti_common::auth::backend::AuthBackend` trait + canonical
+  `/auth/*` handlers**. Five services (VTA, VTC,
+  did-hosting-control, did-hosting-server, webvh-witness) now
+  share challenge / authenticate / refresh flow logic. The
+  trait abstracts over associated `Store`, `Error`, `Role`
+  types so each backend keeps its own storage layer + AppError;
+  default-method policy hooks (`validate_did`,
+  `attest_challenge`, `max_pending_challenges_per_did`,
+  `audit`, `didcomm_freshness_window`) carry safe defaults.
+  The canonical handlers enforce the load-bearing invariants
+  — signer-DID-binds-to-session-DID, constant-time challenge
+  compare, atomic refresh-token claim, AAL preservation across
+  rotation, ACL re-look-up at every step — once, not five
+  times. ~500 lines of duplicated flow logic removed across
+  the callers.
+- **`KeyspaceHandle::take_raw`** — atomic GET+DELETE on the
+  Local (fjall) variant via a single `blocking_with_timeout`
+  closure. Vsock backend falls back to `get_raw` + `remove`
+  with a per-call `warn!()` and a doc note flagging the
+  cross-replica TOCTOU window; single-replica TEE deployments
+  are unaffected. Backs the canonical
+  `take_session_id_by_refresh` helper.
+- **`SessionStore` adapters** — `KeyspaceSessionStore` (vti-
+  common's KeyspaceHandle) and `DidHostingSessionStore`
+  (did-hosting's). VTA + VTC use the first directly; did-hosting
+  implements its own to honour its separate storage + error
+  primitives.
+- **`@openvtc/rp-sdk` (`rp-sdk-js`, new repo)** — server-side
+  TypeScript SDK for Relying Parties consuming SIOPv2
+  `id_token`s from the OpenVTC browser plugin. `verifyIdToken`
+  enforces the OIDC Core §3.1.3.7 + SIOPv2 §6 checks (alg
+  pinning, self-issued constraint, audience + nonce match, iat
+  / exp window, DID-resolved JWS verification). Closes the
+  gap where the browser-plugin demo accepted POSTs without
+  verifying the signature.
+
+#### H/M/L security review follow-ups
+
+Numbering matches the May 2026 cross-system auth review (`H`igh
+/ `M`edium / `L`ow).
+
+- **L1** — JWT `iat` claim. Standard OIDC/RFC 7519 §4.1.6.
+  `#[serde(default)]` so legacy tokens deserialise as `iat=0`.
+- **L4** — `/auth/` + `/auth/refresh` handlers accept both the
+  legacy `affinidi.com/atm/1.0/...` / `affinidi.com/webvh/1.0/...`
+  URIs and the canonical
+  `trusttasks.org/spec/auth/{authenticate,refresh}/0.1`. Drop
+  the legacy alias one minor release after every client
+  upgrades.
+- **L2** — `server.trust_xff: bool` config flag (default `false`)
+  on both VTA and VTC. Selects `PeerIpKeyExtractor` (safe for
+  direct-binding deployments; not bypassable by header spoofing)
+  vs. `SmartIpKeyExtractor` (honours `X-Forwarded-For` /
+  `Forwarded`; only safe behind a trust-boundary reverse proxy
+  that overwrites these headers). Closes a silent rate-limit
+  bypass.
+- **M3** — DIDComm `created_time` freshness window. VTA + VTC
+  authenticate handlers now thread `msg.created_time` into the
+  canonical handler instead of `None`; 60s default window
+  against `session.created_at` bounds replay risk.
+- **M1** — `vti_common::auth::StepUpAuth` extractor. Axum
+  extractor that requires the JWT's `acr == "aal2"`; rejection
+  returns 403 with body
+  `{ "error": "step_up_required", "requiredAcr": "aal2" }` —
+  a distinct signal the wallet uses to trigger a step-up
+  ceremony. Mirrors did-hosting-common's existing impl.
+- **M2** — `AuthBackend::access_token_ttl_for_aal2()`. Default
+  1/3 of base TTL with a 60s floor; canonical handlers pick
+  TTL by `acr`. A leaked aal2 token now has a ~5-minute
+  window (default) instead of 15.
+- **M6** — `AclEntry.version: u32` + `update_acl_entry_versioned`
+  helper. Optimistic-concurrency-checked write that refuses to
+  overwrite if the stored row has moved ahead; raises
+  `AppError::Conflict` on stale write. Closes "two admins
+  silently lose one update" on concurrent ACL edits.
+- **H2** — RP-side `id_token` verification — see `@openvtc/rp-sdk`
+  under Added.
+- **H3 + H4 + H5** — closed as side-effects of the canonical-
+  handler migration:
+  - per-DID challenge rate limit now uniform across all five
+    services (was missing on VTA/VTC, O(N) prefix-scan on
+    did-hosting-server/witness, O(1) tracker on
+    did-hosting-control);
+  - `allowed_did_methods` rejection error collapsed to a
+    generic `Forbidden` so the operator-configured allowlist
+    isn't echoed to callers.
+- **M4** — `chrome.runtime.onMessage` sender check in the
+  browser plugin's background + offscreen listeners. Rejects
+  messages whose `sender.id !== chrome.runtime.id`. MV3
+  isolation enforces this at the manifest layer already;
+  belt-to-the-braces defence-in-depth.
+- **M5** — origin → RP-DID pinning in the browser plugin. New
+  `origin-pin.ts` module persists `chrome.storage.local`
+  mappings; the consent prompt renders a loud red warning
+  ("⚠ Relying-party identity changed") when a site asks for
+  a different `rpDid` than the previously-approved one. Both
+  SIOP and DIDComm login flows wired.
+- **H1 (foundation)** — pluggable `SecretWrap` trait in
+  `@pnm/core` + a working `WebAuthnPrfSecretWrap` impl in the
+  extension. The wallet's Ed25519 root secret can be persisted
+  through an encryption wrap (WebAuthn PRF → HKDF →
+  non-extractable AES-256-GCM key) rather than plaintext
+  base64url in IndexedDB. **Not yet auto-enabled**; the
+  operator-visible UX (settings toggle, first-enroll
+  ceremony, lock/unlock, migration of existing plaintext
+  wallets) is the second half.
+
+#### Behaviour / wire changes worth flagging
+
+- **VTC `/auth/refresh` response shape** is now the canonical
+  `{ session, tokens }` body (was the legacy `{ sessionId,
+  data: { accessToken, accessExpiresAt } }`). Matches VTA and
+  the cross-cutting `spec/auth/refresh/0.1` schema; no
+  in-tree callers consumed the legacy shape. External clients
+  of VTC's `/auth/refresh` need to migrate.
+- The 2^-256 nonce-collision check on VTA's `/auth/challenge`
+  is dropped during the canonical-handler migration — defence
+  in depth that wasn't anchored by anything else, and the
+  canonical handler doesn't carry it for the four other
+  backends. Random 32 bytes is sufficient.
+
+#### Deferred
+
+- **H1 (operator-visible flow)** — settings toggle, first-
+  enroll UX, migration UX for existing plaintext wallets,
+  lock/unlock UX from the popup. The encryption infrastructure
+  is in (`SecretWrap` trait + `WebAuthnPrfSecretWrap` impl);
+  not yet auto-enabled in `holder.ts` so existing users aren't
+  locked out.
+- **L5** — workspace lint for trust-task `recipient`
+  enforcement. Tooling-heavy; needs design.
+
 ### Added
 
 - **Runtime service management** — operators can now enable, update,
