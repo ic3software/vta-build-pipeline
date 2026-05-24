@@ -725,6 +725,7 @@ pub async fn run_setup_wizard(
             host: host.clone(),
             port,
             cors_origins: Vec::new(),
+            trust_xff: false,
         },
         log: LogConfig::default(),
         store: StoreConfig {
@@ -806,6 +807,7 @@ pub async fn run_setup_wizard(
             host,
             port,
             cors_origins: Vec::new(),
+            trust_xff: false,
         },
         log: LogConfig {
             level: log_level,

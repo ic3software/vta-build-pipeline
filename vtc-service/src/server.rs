@@ -922,15 +922,16 @@ fn run_rest_thread(
         #[cfg(feature = "website")]
         let website_state = build_website_state(&state.config).await;
 
+        let trust_xff = state.config.read().await.server.trust_xff;
         #[cfg(feature = "website")]
-        let app = routes::router_with(&routing, website_state)
+        let app = routes::router_with_xff(&routing, website_state, trust_xff)
             .with_state(state)
             .layer(csrf_layer)
             .layer(host_layer)
             .layer(cors_layer)
             .layer(TraceLayer::new_for_http());
         #[cfg(not(feature = "website"))]
-        let app = routes::router_with(&routing)
+        let app = routes::router_with_xff(&routing, trust_xff)
             .with_state(state)
             .layer(csrf_layer)
             .layer(host_layer)

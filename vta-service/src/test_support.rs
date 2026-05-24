@@ -581,7 +581,14 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         metrics_handle: None,
     };
 
-    let router = crate::routes::router()
+    // Test harness uses `trust_xff = true` so the per-IP rate
+    // limiter falls back to `X-Forwarded-For` when there's no
+    // socket peer-IP (tower::oneshot doesn't carry one). The
+    // existing rate-limit regression test
+    // (`unauth_endpoint_rate_limit_returns_429_after_burst`)
+    // sets `x-forwarded-for: 192.0.2.1` so all calls hash to the
+    // same bucket and trip the burst within 20 requests.
+    let router = crate::routes::router_with_cors(&[], true)
         .with_state(state.clone())
         .merge(crate::routes::health_router().with_state(state));
 

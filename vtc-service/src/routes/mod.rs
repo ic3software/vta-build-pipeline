@@ -93,17 +93,36 @@ pub fn router_with(
     routing: &RoutingConfig,
     website_state: Option<crate::website::WebsiteState>,
 ) -> Router<AppState> {
-    router_with_inner(routing, website_state)
+    router_with_inner(routing, website_state, false)
+}
+
+/// Build the router with explicit `trust_xff`. Use this from
+/// `server.rs` where the config is available; the no-args
+/// `router_with` defaults to `trust_xff=false` (peer-IP rate
+/// limiting), which is the safe default for tests and direct-
+/// binding deployments.
+#[cfg(feature = "website")]
+pub fn router_with_xff(
+    routing: &RoutingConfig,
+    website_state: Option<crate::website::WebsiteState>,
+    trust_xff: bool,
+) -> Router<AppState> {
+    router_with_inner(routing, website_state, trust_xff)
 }
 
 #[cfg(not(feature = "website"))]
 pub fn router_with(routing: &RoutingConfig) -> Router<AppState> {
-    router_with_inner(routing)
+    router_with_inner(routing, false)
 }
 
 #[cfg(not(feature = "website"))]
-fn router_with_inner(routing: &RoutingConfig) -> Router<AppState> {
-    let (api_chain,) = (build_api_chain(routing),);
+pub fn router_with_xff(routing: &RoutingConfig, trust_xff: bool) -> Router<AppState> {
+    router_with_inner(routing, trust_xff)
+}
+
+#[cfg(not(feature = "website"))]
+fn router_with_inner(routing: &RoutingConfig, trust_xff: bool) -> Router<AppState> {
+    let api_chain = build_api_chain(routing, trust_xff);
     assemble(routing, api_chain)
 }
 
@@ -111,8 +130,9 @@ fn router_with_inner(routing: &RoutingConfig) -> Router<AppState> {
 fn router_with_inner(
     routing: &RoutingConfig,
     website_state: Option<crate::website::WebsiteState>,
+    trust_xff: bool,
 ) -> Router<AppState> {
-    let api_chain = build_api_chain(routing);
+    let api_chain = build_api_chain(routing, trust_xff);
     assemble_with_website(routing, api_chain, website_state)
 }
 
@@ -122,7 +142,7 @@ fn router_with_inner(
 /// [`assemble_with_website`]) but threaded through so a future
 /// per-mount override can land without changing this function's
 /// signature.
-fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
+fn build_api_chain(_routing: &RoutingConfig, trust_xff: bool) -> Router<AppState> {
     // Canonical cross-cutting auth tasks from trusttasks-tf. The legacy
     // openvtc/vtc/auth/legacy/* slugs were VTC-specific reimplementations
     // of primitives that VTA + did-hosting also have; consolidating here
@@ -751,7 +771,7 @@ fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE));
 
     // Unauthenticated routes — tighter body cap + per-IP governor.
-    let unauth = build_unauth_routes();
+    let unauth = build_unauth_routes(trust_xff);
     api.merge(unauth)
 }
 
@@ -770,7 +790,7 @@ fn build_api_chain(_routing: &RoutingConfig) -> Router<AppState> {
 ///   envelope, small enough to reject blob floods).
 /// - Per-IP `tower-governor` (5 rps + 10 burst) via
 ///   [`SmartIpKeyExtractor`].
-fn build_unauth_routes() -> Router<AppState> {
+fn build_unauth_routes(trust_xff: bool) -> Router<AppState> {
     // Canonical cross-cutting auth tasks from trusttasks-tf.
     let auth_challenge = TrustTask::new("https://trusttasks.org/spec/auth/challenge/0.1")
         .expect("static Trust-Task URL");
@@ -811,15 +831,11 @@ fn build_unauth_routes() -> Router<AppState> {
     let auth_recognise = TrustTask::new("https://trusttasks.org/openvtc/vtc/auth/recognise/1.0")
         .expect("static Trust-Task URL");
 
-    let governor_config = Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(5)
-            .burst_size(10)
-            .key_extractor(SmartIpKeyExtractor)
-            .finish()
-            .expect("governor config values are static and non-zero"),
-    );
-    let governor = GovernorLayer::new(governor_config);
+    // L2: rate-limiter key extractor honours `trust_xff`. The
+    // governor is applied in the routing chain below via a
+    // branched `apply_governor` helper so the two key extractors'
+    // distinct generic types don't pollute the variable's signature.
+    let _ = trust_xff;
 
     // `SmartIpKeyExtractor` reads `X-Forwarded-For` / `X-Real-IP` /
     // `Forwarded` headers first and only falls back to `ConnectInfo`
@@ -834,7 +850,7 @@ fn build_unauth_routes() -> Router<AppState> {
     // is untouched.
     let synth_connect_info = axum::middleware::from_fn(insert_default_connect_info_if_missing);
 
-    TrustTaskRouter::<AppState>::new()
+    let unauth_router = TrustTaskRouter::<AppState>::new()
         .route_with_task("/auth/challenge", post(auth::challenge), auth_challenge)
         .route_with_task("/auth/", post(auth::authenticate), auth_authenticate)
         .route_with_task("/auth/refresh", post(auth::refresh), auth_refresh)
@@ -869,9 +885,34 @@ fn build_unauth_routes() -> Router<AppState> {
             auth_recognise,
         )
         .into_router()
-        .layer(DefaultBodyLimit::max(UNAUTH_BODY_SIZE))
-        .layer(governor)
-        .layer(synth_connect_info)
+        .layer(DefaultBodyLimit::max(UNAUTH_BODY_SIZE));
+
+    // Apply the per-IP rate limiter in a branch so the two
+    // key-extractor generic types don't leak into the variable's
+    // type. The layered router is type-erased on the axum side
+    // once we hand it back.
+    let unauth_router = if trust_xff {
+        let cfg = Arc::new(
+            GovernorConfigBuilder::default()
+                .per_second(5)
+                .burst_size(10)
+                .key_extractor(SmartIpKeyExtractor)
+                .finish()
+                .expect("governor config values are static and non-zero"),
+        );
+        unauth_router.layer(GovernorLayer::new(cfg))
+    } else {
+        let cfg = Arc::new(
+            GovernorConfigBuilder::default()
+                .per_second(5)
+                .burst_size(10)
+                .key_extractor(tower_governor::key_extractor::PeerIpKeyExtractor)
+                .finish()
+                .expect("governor config values are static and non-zero"),
+        );
+        unauth_router.layer(GovernorLayer::new(cfg))
+    };
+    unauth_router.layer(synth_connect_info)
 }
 
 /// Middleware that inserts a `ConnectInfo<SocketAddr>(127.0.0.1)`

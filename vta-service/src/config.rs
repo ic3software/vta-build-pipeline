@@ -220,6 +220,25 @@ pub struct ServerConfig {
     /// not flow to arbitrary origins.
     #[serde(default)]
     pub cors_origins: Vec<String>,
+    /// Whether to trust `X-Forwarded-For` / `Forwarded` headers
+    /// for client-IP attribution in the per-IP rate limiter.
+    ///
+    /// Default `false` — the rate limiter keys on the socket
+    /// peer-IP (`PeerIpKeyExtractor`). This is the safe default
+    /// for direct-binding deployments where an attacker can spoof
+    /// `X-Forwarded-For` to evade rate limiting.
+    ///
+    /// Set `true` only when the VTA runs behind a trust-boundary
+    /// reverse proxy (Nginx, Envoy, ALB) that overwrites or
+    /// strips these headers from external requests — the rate
+    /// limiter switches to `SmartIpKeyExtractor` and walks the
+    /// `X-Forwarded-For` chain. Misconfiguring this (`trust_xff =
+    /// true` with no proxy, or a misconfigured proxy that doesn't
+    /// strip the header) is a silent rate-limit bypass.
+    ///
+    /// Closes L2 from the May 2026 security review.
+    #[serde(default)]
+    pub trust_xff: bool,
 }
 
 fn default_host() -> String {
@@ -246,6 +265,7 @@ impl Default for ServerConfig {
             host: default_host(),
             port: default_port(),
             cors_origins: Vec::new(),
+            trust_xff: false,
         }
     }
 }

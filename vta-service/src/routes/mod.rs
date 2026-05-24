@@ -143,28 +143,34 @@ fn build_cors_layer(allowed_origins: &[String]) -> Option<CorsLayer> {
 }
 
 pub fn router() -> Router<AppState> {
-    router_with_cors(&[])
+    router_with_cors(&[], false)
 }
 
 /// Build the router and conditionally apply a CORS layer for the
 /// given list of allowed origins. Wraps [`router()`] for callers
 /// (production VTA front-ends) that already hold a config; empty
 /// list = no layer = legacy behaviour.
-pub fn router_with_cors(allowed_origins: &[String]) -> Router<AppState> {
+///
+/// `trust_xff` selects the rate-limiter's IP-attribution
+/// strategy (L2 from the May 2026 security review):
+///
+/// - `false` (default) → `PeerIpKeyExtractor` keys on the socket
+///   peer. Safe for direct-binding deployments; not bypassable
+///   by header spoofing.
+/// - `true` → `SmartIpKeyExtractor` honours `X-Forwarded-For` /
+///   `Forwarded`. Only safe behind a trust-boundary reverse
+///   proxy that overwrites or strips these headers from external
+///   requests. Misconfiguring this is a silent rate-limit bypass.
+pub fn router_with_cors(allowed_origins: &[String], trust_xff: bool) -> Router<AppState> {
     // Per-IP rate-limit layer applied to every unauthenticated endpoint.
     // Authenticated routes stay unthrottled — JWT auth is itself a gate,
     // and legitimate operator traffic against the management plane
     // shouldn't be rate-limited.
-    let governor_config = Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(UNAUTH_RPS)
-            .burst_size(UNAUTH_BURST)
-            .key_extractor(tower_governor::key_extractor::SmartIpKeyExtractor)
-            .finish()
-            .expect("governor config values are static and non-zero"),
-    );
-    let unauth_layer = GovernorLayer::new(governor_config);
-
+    //
+    // The branches build the layer separately because the two key
+    // extractors instantiate `GovernorConfig` at distinct generic
+    // types — the layer itself is type-erased via the axum
+    // dispatcher so the downstream router shape stays uniform.
     let unauth = Router::new()
         // Sealed-transfer bootstrap (token or attestation gated inside)
         .route("/bootstrap/request", post(bootstrap::request))
@@ -193,7 +199,31 @@ pub fn router_with_cors(allowed_origins: &[String]) -> Router<AppState> {
         // limited via the same governor layer as the other unauth
         // endpoints.
         .route("/did/{did}/log", get(did_webvh::get_did_log_public_handler));
-    let unauth = unauth.layer(unauth_layer);
+    // Apply the rate-limit layer in a branch so the two key
+    // extractors' distinct generic types don't pollute the
+    // `unauth` shape. The layered router is type-erased on the
+    // axum side once we hand it off.
+    let unauth = if trust_xff {
+        let cfg = Arc::new(
+            GovernorConfigBuilder::default()
+                .per_second(UNAUTH_RPS)
+                .burst_size(UNAUTH_BURST)
+                .key_extractor(tower_governor::key_extractor::SmartIpKeyExtractor)
+                .finish()
+                .expect("governor config values are static and non-zero"),
+        );
+        unauth.layer(GovernorLayer::new(cfg))
+    } else {
+        let cfg = Arc::new(
+            GovernorConfigBuilder::default()
+                .per_second(UNAUTH_RPS)
+                .burst_size(UNAUTH_BURST)
+                .key_extractor(tower_governor::key_extractor::PeerIpKeyExtractor)
+                .finish()
+                .expect("governor config values are static and non-zero"),
+        );
+        unauth.layer(GovernorLayer::new(cfg))
+    };
 
     // Auth portal — same-origin popup target for cross-origin WebAuthn
     // flows. Sits on its own router branch so:
