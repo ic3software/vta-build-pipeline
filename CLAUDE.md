@@ -6,7 +6,7 @@ those in addition to this file.
 
 ## Workspace layout
 
-Rust workspace (edition 2024, resolver 3, MSRV 1.94.0). Dependencies flow
+Rust workspace (edition 2024, resolver 3, MSRV 1.95.0). Dependencies flow
 strictly downward — no cycles. There are two leaf crates with no internal
 workspace deps (`vti-common`, `vta-sdk`); everything else depends on one
 or both of them, plus optionally on `vta-cli-common`.

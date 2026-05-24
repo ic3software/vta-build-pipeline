@@ -325,21 +325,37 @@ pub async fn run(
             None => ks,
         }
     };
-    crate::operations::protocol::runtime_state::migrate_from_config(
-        &boot_service_state_ks,
-        &config,
-    )
-    .await?;
+    // Runtime-state-to-fjall migration + read-back lives in
+    // `operations::protocol`, which is `#[cfg(feature = "webvh")]`-
+    // gated (the protocol-management surface that owns service
+    // toggles only exists in webvh builds). Without webvh the
+    // boot path falls back to reading `config.services.*` directly
+    // from `config.toml` — the legacy behaviour, still useful for
+    // headless / secrets-only builds in the CI feature-combos
+    // matrix.
+    #[cfg(feature = "webvh")]
+    {
+        crate::operations::protocol::runtime_state::migrate_from_config(
+            &boot_service_state_ks,
+            &config,
+        )
+        .await?;
 
-    // Runtime state in fjall is authoritative; mirror it into the in-memory
-    // `config.services` so the existing readers across the codebase keep
-    // working unchanged. The on-disk `config.toml` [services] block is now
-    // legacy (consumed only by the first-boot migration above).
-    config.services.rest =
-        crate::operations::protocol::runtime_state::is_rest_enabled(&boot_service_state_ks).await?;
-    config.services.didcomm =
-        crate::operations::protocol::runtime_state::is_didcomm_enabled(&boot_service_state_ks)
-            .await?;
+        // Runtime state in fjall is authoritative; mirror it into the in-memory
+        // `config.services` so the existing readers across the codebase keep
+        // working unchanged. The on-disk `config.toml` [services] block is now
+        // legacy (consumed only by the first-boot migration above).
+        config.services.rest =
+            crate::operations::protocol::runtime_state::is_rest_enabled(&boot_service_state_ks)
+                .await?;
+        config.services.didcomm =
+            crate::operations::protocol::runtime_state::is_didcomm_enabled(&boot_service_state_ks)
+                .await?;
+    }
+    #[cfg(not(feature = "webvh"))]
+    {
+        let _ = &boot_service_state_ks;
+    }
 
     // Determine which services will actually start (feature flag AND
     // persisted runtime state, the latter set by `pnm services {kind}

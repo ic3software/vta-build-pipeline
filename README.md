@@ -1,6 +1,6 @@
 # Verifiable Trust Infrastructure
 
-[![Rust](https://img.shields.io/badge/rust-1.94.0%2B-blue.svg?maxAge=3600)](https://github.com/OpenVTC/verifiable-trust-infrastructure)
+[![Rust](https://img.shields.io/badge/rust-1.95.0%2B-blue.svg?maxAge=3600)](https://github.com/OpenVTC/verifiable-trust-infrastructure)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 A Rust workspace implementing the two service backends of the
@@ -127,7 +127,7 @@ The documentation tree is split by audience:
 
 ## Prerequisites
 
-- **Rust 1.94.0+** (edition 2024).
+- **Rust 1.95.0+** (edition 2024).
 - For the default `keyring` secret backend: platform credential
   manager (macOS Keychain, Linux secret-service, Windows Credential
   Manager). Alternatives: AWS / GCP / Azure / HashiCorp Vault /
