@@ -9424,6 +9424,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "vta-sdk 0.6.0",
  "webauthn-rs",
  "zeroize",
 ]

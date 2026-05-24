@@ -33,6 +33,17 @@ passkey = ["dep:webauthn-rs", "dep:url"]
 setup = ["dep:dialoguer"]
 
 [dependencies]
+# vta-sdk for the canonical auth wire shapes
+# (`protocols::auth::ChallengeResponse`, `AuthenticateResponse`,
+# `TokenBundle`). These are SIOPv2 / RFC 6749-shaped public types
+# that clients deserialise; the canonical `/auth/*` handlers in
+# `auth::handlers` mint them. Server depending on the public SDK
+# for wire types is intentional — they're the contract.
+#
+# `default-features = false` skips the optional client transports
+# (didcomm, sealed-transfer, etc.); we only consume the type
+# definitions in the default feature set.
+vta-sdk = { path = "../vta-sdk", version = "0.6", default-features = false }
 async-trait = "0.1"
 axum = { workspace = true }
 axum-extra = { workspace = true }
