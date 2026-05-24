@@ -122,10 +122,20 @@ pub async fn handle_authenticate_with_aal<B: AuthBackend>(
     let role_resolution = backend.check_acl(&session.did).await?;
 
     // ---- Mint tokens ----
+    //
+    // Access-token TTL is acr-dependent: stepped-up sessions
+    // (`aal2`) get a shorter window (M2 from the May 2026
+    // security review) to bound the blast radius of a leaked
+    // elevated token.
+    let access_ttl = if acr == "aal2" {
+        backend.access_token_ttl_for_aal2()
+    } else {
+        backend.access_token_ttl()
+    };
 
     let refresh_token = Uuid::new_v4().to_string();
     let refresh_expires_at = now.saturating_add(backend.refresh_token_ttl());
-    let access_expires_at = now.saturating_add(backend.access_token_ttl());
+    let access_expires_at = now.saturating_add(access_ttl);
 
     let access_token = backend
         .mint_access_token(
@@ -136,7 +146,7 @@ pub async fn handle_authenticate_with_aal<B: AuthBackend>(
             &amr,
             &acr,
             session.tee_attested,
-            backend.access_token_ttl(),
+            access_ttl,
         )
         .await?;
 
@@ -184,7 +194,7 @@ pub async fn handle_authenticate_with_aal<B: AuthBackend>(
             access_token,
             refresh_token: Some(refresh_token),
             token_type: "Bearer".to_string(),
-            expires_in: backend.access_token_ttl(),
+            expires_in: access_ttl,
             refresh_expires_in: Some(backend.refresh_token_ttl()),
             scope: role_resolution
                 .contexts

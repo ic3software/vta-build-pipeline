@@ -341,6 +341,21 @@ pub trait AuthBackend: Send + Sync + 'static {
     /// Access-token TTL in seconds. Typical: 900 (15 min).
     fn access_token_ttl(&self) -> u64;
 
+    /// Access-token TTL in seconds for a stepped-up
+    /// (`acr=aal2`) session. Default: 1/3 of [`Self::access_token_ttl`]
+    /// floored to a minimum of 60 seconds — closes M2 from the
+    /// May 2026 security review, which observed that a leaked
+    /// `aal2` token has the same 15-minute window as a `aal1`
+    /// token despite the elevated privileges it grants.
+    ///
+    /// Backends can override to set their own ratio or to
+    /// disable the elevation (return `access_token_ttl()` for a
+    /// uniform TTL).
+    fn access_token_ttl_for_aal2(&self) -> u64 {
+        let base = self.access_token_ttl();
+        std::cmp::max(60, base / 3)
+    }
+
     /// Refresh-token TTL in seconds. Typical: 86400 (24 h).
     fn refresh_token_ttl(&self) -> u64;
 

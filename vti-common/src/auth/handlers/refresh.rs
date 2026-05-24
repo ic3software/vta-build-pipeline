@@ -114,7 +114,15 @@ pub async fn handle_refresh<B: AuthBackend>(
     let new_session_id = Uuid::new_v4().to_string();
     let new_refresh_token = Uuid::new_v4().to_string();
     let new_refresh_expires_at = now.saturating_add(backend.refresh_token_ttl());
-    let access_expires_at = now.saturating_add(backend.access_token_ttl());
+    // M2: stepped-up sessions keep the shorter `aal2` TTL
+    // across rotation (was previously dropping back to the
+    // base TTL on every refresh).
+    let access_ttl = if acr == "aal2" {
+        backend.access_token_ttl_for_aal2()
+    } else {
+        backend.access_token_ttl()
+    };
+    let access_expires_at = now.saturating_add(access_ttl);
 
     let access_token = backend
         .mint_access_token(
@@ -125,7 +133,7 @@ pub async fn handle_refresh<B: AuthBackend>(
             &amr,
             &acr,
             old_session.tee_attested,
-            backend.access_token_ttl(),
+            access_ttl,
         )
         .await?;
 
@@ -180,7 +188,7 @@ pub async fn handle_refresh<B: AuthBackend>(
             access_token,
             refresh_token: Some(new_refresh_token),
             token_type: "Bearer".to_string(),
-            expires_in: backend.access_token_ttl(),
+            expires_in: access_ttl,
             refresh_expires_in: Some(backend.refresh_token_ttl()),
             scope: role_resolution
                 .contexts

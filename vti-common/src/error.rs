@@ -41,6 +41,20 @@ pub enum AppError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    /// Operation requires a stepped-up (`acr=aal2`) session, but
+    /// the caller's JWT carries a lower acr (typically `aal1`).
+    /// Distinct from [`Self::Forbidden`] so wallets can react —
+    /// `step_up_required` is the operator-friendly signal to
+    /// trigger a passkey-login or VTA-approval ceremony, not a
+    /// hard rejection.
+    ///
+    /// Rendered as **403 Forbidden** with body
+    /// `{ "error": "step_up_required", "message": "...",
+    ///   "requiredAcr": "aal2" }` so clients can distinguish it
+    /// from a role-based rejection without parsing English.
+    #[error("step-up required: {0}")]
+    StepUpRequired(String),
+
     #[error("validation error: {0}")]
     Validation(String),
 
@@ -163,6 +177,7 @@ impl IntoResponse for AppError {
             AppError::Authentication(_) => StatusCode::UNAUTHORIZED,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+            AppError::StepUpRequired(_) => StatusCode::FORBIDDEN,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::TrustTaskMissing => StatusCode::BAD_REQUEST,
             AppError::TrustTaskMismatch { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -202,6 +217,11 @@ impl IntoResponse for AppError {
             AppError::IdempotencyKeyConflict => serde_json::json!({
                 "error": "IdempotencyKeyConflict",
                 "message": self.to_string(),
+            }),
+            AppError::StepUpRequired(msg) => serde_json::json!({
+                "error": "step_up_required",
+                "message": msg,
+                "requiredAcr": "aal2",
             }),
             _ => serde_json::json!({ "error": self.to_string() }),
         };

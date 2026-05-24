@@ -10,4 +10,6 @@ pub use backend::{
     AttestationOutcome, AuthAuditEvent, AuthBackend, AuthError, AuthenticateInput, ChallengeInput,
     RefreshInput, RoleResolution, SessionStore,
 };
-pub use extractor::{AdminAuth, AuthClaims, AuthState, ManageAuth, SuperAdminAuth, WriteAuth};
+pub use extractor::{
+    AdminAuth, AuthClaims, AuthState, ManageAuth, StepUpAuth, SuperAdminAuth, WriteAuth,
+};

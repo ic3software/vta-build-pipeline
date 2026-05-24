@@ -311,6 +311,55 @@ impl<S: AuthState> FromRequestParts<S> for AdminAuth {
     }
 }
 
+/// Extractor that requires a **stepped-up** session (JWT `acr == "aal2"`).
+///
+/// Use on routes that demand a second factor beyond the base DID
+/// challenge-response (`aal1`) — typical examples: ACL edits,
+/// key rotation, backup export, anything that lets an attacker
+/// with a leaked `aal1` token pivot to a long-lived foothold.
+///
+/// ```ignore
+/// async fn rotate_keys(auth: StepUpAuth, ...) { /* aal2 enforced */ }
+/// ```
+///
+/// A request with a lower `acr` is rejected with
+/// [`AppError::StepUpRequired`] (403 + body
+/// `{ "error": "step_up_required", "requiredAcr": "aal2" }`). The
+/// wallet uses that signal to trigger a passkey-login or
+/// VTA-approval ceremony — distinct from a generic `forbidden`
+/// it would get from a role gate.
+///
+/// **Trust model**: the gate reads `acr` from the JWT claims the
+/// `AuthClaims` extractor already verified (signature, expiry,
+/// session existence). Step-up tokens are stateless during their
+/// access-window; the canonical refresh handler preserves `acr`
+/// across rotation. If a step-up access-token leaks, the only
+/// brake is the short access-token TTL (or [`M2`] — shorter TTL
+/// when `acr=aal2`).
+#[derive(Debug, Clone)]
+pub struct StepUpAuth(pub AuthClaims);
+
+impl<S: AuthState> FromRequestParts<S> for StepUpAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let claims = AuthClaims::from_request_parts(parts, state).await?;
+
+        if claims.acr == "aal2" {
+            Ok(StepUpAuth(claims))
+        } else {
+            warn!(
+                did = %claims.did,
+                acr = %claims.acr,
+                "auth rejected: step-up (aal2) required",
+            );
+            Err(AppError::StepUpRequired(
+                "operation requires a stepped-up (aal2) session".into(),
+            ))
+        }
+    }
+}
+
 /// Extractor that requires the caller to be a super admin (Admin role with
 /// empty `allowed_contexts`).
 ///
