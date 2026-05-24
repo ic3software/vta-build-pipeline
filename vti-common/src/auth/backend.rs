@@ -247,9 +247,25 @@ pub trait AuthBackend: Send + Sync + 'static {
     /// [`SessionStore`] methods through this.
     fn sessions(&self) -> &Self::Store;
 
-    /// JWT minter. The handler hands it the role, contexts, and
-    /// `(amr, acr)` and gets back an access token + expiry.
-    fn jwt_keys(&self) -> &crate::auth::jwt::JwtKeys;
+    /// Mint an access token JWT for an authenticated session.
+    ///
+    /// The trait abstracts over the concrete JWT minter — VTA + VTC
+    /// use `vti_common::auth::jwt::JwtKeys`; did-hosting has its own
+    /// minter type with the same shape but a separate `AppError`
+    /// surface. Each backend implements this method using whatever
+    /// minter it holds; the canonical handler treats the return
+    /// value as an opaque base64url-encoded JWS.
+    async fn mint_access_token(
+        &self,
+        subject: &str,
+        session_id: &str,
+        role: &Self::Role,
+        contexts: &[String],
+        amr: &[String],
+        acr: &str,
+        tee_attested: bool,
+        ttl_secs: u64,
+    ) -> Result<String, Self::Error>;
 
     // -------- Policy hooks --------
 

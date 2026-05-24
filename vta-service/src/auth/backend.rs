@@ -77,8 +77,31 @@ impl AuthBackend for VtaAuthBackend {
         &self.sessions
     }
 
-    fn jwt_keys(&self) -> &JwtKeys {
-        &self.jwt_keys
+    async fn mint_access_token(
+        &self,
+        subject: &str,
+        session_id: &str,
+        role: &Self::Role,
+        contexts: &[String],
+        amr: &[String],
+        acr: &str,
+        tee_attested: bool,
+        ttl_secs: u64,
+    ) -> Result<String, Self::Error> {
+        let claims = self
+            .jwt_keys
+            .new_claims(
+                subject.to_string(),
+                session_id.to_string(),
+                role.to_string(),
+                contexts.to_vec(),
+                ttl_secs,
+                tee_attested,
+            )
+            .with_aal(amr.to_vec(), acr.to_string());
+        self.jwt_keys
+            .encode(&claims)
+            .map_err(|e| AppError::Internal(format!("jwt encode failed: {e:?}")))
     }
 
     async fn check_acl(&self, did: &str) -> Result<RoleResolution<Self::Role>, Self::Error> {

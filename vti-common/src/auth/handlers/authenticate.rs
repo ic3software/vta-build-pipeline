@@ -127,22 +127,18 @@ pub async fn handle_authenticate_with_aal<B: AuthBackend>(
     let refresh_expires_at = now.saturating_add(backend.refresh_token_ttl());
     let access_expires_at = now.saturating_add(backend.access_token_ttl());
 
-    let claims = backend
-        .jwt_keys()
-        .new_claims(
-            session.did.clone(),
-            session.session_id.clone(),
-            role_resolution.role.to_string(),
-            role_resolution.contexts.clone(),
-            backend.access_token_ttl(),
-            session.tee_attested,
-        )
-        .with_aal(amr.clone(), acr.clone());
-
     let access_token = backend
-        .jwt_keys()
-        .encode(&claims)
-        .map_err(|e| AuthError::Internal(format!("jwt encode failed: {e:?}")))?;
+        .mint_access_token(
+            &session.did,
+            &session.session_id,
+            &role_resolution.role,
+            &role_resolution.contexts,
+            &amr,
+            &acr,
+            session.tee_attested,
+            backend.access_token_ttl(),
+        )
+        .await?;
 
     // ---- Transition session + persist refresh index ----
 
