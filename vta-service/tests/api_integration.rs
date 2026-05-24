@@ -141,6 +141,7 @@ impl TestContext {
             created_at: now_epoch(),
             created_by: "test".to_string(),
             expires_at: None,
+            version: 0,
         };
         self.acl_ks()
             .insert(format!("acl:{did}"), &entry)

@@ -113,6 +113,7 @@ pub async fn create_acl(
         created_at: now_epoch(),
         created_by: auth.did.clone(),
         expires_at,
+        version: 0,
     };
 
     store_acl_entry(acl_ks, &entry).await?;
@@ -392,6 +393,7 @@ pub async fn swap_acl(
         created_at: now,
         created_by: auth.did.clone(),
         expires_at: old.expires_at,
+        version: 0,
     };
 
     // Create new before deleting old: a crash between the two leaves the old
@@ -494,6 +496,7 @@ mod tests {
                 created_at: now_epoch(),
                 created_by: "seed".into(),
                 expires_at: None,
+                version: 0,
             },
         )
         .await

@@ -72,6 +72,7 @@ pub async fn run_create_did_key(args: CreateDidKeyArgs) -> Result<(), Box<dyn st
                 .as_secs(),
             created_by: "cli:create-did-key".into(),
             expires_at: None,
+            version: 0,
         };
         store_acl_entry(&acl_ks, &entry).await?;
         eprintln!(

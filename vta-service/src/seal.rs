@@ -363,6 +363,7 @@ mod tests {
                 .as_secs(),
             created_by: "test".into(),
             expires_at: None,
+            version: 0,
         };
         acl::store_acl_entry(&acl_ks, &entry).await.expect("acl");
         seal(&acl_ks, admin_did).await.expect("seal");

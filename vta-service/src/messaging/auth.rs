@@ -95,6 +95,7 @@ mod tests {
                 created_at: now_epoch().saturating_sub(7200),
                 created_by: "test".into(),
                 expires_at: Some(now_epoch().saturating_sub(60)), // expired one minute ago
+                version: 0,
             },
         )
         .await
@@ -124,6 +125,7 @@ mod tests {
                 created_at: now_epoch(),
                 created_by: "test".into(),
                 expires_at: Some(now_epoch() + 3600),
+                version: 0,
             },
         )
         .await
@@ -152,6 +154,7 @@ mod tests {
                 created_at: now_epoch(),
                 created_by: "test".into(),
                 expires_at: None,
+                version: 0,
             },
         )
         .await
