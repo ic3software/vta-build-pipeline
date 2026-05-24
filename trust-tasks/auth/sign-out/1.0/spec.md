@@ -11,15 +11,17 @@ inputs:
   - Authenticated request (bearer JWT or `vtc_admin_session` cookie)
 outputs:
   - HTTP 204 (No Content)
-  - `Set-Cookie: vtc_admin_session=; Path=/; Max-Age=0; SameSite=Strict; Secure; HttpOnly`
-  - `Set-Cookie: csrf=; Path=/; Max-Age=0; SameSite=Strict; Secure`
+  - "`Set-Cookie: vtc_admin_session=; Path=/; Max-Age=0; SameSite=Strict; Secure; HttpOnly`"
+  - "`Set-Cookie: csrf=; Path=/; Max-Age=0; SameSite=Strict; Secure`"
 trust_assumptions:
-  - Sign-out is **best effort** server-side: the session row may
+  - >-
+    Sign-out is **best effort** server-side: the session row may
     already have been deleted from another tab or expired, and
     that's fine. The cookie expiry header is the user-visible
     side effect — once the browser drops it, the SPA can no
     longer authenticate with this server.
-  - JavaScript on the SPA can't clear the HttpOnly session
+  - >-
+    JavaScript on the SPA can't clear the HttpOnly session
     cookie itself; only the server's `Set-Cookie: Max-Age=0`
     response can. This endpoint exists for exactly that reason.
   - Idempotent — repeated POSTs against an already-revoked

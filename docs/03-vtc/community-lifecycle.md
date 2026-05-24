@@ -83,7 +83,7 @@ trust-registry record so peer communities see the same intent:
 ```mermaid
 flowchart LR
     leave([Member departure])
-    purge[Purge<br/>(RTBF)]
+    purge["Purge<br/>(RTBF)"]
     tomb[Tombstone]
     hist[Historical]
 

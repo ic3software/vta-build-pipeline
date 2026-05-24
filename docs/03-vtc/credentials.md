@@ -18,7 +18,7 @@ backed by a Bitstring Status List slot for revocation. All use the
 graph TB
     issue[Issue credential]
     slot[Allocate status-list slot<br/>via slot allocator]
-    sign[Sign with LocalSigner<br/>(cached VTA key)]
+    sign["Sign with LocalSigner<br/>(cached VTA key)"]
     persist[Persist credential row]
     audit_i[Audit: VmcIssued / VecIssued / ...]
     return[Return signed VC<br/>+ status-list reference]
@@ -92,8 +92,8 @@ graph LR
 
     subgraph Revocation
         rev[Admin revokes / member self-removes]
-        rev --> bit[storage.flip(slot=42, value=1)]
-        bit --> list[BitstringStatusList credential<br/>(bit 42 now 1)]
+        rev --> bit["storage.flip(slot=42, value=1)"]
+        bit --> list["BitstringStatusList credential<br/>(bit 42 now 1)"]
         list -->|GET /v1/status-lists/revocation| verifier[External verifier]
     end
 ```

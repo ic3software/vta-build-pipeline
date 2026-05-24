@@ -177,8 +177,8 @@ graph TB
     end
 
     subgraph VTC["VTC (independent process)"]
-        VTC_BUNDLE[VtcKeyBundle<br/>(cached at setup)]
-        VTC_SIGNER[LocalSigner<br/>(in-memory)]
+        VTC_BUNDLE["VtcKeyBundle<br/>(cached at setup)"]
+        VTC_SIGNER["LocalSigner<br/>(in-memory)"]
         VTC_CREDS[VMC / VEC / VRC issuance]
         VTC_BUNDLE --> VTC_SIGNER
         VTC_SIGNER --> VTC_CREDS

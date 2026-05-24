@@ -12,8 +12,8 @@ inputs:
     `auth/legacy/authenticate/1.0`)
 outputs:
   - HTTP 200 with `AuthenticateResponse` JSON body
-  - `Set-Cookie: vtc_admin_session=<jwt>; Path=/admin; SameSite=Strict; Secure; HttpOnly`
-  - `Set-Cookie: csrf=<random-32-byte-hex>; Path=/; SameSite=Strict; Secure`
+  - "`Set-Cookie: vtc_admin_session=<jwt>; Path=/admin; SameSite=Strict; Secure; HttpOnly`"
+  - "`Set-Cookie: csrf=<random-32-byte-hex>; Path=/; SameSite=Strict; Secure`"
 trust_assumptions:
   - The DIDComm authenticate message carries the same signed
     challenge required by `auth/legacy/authenticate/1.0`. The

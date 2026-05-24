@@ -12,7 +12,8 @@ inputs:
     (Admin role with empty `allowed_contexts`). Pagination via
     `?cursor=<opaque>&limit=<1..=200>` query parameters.
 outputs:
-  - HTTP 200 with a `Paginated<AuditEnvelope>` body: `items`,
+  - >-
+    HTTP 200 with a `Paginated<AuditEnvelope>` body: `items`,
     `next_cursor`, and an optional `total_estimate` (currently
     always omitted).
 trust_assumptions:

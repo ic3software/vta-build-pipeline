@@ -70,7 +70,7 @@ graph TB
         gen1[gen-1/]
         gen2[gen-2/]
         gen3[gen-3/]
-        current[current → gen-3<br/>(symlink)]
+        current["current → gen-3<br/>(symlink)"]
         root2 --> gen1
         root2 --> gen2
         root2 --> gen3
