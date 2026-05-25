@@ -127,12 +127,12 @@ consolidation. Each fix below ships with a focused regression test.
   effect**: the `pnm/cnm import-key` CLI's
   fall-back-to-multibase branch (active when the wrapping-key
   fetch failed) is removed — the CLI now surfaces the
-  wrapping-key-fetch error directly with a clear message ("the
-  VTA must support sealed-transfer key import — `vta-service ≥
-  0.8`"). The mediator-setup and did-hosting-setup flows are
-  **not** affected: they use `provision-integration` (the VTA
-  mints keys via BIP-32 from the master seed and returns a
-  sealed bundle to the consumer), never `POST /keys/import`.
+  wrapping-key-fetch error directly with a clear message
+  pointing operators at the sealed-transfer wrapping flow. The
+  mediator-setup and did-hosting-setup flows are **not**
+  affected: they use `provision-integration` (the VTA mints keys
+  via BIP-32 from the master seed and returns a sealed bundle to
+  the consumer), never `POST /keys/import`.
 
 External tracker file at
 `~/Downloads/patches/verifiable-trust-infrastructure/REVIEW_2026-04_TRACKER.md`
@@ -161,11 +161,12 @@ roles (see auth-architecture and trust-task-uri-registry design notes).
   role in the webvh-service repo) follow the same rename to
   `did-hosting-witness`. Protocol URIs and module names that refer to
   the `did:webvh` DID-method itself are unchanged.
-- **Version bumps.** vta-sdk 0.7 → 0.8, vti-common 0.7 → 0.8,
-  vta-service 0.7 → 0.8, vta-cli-common 0.7 → 0.8, pnm-cli 0.7 → 0.8,
-  cnm-cli 0.7 → 0.8, vta-enclave 0.7 → 0.8, vtc-service 0.1 → 0.2,
-  didcomm-test 0.6 → 0.7. Workspace `major.minor` pinning ripples
-  through.
+
+  No version bumps in this entry — all four workstreams in the PR
+  land under the current `0.7` / `0.1` / `0.6` workspace versions
+  ("Unreleased"). The `#[deprecated(since = "0.8.0")]` markers on
+  the legacy template constants and builders are forward-looking;
+  they'll become accurate when a future release performs the bump.
 
 ### Auth-architecture consolidation (S1+S2+S3)
 
