@@ -320,6 +320,12 @@ pub async fn get_key(
     key_id: &str,
     channel: &str,
 ) -> Result<KeyRecord, AppError> {
+    // Role floor: Monitor-role principals (intended for metrics / health
+    // only) must not be able to read key records, even when the context
+    // checks below would pass. Belongs at the top of the function so
+    // both REST and DIDComm callers hit it.
+    auth.require_read()?;
+
     let record: KeyRecord = keys_ks
         .get(keys::store_key(key_id))
         .await?
@@ -343,6 +349,11 @@ pub async fn list_keys(
     params: ListKeysParams,
     channel: &str,
 ) -> Result<ListKeysResultBody, AppError> {
+    // Role floor: Monitor-role principals must not enumerate key
+    // records. Per-record context filtering below is a *visibility*
+    // filter, not an authorization gate; the gate is here.
+    auth.require_read()?;
+
     let raw = keys_ks.prefix_iter_raw("key:").await?;
 
     let mut records: Vec<KeyRecord> = Vec::with_capacity(raw.len());
@@ -1070,5 +1081,89 @@ mod tests {
         assert!(!decoded.is_empty(), "decoded signature must be non-empty");
         // Ed25519 signatures are 64 bytes
         assert_eq!(decoded.len(), 64, "Ed25519 signature should be 64 bytes");
+    }
+
+    /// Regression test for the missing role floor on `get_key` /
+    /// `list_keys`. A Monitor-role caller (intended for metrics +
+    /// health endpoints only) must not be able to read key records,
+    /// even when context filtering would otherwise let them through.
+    #[tokio::test]
+    async fn get_key_and_list_keys_reject_monitor_role() {
+        let h = TestHarness::new().await;
+        let admin = h.super_admin_auth();
+
+        // Plant a key under test-ctx so there's something to read.
+        let key = create_key(
+            &h.keys_ks,
+            &h.contexts_ks,
+            &h.seed_store,
+            &h.audit_ks,
+            &admin,
+            CreateKeyParams {
+                key_type: KeyType::Ed25519,
+                derivation_path: None,
+                key_id: Some("monitor-floor-key".into()),
+                mnemonic: None,
+                label: None,
+                context_id: Some("test-ctx".into()),
+            },
+            "test",
+        )
+        .await
+        .expect("seed key");
+
+        // Monitor role with the same context scope still must be refused
+        // by the role floor — the floor sits above the per-record context
+        // check intentionally so DIDComm callers hit it too.
+        let monitor = AuthClaims {
+            did: "did:key:zMonitor".into(),
+            role: Role::Monitor,
+            allowed_contexts: vec!["test-ctx".into()],
+            session_id: "test-session".into(),
+            access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
+        };
+
+        let get_err = get_key(&h.keys_ks, &monitor, &key.key_id, "test")
+            .await
+            .expect_err("monitor must not get_key");
+        assert!(
+            matches!(get_err, AppError::Forbidden(_)),
+            "expected Forbidden, got {get_err:?}"
+        );
+
+        let list_err = list_keys(
+            &h.keys_ks,
+            &monitor,
+            ListKeysParams {
+                status: None,
+                context_id: None,
+                offset: None,
+                limit: None,
+            },
+            "test",
+        )
+        .await
+        .expect_err("monitor must not list_keys");
+        assert!(
+            matches!(list_err, AppError::Forbidden(_)),
+            "expected Forbidden, got {list_err:?}"
+        );
+
+        // Sanity check: a Reader-role caller in the same context CAN
+        // read — the floor is "at least Reader", not "Admin only".
+        let reader = AuthClaims {
+            did: "did:key:zReader".into(),
+            role: Role::Reader,
+            allowed_contexts: vec!["test-ctx".into()],
+            session_id: "test-session".into(),
+            access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
+        };
+        get_key(&h.keys_ks, &reader, &key.key_id, "test")
+            .await
+            .expect("reader-role caller can get_key");
     }
 }
