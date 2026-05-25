@@ -1024,6 +1024,12 @@ pub async fn delete_did_webvh(
     let record = webvh_store::get_did(webvh_ks, did)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("webvh DID not found: {did}")))?;
+    // Mirror the context-scoping that create/get/get_log/list already
+    // enforce on this record. Without this check, any context-scoped
+    // admin could trigger remote deletion (via record.mnemonic) and
+    // local key cleanup of DIDs owned by other contexts on the same
+    // VTA.
+    auth.require_context(&record.context_id)?;
 
     // Resolve server for remote deletion. Track the outcome so the
     // operator can act on a daemon-side orphan rather than seeing
@@ -1373,4 +1379,91 @@ pub(crate) async fn derive_pre_rotation_keys(
     }
 
     Ok((hashes, key_data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::webvh_store;
+    use tempfile::TempDir;
+    use vti_common::acl::Role;
+    use vti_common::config::StoreConfig as VtiStoreConfig;
+
+    /// Pin the post-fetch context-scoping invariant that `delete_did_webvh`
+    /// enforces. A context-A admin must not be able to delete a DID record
+    /// owned by context B, even when the record exists and the caller has
+    /// `Role::Admin`. The full function is heavyweight (DIDComm bridge,
+    /// resolver, seed store) so this exercises the invariant against a
+    /// realistic planted record using the same `webvh_store::get_did` +
+    /// `auth.require_context(&record.context_id)` sequence the operation
+    /// runs first.
+    #[tokio::test]
+    async fn delete_did_webvh_blocks_cross_context_admin() {
+        let dir = TempDir::new().expect("tempdir");
+        let store = Store::open(&VtiStoreConfig {
+            data_dir: dir.path().to_path_buf(),
+        })
+        .expect("open store");
+        let webvh_ks = store.keyspace("webvh").expect("keyspace");
+
+        let now = Utc::now();
+        let did = "did:webvh:QmTest:example.com:abc";
+        webvh_store::store_did(
+            &webvh_ks,
+            &WebvhDidRecord {
+                did: did.to_string(),
+                server_id: "prod".to_string(),
+                mnemonic: "fixture-mnemonic".to_string(),
+                scid: "QmTest".to_string(),
+                context_id: "ctx-b".to_string(),
+                portable: false,
+                log_entry_count: 1,
+                pre_rotation_count: 0,
+                next_fragment_id: 1,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .expect("plant did record");
+
+        let auth_a = AuthClaims {
+            did: "did:key:z6MkCtxAAdmin".to_string(),
+            role: Role::Admin,
+            allowed_contexts: vec!["ctx-a".to_string()],
+            session_id: "test-session".into(),
+            access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
+        };
+
+        // Mirror the prelude `delete_did_webvh` runs before any I/O.
+        auth_a.require_admin().expect("admin floor passes");
+        let record = webvh_store::get_did(&webvh_ks, did)
+            .await
+            .expect("get_did ok")
+            .expect("record present");
+        let err = auth_a
+            .require_context(&record.context_id)
+            .expect_err("context-A admin must not pass require_context for ctx-b");
+        assert!(
+            matches!(err, AppError::Forbidden(_)),
+            "expected Forbidden, got: {err:?}"
+        );
+
+        // Sanity check: same call from a ctx-B admin passes.
+        let auth_b = AuthClaims {
+            did: "did:key:z6MkCtxBAdmin".to_string(),
+            role: Role::Admin,
+            allowed_contexts: vec!["ctx-b".to_string()],
+            session_id: "test-session".into(),
+            access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
+        };
+        auth_b
+            .require_context(&record.context_id)
+            .expect("ctx-B admin passes require_context for ctx-b");
+    }
 }
