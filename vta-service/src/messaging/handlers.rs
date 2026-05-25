@@ -1014,6 +1014,7 @@ pub async fn handle_register_did_with_server(
                 did: body.did,
                 server_id: body.server_id,
                 force: body.force,
+                domain: body.domain,
             },
             vta_did.as_deref(),
             &state.webvh_auth_locks,

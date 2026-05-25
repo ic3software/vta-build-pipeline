@@ -402,15 +402,34 @@ impl WebvhClient {
         Ok(resp)
     }
 
-    /// POST /api/dids — allocate URI (optional path).
-    pub async fn request_uri(&self, path: Option<&str>) -> Result<RequestUriResponse, AppError> {
+    /// POST /api/dids — reserve a path on the remote.
+    ///
+    /// `domain` is the optional hosting domain to target. When the
+    /// remote serves multiple tenant domains, the operator (via pnm
+    /// CLI `--domain`) supplies the target; otherwise the remote
+    /// resolves through caller's ACL default → system default. An
+    /// unknown domain on the remote is rejected as
+    /// `did-management:unknown_domain`.
+    pub async fn request_uri(
+        &self,
+        path: Option<&str>,
+        domain: Option<&str>,
+    ) -> Result<RequestUriResponse, AppError> {
         let url = format!("{}/api/dids", self.server_url);
         info!(method = "POST", %url, "webvh: sending via rest");
-        let body = match path {
-            Some(p) => serde_json::json!({ "path": p }),
-            None => serde_json::json!({}),
-        };
-        let req = self.with_auth(self.http.post(&url)).json(&body);
+        let mut body = serde_json::Map::new();
+        if let Some(p) = path {
+            body.insert("path".to_string(), serde_json::Value::String(p.to_string()));
+        }
+        if let Some(d) = domain {
+            body.insert(
+                "domain".to_string(),
+                serde_json::Value::String(d.to_string()),
+            );
+        }
+        let req = self
+            .with_auth(self.http.post(&url))
+            .json(&serde_json::Value::Object(body));
         let resp = self.send(req, "POST /api/dids").await?;
         resp.json()
             .await
@@ -429,21 +448,44 @@ impl WebvhClient {
     /// `force` is honoured only when the caller is an admin replacing a
     /// slot owned by a different DID. The owner re-registering their
     /// own slot is idempotent and needs no force.
+    ///
+    /// `domain` follows the same resolution chain as `request_uri`.
     pub async fn register_did_atomic(
         &self,
         path: &str,
         did_log: &str,
         force: bool,
+        domain: Option<&str>,
     ) -> Result<RequestUriResponse, AppError> {
         let url = format!("{}/api/dids/register", self.server_url);
         info!(method = "POST", %url, "webvh: sending via rest");
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "path".to_string(),
+            serde_json::Value::String(path.to_string()),
+        );
+        // Send the canonical `didData` + `method` shape introduced by
+        // the v0.1 did-management spec. The remote accepts the legacy
+        // `did_log` shape too (T26 normalisation), but emitting the
+        // canonical form keeps this client off the deprecation path.
+        body.insert(
+            "method".to_string(),
+            serde_json::Value::String("webvh".to_string()),
+        );
+        body.insert(
+            "didData".to_string(),
+            serde_json::Value::String(did_log.to_string()),
+        );
+        body.insert("force".to_string(), serde_json::Value::Bool(force));
+        if let Some(d) = domain {
+            body.insert(
+                "domain".to_string(),
+                serde_json::Value::String(d.to_string()),
+            );
+        }
         let req = self
             .with_auth(self.http.post(&url))
-            .json(&serde_json::json!({
-                "path": path,
-                "did_log": did_log,
-                "force": force,
-            }));
+            .json(&serde_json::Value::Object(body));
         let resp = self.send(req, "POST /api/dids/register").await?;
         resp.json()
             .await
@@ -451,8 +493,26 @@ impl WebvhClient {
     }
 
     /// PUT /api/dids/{mnemonic} — publish DID log.
-    pub async fn publish_did(&self, mnemonic: &str, log_content: &str) -> Result<(), AppError> {
-        let url = format!("{}/api/dids/{mnemonic}", self.server_url);
+    ///
+    /// The `domain` argument is accepted for disambiguation on hosts
+    /// that run per-domain mnemonic namespaces. Hosts with a flat
+    /// namespace ignore it on lookup; a mismatched explicit domain is
+    /// surfaced as `did-management:unknown_domain`.
+    pub async fn publish_did(
+        &self,
+        mnemonic: &str,
+        log_content: &str,
+        domain: Option<&str>,
+    ) -> Result<(), AppError> {
+        let url = if let Some(d) = domain {
+            format!(
+                "{}/api/dids/{mnemonic}?domain={}",
+                self.server_url,
+                url::form_urlencoded::byte_serialize(d.as_bytes()).collect::<String>()
+            )
+        } else {
+            format!("{}/api/dids/{mnemonic}", self.server_url)
+        };
         info!(method = "PUT", %url, "webvh: sending via rest");
         let req = self
             .with_auth(self.http.put(&url))
@@ -463,8 +523,16 @@ impl WebvhClient {
     }
 
     /// DELETE /api/dids/{mnemonic}.
-    pub async fn delete_did(&self, mnemonic: &str) -> Result<(), AppError> {
-        let url = format!("{}/api/dids/{mnemonic}", self.server_url);
+    pub async fn delete_did(&self, mnemonic: &str, domain: Option<&str>) -> Result<(), AppError> {
+        let url = if let Some(d) = domain {
+            format!(
+                "{}/api/dids/{mnemonic}?domain={}",
+                self.server_url,
+                url::form_urlencoded::byte_serialize(d.as_bytes()).collect::<String>()
+            )
+        } else {
+            format!("{}/api/dids/{mnemonic}", self.server_url)
+        };
         info!(method = "DELETE", %url, "webvh: sending via rest");
         let req = self.with_auth(self.http.delete(&url));
         self.send(req, &format!("DELETE /api/dids/{mnemonic}"))
@@ -472,17 +540,71 @@ impl WebvhClient {
         Ok(())
     }
 
-    /// POST /api/dids/check — check if a path is available.
-    pub async fn check_path(&self, path: &str) -> Result<CheckPathResponse, AppError> {
+    /// POST /api/dids/check — check whether a path is available, with
+    /// optional atomic reservation (v0.1 `did-management/did/check-name/0.1`
+    /// `reserve` flag).
+    pub async fn check_path(
+        &self,
+        path: &str,
+        reserve: bool,
+        domain: Option<&str>,
+    ) -> Result<CheckPathResponse, AppError> {
         let url = format!("{}/api/dids/check", self.server_url);
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "path".to_string(),
+            serde_json::Value::String(path.to_string()),
+        );
+        if reserve {
+            body.insert("reserve".to_string(), serde_json::Value::Bool(true));
+        }
+        if let Some(d) = domain {
+            body.insert(
+                "domain".to_string(),
+                serde_json::Value::String(d.to_string()),
+            );
+        }
         let req = self
             .with_auth(self.http.post(&url))
-            .json(&serde_json::json!({ "path": path }));
+            .json(&serde_json::Value::Object(body));
         let resp = self.send(req, "POST /api/dids/check").await?;
         resp.json()
             .await
             .map_err(|e| AppError::Internal(format!("webvh-server response parse error: {e}")))
     }
+
+    /// GET /api/me/domains — list the hosting domains the caller's
+    /// ACL scope permits on this server. Read-only; used by the pnm
+    /// CLI to discover legitimate `--domain` values before creating
+    /// a DID.
+    pub async fn list_my_domains(&self) -> Result<MyDomainsResponse, AppError> {
+        let url = format!("{}/api/me/domains", self.server_url);
+        info!(method = "GET", %url, "webvh: sending via rest");
+        let req = self.with_auth(self.http.get(&url));
+        let resp = self.send(req, "GET /api/me/domains").await?;
+        resp.json()
+            .await
+            .map_err(|e| AppError::Internal(format!("webvh-server response parse error: {e}")))
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyDomainsResponse {
+    pub domains: Vec<MyDomainEntry>,
+    pub default: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyDomainEntry {
+    pub name: String,
+    #[serde(default)]
+    pub default_domain: bool,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[cfg(test)]

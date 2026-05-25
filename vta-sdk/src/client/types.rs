@@ -401,6 +401,10 @@ pub struct CreateDidWebvhRequest {
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Optional explicit hosting domain on the target server. See
+    /// [`crate::protocols::did_management::create::CreateDidWebvhBody::domain`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub portable: bool,

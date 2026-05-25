@@ -66,6 +66,106 @@ pub async fn list_webvh_servers(
     Ok(ListWebvhServersResultBody { servers })
 }
 
+/// Authenticate to the registered hosting server and relay its
+/// `/api/me/domains` view to the caller. Used by
+/// `pnm did-mgmt list-domains` and the interactive `--domain`
+/// prompt in `create-did` / `register-did`.
+///
+/// Only the REST transport is supported today — the v0.8
+/// `did-management/me/domains/...` task is REST-only on the
+/// hosting server side. For DIDComm-only servers we return an
+/// empty list and a `None` default so the CLI falls back to the
+/// server-side resolution chain rather than blocking the user.
+#[allow(clippy::too_many_arguments)]
+pub async fn list_webvh_server_domains(
+    keys_ks: &KeyspaceHandle,
+    imported_ks: &KeyspaceHandle,
+    audit_ks: &KeyspaceHandle,
+    webvh_ks: &KeyspaceHandle,
+    seed_store: &dyn crate::keys::seed_store::SeedStore,
+    auth: &AuthClaims,
+    did_resolver: &DIDCacheClient,
+    didcomm_bridge: &std::sync::Arc<crate::didcomm_bridge::DIDCommBridge>,
+    auth_locks: &crate::operations::did_webvh::WebvhAuthLocks,
+    vta_did: Option<&str>,
+    server_id: &str,
+) -> Result<vta_sdk::protocols::did_management::servers::ListWebvhServerDomainsResultBody, AppError>
+{
+    use vta_sdk::protocols::did_management::servers::{
+        ListWebvhServerDomainsResultBody, WebvhServerDomainEntry,
+    };
+
+    // Any authenticated caller may discover hosting domains —
+    // identical scope rule as `list_webvh_servers`.
+    let server = webvh_store::get_server(webvh_ks, server_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("webvh server not found: {server_id}")))?;
+
+    let vta_did_value = vta_did.ok_or_else(|| {
+        AppError::Validation(
+            "VTA DID is not configured — complete `vta setup` before listing hosting domains."
+                .to_string(),
+        )
+    })?;
+
+    let identity = crate::operations::did_webvh::auth_cache::load_vta_webvh_signing_identity(
+        keys_ks,
+        imported_ks,
+        seed_store,
+        audit_ks,
+        vta_did_value,
+    )
+    .await?;
+    let auth_ctx = crate::operations::did_webvh::auth_cache::AuthContext {
+        webvh_ks,
+        identity: &identity,
+        locks: auth_locks,
+    };
+
+    let transport = crate::operations::did_webvh::WebvhTransport::from_server_authenticated(
+        &server,
+        did_resolver,
+        didcomm_bridge,
+        &auth_ctx,
+    )
+    .await?;
+    let entries = match transport {
+        crate::operations::did_webvh::WebvhTransport::Rest(c) => {
+            let resp = c.list_my_domains().await?;
+            ListWebvhServerDomainsResultBody {
+                domains: resp
+                    .domains
+                    .into_iter()
+                    .map(|d| WebvhServerDomainEntry {
+                        name: d.name,
+                        default_domain: d.default_domain,
+                        status: d.status,
+                        label: d.label,
+                    })
+                    .collect(),
+                default: resp.default,
+            }
+        }
+        crate::operations::did_webvh::WebvhTransport::DIDComm { .. } => {
+            // DIDComm-only servers don't have a `me/domains` op
+            // in the v0.8 surface; the CLI falls back to the
+            // server's resolution chain.
+            ListWebvhServerDomainsResultBody {
+                domains: vec![],
+                default: None,
+            }
+        }
+    };
+    info!(
+        channel = "rest",
+        caller = %auth.did,
+        server_id = %server_id,
+        count = entries.domains.len(),
+        "webvh server hosting domains listed"
+    );
+    Ok(entries)
+}
+
 pub async fn update_webvh_server(
     webvh_ks: &KeyspaceHandle,
     auth: &AuthClaims,

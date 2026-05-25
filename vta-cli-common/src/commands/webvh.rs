@@ -147,9 +147,10 @@ pub async fn cmd_webvh_did_register_server(
     did: &str,
     server_id: &str,
     force: bool,
+    domain: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let result = client
-        .register_did_with_server(did, server_id, force)
+        .register_did_with_server(did, server_id, force, domain.as_deref())
         .await?;
     println!("DID registered with WebVH server.");
     println!("  DID:        {}", result.did);
@@ -330,6 +331,7 @@ pub async fn cmd_webvh_did_create_with_files(
     server_id: Option<String>,
     url: Option<String>,
     path: Option<String>,
+    domain: Option<String>,
     label: Option<String>,
     portable: bool,
     add_mediator_service: bool,
@@ -379,6 +381,7 @@ pub async fn cmd_webvh_did_create_with_files(
         server_id,
         url,
         path,
+        domain,
         label,
         portable,
         add_mediator_service,

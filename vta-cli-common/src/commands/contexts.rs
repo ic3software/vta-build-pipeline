@@ -512,6 +512,9 @@ pub async fn cmd_context_provision(
             server_id: opts.server_id,
             url: opts.did_url,
             path: None,
+            // Context-bootstrap path: no per-DID domain override.
+            // The server's caller-default → system-default resolves.
+            domain: None,
             label: Some(id.to_string()),
             portable: opts.portable,
             add_mediator_service: opts.add_mediator_service,

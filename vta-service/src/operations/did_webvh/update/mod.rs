@@ -665,6 +665,7 @@ mod pre_rotation_e2e_tests {
                 server_id: None,
                 url: Some("https://example.com/.well-known/did/did.jsonl".into()),
                 path: None,
+                domain: None,
                 label: Some("e2e".into()),
                 portable: true,
                 add_mediator_service: false,

@@ -37,16 +37,41 @@ use crate::didcomm_bridge::DIDCommBridge;
 use crate::error::AppError;
 use crate::webvh_client::RequestUriResponse;
 
-// WebVH DIDComm protocol message types
-const MSG_DID_REQUEST: &str = "https://affinidi.com/webvh/1.0/did/request";
-const MSG_DID_OFFER: &str = "https://affinidi.com/webvh/1.0/did/offer";
-const MSG_DID_PUBLISH: &str = "https://affinidi.com/webvh/1.0/did/publish";
-const MSG_DID_CONFIRM: &str = "https://affinidi.com/webvh/1.0/did/confirm";
-const MSG_DID_REGISTER: &str = "https://affinidi.com/webvh/1.0/did/register";
-const MSG_DID_REGISTER_CONFIRM: &str = "https://affinidi.com/webvh/1.0/did/register-confirm";
-const MSG_DELETE: &str = "https://affinidi.com/webvh/1.0/did/delete";
-const MSG_DELETE_CONFIRM: &str = "https://affinidi.com/webvh/1.0/did/delete-confirm";
-const MSG_PROBLEM_REPORT: &str = "https://affinidi.com/webvh/1.0/did/problem-report";
+// did-management Trust-Task URIs (v0.1, hosted-DID category).
+//
+// Replaces the legacy `https://affinidi.com/webvh/1.0/did/...` constants
+// this client used through v0.6. The remote `did-hosting-control`
+// accepts both URI families through its alias map during the v0.7
+// deprecation window — see `did-hosting-common::v1_aliases` in
+// affinidi-webvh-service — and drops the legacy ones in v0.8.0. We move
+// outbound traffic to the v0.1 URIs now so this client isn't the source
+// of deprecation-warn log lines on every hosting host the VTA talks to.
+//
+// Spec drafts live in `dtgwg-trust-tasks-tf` under
+// `specs/did-management/...`.
+//
+// Notable shape changes from the legacy surface:
+// - `did/request/1.0` (slot reservation) is absorbed by
+//   `did/check-name/0.1` with `reserve: true`. The two-step
+//   reservation-then-publish flow still works; one round-trip fewer.
+// - Paired confirm/offer types collapse to `<base>#response`.
+// - Every slot-touching task accepts an optional `domain` field so
+//   the VTA can direct provisioning at the right hosting domain when
+//   the same control plane serves multiple tenants.
+const TASK_DID_CHECK_NAME: &str = "https://trusttasks.org/spec/did-management/did/check-name/0.1";
+const TASK_DID_CHECK_NAME_RESPONSE: &str =
+    "https://trusttasks.org/spec/did-management/did/check-name/0.1#response";
+const TASK_DID_PUBLISH: &str = "https://trusttasks.org/spec/did-management/did/publish/0.1";
+const TASK_DID_PUBLISH_RESPONSE: &str =
+    "https://trusttasks.org/spec/did-management/did/publish/0.1#response";
+const TASK_DID_REGISTER: &str = "https://trusttasks.org/spec/did-management/did/register/0.1";
+const TASK_DID_REGISTER_RESPONSE: &str =
+    "https://trusttasks.org/spec/did-management/did/register/0.1#response";
+const TASK_DID_DELETE: &str = "https://trusttasks.org/spec/did-management/did/delete/0.1";
+const TASK_DID_DELETE_RESPONSE: &str =
+    "https://trusttasks.org/spec/did-management/did/delete/0.1#response";
+const TASK_DID_PROBLEM_REPORT: &str =
+    "https://trusttasks.org/spec/did-management/did/problem-report/0.1";
 
 /// DIDComm-based client for communicating with a WebVH server.
 ///
@@ -62,92 +87,234 @@ impl<'a> WebvhDIDCommClient<'a> {
         Self { bridge, server_did }
     }
 
-    /// Request a URI allocation from the WebVH server.
-    pub async fn request_uri(&self, path: Option<&str>) -> Result<RequestUriResponse, AppError> {
-        let body = match path {
-            Some(p) => serde_json::json!({ "path": p }),
-            None => serde_json::json!({}),
-        };
+    /// Reserve a path on the remote DID-hosting server (v0.1
+    /// `did-management/did/check-name/0.1` with `reserve: true`).
+    ///
+    /// Replaces the legacy `did/request/1.0` round-trip. The
+    /// `check-name` task absorbs both modes: a pure availability
+    /// probe (omit `reserve`), and the atomic check-and-reserve
+    /// (`reserve: true`). This client uses the reserve mode so the
+    /// behaviour matches the prior `request_uri` semantics.
+    ///
+    /// `domain` is the optional hosting domain to target. When the
+    /// remote serves multiple tenant domains (the common case for a
+    /// VTA-managed `did-hosting-control` backplane), the operator
+    /// supplies the target; otherwise the remote falls back to the
+    /// caller's ACL default → system default. An unknown domain is
+    /// rejected with `did-management:unknown_domain`.
+    pub async fn request_uri(
+        &self,
+        path: Option<&str>,
+        domain: Option<&str>,
+    ) -> Result<RequestUriResponse, AppError> {
+        let mut body = serde_json::Map::new();
+        // check-name requires a path; the legacy `request_uri` mode
+        // also accepted an absent path (server-generated mnemonic).
+        // We preserve that behaviour by passing empty string when the
+        // caller wants the host to mint one — the remote interprets
+        // an empty path under `reserve: true` as "pick a mnemonic
+        // for me."
+        body.insert(
+            "path".to_string(),
+            serde_json::Value::String(path.unwrap_or("").to_string()),
+        );
+        body.insert("reserve".to_string(), serde_json::Value::Bool(true));
+        if let Some(d) = domain {
+            body.insert(
+                "domain".to_string(),
+                serde_json::Value::String(d.to_string()),
+            );
+        }
 
         let response = self
             .bridge
             .send_and_wait(
                 self.server_did,
-                MSG_DID_REQUEST,
-                body,
-                MSG_DID_OFFER,
-                MSG_PROBLEM_REPORT,
+                TASK_DID_CHECK_NAME,
+                serde_json::Value::Object(body),
+                TASK_DID_CHECK_NAME_RESPONSE,
+                TASK_DID_PROBLEM_REPORT,
                 30,
             )
             .await?;
 
-        serde_json::from_value(response.body)
-            .map_err(|e| AppError::Internal(format!("failed to parse did/offer response: {e}")))
+        // The v0.1 check-name response shape carries `available`,
+        // `reserved`, and (when reserved) `mnemonic` + `didUrl`.
+        // Translate into the local `RequestUriResponse` shape the
+        // rest of vta-service expects.
+        let body: serde_json::Value = response.body;
+        let reserved = body
+            .get("reserved")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !reserved {
+            let available = body
+                .get("available")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            return Err(AppError::Internal(format!(
+                "remote refused reservation (available={available}); \
+                 check-name with reserve=true expected to succeed"
+            )));
+        }
+        let mnemonic = body
+            .get("mnemonic")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AppError::Internal("check-name response missing `mnemonic`".to_string())
+            })?
+            .to_string();
+        let did_url = body
+            .get("didUrl")
+            .or_else(|| body.get("did_url"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Internal("check-name response missing `didUrl`".to_string()))?
+            .to_string();
+        Ok(RequestUriResponse { mnemonic, did_url })
     }
 
-    /// Atomic claim-and-publish — see [`crate::webvh_client::WebvhClient::register_did_atomic`].
+    /// Atomic claim-and-publish (v0.1 `did-management/did/register/0.1`).
+    ///
+    /// Replaces the legacy `did/register/1.0` URI. Wire shape stays
+    /// the same — `path`, `didData`, `force` — plus the optional
+    /// `domain` and `method` discriminator the v0.1 surface introduces.
     pub async fn register_did_atomic(
         &self,
         path: &str,
         did_log: &str,
         force: bool,
+        domain: Option<&str>,
     ) -> Result<RequestUriResponse, AppError> {
-        let body = serde_json::json!({
-            "path": path,
-            "did_log": did_log,
-            "force": force,
-        });
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "path".to_string(),
+            serde_json::Value::String(path.to_string()),
+        );
+        body.insert(
+            "method".to_string(),
+            serde_json::Value::String("webvh".to_string()),
+        );
+        // v0.1 spec names this field `didData`; the legacy
+        // did-hosting-control alias map normalises legacy `did_log`
+        // → `didData` server-side, so passing the canonical name
+        // works on both old and new hosts.
+        body.insert(
+            "didData".to_string(),
+            serde_json::Value::String(did_log.to_string()),
+        );
+        body.insert("force".to_string(), serde_json::Value::Bool(force));
+        if let Some(d) = domain {
+            body.insert(
+                "domain".to_string(),
+                serde_json::Value::String(d.to_string()),
+            );
+        }
 
         let response = self
             .bridge
             .send_and_wait(
                 self.server_did,
-                MSG_DID_REGISTER,
-                body,
-                MSG_DID_REGISTER_CONFIRM,
-                MSG_PROBLEM_REPORT,
+                TASK_DID_REGISTER,
+                serde_json::Value::Object(body),
+                TASK_DID_REGISTER_RESPONSE,
+                TASK_DID_PROBLEM_REPORT,
                 30,
             )
             .await?;
 
-        serde_json::from_value(response.body).map_err(|e| {
-            AppError::Internal(format!(
-                "failed to parse did/register-confirm response: {e}"
-            ))
-        })
+        // v0.1 response carries `{ record: DidRecord }`; we project
+        // the mnemonic + didUrl out of it for the local response shape.
+        let record = response
+            .body
+            .get("record")
+            .cloned()
+            .or_else(|| {
+                // Legacy did-hosting-control responses (still emitted
+                // by pre-v0.7 hosts) flatten the fields at the top
+                // level. Fall back to that shape transparently.
+                Some(response.body.clone())
+            })
+            .unwrap_or(serde_json::Value::Null);
+        let mnemonic = record
+            .get("mnemonic")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Internal("register response missing `mnemonic`".to_string()))?
+            .to_string();
+        let did_url = record
+            .get("didUrl")
+            .or_else(|| record.get("did_url"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Internal("register response missing `didUrl`".to_string()))?
+            .to_string();
+        Ok(RequestUriResponse { mnemonic, did_url })
     }
 
-    /// Publish a DID log to the WebVH server.
-    pub async fn publish_did(&self, mnemonic: &str, log_content: &str) -> Result<(), AppError> {
-        let body = serde_json::json!({
-            "mnemonic": mnemonic,
-            "did_log": log_content,
-        });
+    /// Publish a DID log to the remote (v0.1
+    /// `did-management/did/publish/0.1`). The `domain` argument is
+    /// accepted for disambiguation when the remote runs per-domain
+    /// mnemonic namespaces; consumers that haven't enabled per-domain
+    /// namespacing treat it as a no-op on the lookup.
+    pub async fn publish_did(
+        &self,
+        mnemonic: &str,
+        log_content: &str,
+        domain: Option<&str>,
+    ) -> Result<(), AppError> {
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "mnemonic".to_string(),
+            serde_json::Value::String(mnemonic.to_string()),
+        );
+        body.insert(
+            "method".to_string(),
+            serde_json::Value::String("webvh".to_string()),
+        );
+        body.insert(
+            "didData".to_string(),
+            serde_json::Value::String(log_content.to_string()),
+        );
+        if let Some(d) = domain {
+            body.insert(
+                "domain".to_string(),
+                serde_json::Value::String(d.to_string()),
+            );
+        }
 
         self.bridge
             .send_and_wait(
                 self.server_did,
-                MSG_DID_PUBLISH,
-                body,
-                MSG_DID_CONFIRM,
-                MSG_PROBLEM_REPORT,
+                TASK_DID_PUBLISH,
+                serde_json::Value::Object(body),
+                TASK_DID_PUBLISH_RESPONSE,
+                TASK_DID_PROBLEM_REPORT,
                 30,
             )
             .await?;
         Ok(())
     }
 
-    /// Delete a DID from the WebVH server.
-    pub async fn delete_did(&self, mnemonic: &str) -> Result<(), AppError> {
-        let body = serde_json::json!({ "mnemonic": mnemonic });
+    /// Soft-delete a DID on the remote (v0.1
+    /// `did-management/did/delete/0.1`).
+    pub async fn delete_did(&self, mnemonic: &str, domain: Option<&str>) -> Result<(), AppError> {
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "mnemonic".to_string(),
+            serde_json::Value::String(mnemonic.to_string()),
+        );
+        if let Some(d) = domain {
+            body.insert(
+                "domain".to_string(),
+                serde_json::Value::String(d.to_string()),
+            );
+        }
 
         self.bridge
             .send_and_wait(
                 self.server_did,
-                MSG_DELETE,
-                body,
-                MSG_DELETE_CONFIRM,
-                MSG_PROBLEM_REPORT,
+                TASK_DID_DELETE,
+                serde_json::Value::Object(body),
+                TASK_DID_DELETE_RESPONSE,
+                TASK_DID_PROBLEM_REPORT,
                 30,
             )
             .await?;

@@ -41,6 +41,32 @@ impl VtaClient {
         .await
     }
 
+    /// Fetch the registered hosting server's `/api/me/domains` view
+    /// (caller-scoped subset of hosting domains, with the system
+    /// default flagged). Used by `pnm did-mgmt list-domains` and the
+    /// interactive `--domain` prompt in `create-did` /
+    /// `register-did`. The VTA relays the call after authenticating
+    /// to the server with its own credentials.
+    pub async fn list_webvh_server_domains(
+        &self,
+        server_id: &str,
+    ) -> Result<crate::protocols::did_management::servers::ListWebvhServerDomainsResultBody, VtaError>
+    {
+        self.rpc(
+            did_management::LIST_WEBVH_SERVER_DOMAINS,
+            serde_json::json!({ "server_id": server_id }),
+            did_management::LIST_WEBVH_SERVER_DOMAINS_RESULT,
+            30,
+            |c, url| {
+                c.get(format!(
+                    "{url}/webvh/servers/{}/domains",
+                    encode_path_segment(server_id)
+                ))
+            },
+        )
+        .await
+    }
+
     pub async fn update_webvh_server(
         &self,
         id: &str,
@@ -86,12 +112,14 @@ impl VtaClient {
         did: &str,
         server_id: &str,
         force: bool,
+        domain: Option<&str>,
     ) -> Result<crate::protocols::did_management::servers::RegisterDidWithServerResultBody, VtaError>
     {
         let body = crate::protocols::did_management::servers::RegisterDidWithServerBody {
             did: did.to_string(),
             server_id: server_id.to_string(),
             force,
+            domain: domain.map(|d| d.to_string()),
         };
         self.rpc(
             did_management::REGISTER_DID_WITH_SERVER,

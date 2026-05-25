@@ -164,6 +164,9 @@ pub async fn run_create_did(
         server_id: Some(server_id),
         url: None,
         path,
+        // CLI-driven flow: no per-DID domain selection here. Wired
+        // via `--domain` in pnm-cli's surface.
+        domain: None,
         label,
         portable,
         add_mediator_service: mediator_service,
@@ -528,6 +531,7 @@ pub async fn run_register_did(
             did,
             server_id: server,
             force,
+            domain: None,
         },
         config.vta_did.as_deref(),
         &auth_locks,

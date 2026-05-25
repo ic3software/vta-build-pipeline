@@ -1081,6 +1081,7 @@ async fn build_wizard_did(
         server_id: None,
         url: Some(url_str.clone()),
         path: None,
+        domain: None,
         label: Some(label.to_string()),
         portable,
         add_mediator_service,

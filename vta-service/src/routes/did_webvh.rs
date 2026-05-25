@@ -67,6 +67,41 @@ pub async fn list_servers_handler(
     Ok(Json(result))
 }
 
+/// `GET /webvh/servers/:id/domains` — relay the registered hosting
+/// server's `/api/me/domains` view to the caller. Used by
+/// `pnm did-mgmt list-domains` and by the interactive `--domain`
+/// prompt in `pnm did-mgmt dids create` / `register`. Authentication
+/// to the hosting server uses the VTA's own credentials.
+pub async fn list_server_domains_handler(
+    auth: AuthClaims,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<
+    Json<vta_sdk::protocols::did_management::servers::ListWebvhServerDomainsResultBody>,
+    AppError,
+> {
+    let did_resolver = state
+        .did_resolver
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("DID resolver not available".into()))?;
+    let config = state.config.read().await;
+    let result = operations::did_webvh::list_webvh_server_domains(
+        &state.keys_ks,
+        &state.imported_ks,
+        &state.audit_ks,
+        &state.webvh_ks,
+        &*state.seed_store,
+        &auth,
+        did_resolver,
+        &state.didcomm_bridge,
+        &state.webvh_auth_locks,
+        config.vta_did.as_deref(),
+        &id,
+    )
+    .await?;
+    Ok(Json(result))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateServerRequest {
     pub label: Option<String>,
@@ -325,6 +360,7 @@ pub async fn register_did_with_server_handler(
             did: body.did,
             server_id: body.server_id,
             force: body.force,
+            domain: body.domain,
         },
         vta_did.as_deref(),
         &state.webvh_auth_locks,

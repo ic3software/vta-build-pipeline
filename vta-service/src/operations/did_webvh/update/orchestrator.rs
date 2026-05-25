@@ -414,6 +414,12 @@ pub async fn update_did_webvh(
             &server,
             &record.mnemonic,
             &new_log_jsonl,
+            // Update paths follow the slot's existing domain — the
+            // remote already records it on the slot. Passing None
+            // lets the remote use the recorded value; a host that
+            // does per-domain mnemonic namespacing would resolve via
+            // the slot lookup.
+            None,
         )
         .await
         .map_err(|e| UpdateDidWebvhError::Publish(format!("publish_did: {e}")))?;

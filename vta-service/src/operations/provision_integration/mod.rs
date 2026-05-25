@@ -399,6 +399,10 @@ pub async fn provision_integration(
                 server_id: params_server_id,
                 url: params_url,
                 path: webvh_path,
+                // Provision-integration runs against a freshly-
+                // bootstrapped tenant context — no explicit domain
+                // selection; let the remote resolve to its default.
+                domain: None,
                 label: Some(client_did.clone()),
                 portable: true,
                 add_mediator_service: false,

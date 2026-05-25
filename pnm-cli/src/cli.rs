@@ -590,6 +590,15 @@ pub(crate) enum WebvhCommands {
         /// Optional path on the WebVH server
         #[arg(long)]
         path: Option<String>,
+        /// Optional hosting domain on the target server. When the
+        /// remote backplane serves multiple tenant domains, name the
+        /// one this DID should live on; otherwise the server resolves
+        /// via your ACL default → its system default. An unknown
+        /// domain comes back as a `did-management:unknown_domain`
+        /// error. Use `pnm did-mgmt list-domains --server <id>` to
+        /// see what's configured. Ignored in serverless mode.
+        #[arg(long)]
+        domain: Option<String>,
         /// Human-readable label
         #[arg(long)]
         label: Option<String>,
@@ -705,6 +714,24 @@ pub(crate) enum WebvhCommands {
         /// always succeeds without `--force`.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Optional hosting domain on the target server. When the
+        /// remote serves multiple tenant domains, name the one this
+        /// DID should land on; otherwise the server resolves via the
+        /// usual chain.
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// List hosting domains a server makes available to this VTA.
+    ///
+    /// Walks the configured webvh server's `GET /api/me/domains`
+    /// endpoint and prints the caller-scoped subset. Use this to
+    /// discover legitimate `--domain` values for `pnm did-mgmt
+    /// create-did` / `register-did` before the first call. The
+    /// system default is flagged with `(default)`.
+    ListDomains {
+        /// Registered server id (from `pnm webvh add-server`).
+        #[arg(long)]
+        server: String,
     },
     /// List WebVH DIDs
     ListDids {
@@ -816,6 +843,12 @@ pub(crate) enum DidMgmtDidCommands {
         /// Optional path on the DID-hosting server
         #[arg(long)]
         path: Option<String>,
+        /// Optional hosting domain on the target server. Discover
+        /// available values with `pnm did-mgmt list-domains --server <id>`.
+        /// Omit to use the server's caller-default → system-default
+        /// resolution chain. Ignored in serverless mode.
+        #[arg(long)]
+        domain: Option<String>,
         /// Human-readable label
         #[arg(long)]
         label: Option<String>,
@@ -924,6 +957,10 @@ pub(crate) enum DidMgmtDidCommands {
         /// always succeeds without `--force`.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Optional hosting domain on the target server. Discover
+        /// available values with `pnm did-mgmt list-domains --server <id>`.
+        #[arg(long)]
+        domain: Option<String>,
     },
     /// List DIDs.
     List {
@@ -957,6 +994,18 @@ pub(crate) enum DidMgmtDidCommands {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// List the hosting domains a registered server makes available.
+    ///
+    /// Calls the server's `GET /api/me/domains` endpoint and prints
+    /// the caller-scoped subset. Use this to discover legitimate
+    /// `--domain` values for `pnm did-mgmt dids create` /
+    /// `pnm did-mgmt dids register` before the first call. The
+    /// system default is flagged with `(default)`.
+    ListDomains {
+        /// Registered server id (from `pnm did-mgmt servers add`).
+        #[arg(long)]
+        server: String,
+    },
 }
 
 impl From<DidMgmtCommands> for WebvhCommands {
@@ -982,6 +1031,7 @@ impl From<DidMgmtCommands> for WebvhCommands {
                     server,
                     did_url,
                     path,
+                    domain,
                     label,
                     portable,
                     mediator_service,
@@ -1000,6 +1050,7 @@ impl From<DidMgmtCommands> for WebvhCommands {
                     server,
                     did_url,
                     path,
+                    domain,
                     label,
                     portable,
                     mediator_service,
@@ -1035,15 +1086,24 @@ impl From<DidMgmtCommands> for WebvhCommands {
                     label,
                     no_confirm,
                 },
-                DidMgmtDidCommands::Register { did, server, force } => {
-                    WebvhCommands::RegisterDid { did, server, force }
-                }
+                DidMgmtDidCommands::Register {
+                    did,
+                    server,
+                    force,
+                    domain,
+                } => WebvhCommands::RegisterDid {
+                    did,
+                    server,
+                    force,
+                    domain,
+                },
                 DidMgmtDidCommands::List { context, server } => {
                     WebvhCommands::ListDids { context, server }
                 }
                 DidMgmtDidCommands::Get { did } => WebvhCommands::GetDid { did },
                 DidMgmtDidCommands::Delete { did } => WebvhCommands::DeleteDid { did },
                 DidMgmtDidCommands::GetLog { did, out } => WebvhCommands::DidLog { did, out },
+                DidMgmtDidCommands::ListDomains { server } => WebvhCommands::ListDomains { server },
             },
         }
     }

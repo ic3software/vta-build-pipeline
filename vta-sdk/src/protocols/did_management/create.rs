@@ -10,6 +10,15 @@ pub struct CreateDidWebvhBody {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Optional explicit hosting domain on the target server. When
+    /// the server hosts multiple tenant domains, the caller may
+    /// supply this to direct the new DID at a specific one;
+    /// otherwise the server resolves via caller's ACL default →
+    /// system default. An unknown domain on the server is rejected
+    /// with `did-management:unknown_domain`. Ignored in serverless
+    /// mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

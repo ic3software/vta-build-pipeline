@@ -226,6 +226,7 @@ pub async fn publish_log_to_server(
     server: &WebvhServerRecord,
     mnemonic: &str,
     log_content: &str,
+    domain: Option<&str>,
 ) -> Result<(), AppError> {
     let identity =
         load_vta_webvh_signing_identity(keys_ks, imported_ks, seed_store, audit_ks, vta_did)
@@ -243,7 +244,7 @@ pub async fn publish_log_to_server(
     )
     .await?;
     transport
-        .publish_did_authenticated(mnemonic, log_content, &auth_ctx, server)
+        .publish_did_authenticated(mnemonic, log_content, domain, &auth_ctx, server)
         .await
 }
 
@@ -262,6 +263,7 @@ pub async fn delete_log_on_server(
     vta_did: &str,
     server: &WebvhServerRecord,
     mnemonic: &str,
+    domain: Option<&str>,
 ) -> Result<(), AppError> {
     let identity =
         load_vta_webvh_signing_identity(keys_ks, imported_ks, seed_store, audit_ks, vta_did)
@@ -279,7 +281,7 @@ pub async fn delete_log_on_server(
     )
     .await?;
     transport
-        .delete_did_authenticated(mnemonic, &auth_ctx, server)
+        .delete_did_authenticated(mnemonic, domain, &auth_ctx, server)
         .await
 }
 
@@ -300,6 +302,7 @@ pub async fn register_did_atomic_on_server(
     path: &str,
     did_log: &str,
     force: bool,
+    domain: Option<&str>,
 ) -> Result<crate::webvh_client::RequestUriResponse, AppError> {
     let identity =
         load_vta_webvh_signing_identity(keys_ks, imported_ks, seed_store, audit_ks, vta_did)
@@ -317,7 +320,7 @@ pub async fn register_did_atomic_on_server(
     )
     .await?;
     transport
-        .register_did_atomic_authenticated(path, did_log, force, &auth_ctx, server)
+        .register_did_atomic_authenticated(path, did_log, force, domain, &auth_ctx, server)
         .await
 }
 

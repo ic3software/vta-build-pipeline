@@ -149,6 +149,7 @@ pub async fn run_create_did_webvh(
         server_id: None,
         url: Some(url_str.clone()),
         path: None,
+        domain: None,
         label: Some(label.to_string()),
         portable,
         add_mediator_service: false, // handled via did_document template

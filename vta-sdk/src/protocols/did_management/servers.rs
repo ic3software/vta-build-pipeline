@@ -20,6 +20,38 @@ pub struct ListWebvhServersResultBody {
     pub servers: Vec<WebvhServerRecord>,
 }
 
+/// `list-webvh-server-domains` — relay the registered hosting
+/// server's `/api/me/domains` response (caller-scoped subset of
+/// hosting domains, with the system default flagged). Used by
+/// `pnm did-mgmt list-domains` and the interactive `--domain`
+/// prompt in `create-did` / `register-did`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListWebvhServerDomainsBody {
+    pub server_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListWebvhServerDomainsResultBody {
+    pub domains: Vec<WebvhServerDomainEntry>,
+    /// System-default domain on the server, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebvhServerDomainEntry {
+    pub name: String,
+    #[serde(default)]
+    pub default_domain: bool,
+    /// Server-reported status (`"active"` or `"disabled"`).
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateWebvhServerBody {
     pub id: String,
@@ -57,6 +89,13 @@ pub struct RegisterDidWithServerBody {
     pub server_id: String,
     #[serde(default)]
     pub force: bool,
+    /// Optional explicit hosting domain on the target server. When
+    /// the server hosts multiple tenant domains, this directs the
+    /// register call at a specific one; otherwise the remote
+    /// resolves via caller's ACL default → system default. An
+    /// unknown domain is rejected with `did-management:unknown_domain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

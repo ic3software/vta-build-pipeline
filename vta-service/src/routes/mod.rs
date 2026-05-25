@@ -440,6 +440,10 @@ pub fn router_with_cors(allowed_origins: &[String], trust_xff: bool) -> Router<A
                 .delete(did_webvh::remove_server_handler),
         )
         .route(
+            "/webvh/servers/{id}/domains",
+            get(did_webvh::list_server_domains_handler),
+        )
+        .route(
             "/webvh/dids",
             get(did_webvh::list_dids_handler).post(did_webvh::create_did_handler),
         )

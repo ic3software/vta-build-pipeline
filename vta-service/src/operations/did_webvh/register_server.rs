@@ -52,6 +52,11 @@ pub struct RegisterDidWithServerParams {
     /// that case). Maps to the `force` field on the host's
     /// `did/register` request.
     pub force: bool,
+    /// Optional explicit hosting domain on the target server. When
+    /// the host serves multiple tenant domains, this directs the
+    /// register call at a specific one. Defaults to the host's
+    /// caller-default → system-default chain when omitted.
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +208,12 @@ pub async fn register_did_with_server(
         &request_path,
         &did_log,
         params.force,
+        // register-server is a follow-up call on an existing
+        // serverless DID — the operator didn't pick a domain at
+        // create time. Let the remote resolve via caller-default →
+        // system-default. A `pnm did-mgmt register-did --domain`
+        // override would flow through here as Some.
+        params.domain.as_deref(),
     )
     .await
     .map_err(|e| RegisterDidWithServerError::Publish(e.to_string()))?;
@@ -370,6 +381,7 @@ mod tests {
                 did: "did:webvh:scid:host:vta".into(),
                 server_id: "primary".into(),
                 force: false,
+                domain: None,
             },
             None,
             &auth_locks,
@@ -400,6 +412,7 @@ mod tests {
                 did: "did:webvh:nonexistent:host:vta".into(),
                 server_id: "primary".into(),
                 force: false,
+                domain: None,
             },
             None,
             &auth_locks,
@@ -435,6 +448,7 @@ mod tests {
                 did: did.into(),
                 server_id: "primary".into(),
                 force: false,
+                domain: None,
             },
             None,
             &auth_locks,
@@ -476,6 +490,7 @@ mod tests {
                 did: did.into(),
                 server_id: "missing-host".into(),
                 force: false,
+                domain: None,
             },
             None,
             &auth_locks,
@@ -515,6 +530,7 @@ mod tests {
                 did: did.into(),
                 server_id: "primary".into(),
                 force: false,
+                domain: None,
             },
             None,
             &auth_locks,

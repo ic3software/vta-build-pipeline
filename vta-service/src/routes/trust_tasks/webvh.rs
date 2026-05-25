@@ -498,6 +498,7 @@ pub(super) async fn handle_dids_register_with_server(
             did: req.did,
             server_id: req.server_id,
             force: req.force,
+            domain: req.domain.clone(),
         },
         vta_did.as_deref(),
         &state.webvh_auth_locks,
