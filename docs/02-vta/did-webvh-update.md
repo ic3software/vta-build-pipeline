@@ -220,8 +220,8 @@ at the time) and the operator later wants it published to a host,
 use:
 
 ```bash
-pnm webvh add-server --id primary --did did:web:webvh.example.com
-pnm webvh register-did --did <serverless-did> --server primary
+pnm did-mgmt servers add --id primary --did did:web:webvh.example.com
+pnm did-mgmt dids register --did <serverless-did> --server primary
 ```
 
 The second command pushes the existing local `did.jsonl` to the

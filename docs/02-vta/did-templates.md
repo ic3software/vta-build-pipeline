@@ -224,7 +224,7 @@ CNM use the same surface.
 ### Using a template to create a DID
 
 ```sh
-pnm webvh create-did \
+pnm did-mgmt dids create \
   --context my-ctx \
   --did-url https://mediator.example.com/.well-known/did/did.jsonl \
   --template didcomm-mediator \

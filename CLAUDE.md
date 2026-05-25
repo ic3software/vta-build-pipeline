@@ -453,8 +453,8 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Refused if** the DID is already server-managed (re-pointing
   a hosted DID at a different host needs coordinated teardown on
   the old host and is out of scope for this op).
-- **CLI**: `pnm webvh register-did --did <did> --server <id>`
-  (online, REST). `vta webvh register-did …` (offline; daemon
+- **CLI**: `pnm did-mgmt dids register --did <did> --server <id>`
+  (online, REST). `vta did-mgmt dids register …` (offline; daemon
   must be stopped, fjall lock; not available in TEE).
 - **Code**: `vta-service/src/operations/did_webvh/register_server.rs`,
   `vta-service/src/routes/did_webvh.rs::register_did_with_server_handler`,

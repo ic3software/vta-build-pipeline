@@ -110,7 +110,7 @@ VTA DID:
   > Create a new did:webvh DID
 ```
 
-Point it at wherever you plan to host the `did.jsonl` (a WebVH server,
+Point it at wherever you plan to host the `did.jsonl` (a DID-hosting server,
 static host, or a `did:web`-style URL). Choose **Simple** mode.
 
 If you skip this, the VTA will use `did:key` as its identity; clients
@@ -413,8 +413,8 @@ The VTA exposes the provisioning-time `did.jsonl` log publicly (webvh
 logs are world-readable by design):
 
 ```
-pnm webvh did-log <did:webvh:...>
-vta webvh did-log <did:webvh:...>              # offline from the VTA host
+pnm did-mgmt dids get-log <did:webvh:...>
+vta did-mgmt dids get-log <did:webvh:...>              # offline from the VTA host
 GET /did/{did}/log                             # HTTP, unauthenticated
 ```
 
@@ -430,7 +430,7 @@ fallback, or debugging resolution issues.
 
 For services that need a full identity (DID + signing key + KA key +
 VTA DID/URL) *before* they can contact the VTA — typically mediators
-and webvh servers — the VTA admin uses the sealed-transfer flow:
+and DID-hosting servers — the VTA admin uses the sealed-transfer flow:
 
 **On the client's host** (1-time):
 

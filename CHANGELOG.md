@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### CLI restructure: `pnm webvh` / `vta webvh` → `did-mgmt {servers,dids}`
+
+The operator CLI surface that managed registered DID-hosting servers
+and the DIDs they host has been restructured to match the SDK
+umbrella module `vta_sdk::protocols::did_management`:
+
+- `pnm webvh add-server` → `pnm did-mgmt servers add`
+- `pnm webvh list-servers` → `pnm did-mgmt servers list`
+- `pnm webvh update-server <id>` → `pnm did-mgmt servers update <id>`
+- `pnm webvh remove-server <id>` → `pnm did-mgmt servers remove <id>`
+- `pnm webvh create-did` → `pnm did-mgmt dids create`
+- `pnm webvh edit-did` → `pnm did-mgmt dids edit`
+- `pnm webvh register-did` → `pnm did-mgmt dids register`
+- `pnm webvh list-dids` → `pnm did-mgmt dids list`
+- `pnm webvh get-did` → `pnm did-mgmt dids get`
+- `pnm webvh delete-did` → `pnm did-mgmt dids delete`
+- `pnm webvh did-log` → `pnm did-mgmt dids get-log`
+
+Same rename applies to the offline `vta` binary (no `get-did`
+variant). The `webvh` cargo feature is **not** renamed — it still
+gates `didwebvh-rs`, which refers to the DID *method*, not the
+operator UX.
+
+**Back-compat alias for one release.** The old `pnm webvh …` /
+`vta webvh …` paths still dispatch through the same handlers
+(`Webvh` variant is `#[command(hide = true)]` so it's absent from
+`--help` but invocable). Each call prints a yellow stderr
+deprecation note pointing at the new path; the alias is removed in
+the next minor.
+
+Operator-facing docs (`docs/02-vta/{cold-start,
+runtime-service-management,provision-integration,did-templates,
+did-webvh-update}.md`, `docs/03-vtc/getting-started.md`,
+`docs/04-reference/cli-style.md`, `CLAUDE.md`) updated to the new
+command shapes. Prose mentions of "WebVH server" are now
+"DID-hosting server" where they refer to the hosting role.
+References to `did:webvh` the DID method itself are intentionally
+unchanged. Design notes (`trust-task-uri-registry.md`,
+`auth-architecture.md`) and the CHANGELOG's historical entries are
+not retouched — they describe wire shapes and past releases.
+
+Rationale: `did-management` is the right umbrella because half the
+surface isn't hosting at all (DID lifecycle: create/edit/delete/
+get/get-log/register) and the SDK module of the same name already
+groups both halves. `did-hosting` is reserved by
+`trust-task-uri-registry.md` for the host-side trust-task namespace
+(`spec/did-hosting/*`), which is a distinct concern.
+
 ### Security review follow-ups (external patches 02, 03, 04, 05, 07, 08, 09, 10)
 
 Eight findings from the April 2026 external security review are addressed

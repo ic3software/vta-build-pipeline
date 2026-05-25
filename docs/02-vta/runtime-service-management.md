@@ -123,7 +123,7 @@ REST URL updated.
   Effective at:   2026-05-11T20:30:00Z
 
   This VTA's DID is self-hosted. Fetch the updated log:
-    pnm webvh did-log did:webvh:abc:host:vta --out did.jsonl
+    pnm did-mgmt dids get-log did:webvh:abc:host:vta --out did.jsonl
   then redeploy did.jsonl to your host. Until you do,
   resolvers will keep returning the prior version.
 ```
@@ -135,7 +135,7 @@ pushed the new LogEntry to the host as part of the operation
 
 If you later want a serverless DID promoted to server-managed
 (so future updates auto-publish), use
-`pnm webvh register-did --did <did> --server <id>`. See
+`pnm did-mgmt dids register --did <did> --server <id>`. See
 [Walkthrough: register a serverless DID with a webvh
 host](#walkthrough-register-a-serverless-did-with-a-webvh-host)
 below.
@@ -346,17 +346,17 @@ re-issuing the DID identifier.
 # 1. Register the host with the VTA. This validates the host's DID
 #    resolves and advertises a `WebVHHostingService` or
 #    `DIDCommMessaging` endpoint.
-pnm webvh add-server \
+pnm did-mgmt servers add \
   --id primary \
   --did did:web:webvh.example.com \
   --label "primary host"
 
 # 2. Promote the VTA's DID. Pushes the local did.jsonl to the host
 #    and flips `server_id` from "serverless" to "primary".
-pnm webvh register-did \
+pnm did-mgmt dids register \
   --did did:webvh:abcd1234:webvh.example.com:vta \
   --server primary
-# DID registered with WebVH server.
+# DID registered with DID-hosting server.
 #   DID:        did:webvh:abcd1234:webvh.example.com:vta
 #   Server:     primary
 #   Log entries: 4
@@ -379,13 +379,13 @@ teardown on the old host) and is out of scope for this command.
 operation is available on the local binary:
 
 ```bash
-vta webvh register-did \
+vta did-mgmt dids register \
   --did did:webvh:abcd1234:webvh.example.com:vta \
   --server primary
 ```
 
 The fjall lock applies — fails fast if the daemon is running. TEE
-deployments must use `pnm webvh register-did` against the running
+deployments must use `pnm did-mgmt dids register` against the running
 enclave (the offline path can't reach the vsock store on the
 parent host).
 
@@ -398,7 +398,7 @@ document, then publish the change as a new LogEntry.
 ### Interactive (the common case)
 
 ```bash
-pnm webvh edit-did --did did:webvh:abcd1234:vta.example.com:vta
+pnm did-mgmt dids edit --did did:webvh:abcd1234:vta.example.com:vta
 ```
 
 What happens:
@@ -428,19 +428,19 @@ What happens:
 the publish is rejected with `DidIdChanged` and the
 operation aborts. The DID identifier is a permanent commitment
 from the first LogEntry; mutating it would break every existing
-reference. To mint a new DID instead, use `pnm webvh create-did`.
+reference. To mint a new DID instead, use `pnm did-mgmt dids create`.
 
 ### Non-interactive (scripted)
 
 ```bash
 # Just publish a new document, no parameter changes:
-pnm webvh edit-did \
+pnm did-mgmt dids edit \
   --did did:webvh:abcd:vta.example.com:vta \
   --document new-doc.json \
   --no-confirm
 
 # Document + parameter overrides:
-pnm webvh edit-did \
+pnm did-mgmt dids edit \
   --did did:webvh:abcd:vta.example.com:vta \
   --document new-doc.json \
   --pre-rotation 2 \
@@ -450,7 +450,7 @@ pnm webvh edit-did \
   --no-confirm
 
 # Disable watchers entirely:
-pnm webvh edit-did \
+pnm did-mgmt dids edit \
   --did did:webvh:abcd:vta.example.com:vta \
   --no-watchers \
   --no-confirm
@@ -470,7 +470,7 @@ is friendlier.
 
 ```bash
 # VTA daemon must be stopped — fjall lock applies.
-vta webvh edit-did --did did:webvh:abcd:vta.example.com:vta
+vta did-mgmt dids edit --did did:webvh:abcd:vta.example.com:vta
 ```
 
 Same flag surface and same security boundary as the other

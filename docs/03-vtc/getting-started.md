@@ -89,7 +89,7 @@ The wizard prompts:
 | 2 | VTC base URL | The URL the daemon will publish (e.g. `https://community.example.com`) |
 | 3 | VTA DID | The VTA's `did:webvh:...` identifier. Transport endpoints are resolved from the DID document — no separate VTA URL prompt |
 | 4 | Context name | The context inside the VTA that will own this VTC (created via `cnm contexts create` if it doesn't already exist) |
-| 5 | WebVH path | Optional. Blank lets the WebVH server auto-assign |
+| 5 | WebVH path | Optional. Blank lets the DID-hosting server auto-assign |
 | 6 | Secrets backend | `keyring` (default) / `aws` / `gcp` / `azure` / `inline` / `plaintext` |
 
 The wizard prints an ephemeral `did:key` and pauses. **Authorise it

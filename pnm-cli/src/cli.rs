@@ -128,7 +128,35 @@ pub(crate) enum Commands {
         command: AuthCredentialCommands,
     },
 
-    /// WebVH server management
+    /// Manage the controller's DIDs and the DID-hosting servers
+    /// they live on.
+    ///
+    /// `pnm did-mgmt servers {add,list,update,remove}` manages the
+    /// controller's view of registered DID-hosting servers (the
+    /// daemons that publish `did:webvh:*` logs). `pnm did-mgmt
+    /// dids {…}` operates on the DIDs themselves (create, edit,
+    /// delete, list, get, get-log, register).
+    ///
+    /// Matches the `vta_sdk::protocols::did_management` SDK module,
+    /// which is the umbrella for both lifecycle and server-
+    /// registration operations on the controller side. (The
+    /// daemon-side hosting trust-tasks live under
+    /// `spec/did-hosting/*` and are a separate concern.)
+    ///
+    /// Replaces the earlier `pnm webvh …` surface. The retired
+    /// command path is still accepted (hidden) for one release —
+    /// operators get a stderr deprecation note on each invocation.
+    /// The DID method itself remains `did:webvh`; only the operator
+    /// UX category was renamed.
+    DidMgmt {
+        #[command(subcommand)]
+        command: DidMgmtCommands,
+    },
+
+    /// DEPRECATED — renamed to `pnm did-mgmt <subcommand>`. Still
+    /// dispatched for one release; switch your scripts before the
+    /// alias is removed in the next minor.
+    #[command(hide = true)]
     Webvh {
         #[command(subcommand)]
         command: WebvhCommands,
@@ -711,6 +739,314 @@ pub(crate) enum WebvhCommands {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+}
+
+// ── pnm did-mgmt {servers,dids} (new surface) ───────────────────────
+//
+// Restructured replacement for `pnm webvh …`. The variant fields are
+// duplicated from `WebvhCommands` so the new structure can stand on
+// its own, then `From<DidMgmtCommands> for WebvhCommands` converts
+// into the legacy enum so the existing `commands::webvh::run` handler
+// stays the single source of business logic. Drop the legacy enum +
+// conversion in the next minor release.
+
+/// Two-tier split: server-registration management vs DID lifecycle.
+#[derive(Subcommand)]
+pub(crate) enum DidMgmtCommands {
+    /// Manage registered DID-hosting servers.
+    Servers {
+        #[command(subcommand)]
+        command: DidMgmtServerCommands,
+    },
+    /// Manage DIDs hosted by a registered server or published serverlessly.
+    Dids {
+        #[command(subcommand)]
+        command: DidMgmtDidCommands,
+    },
+}
+
+/// `pnm did-mgmt servers {…}` — controller-side server registry.
+#[derive(Subcommand)]
+pub(crate) enum DidMgmtServerCommands {
+    /// Add a DID-hosting server to the controller's registry.
+    Add {
+        /// Server identifier (operator-chosen, must be unique).
+        #[arg(long)]
+        id: String,
+        /// Server DID (must resolve to a DID document with a
+        /// WebVHHostingService endpoint).
+        #[arg(long)]
+        did: String,
+        /// Human-readable label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List registered DID-hosting servers.
+    List,
+    /// Update a registered DID-hosting server.
+    Update {
+        /// Server identifier to update.
+        id: String,
+        /// New label (empty string to clear).
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove a registered DID-hosting server.
+    Remove {
+        /// Server identifier to remove.
+        id: String,
+    },
+}
+
+/// `pnm did-mgmt dids {…}` — DID lifecycle.
+#[derive(Subcommand)]
+pub(crate) enum DidMgmtDidCommands {
+    /// Create a DID hosted on a registered server, or serverless via
+    /// `--did-url`.
+    Create {
+        /// Application context ID
+        #[arg(long)]
+        context: String,
+        /// DID-hosting server ID (mutually exclusive with --did-url)
+        #[arg(long)]
+        server: Option<String>,
+        /// DID URL for serverless creation (mutually exclusive with --server)
+        #[arg(long)]
+        did_url: Option<String>,
+        /// Optional path on the DID-hosting server
+        #[arg(long)]
+        path: Option<String>,
+        /// Human-readable label
+        #[arg(long)]
+        label: Option<String>,
+        /// Make the DID portable (default: true)
+        #[arg(long, default_value = "true")]
+        portable: bool,
+        /// Add a mediator service endpoint
+        #[arg(long)]
+        mediator_service: bool,
+        /// Additional service endpoints (JSON array)
+        #[arg(long)]
+        services: Option<String>,
+        /// Number of pre-rotation keys to generate
+        #[arg(long, default_value = "0")]
+        pre_rotation: u32,
+        /// Path to a JSON file containing a DID Document template (template mode)
+        #[arg(long)]
+        did_document: Option<String>,
+        /// Path to a did.jsonl file containing a pre-signed log entry (final mode)
+        #[arg(long)]
+        did_log: Option<String>,
+        /// Do not set this DID as the primary DID for the context
+        #[arg(long)]
+        no_primary: bool,
+        /// Use an existing key ID as the signing verification method
+        #[arg(long)]
+        signing_key: Option<String>,
+        /// Use an existing key ID as the key-agreement verification method
+        #[arg(long)]
+        ka_key: Option<String>,
+        /// Name of a stored DID template to render into the DID document.
+        /// Mutually exclusive with `--did-document` and `--did-log`.
+        #[arg(long)]
+        template: Option<String>,
+        /// Look up the template in this context's scope first. Defaults
+        /// to the DID's own `--context` so context-local templates
+        /// shadow global ones naturally.
+        #[arg(long)]
+        template_context: Option<String>,
+        /// `KEY=VALUE` — supply a template variable. Repeatable.
+        #[arg(long = "var", value_parser = parse_key_value)]
+        vars: Vec<(String, String)>,
+    },
+    /// Edit an existing DID document.
+    ///
+    /// **Interactive (default):** opens the latest DID document in
+    /// `$EDITOR`, then walks a Confirm/Input chain for the webvh
+    /// parameters (pre-rotation, watchers, TTL, audit label),
+    /// confirms, and publishes a new LogEntry.
+    ///
+    /// **Non-interactive:** supply `--document <file>` (and
+    /// optionally per-field flags) or `--options-file <file>` for
+    /// scripted updates. Witness changes need `--options-file`
+    /// because the multibase-id wire shape is awkward to express
+    /// on the command line.
+    Edit {
+        /// The DID to edit.
+        #[arg(long)]
+        did: String,
+        /// Path to a JSON file with the new DID document. Skips
+        /// `$EDITOR`.
+        #[arg(long)]
+        document: Option<std::path::PathBuf>,
+        /// Path to a JSON file with a full UpdateDidWebvhBody
+        /// (document + every parameter). Mutually exclusive with
+        /// the per-field flags below.
+        #[arg(long)]
+        options_file: Option<std::path::PathBuf>,
+        /// Override the pre-rotation count (0 disables).
+        #[arg(long)]
+        pre_rotation: Option<u32>,
+        /// New TTL in seconds.
+        #[arg(long)]
+        ttl: Option<u32>,
+        /// Replace the watcher set with these URLs (repeatable).
+        #[arg(long = "watcher")]
+        watchers: Vec<String>,
+        /// Disable watchers entirely (mutually exclusive with
+        /// `--watcher`).
+        #[arg(long)]
+        no_watchers: bool,
+        /// Audit label for this update.
+        #[arg(long)]
+        label: Option<String>,
+        /// Skip the final "Publish?" confirmation prompt.
+        #[arg(long)]
+        no_confirm: bool,
+    },
+    /// Register an existing serverless DID with a registered
+    /// DID-hosting server.
+    ///
+    /// Pushes the local `did.jsonl` to the host atomically and flips
+    /// the DID's `server_id` so future updates auto-publish there.
+    /// Useful when the VTA was set up serverless and a host became
+    /// available later. Refused if the DID is already server-managed.
+    Register {
+        /// The serverless DID to promote.
+        #[arg(long)]
+        did: String,
+        /// Registered server id (from `pnm did-mgmt servers add`).
+        #[arg(long)]
+        server: String,
+        /// Take over a slot owned by a different DID. Honoured only
+        /// when this VTA authenticates to the host as an admin. An
+        /// owner re-registering their own slot is idempotent and
+        /// always succeeds without `--force`.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// List DIDs.
+    List {
+        /// FILTER: only show DIDs belonging to this context.
+        #[arg(long)]
+        context: Option<String>,
+        /// FILTER: only show DIDs hosted by this DID-hosting server.
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Get details of a single DID.
+    Get {
+        /// The DID to look up.
+        did: String,
+    },
+    /// Delete a DID.
+    Delete {
+        /// The DID to delete.
+        did: String,
+    },
+    /// Print the raw `did.jsonl` log for a DID the VTA knows.
+    ///
+    /// Snapshot from provisioning time — not a live resolver. Use
+    /// for audit, debugging, or republication fallback. The VTA's
+    /// endpoint is public (webvh logs are world-readable by design),
+    /// so this runs without a session token.
+    GetLog {
+        /// The DID to retrieve the log for.
+        did: String,
+        /// Optional output file; stdout if omitted.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+}
+
+impl From<DidMgmtCommands> for WebvhCommands {
+    /// Bridge the new structured surface into the legacy flat
+    /// `WebvhCommands` so `commands::webvh::run` remains the single
+    /// dispatch site. Drop together with the legacy enum in the next
+    /// minor release.
+    fn from(cmd: DidMgmtCommands) -> Self {
+        match cmd {
+            DidMgmtCommands::Servers { command } => match command {
+                DidMgmtServerCommands::Add { id, did, label } => {
+                    WebvhCommands::AddServer { id, did, label }
+                }
+                DidMgmtServerCommands::List => WebvhCommands::ListServers,
+                DidMgmtServerCommands::Update { id, label } => {
+                    WebvhCommands::UpdateServer { id, label }
+                }
+                DidMgmtServerCommands::Remove { id } => WebvhCommands::RemoveServer { id },
+            },
+            DidMgmtCommands::Dids { command } => match command {
+                DidMgmtDidCommands::Create {
+                    context,
+                    server,
+                    did_url,
+                    path,
+                    label,
+                    portable,
+                    mediator_service,
+                    services,
+                    pre_rotation,
+                    did_document,
+                    did_log,
+                    no_primary,
+                    signing_key,
+                    ka_key,
+                    template,
+                    template_context,
+                    vars,
+                } => WebvhCommands::CreateDid {
+                    context,
+                    server,
+                    did_url,
+                    path,
+                    label,
+                    portable,
+                    mediator_service,
+                    services,
+                    pre_rotation,
+                    did_document,
+                    did_log,
+                    no_primary,
+                    signing_key,
+                    ka_key,
+                    template,
+                    template_context,
+                    vars,
+                },
+                DidMgmtDidCommands::Edit {
+                    did,
+                    document,
+                    options_file,
+                    pre_rotation,
+                    ttl,
+                    watchers,
+                    no_watchers,
+                    label,
+                    no_confirm,
+                } => WebvhCommands::EditDid {
+                    did,
+                    document,
+                    options_file,
+                    pre_rotation,
+                    ttl,
+                    watchers,
+                    no_watchers,
+                    label,
+                    no_confirm,
+                },
+                DidMgmtDidCommands::Register { did, server, force } => {
+                    WebvhCommands::RegisterDid { did, server, force }
+                }
+                DidMgmtDidCommands::List { context, server } => {
+                    WebvhCommands::ListDids { context, server }
+                }
+                DidMgmtDidCommands::Get { did } => WebvhCommands::GetDid { did },
+                DidMgmtDidCommands::Delete { did } => WebvhCommands::DeleteDid { did },
+                DidMgmtDidCommands::GetLog { did, out } => WebvhCommands::DidLog { did, out },
+            },
+        }
+    }
 }
 
 #[derive(Subcommand)]

@@ -121,7 +121,7 @@ before the alias is removed.
 `requiredVars`. Any webvh-method template needs to know where its
 `did.jsonl` log will be published — pass `--var URL=<host>` for
 serverless mode, or `--var WEBVH_SERVER=<id>` to route through a
-hosting server registered with `vta webvh add-server`.
+hosting server registered with `vta did-mgmt servers add`.
 
 ---
 
@@ -161,7 +161,7 @@ then, both DIDs self-host their own logs. No circular dependency.
 ┌──────────────────────────┐            ┌──────────────────────────┐
 │  Integration host        │            │  VTA host                │
 │  (future mediator /      │            │  (already `vta setup`)   │
-│   webvh server)          │            │                          │
+│   DID-hosting server)          │            │                          │
 └──────────────────────────┘            └──────────────────────────┘
             │                                        │
   ┌─────────▼─────────┐                              │
@@ -192,7 +192,7 @@ then, both DIDs self-host their own logs. No circular dependency.
 
 ### Phase 1 — Generate the request (integration host)
 
-On the host that will run the mediator (or webvh server, or whatever).
+On the host that will run the mediator (or DID-hosting server, or whatever).
 No VTA contact, no network.
 
 **Mediator example:**
@@ -251,7 +251,7 @@ vta bootstrap provision-request \
 the VTA knows where the DID's `did.jsonl` log will be published —
 even on `did-hosting-server`, where `URL` does not appear in the rendered
 document. Pass `--var WEBVH_SERVER=<id>` instead to route through a
-hosting server already registered with `vta webvh add-server`.
+hosting server already registered with `vta did-mgmt servers add`.
 
 What this does:
 
@@ -990,7 +990,7 @@ standard webvh semantics.
 ## SDK surface
 
 Integration setup wizards (the mediator binary's own setup, the
-webvh server's own setup, any custom operator glue) should import
+DID-hosting server's own setup, any custom operator glue) should import
 the SDK directly rather than shelling out to the CLI.
 
 ### Generate a request

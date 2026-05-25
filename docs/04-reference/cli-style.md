@@ -12,7 +12,7 @@ Every user-facing command falls into exactly one of three modes:
 ### 1. List / search → ratatui table
 
 For commands that return **multiple records** (`acl list`, `keys list`,
-`contexts list`, `webvh servers list`, `webvh dids list`, `audit logs`,
+`contexts list`, `did-mgmt servers list`, `did-mgmt dids list`, `audit logs`,
 `did-templates list`, `did-templates list-builtins`, …).
 
 ```text

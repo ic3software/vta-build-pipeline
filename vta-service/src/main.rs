@@ -161,8 +161,31 @@ enum Commands {
         #[command(subcommand)]
         command: ContextCommands,
     },
-    /// Manage WebVH servers and DIDs (offline, no server required)
+    /// Manage the VTA's DIDs and the DID-hosting servers they live
+    /// on. Offline equivalent of `pnm did-mgmt …` — operates
+    /// directly on the local fjall keystore, so the daemon must be
+    /// stopped.
+    ///
+    /// `vta did-mgmt servers {add,list,update,remove}` manages the
+    /// controller's registered DID-hosting servers. `vta did-mgmt
+    /// dids {…}` operates on the DIDs themselves.
+    ///
+    /// Replaces the earlier `vta webvh …` surface. The retired
+    /// command path is still accepted (hidden) for one release —
+    /// operators get a stderr deprecation note on each invocation.
+    /// The DID method itself remains `did:webvh`; only the operator
+    /// UX category was renamed.
     #[cfg(feature = "webvh")]
+    DidMgmt {
+        #[command(subcommand)]
+        command: DidMgmtCommands,
+    },
+
+    /// DEPRECATED — renamed to `vta did-mgmt <subcommand>`. Still
+    /// dispatched for one release; switch your scripts before the
+    /// alias is removed in the next minor.
+    #[cfg(feature = "webvh")]
+    #[command(hide = true)]
     Webvh {
         #[command(subcommand)]
         command: WebvhCommands,
@@ -708,6 +731,251 @@ enum WebvhCommands {
     },
 }
 
+// ── vta did-mgmt {servers,dids} (new surface) ──────────────────────
+//
+// Restructured replacement for `vta webvh …`. Variant fields are
+// duplicated from `WebvhCommands` so the new structure can stand on
+// its own; `From<DidMgmtCommands> for WebvhCommands` converts into
+// the legacy enum so the existing dispatch handler stays the single
+// source of business logic. Drop the legacy enum + conversion in
+// the next minor release.
+
+/// Two-tier split: server-registration management vs DID lifecycle.
+#[cfg(feature = "webvh")]
+#[derive(Subcommand)]
+enum DidMgmtCommands {
+    /// Manage registered DID-hosting servers.
+    Servers {
+        #[command(subcommand)]
+        command: DidMgmtServerCommands,
+    },
+    /// Manage DIDs hosted by a registered server or published serverlessly.
+    Dids {
+        #[command(subcommand)]
+        command: DidMgmtDidCommands,
+    },
+}
+
+/// `vta did-mgmt servers {…}` — local server registry.
+#[cfg(feature = "webvh")]
+#[derive(Subcommand)]
+enum DidMgmtServerCommands {
+    /// Add a DID-hosting server to the local registry.
+    Add {
+        /// Server identifier.
+        #[arg(long)]
+        id: String,
+        /// Server DID (must resolve to a DID document with a
+        /// WebVHHostingService endpoint).
+        #[arg(long)]
+        did: String,
+        /// Human-readable label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List configured DID-hosting servers.
+    List,
+    /// Update a DID-hosting server.
+    Update {
+        /// Server identifier to update.
+        id: String,
+        /// New label (empty string to clear).
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove a DID-hosting server.
+    Remove {
+        /// Server identifier to remove.
+        id: String,
+    },
+}
+
+/// `vta did-mgmt dids {…}` — DID lifecycle (offline).
+#[cfg(feature = "webvh")]
+#[derive(Subcommand)]
+enum DidMgmtDidCommands {
+    /// Create a did:webvh DID and publish to a registered server.
+    Create {
+        /// Target context ID.
+        #[arg(long)]
+        context: String,
+        /// DID-hosting server ID.
+        #[arg(long)]
+        server: String,
+        /// Optional path on the server (server allocates if omitted).
+        #[arg(long)]
+        path: Option<String>,
+        /// Human-readable label for the DID and key records.
+        #[arg(long)]
+        label: Option<String>,
+        /// Make the DID portable (default: true).
+        #[arg(long, default_value_t = true)]
+        portable: bool,
+        /// Add mediator DIDComm service endpoint.
+        #[arg(long)]
+        mediator_service: bool,
+        /// Additional services as JSON array.
+        #[arg(long)]
+        services: Option<String>,
+        /// Number of pre-rotation keys to generate.
+        #[arg(long)]
+        pre_rotation: Option<u32>,
+        /// Print the generated mnemonic to stderr. **Off by default** —
+        /// printing puts the master seed in shell history, terminal
+        /// scrollback, CI log collectors, and tmux/screen buffers. The
+        /// mnemonic is also persisted via the configured seed-store;
+        /// if you need it for paper backup, run `vta export-mnemonic`
+        /// instead so it goes through the time-bounded export guard.
+        #[arg(long)]
+        print_mnemonic: bool,
+    },
+    /// Edit an existing DID document. Offline equivalent of
+    /// `pnm did-mgmt dids edit`. Operates directly on the local
+    /// fjall keystore — VTA daemon must be stopped.
+    Edit {
+        /// The DID to edit.
+        #[arg(long)]
+        did: String,
+        /// Path to a JSON file with the new DID document. Skips
+        /// `$EDITOR`.
+        #[arg(long)]
+        document: Option<PathBuf>,
+        /// Path to a JSON file with a full UpdateDidWebvhBody.
+        /// Mutually exclusive with the per-field flags below.
+        #[arg(long)]
+        options_file: Option<PathBuf>,
+        #[arg(long)]
+        pre_rotation: Option<u32>,
+        #[arg(long)]
+        ttl: Option<u32>,
+        #[arg(long = "watcher")]
+        watchers: Vec<String>,
+        #[arg(long)]
+        no_watchers: bool,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        no_confirm: bool,
+    },
+    /// Register an existing serverless DID with a registered
+    /// hosting server. Pushes the local `did.jsonl` to the host and
+    /// flips the DID's `server_id` so future updates auto-publish.
+    /// Offline equivalent of `pnm did-mgmt dids register`.
+    Register {
+        /// The serverless DID to promote.
+        #[arg(long)]
+        did: String,
+        /// Registered server id (from `vta did-mgmt servers add`).
+        #[arg(long)]
+        server: String,
+        /// Take over a slot owned by a different DID. Honoured only
+        /// when this VTA's DID authenticates to the host as an admin.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// List DIDs.
+    List {
+        /// Filter by context ID.
+        #[arg(long)]
+        context: Option<String>,
+        /// Filter by server ID.
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Delete a DID.
+    Delete {
+        /// The DID to delete.
+        did: String,
+    },
+    /// Print the raw `did.jsonl` log for a DID the VTA knows.
+    ///
+    /// Snapshot from provisioning time — use this for audit or
+    /// republication fallback, not as a live resolver (the
+    /// integration itself becomes the live source once it
+    /// publishes).
+    GetLog {
+        /// The DID to retrieve the log for.
+        did: String,
+        /// Optional output file. Stdout if omitted.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[cfg(feature = "webvh")]
+impl From<DidMgmtCommands> for WebvhCommands {
+    /// Bridge the new structured surface into the legacy flat
+    /// `WebvhCommands` so the existing dispatch handler remains the
+    /// single source of business logic. Drop together with the
+    /// legacy enum in the next minor release.
+    fn from(cmd: DidMgmtCommands) -> Self {
+        match cmd {
+            DidMgmtCommands::Servers { command } => match command {
+                DidMgmtServerCommands::Add { id, did, label } => {
+                    WebvhCommands::AddServer { id, did, label }
+                }
+                DidMgmtServerCommands::List => WebvhCommands::ListServers,
+                DidMgmtServerCommands::Update { id, label } => {
+                    WebvhCommands::UpdateServer { id, label }
+                }
+                DidMgmtServerCommands::Remove { id } => WebvhCommands::RemoveServer { id },
+            },
+            DidMgmtCommands::Dids { command } => match command {
+                DidMgmtDidCommands::Create {
+                    context,
+                    server,
+                    path,
+                    label,
+                    portable,
+                    mediator_service,
+                    services,
+                    pre_rotation,
+                    print_mnemonic,
+                } => WebvhCommands::CreateDid {
+                    context,
+                    server,
+                    path,
+                    label,
+                    portable,
+                    mediator_service,
+                    services,
+                    pre_rotation,
+                    print_mnemonic,
+                },
+                DidMgmtDidCommands::Edit {
+                    did,
+                    document,
+                    options_file,
+                    pre_rotation,
+                    ttl,
+                    watchers,
+                    no_watchers,
+                    label,
+                    no_confirm,
+                } => WebvhCommands::EditDid {
+                    did,
+                    document,
+                    options_file,
+                    pre_rotation,
+                    ttl,
+                    watchers,
+                    no_watchers,
+                    label,
+                    no_confirm,
+                },
+                DidMgmtDidCommands::Register { did, server, force } => {
+                    WebvhCommands::RegisterDid { did, server, force }
+                }
+                DidMgmtDidCommands::List { context, server } => {
+                    WebvhCommands::ListDids { context, server }
+                }
+                DidMgmtDidCommands::Delete { did } => WebvhCommands::DeleteDid { did },
+                DidMgmtDidCommands::GetLog { did, out } => WebvhCommands::DidLog { did, out },
+            },
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum ConfigCommands {
     /// Print the VTA's identity and service settings.
@@ -1184,92 +1452,22 @@ async fn main() {
             }
         }
         #[cfg(feature = "webvh")]
+        Some(Commands::DidMgmt { command }) => {
+            // Funnel the new structure through the legacy enum so the
+            // existing dispatch / seal-check / handler chain stays the
+            // single source of business logic. Drop together with the
+            // legacy `Webvh` variant in the next minor release.
+            run_webvh_dispatch(cli.config.clone(), command.into()).await;
+        }
+        #[cfg(feature = "webvh")]
         Some(Commands::Webvh { command }) => {
-            // SEALED CHECK: webvh commands modify servers and DIDs
-            match &command {
-                WebvhCommands::ListServers
-                | WebvhCommands::ListDids { .. }
-                | WebvhCommands::DidLog { .. } => {}
-                _ => check_seal(&cli.config).await,
-            }
-            let result = match command {
-                WebvhCommands::AddServer { id, did, label } => {
-                    webvh_cli::run_add_server(cli.config, id, did, label).await
-                }
-                WebvhCommands::ListServers => webvh_cli::run_list_servers(cli.config).await,
-                WebvhCommands::UpdateServer { id, label } => {
-                    webvh_cli::run_update_server(cli.config, id, label).await
-                }
-                WebvhCommands::RemoveServer { id } => {
-                    webvh_cli::run_remove_server(cli.config, id).await
-                }
-                WebvhCommands::CreateDid {
-                    context,
-                    server,
-                    path,
-                    label,
-                    portable,
-                    mediator_service,
-                    services,
-                    pre_rotation,
-                    print_mnemonic,
-                } => {
-                    webvh_cli::run_create_did(
-                        cli.config,
-                        context,
-                        server,
-                        path,
-                        label,
-                        portable,
-                        mediator_service,
-                        services,
-                        pre_rotation,
-                        print_mnemonic,
-                    )
-                    .await
-                }
-                WebvhCommands::ListDids { context, server } => {
-                    webvh_cli::run_list_dids(cli.config, context, server).await
-                }
-                WebvhCommands::DeleteDid { did } => {
-                    webvh_cli::run_delete_did(cli.config, did).await
-                }
-                WebvhCommands::DidLog { did, out } => {
-                    webvh_cli::run_did_log(cli.config, did, out).await
-                }
-                WebvhCommands::EditDid {
-                    did,
-                    document,
-                    options_file,
-                    pre_rotation,
-                    ttl,
-                    watchers,
-                    no_watchers,
-                    label,
-                    no_confirm,
-                } => {
-                    webvh_cli::run_edit_did(
-                        cli.config,
-                        did,
-                        document,
-                        options_file,
-                        pre_rotation,
-                        ttl,
-                        watchers,
-                        no_watchers,
-                        label,
-                        no_confirm,
-                    )
-                    .await
-                }
-                WebvhCommands::RegisterDid { did, server, force } => {
-                    webvh_cli::run_register_did(cli.config, did, server, force).await
-                }
-            };
-            if let Err(e) = result {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
+            eprintln!(
+                "\x1b[1;33mwarning:\x1b[0m `vta webvh …` has been renamed to \
+                 `vta did-mgmt {{servers,dids}} …`. The old name is accepted \
+                 for one release and will be removed in the next minor. \
+                 See `vta did-mgmt --help`."
+            );
+            run_webvh_dispatch(cli.config.clone(), command).await;
         }
         Some(Commands::Bootstrap { command }) => {
             let result = match command {
@@ -1477,6 +1675,93 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+/// Dispatch a legacy `WebvhCommands` value through `webvh_cli`. Used
+/// by both the new `vta did-mgmt …` surface (after `From<DidMgmtCommands>`
+/// conversion) and the legacy `vta webvh …` shim. Drop together with
+/// the legacy `Webvh` enum in the next minor release.
+#[cfg(feature = "webvh")]
+async fn run_webvh_dispatch(config_path: Option<PathBuf>, command: WebvhCommands) {
+    // Read-only commands skip the seal check; everything else writes.
+    match &command {
+        WebvhCommands::ListServers
+        | WebvhCommands::ListDids { .. }
+        | WebvhCommands::DidLog { .. } => {}
+        _ => check_seal(&config_path).await,
+    }
+    let result = match command {
+        WebvhCommands::AddServer { id, did, label } => {
+            webvh_cli::run_add_server(config_path, id, did, label).await
+        }
+        WebvhCommands::ListServers => webvh_cli::run_list_servers(config_path).await,
+        WebvhCommands::UpdateServer { id, label } => {
+            webvh_cli::run_update_server(config_path, id, label).await
+        }
+        WebvhCommands::RemoveServer { id } => webvh_cli::run_remove_server(config_path, id).await,
+        WebvhCommands::CreateDid {
+            context,
+            server,
+            path,
+            label,
+            portable,
+            mediator_service,
+            services,
+            pre_rotation,
+            print_mnemonic,
+        } => {
+            webvh_cli::run_create_did(
+                config_path,
+                context,
+                server,
+                path,
+                label,
+                portable,
+                mediator_service,
+                services,
+                pre_rotation,
+                print_mnemonic,
+            )
+            .await
+        }
+        WebvhCommands::ListDids { context, server } => {
+            webvh_cli::run_list_dids(config_path, context, server).await
+        }
+        WebvhCommands::DeleteDid { did } => webvh_cli::run_delete_did(config_path, did).await,
+        WebvhCommands::DidLog { did, out } => webvh_cli::run_did_log(config_path, did, out).await,
+        WebvhCommands::EditDid {
+            did,
+            document,
+            options_file,
+            pre_rotation,
+            ttl,
+            watchers,
+            no_watchers,
+            label,
+            no_confirm,
+        } => {
+            webvh_cli::run_edit_did(
+                config_path,
+                did,
+                document,
+                options_file,
+                pre_rotation,
+                ttl,
+                watchers,
+                no_watchers,
+                label,
+                no_confirm,
+            )
+            .await
+        }
+        WebvhCommands::RegisterDid { did, server, force } => {
+            webvh_cli::run_register_did(config_path, did, server, force).await
+        }
+    };
+    if let Err(e) = result {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
     }
 }
 
