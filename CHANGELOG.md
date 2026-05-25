@@ -127,12 +127,12 @@ consolidation. Each fix below ships with a focused regression test.
   effect**: the `pnm/cnm import-key` CLI's
   fall-back-to-multibase branch (active when the wrapping-key
   fetch failed) is removed — the CLI now surfaces the
-  wrapping-key-fetch error directly with a clear message
-  pointing operators at the sealed-transfer wrapping flow. The
-  mediator-setup and did-hosting-setup flows are **not**
-  affected: they use `provision-integration` (the VTA mints keys
-  via BIP-32 from the master seed and returns a sealed bundle to
-  the consumer), never `POST /keys/import`.
+  wrapping-key-fetch error directly with a clear message ("the
+  VTA must support sealed-transfer key import — `vta-sdk ≥
+  0.8`"). The mediator-setup and did-hosting-setup flows are
+  **not** affected: they use `provision-integration` (the VTA
+  mints keys via BIP-32 from the master seed and returns a
+  sealed bundle to the consumer), never `POST /keys/import`.
 
 External tracker file at
 `~/Downloads/patches/verifiable-trust-infrastructure/REVIEW_2026-04_TRACKER.md`
@@ -162,11 +162,35 @@ roles (see auth-architecture and trust-task-uri-registry design notes).
   `did-hosting-witness`. Protocol URIs and module names that refer to
   the `did:webvh` DID-method itself are unchanged.
 
-  No version bumps in this entry — all four workstreams in the PR
-  land under the current `0.7` / `0.1` / `0.6` workspace versions
-  ("Unreleased"). The `#[deprecated(since = "0.8.0")]` markers on
-  the legacy template constants and builders are forward-looking;
-  they'll become accurate when a future release performs the bump.
+### Version bumps (publish-boundary crates only)
+
+This PR bumps **only the two crates other repositories consume**:
+
+- `vta-sdk` 0.7.0 → 0.8.0
+- `vti-common` 0.7.0 → 0.8.0
+
+The minor bump is warranted by additive public API (the new
+`BUILTIN_DID_HOSTING_*_TEMPLATE` constants, `ProvisionAsk::did_hosting_*`
+builders, new template JSON files), the const-value change on
+`BUILTIN_WEBVH_*_TEMPLATE` (now resolves to `"did-hosting-control"`
+etc.), the manual `Debug` redaction on secret-bearing wire types
+(observable behaviour change — patches 07 + 08), and the REST
+`import_key` hardening (patch 09 — `#[serde(deny_unknown_fields)]`
+rejects the previously-accepted `private_key_multibase` field).
+External consumers update their pin from `"0.7"` to `"0.8"` to pick
+the changes up.
+
+The other workspace crates (`vta-service`, `vta-enclave`,
+`vta-cli-common`, `pnm-cli`, `cnm-cli`, `vtc-service`,
+`didcomm-test`) **stay at their current versions** — they're
+binaries / CLI tools, not libraries consumed by external repos, so
+their Cargo.toml version is cosmetic for the install-the-binary use
+case. Their internal `vta-sdk` / `vti-common` dep pinnings ARE
+updated from `"0.7"` to `"0.8"` to point at the bumped crates.
+
+The `#[deprecated(since = "0.8.0")]` markers on the legacy
+`BUILTIN_WEBVH_*_TEMPLATE` constants and `ProvisionAsk::webvh_*`
+builders are now accurate.
 
 ### Auth-architecture consolidation (S1+S2+S3)
 

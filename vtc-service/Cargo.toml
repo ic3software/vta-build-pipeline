@@ -58,13 +58,13 @@ name = "vtc"
 path = "src/main.rs"
 
 [dependencies]
-vti-common = { path = "../vti-common", version = "0.7", features = [
+vti-common = { path = "../vti-common", version = "0.8", features = [
   "passkey",
   # `setup` gates the shared dialoguer-driven secrets-prompt helper
   # the wizard calls into.
   "setup",
 ] }
-vta-sdk = { path = "../vta-sdk", version = "0.7", features = [
+vta-sdk = { path = "../vta-sdk", version = "0.8", features = [
   "didcomm",
   "session",
   "config-session",
