@@ -2,11 +2,59 @@
 
 ## Unreleased
 
+### Version bumps
+
+Only the two crates external repos (did-hosting-common,
+webvh-witness, rp-sdk, …) consume are bumped:
+
+- `vta-sdk` 0.7.0 → 0.8.0
+- `vti-common` 0.7.0 → 0.8.0
+
+Minor bump (not patch) is required by the additive public API + the
+const-value change on `BUILTIN_WEBVH_*_TEMPLATE` (now resolves to
+`"did-hosting-control"` etc.) + the manual `Debug` redaction on
+secret-bearing wire types + the REST `import_key` hardening. Each
+of those is detailed in its own section below. Consumer repos pull
+the changes by updating their pin from `"0.7"` to `"0.8"`.
+
+The other workspace crates (`vta-service`, `vta-enclave`,
+`vta-cli-common`, `pnm-cli`, `cnm-cli`, `vtc-service`,
+`didcomm-test`) stay at their current versions — they're
+binaries / CLI tools, not libraries consumed externally, so their
+Cargo.toml version is cosmetic for the install-the-binary use case.
+Their internal `vta-sdk` / `vti-common` dep pinnings are updated
+`"0.7"` → `"0.8"` to point at the bumped crates.
+
+### Built-in DID templates renamed `webvh-*` → `did-hosting-*`
+
+Aligns the SDK's built-in template names with the broader OpenVTC
+service-role terminology already in `auth-architecture.md` and
+`trust-task-uri-registry.md`.
+
+- **Renames**: `webvh-control` → `did-hosting-control`,
+  `webvh-daemon` → `did-hosting-daemon`,
+  `webvh-server` → `did-hosting-server`. The on-disk JSON files,
+  `name` + `kind` fields, builtin-loader constants, and curated
+  `ProvisionAsk` builders (`did_hosting_control` / `did_hosting_daemon`
+  / `did_hosting_server`) all flip to the new names.
+- **Back-compat alias for one release.**
+  `load_embedded("webvh-control")` still resolves to
+  `did-hosting-control` (same for daemon and server); the returned
+  `DidTemplate.name` carries the canonical name. The
+  `BUILTIN_WEBVH_*_TEMPLATE` constants and `ProvisionAsk::webvh_*`
+  builders are marked `#[deprecated(since = "0.8.0")]` and forward
+  to the new names. Operator configs should switch to
+  `did-hosting-*` before the alias is dropped in the next minor.
+- **Doc cross-refs.** Tracker mentions of `webvh-witness` (a service
+  role in the webvh-service repo) follow the same rename to
+  `did-hosting-witness`. Protocol URIs and module names that refer
+  to the `did:webvh` DID-method itself are unchanged.
+
 ### CLI restructure: `pnm webvh` / `vta webvh` → `did-mgmt {servers,dids}`
 
-The operator CLI surface that managed registered DID-hosting servers
-and the DIDs they host has been restructured to match the SDK
-umbrella module `vta_sdk::protocols::did_management`:
+The operator CLI surface restructured to match the SDK umbrella
+module `vta_sdk::protocols::did_management`. Two intermediate verbs
+split the noun:
 
 - `pnm webvh add-server` → `pnm did-mgmt servers add`
 - `pnm webvh list-servers` → `pnm did-mgmt servers list`
@@ -21,41 +69,40 @@ umbrella module `vta_sdk::protocols::did_management`:
 - `pnm webvh did-log` → `pnm did-mgmt dids get-log`
 
 Same rename applies to the offline `vta` binary (no `get-did`
-variant). The `webvh` cargo feature is **not** renamed — it still
-gates `didwebvh-rs`, which refers to the DID *method*, not the
-operator UX.
+variant). The `webvh` cargo feature is **not** renamed — it gates
+`didwebvh-rs`, which refers to the DID *method*, not the operator
+UX.
 
 **Back-compat alias for one release.** The old `pnm webvh …` /
 `vta webvh …` paths still dispatch through the same handlers
-(`Webvh` variant is `#[command(hide = true)]` so it's absent from
-`--help` but invocable). Each call prints a yellow stderr
-deprecation note pointing at the new path; the alias is removed in
-the next minor.
+(`Webvh` variant is `#[command(hide = true)]` — absent from `--help`
+but invocable). Each call prints a yellow stderr deprecation note
+pointing at the new path; alias removed in the next minor.
 
 Operator-facing docs (`docs/02-vta/{cold-start,
 runtime-service-management,provision-integration,did-templates,
 did-webvh-update}.md`, `docs/03-vtc/getting-started.md`,
 `docs/04-reference/cli-style.md`, `CLAUDE.md`) updated to the new
 command shapes. Prose mentions of "WebVH server" are now
-"DID-hosting server" where they refer to the hosting role.
-References to `did:webvh` the DID method itself are intentionally
-unchanged. Design notes (`trust-task-uri-registry.md`,
-`auth-architecture.md`) and the CHANGELOG's historical entries are
-not retouched — they describe wire shapes and past releases.
+"DID-hosting server" where they refer to the hosting role;
+references to `did:webvh` the DID method itself are intentionally
+unchanged.
 
 Rationale: `did-management` is the right umbrella because half the
 surface isn't hosting at all (DID lifecycle: create/edit/delete/
 get/get-log/register) and the SDK module of the same name already
 groups both halves. `did-hosting` is reserved by
 `trust-task-uri-registry.md` for the host-side trust-task namespace
-(`spec/did-hosting/*`), which is a distinct concern.
+(`spec/did-hosting/*`), a distinct concern.
 
 ### Security review follow-ups (external patches 02, 03, 04, 05, 07, 08, 09, 10)
 
-Eight findings from the April 2026 external security review are addressed
-in this release. Patches 01 and 06 (DIDComm sender-DID binding on
-`/auth/refresh`) were already closed by the prior auth-handler
-consolidation. Each fix below ships with a focused regression test.
+Eight findings from the April 2026 external security review.
+Patches 01 + 06 (DIDComm sender-DID binding on `/auth/refresh`) were
+already closed by the prior auth-handler consolidation. Each fix
+below ships with a focused regression test. Tracker file at
+`~/Downloads/patches/verifiable-trust-infrastructure/REVIEW_2026-04_TRACKER.md`
+maps each patch to the commit that addressed it.
 
 - **#4 (Critical) — BIP-32 `allocate_path` race.**
   `vta-service/src/keys/paths.rs`: the read-increment-write of the
@@ -69,9 +116,9 @@ consolidation. Each fix below ships with a focused regression test.
   `vta-service/src/operations/did_webvh/mod.rs`: only checked
   `require_admin`, never `require_context(record.context_id)`, so a
   context-scoped admin could trigger remote deletion (via the stored
-  mnemonic) and local key cleanup of did:webvh records owned by other
-  contexts on the same VTA. Now mirrors the scoping that create / get /
-  get_log / list already enforce.
+  mnemonic) and local key cleanup of did:webvh records owned by
+  other contexts on the same VTA. Now mirrors the scoping that
+  create / get / get_log / list already enforce.
 - **#7 (High) — `AuthConfig` / `SecretsConfig` Debug leak.**
   `vti-common/src/config.rs`: replace `#[derive(Debug)]` with manual
   impls that print `<redacted>` for `jwt_signing_key` (Ed25519
@@ -88,6 +135,32 @@ consolidation. Each fix below ships with a focused regression test.
   unchanged. Note the original audit named `AuthenticateData` — that
   type was replaced by `TokenBundle` during the auth consolidation;
   the fix applies to the current shape.
+- **#9 (High) — REST `POST /keys/import` no longer accepts plaintext
+  `private_key_multibase`.** Posting raw key material over a
+  session-bearer-authenticated REST call relies entirely on TLS for
+  confidentiality — on Nitro Enclave the TLS terminator is on the
+  host, which means the host network stack reads plaintext private
+  keys out of memory. The handler now uses
+  `#[serde(deny_unknown_fields)]` so any client posting the legacy
+  field gets a specific `unknown field private_key_multibase` 422
+  pointing them at the migration path. Use one of:
+  - `private_key_sealed` — armored sealed-transfer bundle. Fetch
+    the ephemeral wrapping pubkey via
+    `GET /keys/import/wrapping-key`, then seal locally and POST.
+  - `private_key_jwe` — legacy ECDH-ES + A256GCM compact JWE,
+    wrapped against the same ephemeral key.
+
+  The DIDComm transport (no server-side handler yet) keeps the
+  multibase field on its SDK shape because authcrypt already
+  provides end-to-end confidentiality. **Operator-facing side
+  effect**: the `pnm/cnm import-key` CLI's fall-back-to-multibase
+  branch (active when the wrapping-key fetch failed) is removed —
+  the CLI now surfaces the wrapping-key-fetch error directly with a
+  clear message ("the VTA must support sealed-transfer key import —
+  `vta-sdk ≥ 0.8`"). The mediator-setup and did-hosting-setup flows
+  are **not** affected: they use `provision-integration` (the VTA
+  mints keys via BIP-32 from the master seed and returns a sealed
+  bundle to the consumer), never `POST /keys/import`.
 - **#3 (Medium) — `delete_acl` role floor.**
   `vta-service/src/operations/acl.rs`: an Initiator whose
   `allowed_contexts` overlapped an Admin entry could delete that
@@ -106,91 +179,6 @@ consolidation. Each fix below ships with a focused regression test.
   non-12-byte nonce (or non-32-byte salt) would take the import
   handler down. The KDF-parameter bounds half of the patch was
   already in; the length checks complete the fix.
-- **#9 (High) — REST `POST /keys/import` no longer accepts plaintext
-  `private_key_multibase`.** Posting raw key material over a session-
-  bearer-authenticated REST call relies entirely on TLS for
-  confidentiality — on Nitro Enclave the TLS terminator is on the
-  host, which means the host network stack reads plaintext private
-  keys out of memory. The handler now uses
-  `#[serde(deny_unknown_fields)]` so any client posting the legacy
-  field gets a specific `unknown field private_key_multibase` 422
-  pointing them at the migration path. Use one of:
-  - `private_key_sealed` — armored sealed-transfer bundle. Fetch
-    the ephemeral wrapping pubkey via
-    `GET /keys/import/wrapping-key`, then seal locally and POST.
-  - `private_key_jwe` — legacy ECDH-ES + A256GCM compact JWE,
-    wrapped against the same ephemeral key.
-
-  The DIDComm transport (no server-side handler yet) keeps the
-  multibase field on its SDK shape because authcrypt already
-  provides end-to-end confidentiality. **Operator-facing side
-  effect**: the `pnm/cnm import-key` CLI's
-  fall-back-to-multibase branch (active when the wrapping-key
-  fetch failed) is removed — the CLI now surfaces the
-  wrapping-key-fetch error directly with a clear message ("the
-  VTA must support sealed-transfer key import — `vta-sdk ≥
-  0.8`"). The mediator-setup and did-hosting-setup flows are
-  **not** affected: they use `provision-integration` (the VTA
-  mints keys via BIP-32 from the master seed and returns a
-  sealed bundle to the consumer), never `POST /keys/import`.
-
-External tracker file at
-`~/Downloads/patches/verifiable-trust-infrastructure/REVIEW_2026-04_TRACKER.md`
-maps each patch to the commit that addressed it.
-
-### Built-in DID templates renamed `webvh-*` → `did-hosting-*`
-
-Aligns the SDK's built-in template names with the broader OpenVTC
-terminology already used by the webvh-service / did-hosting service
-roles (see auth-architecture and trust-task-uri-registry design notes).
-
-- **Renames**: `webvh-control` → `did-hosting-control`,
-  `webvh-daemon` → `did-hosting-daemon`,
-  `webvh-server` → `did-hosting-server`. The on-disk JSON files,
-  `name` + `kind` fields, builtin-loader constants, and curated
-  `ProvisionAsk` builders (`did_hosting_control` / `did_hosting_daemon`
-  / `did_hosting_server`) all flip to the new names.
-- **Back-compat alias for one release.** `load_embedded("webvh-control")`
-  still resolves to `did-hosting-control` (same for daemon and server);
-  the returned `DidTemplate.name` carries the canonical name. The
-  `BUILTIN_WEBVH_*_TEMPLATE` constants and `ProvisionAsk::webvh_*`
-  builders are marked `#[deprecated(since = "0.8.0")]` and forward to
-  the new names. Operator configs should switch to `did-hosting-*`
-  before the alias is dropped in the next minor release.
-- **Doc cross-refs.** Tracker mentions of `webvh-witness` (a service
-  role in the webvh-service repo) follow the same rename to
-  `did-hosting-witness`. Protocol URIs and module names that refer to
-  the `did:webvh` DID-method itself are unchanged.
-
-### Version bumps (publish-boundary crates only)
-
-This PR bumps **only the two crates other repositories consume**:
-
-- `vta-sdk` 0.7.0 → 0.8.0
-- `vti-common` 0.7.0 → 0.8.0
-
-The minor bump is warranted by additive public API (the new
-`BUILTIN_DID_HOSTING_*_TEMPLATE` constants, `ProvisionAsk::did_hosting_*`
-builders, new template JSON files), the const-value change on
-`BUILTIN_WEBVH_*_TEMPLATE` (now resolves to `"did-hosting-control"`
-etc.), the manual `Debug` redaction on secret-bearing wire types
-(observable behaviour change — patches 07 + 08), and the REST
-`import_key` hardening (patch 09 — `#[serde(deny_unknown_fields)]`
-rejects the previously-accepted `private_key_multibase` field).
-External consumers update their pin from `"0.7"` to `"0.8"` to pick
-the changes up.
-
-The other workspace crates (`vta-service`, `vta-enclave`,
-`vta-cli-common`, `pnm-cli`, `cnm-cli`, `vtc-service`,
-`didcomm-test`) **stay at their current versions** — they're
-binaries / CLI tools, not libraries consumed by external repos, so
-their Cargo.toml version is cosmetic for the install-the-binary use
-case. Their internal `vta-sdk` / `vti-common` dep pinnings ARE
-updated from `"0.7"` to `"0.8"` to point at the bumped crates.
-
-The `#[deprecated(since = "0.8.0")]` markers on the legacy
-`BUILTIN_WEBVH_*_TEMPLATE` constants and `ProvisionAsk::webvh_*`
-builders are now accurate.
 
 ### Auth-architecture consolidation (S1+S2+S3)
 
