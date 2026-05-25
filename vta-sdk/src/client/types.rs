@@ -104,7 +104,13 @@ pub struct ImportKeyRequest {
     /// in-flight clients; new code should use `private_key_sealed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key_jwe: Option<String>,
-    /// Multibase-encoded private key (DIDComm transport).
+    /// Multibase-encoded private key. **DIDComm transport only** —
+    /// the REST `POST /keys/import` handler rejects this field with
+    /// an `unknown field` error to force callers onto the
+    /// `private_key_sealed` flow (see [`Self::private_key_sealed`]).
+    /// DIDComm authcrypt already provides end-to-end confidentiality,
+    /// so plaintext multibase is acceptable on that transport; REST
+    /// only has TLS, which terminates outside the enclave.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key_multibase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

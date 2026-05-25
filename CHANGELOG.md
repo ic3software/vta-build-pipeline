@@ -2,14 +2,12 @@
 
 ## Unreleased
 
-### Security review follow-ups (external patches 02, 03, 04, 05, 07, 08, 10)
+### Security review follow-ups (external patches 02, 03, 04, 05, 07, 08, 09, 10)
 
-Seven findings from the April 2026 external security review are addressed
+Eight findings from the April 2026 external security review are addressed
 in this release. Patches 01 and 06 (DIDComm sender-DID binding on
 `/auth/refresh`) were already closed by the prior auth-handler
-consolidation; patch 09 (test-helper migration) has an invalid premise
-in the current tree and is tracked separately. Each fix below ships
-with a focused regression test.
+consolidation. Each fix below ships with a focused regression test.
 
 - **#4 (Critical) — BIP-32 `allocate_path` race.**
   `vta-service/src/keys/paths.rs`: the read-increment-write of the
@@ -60,6 +58,33 @@ with a focused regression test.
   non-12-byte nonce (or non-32-byte salt) would take the import
   handler down. The KDF-parameter bounds half of the patch was
   already in; the length checks complete the fix.
+- **#9 (High) — REST `POST /keys/import` no longer accepts plaintext
+  `private_key_multibase`.** Posting raw key material over a session-
+  bearer-authenticated REST call relies entirely on TLS for
+  confidentiality — on Nitro Enclave the TLS terminator is on the
+  host, which means the host network stack reads plaintext private
+  keys out of memory. The handler now uses
+  `#[serde(deny_unknown_fields)]` so any client posting the legacy
+  field gets a specific `unknown field private_key_multibase` 422
+  pointing them at the migration path. Use one of:
+  - `private_key_sealed` — armored sealed-transfer bundle. Fetch
+    the ephemeral wrapping pubkey via
+    `GET /keys/import/wrapping-key`, then seal locally and POST.
+  - `private_key_jwe` — legacy ECDH-ES + A256GCM compact JWE,
+    wrapped against the same ephemeral key.
+
+  The DIDComm transport (no server-side handler yet) keeps the
+  multibase field on its SDK shape because authcrypt already
+  provides end-to-end confidentiality. **Operator-facing side
+  effect**: the `pnm/cnm import-key` CLI's
+  fall-back-to-multibase branch (active when the wrapping-key
+  fetch failed) is removed — the CLI now surfaces the
+  wrapping-key-fetch error directly with a clear message ("the
+  VTA must support sealed-transfer key import — `vta-service ≥
+  0.8`"). The mediator-setup and did-hosting-setup flows are
+  **not** affected: they use `provision-integration` (the VTA
+  mints keys via BIP-32 from the master seed and returns a
+  sealed bundle to the consumer), never `POST /keys/import`.
 
 External tracker file at
 `~/Downloads/patches/verifiable-trust-infrastructure/REVIEW_2026-04_TRACKER.md`

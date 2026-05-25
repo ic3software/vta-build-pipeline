@@ -1363,50 +1363,144 @@ async fn create_did_webvh_set_primary_true() {
 
 // ── User-specified key tests ──────────────────────────────────────
 
-/// Helper: import an Ed25519 key and return the key_id.
-#[cfg(feature = "webvh")]
-async fn import_ed25519_key(app: &TestApp, token: &str, label: &str, context_id: &str) -> String {
-    // 32 deterministic bytes for the Ed25519 seed (test only)
-    let seed_bytes = [0x42u8; 32];
-    let mb = multibase::encode(multibase::Base::Base58Btc, seed_bytes);
+/// Regression test for the security-review patch #9 hardening: the
+/// REST `POST /keys/import` handler must refuse the legacy
+/// `private_key_multibase` field (raw private key over a TLS-only
+/// channel). `#[serde(deny_unknown_fields)]` is the load-bearing
+/// mechanism — operators get a specific "unknown field" error
+/// pointing them at the sealed-transfer migration path.
+#[tokio::test]
+async fn keys_import_rejects_private_key_multibase_over_rest() {
+    let (app, ctx) = TestApp::new().await;
+    let token = ctx
+        .auth_token("did:key:z6MkSuperAdmin", "admin", vec![])
+        .await;
 
+    let (status, body) = app
+        .request(post_auth(
+            "/keys/import",
+            &token,
+            json!({
+                "key_type": "ed25519",
+                "private_key_multibase": "z6MkDeadbeefDeadbeefDeadbeef",
+                "label": "should-be-refused",
+            }),
+        ))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "expected 422 for unknown field, got {status} {body}"
+    );
+    let rendered = body.to_string();
+    assert!(
+        rendered.contains("private_key_multibase"),
+        "rejection must name the offending field so operators can find the migration path: {rendered}"
+    );
+}
+
+/// Helper: drive the full sealed-transfer wrapping flow against
+/// `POST /keys/import`, returning the new `key_id`.
+///
+/// Mirrors what a real consumer does:
+/// 1. `GET /keys/import/wrapping-key` to fetch an ephemeral X25519
+///    pubkey + kid.
+/// 2. Build a [`SealedPayloadV1::RawPrivateKey`] around the test
+///    key bytes.
+/// 3. `seal_payload` against the wrapping pubkey, ASCII-armor.
+/// 4. `POST /keys/import` with `private_key_sealed`.
+///
+/// The plaintext `private_key_multibase` REST path was removed —
+/// see the `ImportKeyRestRequest` doc comment in
+/// `vta-service/src/routes/keys.rs`.
+#[cfg(feature = "webvh")]
+async fn import_key_via_sealed_transfer(
+    app: &TestApp,
+    token: &str,
+    key_type_str: &str,
+    key_bytes: &[u8],
+    label: &str,
+    context_id: &str,
+) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
+    use vta_sdk::sealed_transfer::{
+        AssertionProof, InMemoryNonceStore, ProducerAssertion, RawPrivateKey, SealedPayloadV1,
+        armor, generate_ed25519_keypair, seal_payload,
+    };
+
+    // 1. Fetch the wrapping key.
+    let (status, body) = app
+        .request(get_auth("/keys/import/wrapping-key", token))
+        .await;
+    assert!(status.is_success(), "GET wrapping-key: {status} {body}");
+    let pub_b64 = body["x"]
+        .as_str()
+        .expect("wrapping-key response missing `x`")
+        .to_string();
+    let pub_bytes: [u8; 32] = BASE64
+        .decode(&pub_b64)
+        .expect("decode wrapping pubkey")
+        .try_into()
+        .expect("wrapping pubkey must be 32 bytes");
+
+    // 2. Build the sealed payload.
+    let payload = SealedPayloadV1::RawPrivateKey(RawPrivateKey {
+        key_type: key_type_str.into(),
+        key_bytes_b64: BASE64.encode(key_bytes),
+    });
+
+    // 3. Seal + armor. Producer assertion is `PinnedOnly` — the
+    // wrapping-key endpoint already pins the producer↔consumer
+    // pairing via the single-use ephemeral key, so no separate
+    // signed assertion is required here.
+    let (_seed, prod_ed_pub) = generate_ed25519_keypair();
+    let producer = ProducerAssertion {
+        producer_did: affinidi_crypto::did_key::ed25519_pub_to_did_key(&prod_ed_pub),
+        proof: AssertionProof::PinnedOnly,
+    };
+    let store = InMemoryNonceStore::new();
+    let bundle = seal_payload(&pub_bytes, [0u8; 16], producer, &payload, &store)
+        .await
+        .expect("seal_payload");
+    let armored = armor::encode(&bundle);
+
+    // 4. POST the armored bundle as the import request.
     let (status, body) = app
         .request(post_auth(
             "/keys/import",
             token,
             json!({
-                "key_type": "ed25519",
-                "private_key_multibase": mb,
+                "key_type": key_type_str,
+                "private_key_sealed": armored,
                 "label": label,
                 "context_id": context_id,
             }),
         ))
         .await;
-    assert!(status.is_success(), "import ed25519: {status} {body}");
+    assert!(
+        status.is_success(),
+        "import {key_type_str} via sealed-transfer: {status} {body}",
+    );
     body["key_id"].as_str().unwrap().to_string()
 }
 
-/// Helper: import an X25519 key and return the key_id.
+/// Helper: import an Ed25519 key via the sealed-transfer wrapping
+/// flow and return the key_id.
+#[cfg(feature = "webvh")]
+async fn import_ed25519_key(app: &TestApp, token: &str, label: &str, context_id: &str) -> String {
+    // 32 deterministic bytes for the Ed25519 seed (test only).
+    let seed_bytes = [0x42u8; 32];
+    import_key_via_sealed_transfer(app, token, "ed25519", &seed_bytes, label, context_id).await
+}
+
+/// Helper: import an X25519 key via the sealed-transfer wrapping
+/// flow and return the key_id.
 #[cfg(feature = "webvh")]
 async fn import_x25519_key(app: &TestApp, token: &str, label: &str, context_id: &str) -> String {
-    // 32 deterministic bytes for the X25519 private key (test only)
+    // 32 deterministic bytes for the X25519 private key (test only).
     let key_bytes = [0x99u8; 32];
-    let mb = multibase::encode(multibase::Base::Base58Btc, key_bytes);
-
-    let (status, body) = app
-        .request(post_auth(
-            "/keys/import",
-            token,
-            json!({
-                "key_type": "x25519",
-                "private_key_multibase": mb,
-                "label": label,
-                "context_id": context_id,
-            }),
-        ))
-        .await;
-    assert!(status.is_success(), "import x25519: {status} {body}");
-    body["key_id"].as_str().unwrap().to_string()
+    import_key_via_sealed_transfer(app, token, "x25519", &key_bytes, label, context_id).await
 }
 
 #[cfg(feature = "webvh")]

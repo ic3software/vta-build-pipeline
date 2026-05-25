@@ -253,15 +253,45 @@ pub async fn get_wrapping_key(
     }))
 }
 
+/// REST `POST /keys/import` request body.
+///
+/// **The plaintext `private_key_multibase` shape is deliberately not
+/// accepted here.** Posting raw key material over a session-bearer-
+/// authenticated REST call relies entirely on TLS for confidentiality
+/// — the key is decrypted by the TLS terminator before the VTA sees
+/// it, which on Nitro Enclave means the host network stack reads
+/// plaintext private keys out of memory.
+///
+/// `#[serde(deny_unknown_fields)]` is load-bearing: any client posting
+/// the legacy `private_key_multibase` field gets a specific
+/// `unknown field` 400, not a generic missing-field error. That
+/// turns "the field is silently ignored" into "the operator gets a
+/// pointer to the migration path."
+///
+/// Use one of:
+/// - `private_key_sealed` — armored sealed-transfer bundle
+///   ([`SealedPayloadV1::RawPrivateKey`]). Preferred. Fetch the
+///   ephemeral wrapping pubkey from `GET /keys/import/wrapping-key`,
+///   then seal locally and POST.
+/// - `private_key_jwe` — legacy ECDH-ES + A256GCM compact JWE,
+///   wrapped against the same ephemeral key. Retained for in-flight
+///   callers; new code should pick `private_key_sealed`.
+///
+/// The DIDComm transport accepts `private_key_multibase` directly
+/// because authcrypt already provides end-to-end confidentiality —
+/// the SDK shape ([`vta_sdk::client::ImportKeyRequest`]) keeps the
+/// field for that future handler.
+///
+/// [`SealedPayloadV1::RawPrivateKey`]:
+///     vta_sdk::sealed_transfer::SealedPayloadV1::RawPrivateKey
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImportKeyRestRequest {
     pub key_type: KeyType,
     /// Sealed-transfer armored bundle — preferred REST transport.
     pub private_key_sealed: Option<String>,
     /// Legacy JWE compact serialization. Retained for existing clients.
     pub private_key_jwe: Option<String>,
-    /// Multibase-encoded private key (DIDComm transport — should not be used via REST).
-    pub private_key_multibase: Option<String>,
     pub label: Option<String>,
     pub context_id: Option<String>,
 }
@@ -273,7 +303,9 @@ pub async fn import_key(
     Json(req): Json<ImportKeyRestRequest>,
 ) -> Result<(StatusCode, Json<CreateKeyResultBody>), AppError> {
     // Unwrap the private key based on transport. Sealed-transfer is
-    // preferred; JWE is kept as a fallback for legacy clients.
+    // preferred; JWE is kept as a fallback for legacy clients. The
+    // plaintext `private_key_multibase` path is intentionally not
+    // accepted here — see [`ImportKeyRestRequest`] doc comment.
     let private_key_bytes = if let Some(sealed) = req.private_key_sealed.as_deref() {
         let (sealed_type, bytes) = state.wrapping_cache.unwrap_sealed(sealed).await?;
         if sealed_type != req.key_type.to_string() {
@@ -288,13 +320,12 @@ pub async fn import_key(
             "key import via legacy JWE path — prefer private_key_sealed (sealed-transfer)"
         );
         state.wrapping_cache.unwrap_jwe(&jwe).await?
-    } else if let Some(ref mb) = req.private_key_multibase {
-        let (_, bytes) = multibase::decode(mb)
-            .map_err(|e| AppError::Validation(format!("invalid multibase private key: {e}")))?;
-        bytes
     } else {
         return Err(AppError::Validation(
-            "one of private_key_sealed, private_key_jwe, or private_key_multibase is required"
+            "one of private_key_sealed or private_key_jwe is required; raw \
+             private_key_multibase over REST is not accepted (TLS-only \
+             confidentiality is insufficient — use the GET /keys/import/wrapping-key \
+             ECDH flow)"
                 .into(),
         ));
     };

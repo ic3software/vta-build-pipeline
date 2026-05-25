@@ -92,22 +92,29 @@ pub async fn cmd_key_import(
         return Err("either --private-key or --private-key-file is required".into());
     };
 
-    // REST path: fetch the server's ephemeral wrapping pubkey and seal the
-    // private key via sealed-transfer. DIDComm path: send multibase directly.
-    let (sealed, multibase) = match client.get_wrapping_key().await {
-        Ok(wrapping_key) => {
-            let sealed =
-                seal_private_key(&wrapping_key.x, &key_type, &private_key_multibase).await?;
-            (Some(sealed), None)
-        }
-        Err(_) => (None, Some(private_key_multibase)),
-    };
+    // Fetch the server's ephemeral wrapping pubkey and seal the private
+    // key via sealed-transfer. The REST `POST /keys/import` handler no
+    // longer accepts `private_key_multibase` (the previous fallback) —
+    // posting raw key material over a TLS-only channel was rejected by
+    // the April 2026 security review (patch #9). If the wrapping-key
+    // fetch fails, surface the error to the operator with the cause
+    // intact rather than silently downgrading to a request the server
+    // would reject as `unknown field`.
+    let wrapping_key = client.get_wrapping_key().await.map_err(|e| {
+        format!(
+            "failed to fetch ephemeral wrapping key from {}/keys/import/wrapping-key: {e} \
+             — the VTA must support sealed-transfer key import (vta-service ≥ 0.8); \
+             raw `private_key_multibase` over REST is no longer accepted",
+            client.base_url()
+        )
+    })?;
+    let sealed = seal_private_key(&wrapping_key.x, &key_type, &private_key_multibase).await?;
 
     let req = ImportKeyRequest {
         key_type,
-        private_key_sealed: sealed,
+        private_key_sealed: Some(sealed),
         private_key_jwe: None,
-        private_key_multibase: multibase,
+        private_key_multibase: None,
         label,
         context_id,
     };
