@@ -193,7 +193,7 @@ Mints two keys, following the workspace convention used by every
 other built-in template:
 
 - **`#key-0`** Ed25519 — `assertionMethod` + `authentication` (one
-  signing key serves both purposes; matches `webvh-control` and
+  signing key serves both purposes; matches `did-hosting-control` and
   friends).
 - **`#key-1`** X25519 — `keyAgreement` (sealed-transfer + later
   DIDComm reception).

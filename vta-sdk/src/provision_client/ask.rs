@@ -3,11 +3,13 @@
 //! [`ProvisionAsk`] mirrors the SDK's
 //! [`crate::provision_integration::BootstrapAsk::TemplateBootstrap`] without
 //! requiring callers to construct `DidTemplateRef` directly. Use the typed
-//! builders ([`ProvisionAsk::didcomm_mediator`], [`ProvisionAsk::webvh_control`],
-//! [`ProvisionAsk::webvh_daemon`], [`ProvisionAsk::webvh_server`], etc.) for
-//! the templates that ship with `vta-service`. For an operator-supplied
-//! template, use [`ProvisionAsk::for_template`] with the template name and
-//! variable bindings the template's `requiredVars` declares.
+//! builders ([`ProvisionAsk::didcomm_mediator`],
+//! [`ProvisionAsk::did_hosting_control`],
+//! [`ProvisionAsk::did_hosting_daemon`],
+//! [`ProvisionAsk::did_hosting_server`], etc.) for the templates that ship
+//! with `vta-service`. For an operator-supplied template, use
+//! [`ProvisionAsk::for_template`] with the template name and variable
+//! bindings the template's `requiredVars` declares.
 //!
 //! Adding a built-in template to `vta-service` without adding a curated
 //! builder here is an SDK-side bug — the equivalence tests at the bottom
@@ -24,9 +26,29 @@ use crate::provision_integration::ProvisionRequestBuilder;
 /// a typed builder below.
 pub const BUILTIN_MEDIATOR_TEMPLATE: &str = "didcomm-mediator";
 pub const BUILTIN_VTA_ADMIN_TEMPLATE: &str = "vta-admin";
-pub const BUILTIN_WEBVH_CONTROL_TEMPLATE: &str = "webvh-control";
-pub const BUILTIN_WEBVH_DAEMON_TEMPLATE: &str = "webvh-daemon";
-pub const BUILTIN_WEBVH_SERVER_TEMPLATE: &str = "webvh-server";
+pub const BUILTIN_DID_HOSTING_CONTROL_TEMPLATE: &str = "did-hosting-control";
+pub const BUILTIN_DID_HOSTING_DAEMON_TEMPLATE: &str = "did-hosting-daemon";
+pub const BUILTIN_DID_HOSTING_SERVER_TEMPLATE: &str = "did-hosting-server";
+
+/// Legacy `webvh-*` template-name constants retained for one release
+/// after the rename to `did-hosting-*`. The builtin loader silently
+/// resolves the old strings, but the constants themselves carry a
+/// `#[deprecated]` so call-sites surface a compile-time warning.
+#[deprecated(
+    since = "0.8.0",
+    note = "renamed to BUILTIN_DID_HOSTING_CONTROL_TEMPLATE"
+)]
+pub const BUILTIN_WEBVH_CONTROL_TEMPLATE: &str = "did-hosting-control";
+#[deprecated(
+    since = "0.8.0",
+    note = "renamed to BUILTIN_DID_HOSTING_DAEMON_TEMPLATE"
+)]
+pub const BUILTIN_WEBVH_DAEMON_TEMPLATE: &str = "did-hosting-daemon";
+#[deprecated(
+    since = "0.8.0",
+    note = "renamed to BUILTIN_DID_HOSTING_SERVER_TEMPLATE"
+)]
+pub const BUILTIN_WEBVH_SERVER_TEMPLATE: &str = "did-hosting-server";
 
 /// Default validity on a wizard-issued VP for the online path — chosen to
 /// comfortably cover the round-trip with the verifier's ±5min skew margin
@@ -93,12 +115,12 @@ impl ProvisionAsk {
         Self::for_template(BUILTIN_MEDIATOR_TEMPLATE, vars, context)
     }
 
-    /// Curated builder for the built-in `webvh-control` template. Mints
-    /// a control-plane node's DID with both a `WebVHHosting` service at
-    /// `host_url` and a `DIDCommMessaging` service routed through
+    /// Curated builder for the built-in `did-hosting-control` template.
+    /// Mints a control-plane node's DID with both a `WebVHHosting` service
+    /// at `host_url` and a `DIDCommMessaging` service routed through
     /// `mediator_did`. Use for nodes that both publish DID logs over HTTP
     /// and accept DIDComm (admin RPC, witness coordination, etc.).
-    pub fn webvh_control(
+    pub fn did_hosting_control(
         context: impl Into<String>,
         host_url: impl Into<String>,
         mediator_did: impl Into<String>,
@@ -109,30 +131,52 @@ impl ProvisionAsk {
             "MEDIATOR_DID".to_string(),
             Value::String(mediator_did.into()),
         );
-        Self::for_template(BUILTIN_WEBVH_CONTROL_TEMPLATE, vars, context)
+        Self::for_template(BUILTIN_DID_HOSTING_CONTROL_TEMPLATE, vars, context)
     }
 
-    /// Curated builder for the built-in `webvh-daemon` template. Mints a
-    /// hosting daemon's DID with a `WebVHHosting` service at `host_url`.
-    /// No DIDComm — use [`Self::webvh_control`] if the daemon also needs
-    /// to accept DIDComm.
-    pub fn webvh_daemon(context: impl Into<String>, host_url: impl Into<String>) -> Self {
+    /// Curated builder for the built-in `did-hosting-daemon` template.
+    /// Mints a hosting daemon's DID with a `WebVHHosting` service at
+    /// `host_url`. No DIDComm — use [`Self::did_hosting_control`] if the
+    /// daemon also needs to accept DIDComm.
+    pub fn did_hosting_daemon(context: impl Into<String>, host_url: impl Into<String>) -> Self {
         let mut vars = BTreeMap::new();
         vars.insert("URL".to_string(), Value::String(host_url.into()));
-        Self::for_template(BUILTIN_WEBVH_DAEMON_TEMPLATE, vars, context)
+        Self::for_template(BUILTIN_DID_HOSTING_DAEMON_TEMPLATE, vars, context)
     }
 
-    /// Curated builder for the built-in `webvh-server` template. Mints a
-    /// witness/watcher/server DID that talks DIDComm through
+    /// Curated builder for the built-in `did-hosting-server` template.
+    /// Mints a witness/watcher/server DID that talks DIDComm through
     /// `mediator_did` and exposes no public HTTP endpoint. The DID
     /// document carries only a `DIDCommMessaging` service.
-    pub fn webvh_server(context: impl Into<String>, mediator_did: impl Into<String>) -> Self {
+    pub fn did_hosting_server(context: impl Into<String>, mediator_did: impl Into<String>) -> Self {
         let mut vars = BTreeMap::new();
         vars.insert(
             "MEDIATOR_DID".to_string(),
             Value::String(mediator_did.into()),
         );
-        Self::for_template(BUILTIN_WEBVH_SERVER_TEMPLATE, vars, context)
+        Self::for_template(BUILTIN_DID_HOSTING_SERVER_TEMPLATE, vars, context)
+    }
+
+    /// Deprecated alias for [`Self::did_hosting_control`].
+    #[deprecated(since = "0.8.0", note = "renamed to did_hosting_control")]
+    pub fn webvh_control(
+        context: impl Into<String>,
+        host_url: impl Into<String>,
+        mediator_did: impl Into<String>,
+    ) -> Self {
+        Self::did_hosting_control(context, host_url, mediator_did)
+    }
+
+    /// Deprecated alias for [`Self::did_hosting_daemon`].
+    #[deprecated(since = "0.8.0", note = "renamed to did_hosting_daemon")]
+    pub fn webvh_daemon(context: impl Into<String>, host_url: impl Into<String>) -> Self {
+        Self::did_hosting_daemon(context, host_url)
+    }
+
+    /// Deprecated alias for [`Self::did_hosting_server`].
+    #[deprecated(since = "0.8.0", note = "renamed to did_hosting_server")]
+    pub fn webvh_server(context: impl Into<String>, mediator_did: impl Into<String>) -> Self {
+        Self::did_hosting_server(context, mediator_did)
     }
 
     /// Curated builder for the built-in `vta-admin` template — mint a
@@ -252,9 +296,9 @@ mod tests {
         for name in [
             BUILTIN_MEDIATOR_TEMPLATE,
             BUILTIN_VTA_ADMIN_TEMPLATE,
-            BUILTIN_WEBVH_CONTROL_TEMPLATE,
-            BUILTIN_WEBVH_DAEMON_TEMPLATE,
-            BUILTIN_WEBVH_SERVER_TEMPLATE,
+            BUILTIN_DID_HOSTING_CONTROL_TEMPLATE,
+            BUILTIN_DID_HOSTING_DAEMON_TEMPLATE,
+            BUILTIN_DID_HOSTING_SERVER_TEMPLATE,
         ] {
             load_embedded(name).unwrap_or_else(|e| {
                 panic!("built-in template {name} not in vta-sdk registry: {e}")
@@ -282,11 +326,11 @@ mod tests {
     }
 
     #[test]
-    fn webvh_server_sets_mediator_did_var() {
-        let ask = ProvisionAsk::webvh_server("ctx", "did:webvh:m.example.com");
+    fn did_hosting_server_sets_mediator_did_var() {
+        let ask = ProvisionAsk::did_hosting_server("ctx", "did:webvh:m.example.com");
         assert_eq!(
             ask.integration_template.as_deref(),
-            Some(BUILTIN_WEBVH_SERVER_TEMPLATE)
+            Some(BUILTIN_DID_HOSTING_SERVER_TEMPLATE)
         );
         assert_eq!(
             ask.integration_template_vars["MEDIATOR_DID"],
@@ -295,11 +339,11 @@ mod tests {
     }
 
     #[test]
-    fn webvh_daemon_sets_url_var() {
-        let ask = ProvisionAsk::webvh_daemon("ctx", "https://h.example.com");
+    fn did_hosting_daemon_sets_url_var() {
+        let ask = ProvisionAsk::did_hosting_daemon("ctx", "https://h.example.com");
         assert_eq!(
             ask.integration_template.as_deref(),
-            Some(BUILTIN_WEBVH_DAEMON_TEMPLATE)
+            Some(BUILTIN_DID_HOSTING_DAEMON_TEMPLATE)
         );
         assert_eq!(
             ask.integration_template_vars["URL"],
@@ -308,12 +352,15 @@ mod tests {
     }
 
     #[test]
-    fn webvh_control_sets_url_and_mediator_did_vars() {
-        let ask =
-            ProvisionAsk::webvh_control("ctx", "https://h.example.com", "did:webvh:m.example.com");
+    fn did_hosting_control_sets_url_and_mediator_did_vars() {
+        let ask = ProvisionAsk::did_hosting_control(
+            "ctx",
+            "https://h.example.com",
+            "did:webvh:m.example.com",
+        );
         assert_eq!(
             ask.integration_template.as_deref(),
-            Some(BUILTIN_WEBVH_CONTROL_TEMPLATE)
+            Some(BUILTIN_DID_HOSTING_CONTROL_TEMPLATE)
         );
         assert_eq!(
             ask.integration_template_vars["URL"],
@@ -322,6 +369,31 @@ mod tests {
         assert_eq!(
             ask.integration_template_vars["MEDIATOR_DID"],
             Value::String("did:webvh:m.example.com".into())
+        );
+    }
+
+    /// Deprecated `webvh_*` builder aliases must keep working for one
+    /// release — they're thin wrappers over the new `did_hosting_*`
+    /// names. Asserts both wrappers produce the same integration_template
+    /// name as the canonical builder.
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_webvh_aliases_match_did_hosting_canonical() {
+        let ctx = "ctx";
+        let host = "https://h.example.com";
+        let med = "did:webvh:m.example.com";
+
+        assert_eq!(
+            ProvisionAsk::webvh_control(ctx, host, med).integration_template,
+            ProvisionAsk::did_hosting_control(ctx, host, med).integration_template,
+        );
+        assert_eq!(
+            ProvisionAsk::webvh_daemon(ctx, host).integration_template,
+            ProvisionAsk::did_hosting_daemon(ctx, host).integration_template,
+        );
+        assert_eq!(
+            ProvisionAsk::webvh_server(ctx, med).integration_template,
+            ProvisionAsk::did_hosting_server(ctx, med).integration_template,
         );
     }
 
@@ -409,37 +481,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn curated_webvh_server_equivalent_to_for_template() {
-        let curated = ProvisionAsk::webvh_server("ctx", "did:webvh:m.example.com");
+    async fn curated_did_hosting_server_equivalent_to_for_template() {
+        let curated = ProvisionAsk::did_hosting_server("ctx", "did:webvh:m.example.com");
 
         let mut vars = BTreeMap::new();
         vars.insert(
             "MEDIATOR_DID".to_string(),
             Value::String("did:webvh:m.example.com".into()),
         );
-        let generic = ProvisionAsk::for_template(BUILTIN_WEBVH_SERVER_TEMPLATE, vars, "ctx");
+        let generic = ProvisionAsk::for_template(BUILTIN_DID_HOSTING_SERVER_TEMPLATE, vars, "ctx");
 
         assert_signed_vps_have_equivalent_ask(&curated, &generic).await;
     }
 
     #[tokio::test]
-    async fn curated_webvh_daemon_equivalent_to_for_template() {
-        let curated = ProvisionAsk::webvh_daemon("ctx", "https://h.example.com");
+    async fn curated_did_hosting_daemon_equivalent_to_for_template() {
+        let curated = ProvisionAsk::did_hosting_daemon("ctx", "https://h.example.com");
 
         let mut vars = BTreeMap::new();
         vars.insert(
             "URL".to_string(),
             Value::String("https://h.example.com".into()),
         );
-        let generic = ProvisionAsk::for_template(BUILTIN_WEBVH_DAEMON_TEMPLATE, vars, "ctx");
+        let generic = ProvisionAsk::for_template(BUILTIN_DID_HOSTING_DAEMON_TEMPLATE, vars, "ctx");
 
         assert_signed_vps_have_equivalent_ask(&curated, &generic).await;
     }
 
     #[tokio::test]
-    async fn curated_webvh_control_equivalent_to_for_template() {
-        let curated =
-            ProvisionAsk::webvh_control("ctx", "https://h.example.com", "did:webvh:m.example.com");
+    async fn curated_did_hosting_control_equivalent_to_for_template() {
+        let curated = ProvisionAsk::did_hosting_control(
+            "ctx",
+            "https://h.example.com",
+            "did:webvh:m.example.com",
+        );
 
         let mut vars = BTreeMap::new();
         vars.insert(
@@ -450,7 +525,7 @@ mod tests {
             "MEDIATOR_DID".to_string(),
             Value::String("did:webvh:m.example.com".into()),
         );
-        let generic = ProvisionAsk::for_template(BUILTIN_WEBVH_CONTROL_TEMPLATE, vars, "ctx");
+        let generic = ProvisionAsk::for_template(BUILTIN_DID_HOSTING_CONTROL_TEMPLATE, vars, "ctx");
 
         assert_signed_vps_have_equivalent_ask(&curated, &generic).await;
     }

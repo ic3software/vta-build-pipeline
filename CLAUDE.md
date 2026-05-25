@@ -80,8 +80,11 @@ The workspace has a **DID templates feature** (`docs/02-vta/did-templates.md`,
 template is a JSON file describing the **shape** of a DID document with
 `{TOKEN}` placeholders; the VTA renders them server-side, filling in keys it
 just minted + caller-supplied variables. Built-ins ship with the service
-(`didcomm-mediator`, `vta-admin`, `webvh-control`, `webvh-daemon`,
-`webvh-server`); operators can upload more.
+(`didcomm-mediator`, `vta-admin`, `did-hosting-control`,
+`did-hosting-daemon`, `did-hosting-server`); operators can upload more.
+The previous `webvh-*` template names still resolve via the loader's
+alias table for one release — update operator configs to the canonical
+`did-hosting-*` names before the alias is removed.
 
 **Before inventing a new mint-a-DID path, reach for templates first.**
 
@@ -106,7 +109,7 @@ DID shape for every consumer, no redeploy.
 The noun for "a thing a template provisions" is **integration** (not
 "agent" — that word collides with VTA = Verifiable Trust *Agent*). CLI
 reads "provision-integration"; docs talk about "integration kinds"
-(mediator, webvh-control, webvh-daemon, webvh-server, app, etc.); each
+(mediator, did-hosting-control, did-hosting-daemon, did-hosting-server, app, etc.); each
 template declares its kind in the `kind` field.
 
 ## Authorization claims between VTA and integrations use VC/VP format
@@ -463,11 +466,13 @@ new flow, update both this section and the relevant `docs/*.md`.
 - **Offline**: `pnm did-templates init <kind>`, `validate`, `list-builtins`.
 - **Online**: `pnm did-templates list/show/create/update/delete` →
   REST `/did-templates` (global) or `/contexts/{id}/did-templates` (scoped).
-- **Built-ins**: `didcomm-mediator`, `vta-admin`, `webvh-control`,
-  `webvh-daemon`, `webvh-server` (shipped with the SDK, always available).
-  Three webvh templates by deployment role: `webvh-control` (hosting +
-  DIDComm), `webvh-daemon` (hosting only), `webvh-server` (DIDComm only,
-  for witness/watcher).
+- **Built-ins**: `didcomm-mediator`, `vta-admin`, `did-hosting-control`,
+  `did-hosting-daemon`, `did-hosting-server` (shipped with the SDK,
+  always available). Three did-hosting templates by deployment role:
+  `did-hosting-control` (hosting + DIDComm), `did-hosting-daemon`
+  (hosting only), `did-hosting-server` (DIDComm only, for
+  witness/watcher). Legacy `webvh-*` names resolve via the loader's
+  alias table for one release.
 - **Code**: `vta-sdk/src/did_templates/`,
   `vta-service/src/routes/did_templates.rs`, `vta-service/src/operations/did_templates.rs`.
 - **Docs**: `docs/02-vta/did-templates.md`.

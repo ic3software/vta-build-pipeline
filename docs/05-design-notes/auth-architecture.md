@@ -14,7 +14,7 @@ Five separate codebases each carried their own implementation of the
 | `vtc-service`          | REST + DIDComm      | `vti-common`    | `VtcRole`     |
 | `did-hosting-control`  | REST (SIOPv2)       | `did-hosting`   | `did-hosting` |
 | `did-hosting-server`   | DIDComm             | `did-hosting`   | `did-hosting` |
-| `webvh-witness`        | DIDComm             | `did-hosting`   | `did-hosting` |
+| `did-hosting-witness`        | DIDComm             | `did-hosting`   | `did-hosting` |
 
 The flow logic was 90% identical across all five. The 10% that
 differed (TEE attestation on VTA, SIOPv2 id_token verification on
@@ -23,7 +23,7 @@ drifted in subtle, security-relevant ways. The May 2026 cross-system
 security review surfaced:
 
 - VTA + VTC had no per-DID challenge rate limit; did-hosting-server +
-  webvh-witness had one but used an O(N) prefix-scan; did-hosting-control
+  did-hosting-witness had one but used an O(N) prefix-scan; did-hosting-control
   had an O(1) tracker.
 - `session_pubkey_b58btc` support existed only on did-hosting-control;
   server + witness silently ignored the field.
@@ -118,7 +118,7 @@ Two impls ship in the workspace:
 - `did_hosting_common::server::auth::DidHostingSessionStore` —
   wraps did-hosting's `KeyspaceHandle` struct (separate trait
   with fjall / Redis / DynamoDB / Firestore / Cosmos DB
-  backends). did-hosting-control + server + webvh-witness use it.
+  backends). did-hosting-control + server + did-hosting-witness use it.
 
 A future Redis-backed direct impl could ship here when the
 canonical handler runs in a cloud deployment; the trait
@@ -225,7 +225,7 @@ vti-common 0.7 + vta-sdk 0.7 publish, the git deps flip to
 
 A standalone follow-up PR makes that flip — it's a five-line
 Cargo.toml change in each of `did-hosting-common`,
-`did-hosting-control`, `did-hosting-server`, `webvh-witness`,
+`did-hosting-control`, `did-hosting-server`, `did-hosting-witness`,
 and the workspace root.
 
 ## Security review follow-ups closed by the consolidation

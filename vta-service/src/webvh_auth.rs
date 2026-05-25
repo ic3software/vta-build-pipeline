@@ -1,6 +1,6 @@
 //! Daemon REST authentication for webvh hosting servers.
 //!
-//! The webvh daemon (`affinidi-webvh-service/webvh-control`) exposes a
+//! The webvh daemon (`affinidi-webvh-service/did-hosting-control`) exposes a
 //! challenge/response auth flow over plain HTTP-over-TLS, but the
 //! *body* of the `POST /api/auth/` and `POST /api/auth/refresh`
 //! requests is a **JWS-signed DIDComm v2 envelope**, not plain JSON.
@@ -35,7 +35,7 @@
 //! exists via "session_id + challenge live on this daemon, signed
 //! response must match." For defence-in-depth we additionally
 //! populate the DIDComm `to: [server_did]` field. Current
-//! `webvh-control` does not verify `to:`, but a future verification
+//! `did-hosting-control` does not verify `to:`, but a future verification
 //! step would reject a JWS minted for daemon A when forwarded to
 //! daemon B without us having to re-mint the envelope shape.
 //!
@@ -235,7 +235,7 @@ mod tests {
     fn authenticate_message_binds_audience_via_to_field() {
         // Audit recommendation: include the daemon's DID in `to:` so
         // the JWS isn't replayable against a different daemon that
-        // happens to verify `to:`. Today's webvh-control doesn't
+        // happens to verify `to:`. Today's did-hosting-control doesn't
         // verify `to:` but the binding must still be present.
         let (private, public, vta_did, kid) = fixture_identity(7);
         let identity = VtaSigningIdentity {

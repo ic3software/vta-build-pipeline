@@ -14,8 +14,8 @@ consumer gets the new shape on the next create. No redeploy.
 
 - **Data, not code.** An operator can ship a new agent kind by dropping a JSON
   file, no recompile. The built-ins (`didcomm-mediator`, `vta-admin`,
-  `vtc-host`, `webvh-control`, `webvh-daemon`, `webvh-server`) are baseline shapes, not
-  the only shapes.
+  `vtc-host`, `did-hosting-control`, `did-hosting-daemon`, `did-hosting-server`)
+  are baseline shapes, not the only shapes.
 - **Method-agnostic.** Same format works for `did:webvh`, `did:web`, or
   `did:key` — the loader only knows about `{TOKEN}` placeholders. Method-
   specific details (SCID, log endpoints) are just placeholders the VTA fills.
@@ -149,17 +149,22 @@ template without explicit scope is **context → global → builtin**:
     `runtime-service-management.md`). Requires `URL`; optional
     `STATUS_LIST_PATH` (default `/v1/status-lists`). `URL` must not have a
     trailing slash.
-  - `webvh-control` — webvh control-plane node exposing both a
+  - `did-hosting-control` — DID-hosting control-plane node exposing both a
     `WebVHHosting` service (URL-based) **and** a `DIDCommMessaging` service
     routed through a mediator. Use for nodes that publish DID logs over
     HTTP and accept DIDComm (admin RPC, witness coordination,
     control-plane traffic).
-  - `webvh-daemon` — pure webvh hosting daemon with a `WebVHHosting`
+  - `did-hosting-daemon` — pure DID-hosting daemon with a `WebVHHosting`
     service and **no** DIDComm. Use for nodes whose only role is hosting
-    DID logs. If you also need DIDComm, use `webvh-control`.
-  - `webvh-server` — webvh node that talks DIDComm via a shared mediator
-    and exposes **no** public HTTP endpoint. Use for witness, watcher, or
-    any service consumed via DIDComm only.
+    DID logs. If you also need DIDComm, use `did-hosting-control`.
+  - `did-hosting-server` — DID-hosting node that talks DIDComm via a shared
+    mediator and exposes **no** public HTTP endpoint. Use for witness,
+    watcher, or any service consumed via DIDComm only.
+
+  Legacy `webvh-control` / `webvh-daemon` / `webvh-server` template names
+  still resolve to the renamed templates for one release; update operator
+  configs to the canonical `did-hosting-*` names before the alias is
+  removed.
 - **Global** (`tpl:global:<name>`) — super-admin-managed. Visible across every
   context.
 - **Context** (`tpl:ctx:<id>:<name>`) — context-admin-managed (or super

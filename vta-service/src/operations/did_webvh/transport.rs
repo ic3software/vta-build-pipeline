@@ -11,7 +11,7 @@
 //! - `DIDCommMessaging` — preferred when present, regardless of
 //!   position in the service array.
 //! - `WebVHHosting` — the canonical type emitted by current
-//!   `webvh-daemon` / `webvh-server` builds.
+//!   `did-hosting-daemon` / `did-hosting-server` builds.
 //! - `WebVHHostingService` — legacy alias accepted on **read only**.
 //!   We never emit it; existing daemon DIDs stamped before the
 //!   unification keep working.

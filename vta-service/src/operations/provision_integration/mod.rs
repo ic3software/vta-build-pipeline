@@ -374,8 +374,8 @@ pub async fn provision_integration(
                          `--var URL=https://...` (serverless mode — you publish did.jsonl \
                          yourself) or `--var WEBVH_SERVER=<id>` (route through a webvh \
                          hosting server registered with `vta webvh add-server`). At least one \
-                         is required for any webvh-method built-in (webvh-control, \
-                         webvh-daemon, webvh-server)."
+                         is required for any webvh-method built-in (did-hosting-control, \
+                         did-hosting-daemon, did-hosting-server)."
                     ))
                 })?;
                 (None, Some(url))
@@ -1545,7 +1545,7 @@ mod tests {
         // `didcomm-mediator` template now publishes verificationMethod
         // ids `#key-0` (signing) and `#key-1` (key-agreement) — matching
         // the VTA's internal storage convention and the other built-in
-        // webvh templates (webvh-control / webvh-daemon / webvh-server).
+        // webvh templates (did-hosting-control / did-hosting-daemon / did-hosting-server).
         // Earlier shapes (`#key-1` / `#key-2`) diverged from both, and
         // consumers couldn't match an inbound JWE for `#key-2` to any
         // private key.

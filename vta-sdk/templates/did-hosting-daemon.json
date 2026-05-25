@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "name": "webvh-daemon",
-  "kind": "webvh-daemon",
-  "description": "WebVH hosting daemon — publishes did:webvh logs over HTTP via a WebVHHosting service endpoint. No DIDComm. Use this for a node whose only role is hosting DID logs for self-managed DIDs. If the daemon also needs to accept DIDComm (admin RPC, witness coordination, control-plane traffic), use 'webvh-control' instead.",
+  "name": "did-hosting-daemon",
+  "kind": "did-hosting-daemon",
+  "description": "DID-hosting daemon — publishes did:webvh logs over HTTP via a WebVHHosting service endpoint. No DIDComm. Use this for a node whose only role is hosting DID logs for self-managed DIDs. If the daemon also needs to accept DIDComm (admin RPC, witness coordination, control-plane traffic), use 'did-hosting-control' instead.",
   "methods": ["webvh", "web"],
   "requiredVars": ["URL"],
   "optionalVars": {

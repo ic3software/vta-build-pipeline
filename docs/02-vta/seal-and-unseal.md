@@ -30,7 +30,7 @@ Two paths set the seal automatically:
 If `admin_did` is omitted from the setup TOML (and `vta bootstrap-admin`
 isn't run), the VTA finishes setup **unsealed with an empty ACL** — the
 offline CLI remains fully usable. This is the recommended state for the
-window where you're provisioning the mediator, webvh-daemon, or any
+window where you're provisioning the mediator, did-hosting-daemon, or any
 other integration that needs the VTA to mint keys and seal bundles.
 
 ## When the seal is in your way
@@ -41,7 +41,7 @@ Any of these would fail with `Error: configuration error: VTA is sealed
 - `vta contexts reprovision …` — sealing a bundle for the mediator's
   Phase 2.
 - `vta bootstrap provision-integration …` — sealing a bundle for a
-  webvh-daemon or other template-driven integration.
+  did-hosting-daemon or other template-driven integration.
 - `vta contexts create …`, `vta acl …`, `vta keys …`,
   `vta import-did …` — any state-mutating offline command.
 
@@ -59,10 +59,10 @@ unseal dance entirely:
    → unsealed, ACL empty.
 2. Provision the mediator: `mediator-setup` Phase 1 →
    `vta contexts reprovision …` → `mediator-setup` Phase 2.
-3. Provision the webvh-daemon: `webvh-daemon setup-offline-prepare` →
+3. Provision the did-hosting-daemon: `did-hosting-daemon setup-offline-prepare` →
    `vta contexts create webvh …` →
    `vta bootstrap provision-integration …` →
-   `webvh-daemon setup-offline-complete`.
+   `did-hosting-daemon setup-offline-complete`.
 4. Provision any other integrations the same way.
 5. Mint or import the admin identity (`pnm setup --name <slug>` is the
    common case) and register it: `vta import-did --did <admin> --role

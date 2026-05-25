@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Built-in DID templates renamed `webvh-*` → `did-hosting-*`
+
+Aligns the SDK's built-in template names with the broader OpenVTC
+terminology already used by the webvh-service / did-hosting service
+roles (see auth-architecture and trust-task-uri-registry design notes).
+
+- **Renames**: `webvh-control` → `did-hosting-control`,
+  `webvh-daemon` → `did-hosting-daemon`,
+  `webvh-server` → `did-hosting-server`. The on-disk JSON files,
+  `name` + `kind` fields, builtin-loader constants, and curated
+  `ProvisionAsk` builders (`did_hosting_control` / `did_hosting_daemon`
+  / `did_hosting_server`) all flip to the new names.
+- **Back-compat alias for one release.** `load_embedded("webvh-control")`
+  still resolves to `did-hosting-control` (same for daemon and server);
+  the returned `DidTemplate.name` carries the canonical name. The
+  `BUILTIN_WEBVH_*_TEMPLATE` constants and `ProvisionAsk::webvh_*`
+  builders are marked `#[deprecated(since = "0.8.0")]` and forward to
+  the new names. Operator configs should switch to `did-hosting-*`
+  before the alias is dropped in the next minor release.
+- **Doc cross-refs.** Tracker mentions of `webvh-witness` (a service
+  role in the webvh-service repo) follow the same rename to
+  `did-hosting-witness`. Protocol URIs and module names that refer to
+  the `did:webvh` DID-method itself are unchanged.
+- **Version bumps.** vta-sdk 0.7 → 0.8, vti-common 0.7 → 0.8,
+  vta-service 0.7 → 0.8, vta-cli-common 0.7 → 0.8, pnm-cli 0.7 → 0.8,
+  cnm-cli 0.7 → 0.8, vta-enclave 0.7 → 0.8, vtc-service 0.1 → 0.2,
+  didcomm-test 0.6 → 0.7. Workspace `major.minor` pinning ripples
+  through.
+
 ### Auth-architecture consolidation (S1+S2+S3)
 
 A cross-repo consolidation of the `/auth/*` surface. Five

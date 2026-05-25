@@ -298,15 +298,15 @@ enum BootstrapCommands {
     /// return an armored sealed bundle which `vta bootstrap open`
     /// decrypts using the persisted seed.
     ///
-    /// Used by integration operators (mediator, webvh-control, webvh-daemon,
-    /// webvh-server, etc.) to request enrollment from a VTA that may not
+    /// Used by integration operators (mediator, did-hosting-control, did-hosting-daemon,
+    /// did-hosting-server, etc.) to request enrollment from a VTA that may not
     /// yet be network-reachable. See
     /// `docs/02-vta/provision-integration.md` for the end-to-end
     /// flow.
     ProvisionRequest {
         /// DID template name the VTA should render (e.g.
-        /// `didcomm-mediator`, `webvh-control`, `webvh-daemon`,
-        /// `webvh-server`, or an operator-uploaded custom template).
+        /// `didcomm-mediator`, `did-hosting-control`, `did-hosting-daemon`,
+        /// `did-hosting-server`, or an operator-uploaded custom template).
         #[arg(long)]
         template: String,
         /// Template variable, repeat for each binding. Format `KEY=VALUE`.

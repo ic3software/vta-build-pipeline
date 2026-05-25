@@ -1053,7 +1053,7 @@ pub async fn delete_did_webvh(
                         did = %did,
                         server_id = %server.id,
                         error = %e,
-                        "webvh-daemon delete_did failed; continuing local cleanup but DID is now orphaned on the daemon"
+                        "did-hosting-daemon delete_did failed; continuing local cleanup but DID is now orphaned on the daemon"
                     );
                     daemon_cleanup_error = Some(format!(
                         "daemon `{}` rejected delete: {e} — DID is orphaned on the daemon and \

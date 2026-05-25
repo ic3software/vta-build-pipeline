@@ -1,7 +1,7 @@
 //! Canonical auth-flow backend trait.
 //!
 //! Five callers (VTA, VTC, did-hosting-control, did-hosting-server,
-//! webvh-witness) all run the same shape of `/auth/challenge`,
+//! did-hosting-witness) all run the same shape of `/auth/challenge`,
 //! `/auth/authenticate`, `/auth/refresh` flow with minor policy
 //! differences (TEE attestation, DID-method allowlist, per-DID
 //! rate limit) and different storage / error / role types.

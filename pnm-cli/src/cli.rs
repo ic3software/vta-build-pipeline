@@ -266,7 +266,7 @@ pub(crate) enum BootstrapCommands {
     /// Mints an ephemeral Ed25519 keypair, persists the seed under
     /// `~/.config/pnm/bootstrap-secrets/<bundle_id>.key`, and writes a
     /// signed VP naming the target DID template (e.g.
-    /// `didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`) + variables. Hand the
+    /// `didcomm-mediator`, `did-hosting-control`, `did-hosting-daemon`, `did-hosting-server`) + variables. Hand the
     /// JSON to the VTA operator. Counterpart to `vta bootstrap
     /// provision-request` — same wire shape, same on-disk layout,
     /// different default seed directory.
@@ -274,7 +274,7 @@ pub(crate) enum BootstrapCommands {
     /// See `docs/02-vta/provision-integration.md` for the flow.
     ProvisionRequest {
         /// DID template name the VTA should render (e.g.
-        /// `didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`, or an
+        /// `didcomm-mediator`, `did-hosting-control`, `did-hosting-daemon`, `did-hosting-server`, or an
         /// operator-uploaded custom template).
         #[arg(long)]
         template: String,
@@ -354,8 +354,10 @@ pub(crate) enum DidTemplateCommands {
     ///
     /// Emits JSON on stdout so it can be redirected to a file for editing.
     /// `kind` accepts either the full built-in name
-    /// (`didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`) or a short alias
-    /// (`mediator`, `control`, `webvh-hosting`, `hosting`, `daemon`, `witness`, `watcher`, `server`).
+    /// (`didcomm-mediator`, `did-hosting-control`, `did-hosting-daemon`, `did-hosting-server`) or a short alias
+    /// (`mediator`, `control`, `did-hosting`, `hosting`, `daemon`, `witness`, `watcher`, `server`).
+    /// Legacy `webvh-control` / `webvh-daemon` / `webvh-server` names are
+    /// still accepted and resolve to the renamed templates for one release.
     Init {
         /// Built-in kind or alias to fork.
         kind: String,

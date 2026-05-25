@@ -63,14 +63,21 @@ pub fn cmd_validate(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Emit a starter template on stdout by forking an embedded built-in. The
 /// operator can redirect to a file, edit, and upload. `kind` is a built-in
-/// name (`didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`).
+/// name (`didcomm-mediator`, `did-hosting-control`, `did-hosting-daemon`,
+/// `did-hosting-server`).
 pub fn cmd_init(kind: String) -> Result<(), Box<dyn std::error::Error>> {
-    // Accept either the exact builtin name or a short alias.
+    // Accept either the exact builtin name, a short alias, or a legacy
+    // webvh-* name (resolved via the builtin loader's alias table).
     let builtin_name = match kind.as_str() {
         "mediator" => "didcomm-mediator",
-        "webvh-hosting" | "hosting" | "daemon" => "webvh-daemon",
-        "control" => "webvh-control",
-        "witness" | "watcher" | "server" => "webvh-server",
+        "did-hosting" | "hosting" | "daemon" => "did-hosting-daemon",
+        "control" => "did-hosting-control",
+        "witness" | "watcher" | "server" => "did-hosting-server",
+        // Legacy aliases — silently resolve to the renamed templates.
+        "webvh-hosting" => "did-hosting-daemon",
+        "webvh-control" => "did-hosting-control",
+        "webvh-daemon" => "did-hosting-daemon",
+        "webvh-server" => "did-hosting-server",
         other if BUILTIN_NAMES.contains(&other) => other,
         other => {
             eprintln!(

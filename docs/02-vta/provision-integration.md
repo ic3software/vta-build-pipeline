@@ -107,10 +107,15 @@ conditional logic in the renderer, so the template name is a
 | Template | DID-document services | Required vars (renderer) | Required at provision time | Use for |
 |---|---|---|---|---|
 | `didcomm-mediator` | `DIDCommMessaging` URL endpoint | `URL` | — | DIDComm v2 routing mediator |
-| `webvh-control` | `WebVHHosting` + `DIDCommMessaging` | `URL`, `MEDIATOR_DID` | `URL` or `WEBVH_SERVER` | Control-plane node — hosts DID logs **and** accepts DIDComm (admin RPC, witness coordination, control-plane traffic) |
-| `webvh-daemon` | `WebVHHosting` only | `URL` | `URL` or `WEBVH_SERVER` | Pure hosting daemon — publishes DID logs over HTTP, no DIDComm. If you also need DIDComm, use `webvh-control` |
-| `webvh-server` | `DIDCommMessaging` only | `MEDIATOR_DID` | `URL` or `WEBVH_SERVER` | Witness, watcher, or any service consumed via DIDComm only — no public HTTP endpoint |
+| `did-hosting-control` | `WebVHHosting` + `DIDCommMessaging` | `URL`, `MEDIATOR_DID` | `URL` or `WEBVH_SERVER` | Control-plane node — hosts DID logs **and** accepts DIDComm (admin RPC, witness coordination, control-plane traffic) |
+| `did-hosting-daemon` | `WebVHHosting` only | `URL` | `URL` or `WEBVH_SERVER` | Pure hosting daemon — publishes DID logs over HTTP, no DIDComm. If you also need DIDComm, use `did-hosting-control` |
+| `did-hosting-server` | `DIDCommMessaging` only | `MEDIATOR_DID` | `URL` or `WEBVH_SERVER` | Witness, watcher, or any service consumed via DIDComm only — no public HTTP endpoint |
 | `vta-admin` | (none) | (none) | — | Long-term admin DID for `--admin-template` rollover |
+
+Legacy `webvh-control` / `webvh-daemon` / `webvh-server` names are still
+accepted at the wire level and resolve to the renamed templates for one
+release; update operator configs to the canonical `did-hosting-*` names
+before the alias is removed.
 
 "Required at provision time" applies in addition to the renderer's
 `requiredVars`. Any webvh-method template needs to know where its
@@ -203,11 +208,11 @@ vta bootstrap provision-request \
     --out            mediator-request.vp.json
 ```
 
-**Webvh-daemon example** (hosts DID logs over HTTP, no DIDComm):
+**did-hosting-daemon example** (hosts DID logs over HTTP, no DIDComm):
 
 ```bash
 vta bootstrap provision-request \
-    --template       webvh-daemon \
+    --template       did-hosting-daemon \
     --var            URL=https://webvh.example.com \
     --context-hint   webvh-host-prod \
     --admin-template vta-admin \
@@ -215,36 +220,36 @@ vta bootstrap provision-request \
     --out            webvh-host-request.vp.json
 ```
 
-**Webvh-control example** (hosts DID logs **and** accepts DIDComm —
+**did-hosting-control example** (hosts DID logs **and** accepts DIDComm —
 admin RPC, witness coordination, etc.):
 
 ```bash
 vta bootstrap provision-request \
-    --template       webvh-control \
+    --template       did-hosting-control \
     --var            URL=https://webvh.example.com \
     --var            MEDIATOR_DID=did:webvh:mediator.example.com \
-    --context-hint   webvh-control-prod \
+    --context-hint   did-hosting-control-prod \
     --admin-template vta-admin \
     --validity-hours 168 \
-    --out            webvh-control-request.vp.json
+    --out            did-hosting-control-request.vp.json
 ```
 
-**Webvh-server example** (witness/watcher — DIDComm only, no public HTTP):
+**did-hosting-server example** (witness/watcher — DIDComm only, no public HTTP):
 
 ```bash
 vta bootstrap provision-request \
-    --template       webvh-server \
+    --template       did-hosting-server \
     --var            MEDIATOR_DID=did:webvh:mediator.example.com \
     --var            URL=https://logs.example.com \
-    --context-hint   webvh-witness \
+    --context-hint   did-hosting-witness \
     --admin-template vta-admin \
     --validity-hours 168 \
-    --out            webvh-witness-request.vp.json
+    --out            did-hosting-witness-request.vp.json
 ```
 
 `URL` is required for any webvh-method template at provision time so
 the VTA knows where the DID's `did.jsonl` log will be published —
-even on `webvh-server`, where `URL` does not appear in the rendered
+even on `did-hosting-server`, where `URL` does not appear in the rendered
 document. Pass `--var WEBVH_SERVER=<id>` instead to route through a
 hosting server already registered with `vta webvh add-server`.
 
@@ -269,7 +274,7 @@ shape, different binary, different default seed directory
 
 | Flag | Required | Notes |
 |---|---|---|
-| `--template` | yes | Built-in (`didcomm-mediator`, `webvh-control`, `webvh-daemon`, `webvh-server`) or operator-uploaded template name. |
+| `--template` | yes | Built-in (`didcomm-mediator`, `did-hosting-control`, `did-hosting-daemon`, `did-hosting-server`) or operator-uploaded template name. |
 | `--var KEY=VALUE` | varies | Template-specific. Values are parsed as JSON when possible (`true`, numbers, arrays, objects, quoted strings); unquoted values are treated as strings. |
 | `--context-hint` | recommended | The VTA context the integration will live in. The VTA operator confirms; mismatch is rejected, not silently normalized. |
 | `--admin-template` | recommended | Typically `vta-admin`. The VTA mints a long-term admin DID under its own key custody and binds authorization to it — the ephemeral key stays throwaway. Omit only if you intentionally want the ephemeral `client_did` to remain the admin. |
@@ -377,7 +382,7 @@ What it does:
 `vta bootstrap open` today **prints** the payload contents; it does
 not automatically install them into the integration's keystore. That
 install step is integration-specific and lives in the integration's
-own setup wizard (mediator repo, webvh-daemon repo, etc.).
+own setup wizard (mediator repo, did-hosting-daemon repo, etc.).
 Those wizards use the SDK directly — see [SDK surface](#sdk-surface).
 
 **What the integration installs:**
@@ -814,9 +819,9 @@ Five curated builders mirror the built-in templates shipped by
 | Builder | Template | Required vars |
 |---|---|---|
 | `ProvisionAsk::didcomm_mediator(ctx, url)` | `didcomm-mediator` | `URL` |
-| `ProvisionAsk::webvh_control(ctx, url, mediator_did)` | `webvh-control` | `URL`, `MEDIATOR_DID` |
-| `ProvisionAsk::webvh_daemon(ctx, url)` | `webvh-daemon` | `URL` |
-| `ProvisionAsk::webvh_server(ctx, mediator_did)` | `webvh-server` | `MEDIATOR_DID` |
+| `ProvisionAsk::did_hosting_control(ctx, url, mediator_did)` | `did-hosting-control` | `URL`, `MEDIATOR_DID` |
+| `ProvisionAsk::did_hosting_daemon(ctx, url)` | `did-hosting-daemon` | `URL` |
+| `ProvisionAsk::did_hosting_server(ctx, mediator_did)` | `did-hosting-server` | `MEDIATOR_DID` |
 | `ProvisionAsk::vta_admin(ctx)` | `vta-admin` | (none) |
 
 For an operator-supplied template, use
@@ -919,7 +924,7 @@ The integration operator generates the request side with:
 
 ```
 vta bootstrap provision-request \
-    --template       <name>               # didcomm-mediator | webvh-control | webvh-daemon | webvh-server | …
+    --template       <name>               # didcomm-mediator | did-hosting-control | did-hosting-daemon | did-hosting-server | …
     --var KEY=VALUE                       # repeat for each template variable
     --context-hint   <id>                 # recommended
     --admin-template vta-admin            # recommended (long-term admin rollover)
