@@ -106,7 +106,7 @@ pub struct Session {
 /// issuance, not an absolute timestamp. Clients compute the absolute
 /// expiry as `now() + expires_in` immediately after issuance, or
 /// store the issuance moment alongside the bundle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenBundle {
     pub access_token: String,
@@ -118,6 +118,27 @@ pub struct TokenBundle {
     pub refresh_expires_in: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scope: Vec<String>,
+}
+
+// Manual Debug — `access_token` and `refresh_token` are bearer
+// credentials. Any tracing or panic that captures a `TokenBundle`
+// via `{:?}` would otherwise leak them straight into logs. Serialize
+// is unchanged so the wire format / on-disk session cache still
+// round-trips.
+impl std::fmt::Debug for TokenBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenBundle")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("refresh_expires_in", &self.refresh_expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// Server responds from `POST /auth/`. Conforms to

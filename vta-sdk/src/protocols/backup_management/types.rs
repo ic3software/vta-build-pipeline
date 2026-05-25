@@ -42,7 +42,7 @@ pub struct EncryptionParams {
 // ── Backup payload (inner, encrypted) ──────────────────────────────
 
 /// All VTA state, serialized as JSON then encrypted.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct BackupPayload {
     /// Hex-encoded active seed bytes (32 bytes → 64 hex chars).
     pub active_seed_hex: String,
@@ -87,21 +87,76 @@ pub struct BackupPayload {
     pub imported_kek_salt: Option<String>,
 }
 
+// Manual Debug for `BackupPayload` and the secret-bearing leaf types
+// below. The backup payload carries the active seed, the JWT signing
+// key, every imported private key, every retired seed, plus the
+// password on Export/Import requests. Any `{:?}` of these via a
+// tracing macro or panic-with-debug would be a near-total compromise
+// of the VTA's key material. Serialize is unchanged so the encrypted
+// envelope, file persistence, and DIDComm wire formats still
+// round-trip the secret-bearing fields verbatim.
+
+impl std::fmt::Debug for BackupPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackupPayload")
+            .field("active_seed_hex", &"<redacted>")
+            .field("active_seed_id", &self.active_seed_id)
+            .field("seed_records", &self.seed_records)
+            .field(
+                "jwt_signing_key",
+                &self.jwt_signing_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("key_records_len", &self.key_records.len())
+            .field("context_records_len", &self.context_records.len())
+            .field("context_counter", &self.context_counter)
+            .field("acl_entries_len", &self.acl_entries.len())
+            .field("seal", &self.seal)
+            .field("webvh_servers_len", &self.webvh_servers.len())
+            .field("webvh_dids_len", &self.webvh_dids.len())
+            .field("webvh_logs_len", &self.webvh_logs.len())
+            .field("config", &self.config)
+            .field("audit_logs_len", &self.audit_logs.len())
+            .field("imported_secrets", &self.imported_secrets)
+            .field("imported_kek_salt", &self.imported_kek_salt)
+            .finish()
+    }
+}
+
 /// An imported secret included in the backup payload.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ImportedSecretBackup {
     pub key_id: String,
     /// Hex-encoded raw private key bytes.
     pub private_key_hex: String,
 }
 
+impl std::fmt::Debug for ImportedSecretBackup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportedSecretBackup")
+            .field("key_id", &self.key_id)
+            .field("private_key_hex", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Seed record for backup (mirrors SeedRecord from vta-service).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SeedRecordBackup {
     pub id: u32,
     pub seed_hex: Option<String>,
     pub created_at: DateTime<Utc>,
     pub retired_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for SeedRecordBackup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeedRecordBackup")
+            .field("id", &self.id)
+            .field("seed_hex", &self.seed_hex.as_ref().map(|_| "<redacted>"))
+            .field("created_at", &self.created_at)
+            .field("retired_at", &self.retired_at)
+            .finish()
+    }
 }
 
 /// ACL entry for backup (mirrors AclEntry from vti-common).
@@ -149,21 +204,40 @@ pub struct BackupConfig {
 // ── Request/response types ─────────────────────────────────────────
 
 /// Export request body (REST + DIDComm).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ExportRequest {
     pub password: String,
     #[serde(default)]
     pub include_audit: bool,
 }
 
+impl std::fmt::Debug for ExportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportRequest")
+            .field("password", &"<redacted>")
+            .field("include_audit", &self.include_audit)
+            .finish()
+    }
+}
+
 /// Import request body (REST + DIDComm).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ImportRequest {
     pub backup: BackupEnvelope,
     pub password: String,
     /// If false, returns a preview without modifying state.
     #[serde(default = "default_true")]
     pub confirm: bool,
+}
+
+impl std::fmt::Debug for ImportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportRequest")
+            .field("backup", &self.backup)
+            .field("password", &"<redacted>")
+            .field("confirm", &self.confirm)
+            .finish()
+    }
 }
 
 fn default_true() -> bool {
