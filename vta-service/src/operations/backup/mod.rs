@@ -739,9 +739,25 @@ pub fn decrypt_backup(
     let salt = BASE64
         .decode(&envelope.kdf.salt)
         .map_err(|e| AppError::Validation(format!("invalid salt: {e}")))?;
+    if salt.len() != SALT_LEN {
+        return Err(AppError::Validation(format!(
+            "invalid salt length: {} (expected {SALT_LEN})",
+            salt.len()
+        )));
+    }
     let nonce_bytes = BASE64
         .decode(&envelope.encryption.nonce)
         .map_err(|e| AppError::Validation(format!("invalid nonce: {e}")))?;
+    // Hard length check before `Nonce::from_slice` — the
+    // `aes-gcm` impl of that constructor panics on the wrong length,
+    // which a crafted backup envelope would otherwise weaponise into
+    // a process-killing DoS on `/backup/import`.
+    if nonce_bytes.len() != NONCE_LEN {
+        return Err(AppError::Validation(format!(
+            "invalid nonce length: {} (expected {NONCE_LEN})",
+            nonce_bytes.len()
+        )));
+    }
     let ciphertext = BASE64
         .decode(&envelope.ciphertext)
         .map_err(|e| AppError::Validation(format!("invalid ciphertext: {e}")))?;
@@ -1115,5 +1131,45 @@ mod tests {
             make_envelope_with_kdf(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, "scrypt-custom");
         let err = decrypt_backup(&env, "anything").expect_err("must reject non-argon2id KDF");
         assert!(format!("{err}").contains("KDF algorithm"), "got {err:?}");
+    }
+
+    // ── Salt / nonce length validation on import ───────────────────
+    //
+    // Regression tests for the DoS where a crafted envelope's
+    // wrong-length nonce would panic `Nonce::from_slice`, taking the
+    // import handler (super-admin only, but reachable over REST) down
+    // with it. The length checks fire before `from_slice` is reached.
+
+    #[test]
+    fn nonce_wrong_length_rejected_without_panic() {
+        let payload = test_payload();
+        let config = test_config();
+        let mut env = encrypt_payload(&payload, "password-12!ok!a", false, &config).unwrap();
+        // Replace the 12-byte nonce with a 16-byte one (the smallest
+        // wrong size large enough that decode succeeds easily).
+        env.encryption.nonce = BASE64.encode([0u8; 16]);
+        let err = decrypt_backup(&env, "password-12!ok!a")
+            .expect_err("wrong-length nonce must be rejected pre-decrypt");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("nonce length"),
+            "expected nonce-length error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn salt_wrong_length_rejected_without_panic() {
+        let payload = test_payload();
+        let config = test_config();
+        let mut env = encrypt_payload(&payload, "password-12!ok!a", false, &config).unwrap();
+        // 16 bytes instead of the expected 32.
+        env.kdf.salt = BASE64.encode([0u8; 16]);
+        let err = decrypt_backup(&env, "password-12!ok!a")
+            .expect_err("wrong-length salt must be rejected pre-decrypt");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("salt length"),
+            "expected salt-length error, got: {msg}"
+        );
     }
 }
