@@ -11,6 +11,7 @@
 //! `FillRelease`. Admin/Initiator carry the write capabilities; Application
 //! and Reader carry read-only; Monitor carries none.
 
+use affinidi_messaging_didcomm::Message;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,9 +28,7 @@ use crate::auth::AuthClaims;
 use crate::error::AppError;
 use crate::server::AppState;
 
-use super::helpers::{
-    app_error_to_reject, not_implemented_yet, parse_payload, reject_with, success_response,
-};
+use super::helpers::{app_error_to_reject, parse_payload, reject_with, success_response};
 use trust_tasks_rs::RejectReason;
 
 /// URIs handled by this slice. Aggregated by the dispatcher's parity
@@ -220,6 +219,55 @@ struct VaultDeleteResponseBody {
     grace_until: String,
 }
 
+/// Request body for `vault/release/0.1`. Mirrors the canonical schema.
+/// `target` / `consumerContext` / `stepUpProof` are accepted but only
+/// consulted by the policy engine in M3; M2A.3's policy is "allow if
+/// FillRelease capability".
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultReleaseBody {
+    entry_id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    target: Option<SiteTarget>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    consumer_context: Option<Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    step_up_proof: Option<Value>,
+    #[serde(default)]
+    ttl_seconds_hint: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultReleaseResponseBody {
+    /// Pluggable cipher envelope — M2A.3 emits only the `didcomm-authcrypt`
+    /// variant. The cleartext inside the JWE is the VaultSecret JSON
+    /// (see `vault/_shared/0.1/vault-secret`).
+    sealed_secret: SealedEnvelopeWire,
+    secret_kind: SecretKind,
+    ttl_seconds: u32,
+}
+
+/// Wire form of `SealedEnvelope` we EMIT (subset of variants we currently
+/// know how to produce). M2A.3 emits the `didcomm-authcrypt` variant only;
+/// other variants land if/when those envelope kinds are needed for vault
+/// release (e.g. an HPKE-armored airgap export).
+#[derive(Debug, Serialize)]
+#[serde(tag = "envelope", rename_all = "kebab-case")]
+enum SealedEnvelopeWire {
+    DidcommAuthcrypt { jwe: String },
+}
+
+/// DIDComm `Message.typ` for the release envelope's cleartext. Workspace-
+/// namespaced (not a Trust Task URI) — this is purely transport metadata
+/// inside the JWE; the outer Trust Task envelope carries the
+/// `vault/release/0.1#response` type and the consumer parses the JWE
+/// body as `VaultSecret` directly per the spec.
+const RELEASE_INNER_MSG_TYPE: &str = "https://openvtc.org/vault/release/secret-envelope/1.0";
+
 /// Reject the request unless the caller's role implies `VaultRead`. When
 /// AclEntry-level explicit capabilities arrive (M4), this check upgrades
 /// to consult the entry's `capabilities` Vec instead of deriving from role.
@@ -252,6 +300,26 @@ fn require_vault_write(auth: &AuthClaims, doc: &TrustTask<Value>) -> Result<(), 
             RejectReason::PermissionDenied {
                 reason: format!(
                     "vault write denied: role {} does not carry VaultWrite capability",
+                    auth.role
+                ),
+            },
+        ))
+    }
+}
+
+/// Reject the request unless the caller's role implies `FillRelease` —
+/// Admin, Initiator, and Application pass; Reader and Monitor do not.
+/// Used by release. Same role→capability fallback as the other
+/// require_* helpers.
+fn require_fill_release(auth: &AuthClaims, doc: &TrustTask<Value>) -> Result<(), Response> {
+    if role_has_capability(&auth.role, Capability::FillRelease) {
+        Ok(())
+    } else {
+        Err(reject_with(
+            doc,
+            RejectReason::PermissionDenied {
+                reason: format!(
+                    "vault release denied: role {} does not carry FillRelease capability",
                     auth.role
                 ),
             },
@@ -800,15 +868,170 @@ pub(super) async fn handle_delete(
     )
 }
 
-/// Handler stub for `spec/vault/release/0.1` — see `handle_upsert`.
+/// Handler for `spec/vault/release/0.1`. Releases the cleartext secret
+/// material of an entry to the requesting consumer, wrapped in a
+/// DIDComm-authcrypt envelope sealed to the caller's keyAgreement key.
+///
+/// M2A.3 flow:
+/// 1. `require_fill_release` — Admin / Initiator / Application pass.
+/// 2. Parse body, load entry by id (`not_found` if absent, conflated
+///    with absence-of-read-access for enumeration resistance).
+/// 3. `enforce_context_scope` against the entry's context.
+/// 4. Default policy: allow (M3 swaps in `regorus`). Step-up demand
+///    is not exercised in M2A.3 — the spec's `step_up_required`
+///    error code lands when policy-driven decisions arrive.
+/// 5. Cap TTL at 60 s (the maintainer-policy ceiling; client
+///    `ttlSecondsHint` is honoured up to that cap).
+/// 6. Build a DIDComm `Message` carrying the `VaultSecret` JSON as
+///    body. Pack via `atm.pack_encrypted(msg, recipient=auth.did,
+///    signer=vta_did, key_holder=vta_did)` — ATM resolves the
+///    consumer's X25519 keyAgreement from their DID document
+///    (cached on `state.did_resolver`) and signs with the VTA's
+///    pre-loaded secrets resolver.
+/// 7. Update the stored entry's `last_used_at` (NOT a version bump
+///    — that's reserved for user-visible mutations; `last_used_at`
+///    is server-managed metadata).
+/// 8. Return the JWE inside a `SealedEnvelope { envelope:
+///    "didcomm-authcrypt", jwe }` per the canonical schema.
+///
+/// Audit-log wiring for vault events lands when the audit module
+/// gains a `vault.*` event variant — same hold as in M2A.2.
 pub(super) async fn handle_release(
-    _state: &AppState,
-    _auth: &AuthClaims,
+    state: &AppState,
+    auth: &AuthClaims,
     doc: TrustTask<Value>,
 ) -> Response {
-    not_implemented_yet(
-        doc,
-        "vault/release/0.1: handler not yet implemented — M2A.3 lands the seal-to-consumer path",
+    if let Err(r) = require_fill_release(auth, &doc) {
+        return r;
+    }
+
+    let req: VaultReleaseBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    let mut stored = match get_stored_vault_entry(&state.vault_ks, &req.entry_id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            return reject_with(
+                &doc,
+                RejectReason::TaskFailed {
+                    reason: format!("vault/release:not_found — no entry at id {}", req.entry_id),
+                    details: None,
+                },
+            );
+        }
+        Err(e) => return app_error_to_reject(&doc, e),
+    };
+
+    if let Err(r) = enforce_context_scope(auth, Some(&stored.entry.context_id), &doc) {
+        return r;
+    }
+
+    // ATM is required for outbound authcrypt. Pre-flight check before
+    // we build the message so the error is clearly "infrastructure not
+    // configured" rather than a packing failure mid-flow.
+    let atm = match state.atm.as_ref() {
+        Some(atm) => atm,
+        None => {
+            return reject_with(
+                &doc,
+                RejectReason::InternalError {
+                    reason: "ATM not configured — server cannot pack DIDComm envelopes".into(),
+                },
+            );
+        }
+    };
+
+    let vta_did = {
+        let config = state.config.read().await;
+        match config.vta_did.clone() {
+            Some(d) => d,
+            None => {
+                return reject_with(
+                    &doc,
+                    RejectReason::InternalError {
+                        reason: "vta_did not configured — server cannot identify itself as signer"
+                            .into(),
+                    },
+                );
+            }
+        }
+    };
+
+    // Cap TTL. Client hint is honoured up to the M2A.3 ceiling (60s);
+    // a higher hint silently caps rather than rejecting.
+    const TTL_CEILING: u32 = 60;
+    let ttl_seconds = req
+        .ttl_seconds_hint
+        .map(|t| t.min(TTL_CEILING))
+        .unwrap_or(TTL_CEILING);
+
+    // Serialise the VaultSecret as the cleartext body of the inner
+    // DIDComm message. Per the canonical sealed-envelope schema, the
+    // cleartext inside the JWE is the VaultSecret JSON directly.
+    let secret_body = match serde_json::to_value(&stored.secret) {
+        Ok(v) => v,
+        Err(e) => {
+            return reject_with(
+                &doc,
+                RejectReason::InternalError {
+                    reason: format!("vault/release: failed to serialise secret: {e}"),
+                },
+            );
+        }
+    };
+
+    let msg = Message::build(
+        Uuid::new_v4().to_string(),
+        RELEASE_INNER_MSG_TYPE.to_string(),
+        secret_body,
+    )
+    .from(vta_did.clone())
+    .to(auth.did.clone())
+    .finalize();
+
+    let (jwe, _metadata) = match atm
+        .pack_encrypted(&msg, &auth.did, Some(&vta_did), Some(&vta_did))
+        .await
+    {
+        Ok(packed) => packed,
+        Err(e) => {
+            return reject_with(
+                &doc,
+                RejectReason::InternalError {
+                    reason: format!("vault/release: pack_encrypted failed: {e}"),
+                },
+            );
+        }
+    };
+
+    // Update lastUsedAt on the stored entry. Server-managed metadata —
+    // NOT a version bump (that's reserved for user-visible mutations
+    // gated by optimistic concurrency). A concurrent upsert with a
+    // stale expectedVersion still validates against the version this
+    // release didn't touch.
+    let now = chrono::Utc::now().to_rfc3339();
+    stored.entry.last_used_at = Some(now);
+    if let Err(e) = put_stored_vault_entry(&state.vault_ks, &stored).await {
+        // Persist failure isn't fatal — the secret has been sealed and
+        // is on its way. Log via the audit reject path so an operator
+        // can see lastUsedAt drift if it ever happens.
+        tracing::warn!(
+            entry_id = %stored.entry.id,
+            error = %e,
+            "vault/release: lastUsedAt update failed; secret release proceeded"
+        );
+    }
+
+    let secret_kind = stored.entry.secret_kind;
+    success_response(
+        &doc,
+        VaultReleaseResponseBody {
+            sealed_secret: SealedEnvelopeWire::DidcommAuthcrypt { jwe },
+            secret_kind,
+            ttl_seconds,
+        },
     )
 }
 
