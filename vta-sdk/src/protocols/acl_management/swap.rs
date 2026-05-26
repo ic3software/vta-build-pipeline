@@ -21,17 +21,41 @@ use serde::{Deserialize, Serialize};
 
 pub use super::create::CreateAclResultBody;
 
-/// Request body for `swap-acl` (REST `POST /acl/swap` + DIDComm). The new DID
-/// is read from the *verified* presentation, not the body, so it can't be
-/// spoofed independently of the proof.
+/// Request body for the legacy `swap-acl` DIDComm message type (FPN-private,
+/// retained for the deprecation window). The new DID is read from the
+/// *verified* presentation, not the body, so it can't be spoofed
+/// independently of the proof.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwapAclBody {
     /// Compact Ed25519 JWS (VP-JWT) proving control of the new DID.
     pub presentation: String,
 }
 
+/// Request body for the canonical `acl/swap-key/0.1` Trust Task. The
+/// `link_proof` field is the VP-JWT that previously rode in `SwapAclBody.presentation`;
+/// `current_subject` and `new_subject` are the explicit subjects the
+/// Trust Task spec requires. The verifier cross-checks `new_subject` against
+/// the holder DID extracted from `link_proof` and rejects on mismatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwapKeyBody {
+    /// The VID being swapped out — MUST equal the DIDComm sender / REST caller.
+    pub current_subject: String,
+    /// The VID being swapped in — MUST equal the `iss` of `link_proof`.
+    pub new_subject: String,
+    /// Compact Ed25519 JWS (VP-JWT) signed by `new_subject` proving consent
+    /// to take over `current_subject`'s ACL entry. The spec marks this
+    /// optional at the framework level, but the FPN deployment policy requires it.
+    pub link_proof: String,
+    /// Optional human-readable rationale recorded in the audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// The swap returns the newly-created ACL entry.
 pub type SwapAclResultBody = CreateAclResultBody;
+/// Alias for the canonical Trust Task response — same shape as the legacy result.
+pub type SwapKeyResponseBody = CreateAclResultBody;
 
 #[cfg(feature = "provision-integration")]
 pub use verify_impl::{AclSwapError, AclSwapPresentation, VerifiedAclSwap};

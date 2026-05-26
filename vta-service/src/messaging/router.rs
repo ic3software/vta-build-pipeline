@@ -294,6 +294,12 @@ pub fn build_handler(
             acl_management::SWAP_ACL,
             handler_fn(handlers::handle_swap_acl),
         )?
+        // Canonical Trust Task URI for the same operation — dual-registered
+        // during the deprecation window. Handler dispatches on incoming type.
+        .route(
+            acl_management::ACL_SWAP_KEY,
+            handler_fn(handlers::handle_swap_acl),
+        )?
         // Audit management
         .route(
             audit_management::LIST_LOGS,

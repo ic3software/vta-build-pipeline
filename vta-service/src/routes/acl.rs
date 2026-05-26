@@ -115,20 +115,69 @@ pub async fn delete_acl(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Request body for `POST /acl/swap`. Accepts both the legacy `{ presentation }`
+/// shape (FPN-private) and the canonical Trust Task `acl/swap-key/0.1` shape
+/// `{ currentSubject, newSubject, linkProof, reason? }`. Distinguished by serde
+/// `untagged` — the canonical variant has the discriminating `linkProof` field.
+/// Field-name aliases let the canonical variant accept both `link_proof`
+/// (snake_case from a Rust producer) and `linkProof` (camelCase from a TS
+/// producer); the spec is camelCase.
 #[derive(Debug, Deserialize)]
-pub struct SwapAclRequest {
-    /// Compact Ed25519 JWS (VP-JWT) proving control of the new DID.
-    pub presentation: String,
+#[serde(untagged)]
+pub enum SwapAclRequest {
+    /// Canonical Trust Task `acl/swap-key/0.1` body. Discriminated by the
+    /// presence of `linkProof` (camelCase per spec, with snake_case alias).
+    Canonical {
+        #[serde(alias = "current_subject")]
+        current_subject: String,
+        #[serde(alias = "new_subject")]
+        new_subject: String,
+        #[serde(alias = "link_proof")]
+        link_proof: String,
+        /// Accepted per the spec but not currently surfaced to the audit
+        /// log — will be wired through when the swap_acl operation signature
+        /// grows a reason parameter. Tolerating the field now means existing
+        /// clients can populate it without breaking on a subsequent migration.
+        #[serde(default)]
+        #[allow(dead_code)]
+        reason: Option<String>,
+    },
+    /// Legacy FPN-private body.
+    Legacy {
+        /// Compact Ed25519 JWS (VP-JWT) proving control of the new DID.
+        presentation: String,
+    },
 }
 
 /// POST /acl/swap — atomically rotate the caller's own ACL entry onto a new
 /// DID proven by the presentation. Auth: any authenticated caller (the swap is
 /// self-service — it only moves the caller's own grant, copying role+contexts).
+///
+/// Accepts both the legacy `{ presentation }` body and the canonical Trust Task
+/// `acl/swap-key/0.1` body during the deprecation window.
 pub async fn swap_acl(
     auth: AuthClaims,
     State(state): State<AppState>,
     Json(req): Json<SwapAclRequest>,
 ) -> Result<Json<CreateAclResultBody>, AppError> {
+    let (presentation, claimed_new_subject) = match req {
+        SwapAclRequest::Canonical {
+            current_subject,
+            new_subject,
+            link_proof,
+            reason: _,
+        } => {
+            if current_subject != auth.did {
+                return Err(AppError::Validation(format!(
+                    "acl/swap-key: currentSubject {} does not equal authenticated caller {}",
+                    current_subject, auth.did
+                )));
+            }
+            (link_proof, Some(new_subject))
+        }
+        SwapAclRequest::Legacy { presentation } => (presentation, None),
+    };
+
     let did_resolver = state
         .did_resolver
         .as_ref()
@@ -144,11 +193,21 @@ pub async fn swap_acl(
         &state.acl_ks,
         &state.audit_ks,
         &auth,
-        &req.presentation,
+        &presentation,
         did_resolver,
         &vta_did,
         "rest",
     )
     .await?;
+
+    if let Some(claimed) = claimed_new_subject {
+        if claimed != result.did {
+            return Err(AppError::Validation(format!(
+                "acl/swap-key: newSubject {} does not match verified VP holder {}",
+                claimed, result.did
+            )));
+        }
+    }
+
     Ok(Json(result))
 }

@@ -552,10 +552,35 @@ pub async fn handle_swap_acl(
     message: Message,
     Extension(state): Extension<Arc<VtaState>>,
 ) -> HandlerResult {
+    // Routed for both the legacy FPN-private `swap-acl` type URI and the
+    // canonical Trust Task `acl/swap-key/0.1` URI. Dispatch on the incoming
+    // type so we accept either wire shape during the deprecation window.
+    // The actual verification is identical: the VP-JWT proves new-subject
+    // control regardless of which envelope carried it.
+    let is_canonical = message.typ == acl_management::ACL_SWAP_KEY;
+
     // No require_manage(): self-service rotation of the caller's own entry.
     let auth = app_try!(auth_from_message(&message, &state.acl_ks).await);
-    let body: vta_sdk::protocols::acl_management::swap::SwapAclBody =
-        serde_json::from_value(message.body).map_err(handler_err)?;
+
+    let (presentation, claimed_new_subject) = if is_canonical {
+        let body: vta_sdk::protocols::acl_management::swap::SwapKeyBody =
+            serde_json::from_value(message.body).map_err(handler_err)?;
+        // Cross-check: the DIDComm sender (authenticated) must equal the
+        // declared currentSubject. Stops a sender from claiming to rotate
+        // someone else's entry by lying in the body.
+        if body.current_subject != auth.did {
+            return Err(handler_err(format!(
+                "acl/swap-key: currentSubject {} does not equal authenticated sender {}",
+                body.current_subject, auth.did
+            )));
+        }
+        (body.link_proof, Some(body.new_subject))
+    } else {
+        let body: vta_sdk::protocols::acl_management::swap::SwapAclBody =
+            serde_json::from_value(message.body).map_err(handler_err)?;
+        (body.presentation, None)
+    };
+
     let did_resolver = state
         .did_resolver
         .as_ref()
@@ -567,19 +592,38 @@ pub async fn handle_swap_acl(
             .clone()
             .ok_or_else(|| handler_err("VTA DID not configured"))?
     };
+
     let result = app_try!(
         operations::acl::swap_acl(
             &state.acl_ks,
             &state.audit_ks,
             &auth,
-            &body.presentation,
+            &presentation,
             did_resolver,
             &vta_did,
             "didcomm",
         )
         .await
     );
-    response(acl_management::SWAP_ACL_RESULT, &result)
+
+    // For canonical Trust Task callers, additionally enforce that the body's
+    // claimed newSubject equals the holder the VP-JWT actually proved. The
+    // operation already verified the VP — `result.did` is the verified holder.
+    if let Some(claimed) = claimed_new_subject {
+        if claimed != result.did {
+            return Err(handler_err(format!(
+                "acl/swap-key: newSubject {} does not match verified VP holder {}",
+                claimed, result.did
+            )));
+        }
+    }
+
+    let response_type = if is_canonical {
+        acl_management::ACL_SWAP_KEY_RESPONSE
+    } else {
+        acl_management::SWAP_ACL_RESULT
+    };
+    response(response_type, &result)
 }
 
 pub async fn handle_get_acl(

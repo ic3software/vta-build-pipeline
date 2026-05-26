@@ -30,3 +30,11 @@ pub const DELETE_ACL_RESULT: &str =
 pub const SWAP_ACL: &str = "https://firstperson.network/protocols/acl-management/1.0/swap-acl";
 pub const SWAP_ACL_RESULT: &str =
     "https://firstperson.network/protocols/acl-management/1.0/swap-acl-result";
+
+/// Canonical Trust Task URI for ACL swap-key. The FPN-private `SWAP_ACL`
+/// constant is retained for backwards compatibility during the deprecation
+/// window; new producers SHOULD emit `ACL_SWAP_KEY` and new verifiers
+/// MUST accept both. The canonical task's payload shape is described in
+/// `vta_sdk::protocols::acl_management::swap::SwapKeyBody`.
+pub const ACL_SWAP_KEY: &str = "https://trusttasks.org/spec/acl/swap-key/0.1";
+pub const ACL_SWAP_KEY_RESPONSE: &str = "https://trusttasks.org/spec/acl/swap-key/0.1#response";
