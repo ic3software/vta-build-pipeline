@@ -19,8 +19,8 @@ use uuid::Uuid;
 use vti_common::acl::{Capability, role_has_capability};
 use vti_common::vault::{
     SecretKind, SiteTarget, StoredVaultEntry, VaultEntry, VaultListFilter, VaultSecret,
-    get_stored_vault_entry, get_vault_entry, list_vault_entries as list_entries_store,
-    put_stored_vault_entry,
+    delete_vault_entry, get_stored_vault_entry, get_vault_entry,
+    list_vault_entries as list_entries_store, put_stored_vault_entry,
 };
 
 use crate::auth::AuthClaims;
@@ -191,6 +191,33 @@ enum ClearableField {
     Tags,
     Selectors,
     CustomFieldNames,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultDeleteBody {
+    id: String,
+    expected_version: Option<u32>,
+    /// Human-readable rationale recorded in the audit trail. M2A.2 doesn't
+    /// have audit-log wiring for vault yet, so this field is accepted but
+    /// only echoed back; full audit landed when the audit module gains a
+    /// vault.delete event type.
+    #[serde(default)]
+    #[allow(dead_code)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultDeleteResponseBody {
+    id: String,
+    deleted_at: String,
+    /// M2A.2 performs a hard delete (no multi-device sync clients exist
+    /// yet, so there's nothing to fan tombstones to). `graceUntil ==
+    /// deletedAt` indicates "no grace window". When sync (M5) lands, this
+    /// gains a real grace window and the storage layer keeps a tombstone
+    /// record until then.
+    grace_until: String,
 }
 
 /// Reject the request unless the caller's role implies `VaultRead`. When
@@ -693,15 +720,83 @@ pub(super) async fn handle_upsert(
     )
 }
 
-/// Handler stub for `spec/vault/delete/0.1` — see `handle_upsert`.
+/// Handler for `spec/vault/delete/0.1`.
+///
+/// M2A.2 performs a hard delete — the row is removed from the keyspace
+/// and the secret bytes are zeroised by the keyspace handle's `remove`
+/// implementation. There's no multi-device sync yet (M5 territory), so
+/// no tombstone-with-grace machinery is needed. The response's
+/// `graceUntil` field equals `deletedAt` to signal "no grace window";
+/// callers that re-sync after M5 will see a real grace window.
+///
+/// Enumeration-resistance: a missing entry returns `not_found`
+/// regardless of whether the consumer would actually have had read
+/// access to it — the consumer can't probe id space by deleting.
+///
+/// Audit-log wiring for vault events lands when the audit module gains
+/// a `vault.*` event variant. For M2A.2 the `reason` field is accepted
+/// and ignored.
 pub(super) async fn handle_delete(
-    _state: &AppState,
-    _auth: &AuthClaims,
+    state: &AppState,
+    auth: &AuthClaims,
     doc: TrustTask<Value>,
 ) -> Response {
-    not_implemented_yet(
-        doc,
-        "vault/delete/0.1: handler not yet implemented — M2A.2 lands the tombstone path",
+    if let Err(r) = require_vault_write(auth, &doc) {
+        return r;
+    }
+
+    let req: VaultDeleteBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    let existing = match get_stored_vault_entry(&state.vault_ks, &req.id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            return reject_with(
+                &doc,
+                RejectReason::TaskFailed {
+                    reason: format!("vault/delete:not_found — no entry at id {}", req.id),
+                    details: None,
+                },
+            );
+        }
+        Err(e) => return app_error_to_reject(&doc, e),
+    };
+
+    // Defence-in-depth: even with VaultWrite, narrow callers must be in
+    // the entry's context. Same shape as the read path.
+    if let Err(r) = enforce_context_scope(auth, Some(&existing.entry.context_id), &doc) {
+        return r;
+    }
+
+    if let Some(v) = req.expected_version
+        && v != existing.entry.version
+    {
+        return reject_with(
+            &doc,
+            RejectReason::TaskFailed {
+                reason: format!(
+                    "vault/delete:version_conflict — expectedVersion {v} != current version {}",
+                    existing.entry.version
+                ),
+                details: Some(serde_json::json!({ "currentVersion": existing.entry.version })),
+            },
+        );
+    }
+
+    if let Err(e) = delete_vault_entry(&state.vault_ks, &req.id).await {
+        return app_error_to_reject(&doc, e);
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    success_response(
+        &doc,
+        VaultDeleteResponseBody {
+            id: req.id,
+            deleted_at: now.clone(),
+            grace_until: now,
+        },
     )
 }
 
