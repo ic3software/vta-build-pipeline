@@ -80,6 +80,10 @@ pub struct AppState {
     pub audit_ks: KeyspaceHandle,
     pub imported_ks: KeyspaceHandle,
     pub cache_ks: KeyspaceHandle,
+    /// Vault — third-party credentials the holder has stored on this VTA.
+    /// M1 reads only; upsert/delete/sync/release land in M2+. Encrypted at
+    /// rest like every other secret-bearing keyspace.
+    pub vault_ks: KeyspaceHandle,
     /// Persistent runtime state for service enable/disable
     /// (`operations::protocol::runtime_state`). Replaces the legacy
     /// `[services]` block in `config.toml` as the source of truth for whether
@@ -208,6 +212,7 @@ pub async fn build_app_state(
     let audit_ks = apply_encryption(store.keyspace("audit")?);
     let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
     let cache_ks = store.keyspace("cache")?;
+    let vault_ks = apply_encryption(store.keyspace("vault")?);
     // Persistent runtime state for service enable/disable. Encrypted because
     // a couple of bool records are cheap and the keyspace may grow.
     let service_state_ks = apply_encryption(store.keyspace("service_state")?);
@@ -267,6 +272,7 @@ pub async fn build_app_state(
         audit_ks,
         imported_ks,
         cache_ks,
+        vault_ks,
         service_state_ks,
         sealed_nonces_ks,
         backup_bundles_ks,
@@ -407,6 +413,7 @@ pub async fn run(
         let audit_ks = apply_encryption(store.keyspace("audit")?);
         let imported_ks = apply_encryption(store.keyspace("imported_secrets")?);
         let cache_ks = store.keyspace("cache")?;
+        let vault_ks = apply_encryption(store.keyspace("vault")?);
         let service_state_ks = apply_encryption(store.keyspace("service_state")?);
         let sealed_nonces_ks = store.keyspace("sealed_nonces")?;
         let backup_bundles_ks = apply_encryption(store.keyspace("backup_bundles")?);
@@ -579,6 +586,7 @@ pub async fn run(
             audit_ks,
             imported_ks,
             cache_ks,
+            vault_ks,
             service_state_ks: service_state_ks.clone(),
             sealed_nonces_ks,
             backup_bundles_ks,

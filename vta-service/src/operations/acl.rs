@@ -113,6 +113,9 @@ pub async fn create_acl(
         created_at: now_epoch(),
         created_by: auth.did.clone(),
         expires_at,
+        kind: Default::default(),
+        capabilities: Vec::new(),
+        device: None,
         version: 0,
     };
 
@@ -393,6 +396,9 @@ pub async fn swap_acl(
         created_at: now,
         created_by: auth.did.clone(),
         expires_at: old.expires_at,
+        kind: old.kind.clone(),
+        capabilities: old.capabilities.clone(),
+        device: old.device.clone(),
         version: 0,
     };
 
@@ -496,6 +502,9 @@ mod tests {
                 created_at: now_epoch(),
                 created_by: "seed".into(),
                 expires_at: None,
+                kind: Default::default(),
+                capabilities: Vec::new(),
+                device: None,
                 version: 0,
             },
         )

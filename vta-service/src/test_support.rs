@@ -474,6 +474,7 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
     }
     let audit_ks = store.keyspace("audit").unwrap();
     let cache_ks = store.keyspace("cache").unwrap();
+    let vault_ks = store.keyspace("vault").unwrap();
     let service_state_ks = store.keyspace("service_state").unwrap();
     let imported_ks = store.keyspace("imported_secrets").unwrap();
     let sealed_nonces_ks = store.keyspace("sealed_nonces").unwrap();
@@ -542,6 +543,7 @@ pub async fn build_test_app() -> (axum::Router, TestAppContext) {
         audit_ks,
         imported_ks,
         cache_ks,
+        vault_ks,
         service_state_ks,
         sealed_nonces_ks,
         backup_bundles_ks: backup_bundles_ks.clone(),
