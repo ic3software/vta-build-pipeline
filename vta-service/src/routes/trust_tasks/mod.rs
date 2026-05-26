@@ -59,6 +59,7 @@ mod passkey_vms;
 #[cfg(feature = "webvh")]
 mod provision_integration;
 mod seeds;
+mod vault;
 #[cfg(feature = "webvh")]
 mod webvh;
 
@@ -151,6 +152,7 @@ fn aggregate_dispatched_uris() -> Vec<&'static str> {
     v.extend(keys::DISPATCHED_URIS);
     v.extend(management::DISPATCHED_URIS);
     v.extend(seeds::DISPATCHED_URIS);
+    v.extend(vault::DISPATCHED_URIS);
     // Feature-gated slices add their `v.extend(slice::DISPATCHED_URIS)`
     // here under `#[cfg(feature = "...")]`. The corresponding URIs
     // must also appear in `KNOWN_FEATURE_GATED_URIS` so the parity
@@ -332,6 +334,9 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
         vta_sdk::trust_tasks::TASK_DISCOVERY_CAPABILITIES_1_0 => {
             discovery::handle_capabilities(state, auth, doc).await
         }
+        // ─── Vault slice (public 0.1 spec) ──────────────────────────
+        vta_sdk::trust_tasks::TASK_VAULT_LIST_0_1 => vault::handle_list(state, auth, doc).await,
+        vta_sdk::trust_tasks::TASK_VAULT_GET_0_1 => vault::handle_get(state, auth, doc).await,
         // ─── Config slice ────────────────────────────────────────────
         vta_sdk::trust_tasks::TASK_CONFIG_GET_1_0 => config::handle_get(state, auth, doc).await,
         vta_sdk::trust_tasks::TASK_CONFIG_UPDATE_1_0 => {

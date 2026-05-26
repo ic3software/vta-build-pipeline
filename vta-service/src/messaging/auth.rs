@@ -95,6 +95,9 @@ mod tests {
                 created_at: now_epoch().saturating_sub(7200),
                 created_by: "test".into(),
                 expires_at: Some(now_epoch().saturating_sub(60)), // expired one minute ago
+                kind: Default::default(),
+                capabilities: Vec::new(),
+                device: None,
                 version: 0,
             },
         )
@@ -125,6 +128,9 @@ mod tests {
                 created_at: now_epoch(),
                 created_by: "test".into(),
                 expires_at: Some(now_epoch() + 3600),
+                kind: Default::default(),
+                capabilities: Vec::new(),
+                device: None,
                 version: 0,
             },
         )
@@ -154,6 +160,9 @@ mod tests {
                 created_at: now_epoch(),
                 created_by: "test".into(),
                 expires_at: None,
+                kind: Default::default(),
+                capabilities: Vec::new(),
+                device: None,
                 version: 0,
             },
         )

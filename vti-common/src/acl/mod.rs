@@ -56,6 +56,146 @@ impl Role {
     }
 }
 
+/// Consumer-kind discriminator distinguishing user-driven Companions
+/// (browser plugin, mobile app, desktop app) from headless Services
+/// (mediator, AI agent, daemon). Companion vs Service drives UX
+/// affordances and default policy posture; the variant payload narrows
+/// the form factor / service role for finer-grained policy hooks.
+///
+/// Wire form (kebab-case discriminator) matches the canonical Trust
+/// Task shared schema `device/_shared/0.1/device-binding#/$defs/ConsumerKind`.
+///
+/// `#[serde(default)]` on the AclEntry field returns `Service { Daemon }`
+/// for legacy rows that pre-date the field — a safe fallback for any
+/// existing operator-deployed mediator or daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ConsumerKind {
+    #[serde(rename_all = "kebab-case")]
+    Companion { form_factor: CompanionFormFactor },
+    #[serde(rename_all = "camelCase")]
+    Service {
+        #[serde(rename = "serviceKind")]
+        service_kind: ServiceKind,
+    },
+}
+
+impl Default for ConsumerKind {
+    fn default() -> Self {
+        ConsumerKind::Service {
+            service_kind: ServiceKind::Daemon,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompanionFormFactor {
+    Browser,
+    Mobile,
+    Desktop,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceKind {
+    Mediator,
+    AiAgent,
+    Daemon,
+}
+
+/// Fine-grained capability flags scoped to the ACL entry's allowed
+/// contexts. Used by route handlers to gate access at finer resolution
+/// than the [`Role`] hierarchy — for example, an AI-agent Service might
+/// be granted `VaultRead` against a specific context but never
+/// `VaultWrite` or `Sign`. Wire form (kebab-case) matches the canonical
+/// `Capability` shared schema.
+///
+/// For legacy rows with no capability set, [`derived_capabilities_for_role`]
+/// produces a sensible default from the existing role (Admin gets
+/// everything, Reader gets only `vault-read`, etc.) so existing ACL
+/// behaviour is preserved bit-for-bit.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum Capability {
+    VaultRead,
+    VaultWrite,
+    ProxyLogin,
+    FillRelease,
+    PolicyAdmin,
+    DeviceAdmin,
+    Sign,
+    KeyMint,
+}
+
+/// Returns true if `role` is granted `cap` by the default capability
+/// mapping. Use for capability checks against legacy ACL entries that have
+/// no explicit `capabilities` set; for entries with explicit capabilities,
+/// check the entry's set directly.
+pub fn role_has_capability(role: &Role, cap: Capability) -> bool {
+    derived_capabilities_for_role(role).contains(&cap)
+}
+
+/// Default capability set inferred from a role for entries that pre-date
+/// the explicit `capabilities` field. Keeps existing behaviour byte-identical
+/// — a pre-Phase-3 Admin still has every capability without any data
+/// migration required.
+pub fn derived_capabilities_for_role(role: &Role) -> Vec<Capability> {
+    match role {
+        Role::Admin => vec![
+            Capability::VaultRead,
+            Capability::VaultWrite,
+            Capability::ProxyLogin,
+            Capability::FillRelease,
+            Capability::PolicyAdmin,
+            Capability::DeviceAdmin,
+            Capability::Sign,
+            Capability::KeyMint,
+        ],
+        Role::Initiator => vec![
+            Capability::VaultRead,
+            Capability::VaultWrite,
+            Capability::ProxyLogin,
+            Capability::FillRelease,
+            Capability::DeviceAdmin,
+            Capability::Sign,
+            Capability::KeyMint,
+        ],
+        Role::Application => vec![
+            Capability::VaultRead,
+            Capability::ProxyLogin,
+            Capability::FillRelease,
+            Capability::Sign,
+        ],
+        Role::Reader => vec![Capability::VaultRead],
+        Role::Monitor => vec![],
+    }
+}
+
+/// Metadata for a registered Companion/Service device. M1 stores the field
+/// shape so the ACL row can carry it forward; the registration flow that
+/// populates it lands in M4 (`device/register/0.1`).
+///
+/// Wire form mirrors the canonical Trust Task shared schema
+/// `device/_shared/0.1/device-binding#/$defs/DeviceBinding`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceBinding {
+    pub device_id: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// RFC 3339 — when the device claimed its binding via `device/register/0.1`.
+    pub registered_at: String,
+    /// RFC 3339 — refreshed on every heartbeat / successful auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiped_at: Option<String>,
+}
+
 /// An entry in the Access Control List.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AclEntry {
@@ -72,6 +212,21 @@ pub struct AclEntry {
     /// this default).
     #[serde(default)]
     pub expires_at: Option<u64>,
+    /// Consumer kind: Companion (user-driven) vs Service (headless). New in
+    /// M1 (vault-credential-manager design). `#[serde(default)]` ⇒ pre-M1
+    /// rows deserialise as `Service { Daemon }`.
+    #[serde(default)]
+    pub kind: ConsumerKind,
+    /// Fine-grained capability set. Empty Vec on legacy rows; the auth
+    /// layer falls back to [`derived_capabilities_for_role`] when this
+    /// is empty so existing behaviour stays byte-identical.
+    #[serde(default)]
+    pub capabilities: Vec<Capability>,
+    /// Optional Companion/Service device-binding metadata. Populated by
+    /// the M4 `device/register/0.1` flow; absent on legacy rows and on
+    /// pure ACL entries that don't represent a registered device.
+    #[serde(default)]
+    pub device: Option<DeviceBinding>,
     /// Optimistic-concurrency version. Incremented on every
     /// successful update; the route layer's `If-Match` header
     /// compares against this and returns 409 Conflict on a
@@ -307,6 +462,9 @@ mod tests {
             created_at: now_epoch(),
             created_by: "did:key:zSetup".into(),
             expires_at: None,
+            kind: Default::default(),
+            capabilities: Vec::new(),
+            device: None,
             version: 0,
         }
     }
@@ -320,6 +478,9 @@ mod tests {
             created_at: now_epoch(),
             created_by: "did:key:zSetup".into(),
             expires_at: None,
+            kind: Default::default(),
+            capabilities: Vec::new(),
+            device: None,
             version: 0,
         }
     }
