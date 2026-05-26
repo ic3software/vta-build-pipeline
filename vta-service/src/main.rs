@@ -9,6 +9,7 @@ mod keys_cli;
 mod services_cli;
 #[cfg(feature = "setup")]
 mod setup;
+mod vault_cli;
 #[cfg(feature = "webvh")]
 mod webvh_cli;
 
@@ -196,6 +197,16 @@ enum Commands {
         #[command(subcommand)]
         command: BootstrapCommands,
     },
+    /// Dev-only vault operations (offline). M1 ships `seed` — populates the
+    /// `vault:` keyspace from a JSON file or a built-in demo set so operators
+    /// can exercise vault/list/0.1 against a running VTA. Daemon must be
+    /// stopped (fjall exclusive lock); not available in TEE deployments
+    /// (the enclave's vsock-store is the only writer there — use the
+    /// upcoming `vault/upsert/0.1` Trust Task instead).
+    Vault {
+        #[command(subcommand)]
+        command: VaultCommands,
+    },
     /// Manage the VTA's advertised transport services offline.
     ///
     /// Mirrors the `pnm services …` surface but operates directly
@@ -218,6 +229,42 @@ enum Commands {
     Services {
         #[command(subcommand)]
         command: ServicesCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum VaultCommands {
+    /// Populate the `vault:` keyspace with VaultEntry records.
+    ///
+    /// Reads entries from a JSON file (array of canonical VaultEntry shape,
+    /// per `https://trusttasks.org/spec/vault/_shared/0.1/vault-entry`), or
+    /// — when `--entries-file` is omitted and `--context` is supplied —
+    /// seeds three built-in demo entries that exercise every field shown
+    /// in the wallet popup's vault panel (web + iOS targets, password and
+    /// passkey kinds, tags, a breach flag, a never-used entry).
+    ///
+    /// Refuses to overwrite an entry with an existing id unless `--force`
+    /// is passed — vault entries with stable ids generally shouldn't be
+    /// silently rewritten.
+    ///
+    /// Daemon must be stopped (fjall holds an exclusive lock); restart
+    /// after seeding to make the entries visible via vault/list/0.1.
+    Seed {
+        /// Path to a JSON file containing an array of VaultEntry objects.
+        /// Mutually exclusive with `--context` for the demo set.
+        #[arg(long)]
+        entries_file: Option<std::path::PathBuf>,
+        /// Trust context id the demo entries land under. Required when
+        /// `--entries-file` is omitted; ignored when entries supply their
+        /// own `contextId`.
+        #[arg(long)]
+        context: Option<String>,
+        /// Print the entries that would be seeded without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite an existing entry with the same id.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1307,6 +1354,26 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Commands::Vault { command }) => match command {
+            VaultCommands::Seed {
+                entries_file,
+                context,
+                dry_run,
+                force,
+            } => {
+                let args = vault_cli::VaultSeedArgs {
+                    config_path: cli.config,
+                    entries_file,
+                    context,
+                    dry_run,
+                    force,
+                };
+                if let Err(e) = vault_cli::run_vault_seed(args).await {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
         Some(Commands::Keys { command }) => {
             // SEALED CHECK: secrets export and seed rotation
             match &command {
