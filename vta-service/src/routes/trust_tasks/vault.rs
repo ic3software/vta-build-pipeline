@@ -24,7 +24,9 @@ use crate::auth::AuthClaims;
 use crate::error::AppError;
 use crate::server::AppState;
 
-use super::helpers::{app_error_to_reject, parse_payload, reject_with, success_response};
+use super::helpers::{
+    app_error_to_reject, not_implemented_yet, parse_payload, reject_with, success_response,
+};
 use trust_tasks_rs::RejectReason;
 
 /// URIs handled by this slice. Aggregated by the dispatcher's parity
@@ -33,6 +35,9 @@ use trust_tasks_rs::RejectReason;
 pub(super) const DISPATCHED_URIS: &[&str] = &[
     vta_sdk::trust_tasks::TASK_VAULT_LIST_0_1,
     vta_sdk::trust_tasks::TASK_VAULT_GET_0_1,
+    vta_sdk::trust_tasks::TASK_VAULT_UPSERT_0_1,
+    vta_sdk::trust_tasks::TASK_VAULT_DELETE_0_1,
+    vta_sdk::trust_tasks::TASK_VAULT_RELEASE_0_1,
 ];
 
 /// Request body for `vault/list/0.1`. Mirrors the canonical
@@ -244,6 +249,46 @@ pub(super) async fn handle_get(
             entry,
             redacted_fields: None,
         },
+    )
+}
+
+/// Handler stub for `spec/vault/upsert/0.1` — wired into the dispatcher
+/// but returns `task_failed: not yet implemented` until M2A.1 lands the
+/// real body. The URI is in the parity harness so a client that POSTs
+/// `vault/upsert/0.1` gets a clear maintainer-defined rejection rather
+/// than `unsupported_type`.
+pub(super) async fn handle_upsert(
+    _state: &AppState,
+    _auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    not_implemented_yet(
+        doc,
+        "vault/upsert/0.1: handler not yet implemented — M2A.1 lands the sealed-envelope unsealing + persist path",
+    )
+}
+
+/// Handler stub for `spec/vault/delete/0.1` — see `handle_upsert`.
+pub(super) async fn handle_delete(
+    _state: &AppState,
+    _auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    not_implemented_yet(
+        doc,
+        "vault/delete/0.1: handler not yet implemented — M2A.2 lands the tombstone path",
+    )
+}
+
+/// Handler stub for `spec/vault/release/0.1` — see `handle_upsert`.
+pub(super) async fn handle_release(
+    _state: &AppState,
+    _auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    not_implemented_yet(
+        doc,
+        "vault/release/0.1: handler not yet implemented — M2A.3 lands the seal-to-consumer path",
     )
 }
 

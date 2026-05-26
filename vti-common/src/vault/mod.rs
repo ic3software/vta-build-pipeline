@@ -156,39 +156,241 @@ pub struct VaultListFilter<'a> {
     pub breached: Option<bool>,
 }
 
+/// Full record persisted in the `vault:` keyspace. `VaultEntry` is the
+/// metadata projection that ships on the wire via vault/list/0.1 and
+/// vault/get/0.1; the cleartext secret material lives ONLY inside this
+/// stored form and crosses the wire only via vault/release/0.1's pluggable
+/// `sealedSecret` envelope.
+///
+/// Encrypted at rest via the keyspace's transparent AES-256-GCM wrapper
+/// when `storage_encryption_key` is configured (TEE deployments). In
+/// local-dev / non-TEE mode the secret is plaintext on disk — same threat
+/// model as every other secret-bearing keyspace today (the OS account
+/// running the daemon is the security boundary).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredVaultEntry {
+    /// Metadata view — the only half that ships on the wire by default.
+    pub entry: VaultEntry,
+    /// Cleartext secret material. Per the canonical
+    /// `vault/_shared/0.1/vault-secret` shared schema.
+    pub secret: VaultSecret,
+}
+
+/// Cleartext secret material. Field-for-field mirror of
+/// [`vault/_shared/0.1/vault-secret#/$defs/VaultSecret`](https://trusttasks.org/spec/vault/_shared/0.1/vault-secret).
+/// Discriminated by `kind`; wire values are kebab-case per the canonical
+/// schema (`oauth-tokens`, `did-self-issued`, `didcomm-peer`,
+/// `bearer-token`, `ssh-key`).
+///
+/// Sensitive fields (`password`, `private_key`, `refresh_token`,
+/// `secure_notes`, `token`, etc.) MUST be zeroised by handlers as soon as
+/// their use is complete; this enum derives `Debug` for diagnostic
+/// convenience but production logs MUST NOT format `VaultSecret` via
+/// `{:?}` — the strings would leak straight in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum VaultSecret {
+    Password {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        password: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        totp: Option<TotpSeed>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_notes: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        custom_fields: Vec<CustomField>,
+    },
+    Passkey {
+        credential_id: String,
+        private_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        algorithm: Option<String>,
+        rp_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_handle: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_notes: Option<String>,
+    },
+    OauthTokens {
+        provider: String,
+        refresh_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_token_expires_at: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scopes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_notes: Option<String>,
+    },
+    DidSelfIssued {
+        did: String,
+        signing_key_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_notes: Option<String>,
+    },
+    DidcommPeer {
+        peer_did: String,
+        signing_key_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_notes: Option<String>,
+    },
+    BearerToken {
+        token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header_prefix: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_notes: Option<String>,
+    },
+    SshKey {
+        private_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        public_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passphrase: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_notes: Option<String>,
+    },
+    Custom {
+        fields: Vec<CustomField>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secure_notes: Option<String>,
+    },
+}
+
+impl VaultSecret {
+    /// Returns the [`SecretKind`] that matches this variant. The metadata
+    /// view's `secret_kind` field MUST equal this on every persisted
+    /// `StoredVaultEntry`; an inconsistency is a programming error and
+    /// callers can use [`VaultSecret::matches_kind`] to assert at the
+    /// upsert / release boundary.
+    pub fn kind(&self) -> SecretKind {
+        match self {
+            VaultSecret::Password { .. } => SecretKind::Password,
+            VaultSecret::Passkey { .. } => SecretKind::Passkey,
+            VaultSecret::OauthTokens { .. } => SecretKind::OauthTokens,
+            VaultSecret::DidSelfIssued { .. } => SecretKind::DidSelfIssued,
+            VaultSecret::DidcommPeer { .. } => SecretKind::DidcommPeer,
+            VaultSecret::BearerToken { .. } => SecretKind::BearerToken,
+            VaultSecret::SshKey { .. } => SecretKind::SshKey,
+            VaultSecret::Custom { .. } => SecretKind::Custom,
+        }
+    }
+
+    /// Convenience: assert that this secret's variant matches `expected`.
+    /// Used by handler code to fail loudly when the metadata view's
+    /// `secret_kind` disagrees with the unsealed secret's discriminator.
+    pub fn matches_kind(&self, expected: SecretKind) -> bool {
+        self.kind() == expected
+    }
+}
+
+/// RFC 6238 TOTP seed for entries that pair a TOTP with a password.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TotpSeed {
+    /// Base32 (RFC 4648) shared secret.
+    pub secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algorithm: Option<TotpAlgorithm>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digits: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TotpAlgorithm {
+    #[serde(rename = "SHA1")]
+    Sha1,
+    #[serde(rename = "SHA256")]
+    Sha256,
+    #[serde(rename = "SHA512")]
+    Sha512,
+}
+
+/// Free-form user-defined field on Password / Custom variants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomField {
+    pub name: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<CustomFieldKind>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustomFieldKind {
+    Text,
+    Url,
+    Email,
+    Phone,
+    Number,
+    Date,
+}
+
 /// Storage key for a vault entry — `"vault:<id>"`. Prefix scans on
 /// `"vault:"` enumerate every entry in this VTA's keyspace.
 fn vault_key(id: &str) -> String {
     format!("vault:{id}")
 }
 
-/// Read a single vault entry by id. Returns `Ok(None)` for absent ids so
-/// callers can map to a not_found / permission_denied response per their
-/// enumeration-resistance policy.
+/// Read a single vault entry's metadata view by id. Returns `Ok(None)`
+/// for absent ids so callers can map to a not_found / permission_denied
+/// response per their enumeration-resistance policy. Skips the secret —
+/// use [`get_stored_vault_entry`] when the secret bytes are needed
+/// (vault/release/0.1's handler is the only caller in M2A).
 pub async fn get_vault_entry(
     vault: &KeyspaceHandle,
     id: &str,
 ) -> Result<Option<VaultEntry>, AppError> {
+    Ok(get_stored_vault_entry(vault, id).await?.map(|s| s.entry))
+}
+
+/// Read the full stored record (metadata + secret) by id. Use sparingly —
+/// only the release handler and admin tooling have a legitimate need for
+/// the secret bytes. All other reads go through [`get_vault_entry`].
+pub async fn get_stored_vault_entry(
+    vault: &KeyspaceHandle,
+    id: &str,
+) -> Result<Option<StoredVaultEntry>, AppError> {
     vault.get(vault_key(id)).await
 }
 
-/// Store (create or overwrite) a vault entry. Unconditional write — version
-/// checks are the caller's responsibility (the upsert handler will gain a
-/// `If-Match`-style ETag in M2).
-pub async fn put_vault_entry(vault: &KeyspaceHandle, entry: &VaultEntry) -> Result<(), AppError> {
-    vault.insert(vault_key(&entry.id), entry).await
+/// Store (create or overwrite) a full vault record. Unconditional write —
+/// version + optimistic-concurrency checks are the caller's responsibility
+/// (the upsert handler implements them).
+pub async fn put_stored_vault_entry(
+    vault: &KeyspaceHandle,
+    record: &StoredVaultEntry,
+) -> Result<(), AppError> {
+    debug_assert!(
+        record.secret.matches_kind(record.entry.secret_kind),
+        "StoredVaultEntry mismatch: entry.secret_kind={:?} but secret.kind()={:?}",
+        record.entry.secret_kind,
+        record.secret.kind()
+    );
+    vault.insert(vault_key(&record.entry.id), record).await
 }
 
 /// Delete a vault entry by id. Use the upcoming `vault/delete/0.1` handler
-/// (M2) for the tombstone-aware path; this helper exists for tests and
+/// (M2A) for the tombstone-aware path; this helper exists for tests and
 /// administrative scripts.
 pub async fn delete_vault_entry(vault: &KeyspaceHandle, id: &str) -> Result<(), AppError> {
     vault.remove(vault_key(id)).await
 }
 
 /// List vault entries matching `filter`, ordered by `last_used_at`
-/// descending (entries without `last_used_at` sort last). Pagination is
-/// caller-applied; this helper returns the full filtered set.
+/// descending (entries without `last_used_at` sort last). Returns the
+/// metadata projection only — secrets stay in the keyspace.
 pub async fn list_vault_entries(
     vault: &KeyspaceHandle,
     filter: &VaultListFilter<'_>,
@@ -196,11 +398,11 @@ pub async fn list_vault_entries(
     let raw = vault.prefix_iter_raw("vault:").await?;
     let mut out = Vec::with_capacity(raw.len());
     for (_, bytes) in raw {
-        let entry: VaultEntry = serde_json::from_slice(&bytes)?;
-        if !matches_filter(&entry, filter) {
+        let stored: StoredVaultEntry = serde_json::from_slice(&bytes)?;
+        if !matches_filter(&stored.entry, filter) {
             continue;
         }
-        out.push(entry);
+        out.push(stored.entry);
     }
     out.sort_by(|a, b| {
         // Most-recently-used first; absent last_used_at sorts last.

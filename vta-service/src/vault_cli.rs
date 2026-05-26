@@ -12,7 +12,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use vti_common::vault::{SecretKind, SiteTarget, VaultEntry, get_vault_entry, put_vault_entry};
+use vti_common::vault::{
+    SecretKind, SiteTarget, StoredVaultEntry, VaultEntry, VaultSecret, get_vault_entry,
+    put_stored_vault_entry,
+};
 
 use crate::config::AppConfig;
 use crate::store::Store;
@@ -41,22 +44,24 @@ pub async fn run_vault_seed(args: VaultSeedArgs) -> Result<(), Box<dyn std::erro
     let store = Store::open(&config.store)?;
     let vault_ks = store.keyspace("vault")?;
 
-    let entries: Vec<VaultEntry> = match (&args.entries_file, &args.context) {
-        (Some(path), _) => load_entries_from_file(path)?,
-        (None, Some(ctx)) => demo_entries(ctx),
+    let records: Vec<StoredVaultEntry> = match (&args.entries_file, &args.context) {
+        (Some(path), _) => load_records_from_file(path)?,
+        (None, Some(ctx)) => demo_records(ctx),
         (None, None) => {
             return Err("either --entries-file <path> or --context <id> is required".into());
         }
     };
 
-    if entries.is_empty() {
+    if records.is_empty() {
         eprintln!("No entries to seed.");
         return Ok(());
     }
 
-    // Validate all entries up front before touching the store — this is the
-    // bulk operation where partial failures would be the most confusing.
-    for (i, e) in entries.iter().enumerate() {
+    // Validate every record up front — bulk operations with partial failure
+    // are confusing. Cheap structural checks + the SecretKind ↔ secret.kind()
+    // invariant (entries-from-JSON could violate this; demo entries can't).
+    for (i, r) in records.iter().enumerate() {
+        let e = &r.entry;
         if e.id.is_empty() {
             return Err(format!("entry {i}: id is empty").into());
         }
@@ -68,6 +73,15 @@ pub async fn run_vault_seed(args: VaultSeedArgs) -> Result<(), Box<dyn std::erro
         }
         if e.label.is_empty() {
             return Err(format!("entry {i} ({}): label is empty", e.id).into());
+        }
+        if !r.secret.matches_kind(e.secret_kind) {
+            return Err(format!(
+                "entry {i} ({}): secretKind {:?} does not match secret variant {:?}",
+                e.id,
+                e.secret_kind,
+                r.secret.kind()
+            )
+            .into());
         }
         if !args.force
             && let Some(existing) = get_vault_entry(&vault_ks, &e.id).await?
@@ -81,121 +95,149 @@ pub async fn run_vault_seed(args: VaultSeedArgs) -> Result<(), Box<dyn std::erro
     }
 
     if args.dry_run {
-        eprintln!("[dry-run] would seed {} entries:", entries.len());
-        for e in &entries {
+        eprintln!("[dry-run] would seed {} entries:", records.len());
+        for r in &records {
             eprintln!(
                 "  {} — {} ({})",
-                e.id,
-                e.label,
-                secret_kind_label(e.secret_kind)
+                r.entry.id,
+                r.entry.label,
+                secret_kind_label(r.entry.secret_kind)
             );
         }
         return Ok(());
     }
 
-    for e in &entries {
-        put_vault_entry(&vault_ks, e).await?;
-        eprintln!("seeded: {} ({})", e.label, e.id);
+    for r in &records {
+        put_stored_vault_entry(&vault_ks, r).await?;
+        eprintln!("seeded: {} ({})", r.entry.label, r.entry.id);
     }
     store.persist().await?;
 
     eprintln!();
-    eprintln!("Seeded {} vault entries.", entries.len());
+    eprintln!("Seeded {} vault entries.", records.len());
     eprintln!("Restart the VTA daemon, then click \"Load entries\" in the wallet popup.");
     Ok(())
 }
 
-fn load_entries_from_file(path: &Path) -> Result<Vec<VaultEntry>, Box<dyn std::error::Error>> {
+fn load_records_from_file(
+    path: &Path,
+) -> Result<Vec<StoredVaultEntry>, Box<dyn std::error::Error>> {
     let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let entries: Vec<VaultEntry> = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("parse {} as VaultEntry[]: {e}", path.display()))?;
-    Ok(entries)
+    let records: Vec<StoredVaultEntry> = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("parse {} as StoredVaultEntry[]: {e}", path.display()))?;
+    Ok(records)
 }
 
 /// Built-in demo set — three entries that exercise every visible-in-UI
 /// field of the metadata view (multiple targets including iOS, breach flag,
-/// never-used entry, custom selectors, tags).
-fn demo_entries(context_id: &str) -> Vec<VaultEntry> {
+/// never-used entry, custom selectors, tags). Each carries a placeholder
+/// secret so the StoredVaultEntry shape is well-formed; real credentials
+/// arrive via vault/upsert/0.1 from the wallet.
+fn demo_records(context_id: &str) -> Vec<StoredVaultEntry> {
     let now = chrono::Utc::now().to_rfc3339();
     let stamp = stamp_suffix();
+    let placeholder_password = || VaultSecret::Password {
+        username: Some("demo".into()),
+        password: "PLACEHOLDER-replace-via-vault/upsert/0.1".into(),
+        totp: None,
+        secure_notes: None,
+        custom_fields: Vec::new(),
+    };
+    let placeholder_passkey = || VaultSecret::Passkey {
+        credential_id: "DEMO-credential-id".into(),
+        private_key: "DEMO-private-key".into(),
+        algorithm: Some("EdDSA".into()),
+        rp_id: "github.com".into(),
+        user_handle: Some("DEMO-user-handle".into()),
+        secure_notes: None,
+    };
     vec![
-        VaultEntry {
-            id: format!("vault_demo_github_{stamp}"),
-            context_id: context_id.into(),
-            targets: vec![
-                SiteTarget::WebOrigin {
-                    origin: "https://github.com".into(),
-                },
-                SiteTarget::IosApp {
-                    bundle_id: "com.github.stwalkerster.codehub".into(),
-                    team_id: Some("VEKTX9H2N7".into()),
-                },
-            ],
-            label: "Work GitHub".into(),
-            secret_kind: SecretKind::Passkey,
-            tags: vec!["work".into(), "engineering".into()],
-            notes: None,
-            favicon: None,
-            selectors: vec!["recent_uv_required".into()],
-            custom_field_names: vec![],
-            attachments: vec![],
-            expires_at: None,
-            breached_at: None,
-            password_changed_at: None,
-            created_at: now.clone(),
-            created_by: Some("cli:vault-seed".into()),
-            updated_at: now.clone(),
-            updated_by: None,
-            last_used_at: Some("2026-05-25T22:11:00Z".into()),
-            version: 1,
+        StoredVaultEntry {
+            entry: VaultEntry {
+                id: format!("vault_demo_github_{stamp}"),
+                context_id: context_id.into(),
+                targets: vec![
+                    SiteTarget::WebOrigin {
+                        origin: "https://github.com".into(),
+                    },
+                    SiteTarget::IosApp {
+                        bundle_id: "com.github.stwalkerster.codehub".into(),
+                        team_id: Some("VEKTX9H2N7".into()),
+                    },
+                ],
+                label: "Work GitHub".into(),
+                secret_kind: SecretKind::Passkey,
+                tags: vec!["work".into(), "engineering".into()],
+                notes: None,
+                favicon: None,
+                selectors: vec!["recent_uv_required".into()],
+                custom_field_names: vec![],
+                attachments: vec![],
+                expires_at: None,
+                breached_at: None,
+                password_changed_at: None,
+                created_at: now.clone(),
+                created_by: Some("cli:vault-seed".into()),
+                updated_at: now.clone(),
+                updated_by: None,
+                last_used_at: Some("2026-05-25T22:11:00Z".into()),
+                version: 1,
+            },
+            secret: placeholder_passkey(),
         },
-        VaultEntry {
-            id: format!("vault_demo_aws_{stamp}"),
-            context_id: context_id.into(),
-            targets: vec![SiteTarget::WebOrigin {
-                origin: "https://aws.amazon.com".into(),
-            }],
-            label: "Work AWS — root".into(),
-            secret_kind: SecretKind::Password,
-            tags: vec!["work".into(), "high-value".into()],
-            notes: Some("Recovery email: ops@example.com".into()),
-            favicon: None,
-            selectors: vec!["step_up_push".into()],
-            custom_field_names: vec![],
-            attachments: vec![],
-            expires_at: None,
-            breached_at: Some("2026-04-22T00:00:00Z".into()),
-            password_changed_at: Some("2026-05-01T08:00:00Z".into()),
-            created_at: now.clone(),
-            created_by: Some("cli:vault-seed".into()),
-            updated_at: now.clone(),
-            updated_by: None,
-            last_used_at: Some(now.clone()),
-            version: 1,
+        StoredVaultEntry {
+            entry: VaultEntry {
+                id: format!("vault_demo_aws_{stamp}"),
+                context_id: context_id.into(),
+                targets: vec![SiteTarget::WebOrigin {
+                    origin: "https://aws.amazon.com".into(),
+                }],
+                label: "Work AWS — root".into(),
+                secret_kind: SecretKind::Password,
+                tags: vec!["work".into(), "high-value".into()],
+                notes: Some("Recovery email: ops@example.com".into()),
+                favicon: None,
+                selectors: vec!["step_up_push".into()],
+                custom_field_names: vec![],
+                attachments: vec![],
+                expires_at: None,
+                breached_at: Some("2026-04-22T00:00:00Z".into()),
+                password_changed_at: Some("2026-05-01T08:00:00Z".into()),
+                created_at: now.clone(),
+                created_by: Some("cli:vault-seed".into()),
+                updated_at: now.clone(),
+                updated_by: None,
+                last_used_at: Some(now.clone()),
+                version: 1,
+            },
+            secret: placeholder_password(),
         },
-        VaultEntry {
-            id: format!("vault_demo_hn_{stamp}"),
-            context_id: context_id.into(),
-            targets: vec![SiteTarget::WebOrigin {
-                origin: "https://news.ycombinator.com".into(),
-            }],
-            label: "Hacker News".into(),
-            secret_kind: SecretKind::Password,
-            tags: vec!["personal".into()],
-            notes: None,
-            favicon: None,
-            selectors: vec![],
-            custom_field_names: vec![],
-            attachments: vec![],
-            expires_at: None,
-            breached_at: None,
-            password_changed_at: None,
-            created_at: now.clone(),
-            created_by: Some("cli:vault-seed".into()),
-            updated_at: now,
-            updated_by: None,
-            last_used_at: None,
-            version: 1,
+        StoredVaultEntry {
+            entry: VaultEntry {
+                id: format!("vault_demo_hn_{stamp}"),
+                context_id: context_id.into(),
+                targets: vec![SiteTarget::WebOrigin {
+                    origin: "https://news.ycombinator.com".into(),
+                }],
+                label: "Hacker News".into(),
+                secret_kind: SecretKind::Password,
+                tags: vec!["personal".into()],
+                notes: None,
+                favicon: None,
+                selectors: vec![],
+                custom_field_names: vec![],
+                attachments: vec![],
+                expires_at: None,
+                breached_at: None,
+                password_changed_at: None,
+                created_at: now.clone(),
+                created_by: Some("cli:vault-seed".into()),
+                updated_at: now,
+                updated_by: None,
+                last_used_at: None,
+                version: 1,
+            },
+            secret: placeholder_password(),
         },
     ]
 }

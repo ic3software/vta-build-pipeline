@@ -337,6 +337,11 @@ async fn dispatch_typed(state: &AppState, auth: &AuthClaims, doc: TrustTask<Valu
         // ─── Vault slice (public 0.1 spec) ──────────────────────────
         vta_sdk::trust_tasks::TASK_VAULT_LIST_0_1 => vault::handle_list(state, auth, doc).await,
         vta_sdk::trust_tasks::TASK_VAULT_GET_0_1 => vault::handle_get(state, auth, doc).await,
+        vta_sdk::trust_tasks::TASK_VAULT_UPSERT_0_1 => vault::handle_upsert(state, auth, doc).await,
+        vta_sdk::trust_tasks::TASK_VAULT_DELETE_0_1 => vault::handle_delete(state, auth, doc).await,
+        vta_sdk::trust_tasks::TASK_VAULT_RELEASE_0_1 => {
+            vault::handle_release(state, auth, doc).await
+        }
         // ─── Config slice ────────────────────────────────────────────
         vta_sdk::trust_tasks::TASK_CONFIG_GET_1_0 => config::handle_get(state, auth, doc).await,
         vta_sdk::trust_tasks::TASK_CONFIG_UPDATE_1_0 => {

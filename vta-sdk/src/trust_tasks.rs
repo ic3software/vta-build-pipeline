@@ -255,6 +255,20 @@ pub const TASK_VAULT_LIST_0_1: &str = "https://trusttasks.org/spec/vault/list/0.
 /// id. Same auth as vault/list.
 pub const TASK_VAULT_GET_0_1: &str = "https://trusttasks.org/spec/vault/get/0.1";
 
+/// `spec/vault/upsert/0.1` — create a new vault entry or update an
+/// existing one. Secret material rides inside a pluggable cipher
+/// envelope (see vault/_shared/0.1/sealed-envelope). Auth: VaultWrite.
+pub const TASK_VAULT_UPSERT_0_1: &str = "https://trusttasks.org/spec/vault/upsert/0.1";
+
+/// `spec/vault/delete/0.1` — tombstone an entry with a maintainer-defined
+/// grace window. Auth: VaultWrite.
+pub const TASK_VAULT_DELETE_0_1: &str = "https://trusttasks.org/spec/vault/delete/0.1";
+
+/// `spec/vault/release/0.1` — release the cleartext secret material of an
+/// entry inside a pluggable cipher envelope sealed to the requesting
+/// consumer. Auth: FillRelease.
+pub const TASK_VAULT_RELEASE_0_1: &str = "https://trusttasks.org/spec/vault/release/0.1";
+
 // ─── Config slice (spec/vta/config/*) ────────────────────────────────────
 
 /// `spec/vta/config/get/1.0` — read the current VTA configuration
@@ -683,6 +697,9 @@ pub const ALL_URIS: &[&str] = &[
     // Vault slice (public 0.1 spec)
     TASK_VAULT_LIST_0_1,
     TASK_VAULT_GET_0_1,
+    TASK_VAULT_UPSERT_0_1,
+    TASK_VAULT_DELETE_0_1,
+    TASK_VAULT_RELEASE_0_1,
     // Config slice
     TASK_CONFIG_GET_1_0,
     TASK_CONFIG_UPDATE_1_0,
