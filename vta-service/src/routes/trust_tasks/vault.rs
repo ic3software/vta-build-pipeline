@@ -1,23 +1,26 @@
-//! Vault slice trust-task handlers — M1 read-only surface.
+//! Vault slice trust-task handlers — M1 + M2A surface.
 //!
-//! Handles `spec/vault/list/0.1` and `spec/vault/get/0.1` per the canonical
-//! [trust-tasks-tf](https://github.com/trustoverip/dtgwg-trust-tasks-tf) spec.
-//! Upsert, delete, sync, proxy-login, release, and usage handlers land in
-//! later milestones (M2+).
+//! Handles `spec/vault/{list,get,upsert,delete,release}/0.1` per the canonical
+//! [trust-tasks-tf](https://github.com/trustoverip/dtgwg-trust-tasks-tf) specs.
+//! Delete + release handler bodies land in M2A.2/M2A.3 — they're stubbed here
+//! returning `task_failed: not yet implemented`.
 //!
-//! Auth: gated on the derived `VaultRead` capability for the caller's role.
-//! Legacy ACL entries (no explicit `capabilities` set) fall back to
-//! [`vti_common::acl::derived_capabilities_for_role`] — Admin, Initiator,
-//! Application, and Reader all carry `VaultRead`. Monitor does not.
+//! Auth: gated on derived capabilities for the caller's role —
+//! [`vti_common::acl::derived_capabilities_for_role`]. List/get require
+//! `VaultRead`; upsert/delete require `VaultWrite`; release requires
+//! `FillRelease`. Admin/Initiator carry the write capabilities; Application
+//! and Reader carry read-only; Monitor carries none.
 
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trust_tasks_rs::TrustTask;
+use uuid::Uuid;
 use vti_common::acl::{Capability, role_has_capability};
 use vti_common::vault::{
-    SecretKind, SiteTarget, VaultEntry, VaultListFilter, get_vault_entry,
-    list_vault_entries as list_entries_store,
+    SecretKind, SiteTarget, StoredVaultEntry, VaultEntry, VaultListFilter, VaultSecret,
+    get_stored_vault_entry, get_vault_entry, list_vault_entries as list_entries_store,
+    put_stored_vault_entry,
 };
 
 use crate::auth::AuthClaims;
@@ -96,6 +99,100 @@ struct VaultGetResponseBody {
     redacted_fields: Option<Vec<String>>,
 }
 
+/// Request body for `vault/upsert/0.1`. Mirrors the canonical
+/// `payload.schema.json`; field names are camelCase per the wire spec.
+///
+/// Notes on semantics:
+/// - `id` omitted → create with a maintainer-assigned ULID. Provided →
+///   update (`expectedVersion` MUST match) or upsert-with-id when the row
+///   doesn't yet exist (recommended for client-generated ids).
+/// - `sealedSecret` REQUIRED on create except for the two reference kinds
+///   (`did-self-issued`, `didcomm-peer`) — those carry only references to
+///   maintainer-internal keys and have no extra secret bytes. On update,
+///   omit to keep the existing secret; populate to rotate.
+/// - `clearFields` distinguishes "don't touch" (field omitted from payload)
+///   from "clear" (field listed here). Only safe-to-clear fields are
+///   listable; `contextId`, `targets`, `label`, `secretKind` are not.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultUpsertBody {
+    id: Option<String>,
+    expected_version: Option<u32>,
+    context_id: String,
+    targets: Vec<SiteTarget>,
+    label: String,
+    secret_kind: SecretKind,
+    #[serde(default)]
+    tags: Vec<String>,
+    notes: Option<String>,
+    favicon: Option<String>,
+    #[serde(default)]
+    selectors: Vec<String>,
+    #[serde(default)]
+    custom_field_names: Vec<String>,
+    expires_at: Option<String>,
+    sealed_secret: Option<SealedEnvelope>,
+    #[serde(default)]
+    clear_fields: Vec<ClearableField>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultUpsertResponseBody {
+    entry: VaultEntry,
+    created: bool,
+}
+
+/// Wire form of `vault/_shared/0.1/sealed-envelope#/$defs/SealedEnvelope`
+/// — the pluggable cipher envelope. M2A implements only the
+/// `didcomm-authcrypt` variant; `hpke-armored` and `tsp-message` are
+/// recognised on the wire (so the consumer gets a clean
+/// `envelope_unsupported` reject) but not unsealable here yet.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "envelope", rename_all = "kebab-case")]
+enum SealedEnvelope {
+    DidcommAuthcrypt {
+        jwe: String,
+    },
+    HpkeArmored {
+        #[serde(default)]
+        #[allow(dead_code)]
+        armored: String,
+        #[serde(default)]
+        #[allow(dead_code)]
+        recipient_key_id: String,
+    },
+    TspMessage {
+        #[serde(default)]
+        #[allow(dead_code)]
+        message: String,
+    },
+}
+
+impl SealedEnvelope {
+    fn kind_name(&self) -> &'static str {
+        match self {
+            SealedEnvelope::DidcommAuthcrypt { .. } => "didcomm-authcrypt",
+            SealedEnvelope::HpkeArmored { .. } => "hpke-armored",
+            SealedEnvelope::TspMessage { .. } => "tsp-message",
+        }
+    }
+}
+
+/// Subset of metadata fields the upsert spec lets the consumer null out
+/// explicitly. `contextId` / `targets` / `label` / `secretKind` are
+/// excluded — they're either immutable or always required.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ClearableField {
+    Notes,
+    Favicon,
+    ExpiresAt,
+    Tags,
+    Selectors,
+    CustomFieldNames,
+}
+
 /// Reject the request unless the caller's role implies `VaultRead`. When
 /// AclEntry-level explicit capabilities arrive (M4), this check upgrades
 /// to consult the entry's `capabilities` Vec instead of deriving from role.
@@ -113,6 +210,125 @@ fn require_vault_read(auth: &AuthClaims, doc: &TrustTask<Value>) -> Result<(), R
             },
         ))
     }
+}
+
+/// Reject the request unless the caller's role implies `VaultWrite` —
+/// Admin and Initiator pass; Application, Reader, Monitor do not. Used by
+/// upsert + delete. Same role→capability fallback story as
+/// [`require_vault_read`]; upgrades to explicit `capabilities` in M4.
+fn require_vault_write(auth: &AuthClaims, doc: &TrustTask<Value>) -> Result<(), Response> {
+    if role_has_capability(&auth.role, Capability::VaultWrite) {
+        Ok(())
+    } else {
+        Err(reject_with(
+            doc,
+            RejectReason::PermissionDenied {
+                reason: format!(
+                    "vault write denied: role {} does not carry VaultWrite capability",
+                    auth.role
+                ),
+            },
+        ))
+    }
+}
+
+/// Unseal a `SealedEnvelope` into the cleartext [`VaultSecret`].
+///
+/// M2A supports the `didcomm-authcrypt` variant only. The JWE is unpacked
+/// through the VTA's ATM (same machinery the `/auth/` endpoint uses), the
+/// resulting message's `from` is cross-checked against the authenticated
+/// caller (an attacker can't relay someone else's pre-signed seal through
+/// their own auth context), and the cleartext body is deserialised as
+/// `VaultSecret`.
+///
+/// Returns an `axum::Response` carrying the appropriate Trust Task reject
+/// on failure — `envelope_unsupported` for non-DIDComm variants,
+/// `permission_denied` for sender mismatch, `sealed_secret_invalid` for
+/// every other failure path (parse, unpack, schema mismatch).
+async fn unseal_secret(
+    state: &AppState,
+    auth: &AuthClaims,
+    doc: &TrustTask<Value>,
+    envelope: &SealedEnvelope,
+) -> Result<VaultSecret, Response> {
+    let jwe = match envelope {
+        SealedEnvelope::DidcommAuthcrypt { jwe } => jwe,
+        other => {
+            return Err(reject_with(
+                doc,
+                RejectReason::TaskFailed {
+                    reason: format!(
+                        "vault/upsert:envelope_unsupported — received {kind}; this maintainer accepts only didcomm-authcrypt in M2A",
+                        kind = other.kind_name()
+                    ),
+                    details: Some(serde_json::json!({
+                        "receivedEnvelope": other.kind_name(),
+                        "supportedEnvelopes": ["didcomm-authcrypt"],
+                    })),
+                },
+            ));
+        }
+    };
+
+    let atm = state.atm.as_ref().ok_or_else(|| {
+        reject_with(
+            doc,
+            RejectReason::InternalError {
+                reason: "ATM not configured — server cannot unpack DIDComm envelopes".into(),
+            },
+        )
+    })?;
+
+    let (msg, _metadata) = atm.unpack(jwe).await.map_err(|e| {
+        reject_with(
+            doc,
+            RejectReason::TaskFailed {
+                reason: format!("vault/upsert:sealed_secret_invalid — DIDComm unpack: {e}"),
+                details: Some(serde_json::json!({ "reason": "unpack_failed" })),
+            },
+        )
+    })?;
+
+    // Cross-check: the authcrypt sender's DID must equal the authenticated
+    // caller. Stops an attacker from replaying someone else's pre-signed
+    // seal through their own session.
+    let sender = msg
+        .from
+        .as_deref()
+        .map(|s| s.split('#').next().unwrap_or(s).to_string())
+        .ok_or_else(|| {
+            reject_with(
+                doc,
+                RejectReason::TaskFailed {
+                    reason: "vault/upsert:sealed_secret_invalid — JWE has no sender (from)".into(),
+                    details: Some(serde_json::json!({ "reason": "missing_sender" })),
+                },
+            )
+        })?;
+    if sender != auth.did {
+        return Err(reject_with(
+            doc,
+            RejectReason::PermissionDenied {
+                reason: format!(
+                    "vault/upsert:sealed_secret_invalid — JWE sender {sender} does not match authenticated caller {}",
+                    auth.did
+                ),
+            },
+        ));
+    }
+
+    let secret: VaultSecret = serde_json::from_value(msg.body).map_err(|e| {
+        reject_with(
+            doc,
+            RejectReason::TaskFailed {
+                reason: format!(
+                    "vault/upsert:sealed_secret_invalid — cleartext not a VaultSecret: {e}"
+                ),
+                details: Some(serde_json::json!({ "reason": "cleartext_schema_invalid" })),
+            },
+        )
+    })?;
+    Ok(secret)
 }
 
 /// Reject if the caller's `allowed_contexts` is non-empty AND `context_id`
@@ -252,19 +468,228 @@ pub(super) async fn handle_get(
     )
 }
 
-/// Handler stub for `spec/vault/upsert/0.1` — wired into the dispatcher
-/// but returns `task_failed: not yet implemented` until M2A.1 lands the
-/// real body. The URI is in the parity harness so a client that POSTs
-/// `vault/upsert/0.1` gets a clear maintainer-defined rejection rather
-/// than `unsupported_type`.
+/// Handler for `spec/vault/upsert/0.1`. Create or update a vault entry;
+/// secret material rides inside the pluggable `sealedSecret` envelope and
+/// is unsealed server-side via [`unseal_secret`]. See the spec for the
+/// full payload shape; this implementation honours every required field
+/// and the spec's full error-code surface
+/// (`context_not_found` is currently NOT enforced — the maintainer accepts
+/// any contextId the consumer supplies; cross-checking against the
+/// contexts keyspace lands in a follow-up).
 pub(super) async fn handle_upsert(
-    _state: &AppState,
-    _auth: &AuthClaims,
+    state: &AppState,
+    auth: &AuthClaims,
     doc: TrustTask<Value>,
 ) -> Response {
-    not_implemented_yet(
-        doc,
-        "vault/upsert/0.1: handler not yet implemented — M2A.1 lands the sealed-envelope unsealing + persist path",
+    if let Err(r) = require_vault_write(auth, &doc) {
+        return r;
+    }
+
+    let req: VaultUpsertBody = match parse_payload(&doc) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    if let Err(r) = enforce_context_scope(auth, Some(&req.context_id), &doc) {
+        return r;
+    }
+
+    // Load existing (if `id` supplied). Optimistic-concurrency check
+    // happens after; we need the row for context-change-forbidden and
+    // for the create-vs-update decision anyway.
+    let existing: Option<StoredVaultEntry> = if let Some(id) = req.id.as_deref() {
+        match get_stored_vault_entry(&state.vault_ks, id).await {
+            Ok(e) => e,
+            Err(e) => return app_error_to_reject(&doc, e),
+        }
+    } else {
+        None
+    };
+
+    // An `expectedVersion` was supplied but there's no row at this id —
+    // the client thinks it's updating something that doesn't exist.
+    if existing.is_none() && req.expected_version.is_some() && req.id.is_some() {
+        return reject_with(
+            &doc,
+            RejectReason::TaskFailed {
+                reason: format!(
+                    "vault/upsert:not_found — no entry at id {}",
+                    req.id.as_deref().unwrap_or("(none)")
+                ),
+                details: None,
+            },
+        );
+    }
+
+    // Forbid changing the contextId of an existing entry.
+    if let Some(e) = existing.as_ref()
+        && e.entry.context_id != req.context_id
+    {
+        return reject_with(
+            &doc,
+            RejectReason::TaskFailed {
+                reason: format!(
+                    "vault/upsert:context_change_forbidden — entry {} is in context {}; cannot move to {}. Delete and recreate instead.",
+                    e.entry.id, e.entry.context_id, req.context_id
+                ),
+                details: Some(serde_json::json!({
+                    "currentContext": e.entry.context_id,
+                    "requestedContext": req.context_id,
+                })),
+            },
+        );
+    }
+
+    // Optimistic concurrency for updates.
+    if let (Some(e), Some(v)) = (existing.as_ref(), req.expected_version)
+        && e.entry.version != v
+    {
+        return reject_with(
+            &doc,
+            RejectReason::TaskFailed {
+                reason: format!(
+                    "vault/upsert:version_conflict — expectedVersion {v} != current version {}",
+                    e.entry.version
+                ),
+                details: Some(serde_json::json!({ "currentVersion": e.entry.version })),
+            },
+        );
+    }
+
+    // Resolve the secret. Three cases:
+    //   - sealed_secret supplied → unseal it.
+    //   - no sealed_secret, existing entry → reuse existing secret.
+    //   - no sealed_secret, create → secret_required.
+    let secret: VaultSecret = match (&req.sealed_secret, existing.as_ref()) {
+        (Some(env), _) => match unseal_secret(state, auth, &doc, env).await {
+            Ok(s) => s,
+            Err(resp) => return resp,
+        },
+        (None, Some(e)) => e.secret.clone(),
+        (None, None) => {
+            return reject_with(
+                &doc,
+                RejectReason::TaskFailed {
+                    reason: format!(
+                        "vault/upsert:secret_required — secretKind {:?} needs `sealedSecret` on create",
+                        req.secret_kind
+                    ),
+                    details: None,
+                },
+            );
+        }
+    };
+
+    if !secret.matches_kind(req.secret_kind) {
+        return reject_with(
+            &doc,
+            RejectReason::TaskFailed {
+                reason: format!(
+                    "vault/upsert:sealed_secret_invalid — declared secretKind {:?} does not match secret variant {:?}",
+                    req.secret_kind,
+                    secret.kind()
+                ),
+                details: Some(serde_json::json!({
+                    "declaredKind": serde_json::to_value(req.secret_kind).ok(),
+                    "secretVariant": serde_json::to_value(secret.kind()).ok(),
+                })),
+            },
+        );
+    }
+
+    // Build the resulting VaultEntry. Some fields come from `existing`
+    // (immutable / sticky), some from the request, some are computed.
+    let now = chrono::Utc::now().to_rfc3339();
+    let is_create = existing.is_none();
+    let secret_rotated_password =
+        req.sealed_secret.is_some() && matches!(req.secret_kind, SecretKind::Password);
+
+    let entry = VaultEntry {
+        id: existing
+            .as_ref()
+            .map(|e| e.entry.id.clone())
+            .or(req.id.clone())
+            .unwrap_or_else(|| format!("vault_{}", Uuid::new_v4().simple())),
+        context_id: req.context_id,
+        targets: req.targets,
+        label: req.label,
+        secret_kind: req.secret_kind,
+        tags: if req.clear_fields.contains(&ClearableField::Tags) {
+            Vec::new()
+        } else {
+            req.tags
+        },
+        notes: if req.clear_fields.contains(&ClearableField::Notes) {
+            None
+        } else {
+            req.notes
+        },
+        favicon: if req.clear_fields.contains(&ClearableField::Favicon) {
+            None
+        } else {
+            req.favicon
+        },
+        selectors: if req.clear_fields.contains(&ClearableField::Selectors) {
+            Vec::new()
+        } else {
+            req.selectors
+        },
+        custom_field_names: if req.clear_fields.contains(&ClearableField::CustomFieldNames) {
+            Vec::new()
+        } else {
+            req.custom_field_names
+        },
+        // Attachments are not exposed on upsert — they round-trip from
+        // existing rows untouched. Future task vault/attachments/*
+        // manages them.
+        attachments: existing
+            .as_ref()
+            .map(|e| e.entry.attachments.clone())
+            .unwrap_or_default(),
+        expires_at: if req.clear_fields.contains(&ClearableField::ExpiresAt) {
+            None
+        } else {
+            req.expires_at
+        },
+        // Sticky from existing — maintainer-set fields.
+        breached_at: existing.as_ref().and_then(|e| e.entry.breached_at.clone()),
+        password_changed_at: if is_create && matches!(req.secret_kind, SecretKind::Password) {
+            Some(now.clone())
+        } else if secret_rotated_password {
+            Some(now.clone())
+        } else {
+            existing
+                .as_ref()
+                .and_then(|e| e.entry.password_changed_at.clone())
+        },
+        created_at: existing
+            .as_ref()
+            .map(|e| e.entry.created_at.clone())
+            .unwrap_or_else(|| now.clone()),
+        created_by: existing
+            .as_ref()
+            .and_then(|e| e.entry.created_by.clone())
+            .or_else(|| Some(auth.did.clone())),
+        updated_at: now,
+        updated_by: Some(auth.did.clone()),
+        last_used_at: existing.as_ref().and_then(|e| e.entry.last_used_at.clone()),
+        version: existing.as_ref().map(|e| e.entry.version + 1).unwrap_or(1),
+    };
+
+    let record = StoredVaultEntry {
+        entry: entry.clone(),
+        secret,
+    };
+    if let Err(e) = put_stored_vault_entry(&state.vault_ks, &record).await {
+        return app_error_to_reject(&doc, e);
+    }
+
+    success_response(
+        &doc,
+        VaultUpsertResponseBody {
+            entry,
+            created: is_create,
+        },
     )
 }
 
