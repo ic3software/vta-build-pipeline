@@ -269,6 +269,14 @@ pub const TASK_VAULT_DELETE_0_1: &str = "https://trusttasks.org/spec/vault/delet
 /// consumer. Auth: FillRelease.
 pub const TASK_VAULT_RELEASE_0_1: &str = "https://trusttasks.org/spec/vault/release/0.1";
 
+/// `spec/vault/proxy-login/0.1` — the VTA performs an authentication at
+/// the third-party site on the holder's behalf using the entry's secret
+/// material and returns a SessionBlob (cookies + headers + optional
+/// localStorage) wrapped in a pluggable cipher envelope sealed to the
+/// requesting consumer. The long-term credential never leaves the VTA.
+/// Auth: ProxyLogin.
+pub const TASK_VAULT_PROXY_LOGIN_0_1: &str = "https://trusttasks.org/spec/vault/proxy-login/0.1";
+
 // ─── Config slice (spec/vta/config/*) ────────────────────────────────────
 
 /// `spec/vta/config/get/1.0` — read the current VTA configuration
@@ -700,6 +708,7 @@ pub const ALL_URIS: &[&str] = &[
     TASK_VAULT_UPSERT_0_1,
     TASK_VAULT_DELETE_0_1,
     TASK_VAULT_RELEASE_0_1,
+    TASK_VAULT_PROXY_LOGIN_0_1,
     // Config slice
     TASK_CONFIG_GET_1_0,
     TASK_CONFIG_UPDATE_1_0,

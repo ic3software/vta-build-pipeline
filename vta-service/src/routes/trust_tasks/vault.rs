@@ -40,6 +40,7 @@ pub(super) const DISPATCHED_URIS: &[&str] = &[
     vta_sdk::trust_tasks::TASK_VAULT_UPSERT_0_1,
     vta_sdk::trust_tasks::TASK_VAULT_DELETE_0_1,
     vta_sdk::trust_tasks::TASK_VAULT_RELEASE_0_1,
+    vta_sdk::trust_tasks::TASK_VAULT_PROXY_LOGIN_0_1,
 ];
 
 /// Request body for `vault/list/0.1`. Mirrors the canonical
@@ -1031,6 +1032,25 @@ pub(super) async fn handle_release(
             sealed_secret: SealedEnvelopeWire::DidcommAuthcrypt { jwe },
             secret_kind,
             ttl_seconds,
+        },
+    )
+}
+
+/// M2B.2a stub for `spec/vault/proxy-login/0.1`. URI is wired into the
+/// dispatcher so clients posting proxy-login get a clear maintainer-
+/// defined reject rather than `unsupported_type`. The real driver bodies
+/// (DID-self-issued in M2B.2b, Password POST in M2B.5) land as follow-up
+/// PRs against this scaffolding.
+pub(super) async fn handle_proxy_login(
+    _state: &AppState,
+    _auth: &AuthClaims,
+    doc: TrustTask<Value>,
+) -> Response {
+    reject_with(
+        &doc,
+        RejectReason::TaskFailed {
+            reason: "vault/proxy-login/0.1: handler not yet implemented — M2B.2b lands the DID-self-issued (SIOP) driver, M2B.5 adds Password POST".into(),
+            details: None,
         },
     )
 }

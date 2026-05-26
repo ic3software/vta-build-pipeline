@@ -388,6 +388,104 @@ pub async fn delete_vault_entry(vault: &KeyspaceHandle, id: &str) -> Result<(), 
     vault.remove(vault_key(id)).await
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// SessionBlob — the cleartext payload of vault/proxy-login/0.1's sealed
+// response (M2B). Mirrors `vault/_shared/0.1/session-blob` schema field
+// for field. Wallet consumers receive this inside a SealedEnvelope and
+// inject the contents into their browser session for the bound origin.
+//
+// Sensitive fields here are server-managed (the VTA issues the session
+// bytes), so unlike VaultSecret these aren't user-typed — but the
+// `headers[].value` and `cookies[].value` carry bearer tokens / session
+// IDs and MUST be zeroised at TTL by the consumer just like VaultSecret.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Cleartext session material returned by vault/proxy-login/0.1 — the
+/// VTA performs the login at the third party, captures the resulting
+/// session credentials, and ships them in this shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBlob {
+    /// Maintainer-assigned opaque id for this session — used by future
+    /// `vault/session/{revoke, refresh}/0.1` tasks (post-M2B) to act on
+    /// the session without re-identifying it by content.
+    pub session_id: String,
+    /// RFC 3339. The consumer MUST discard the blob (cookies + headers)
+    /// at this time even if the user hasn't finished interacting.
+    pub expires_at: String,
+    /// Cookies the consumer injects into the bound origin's cookie jar.
+    /// Order is significant for sites that set multiple cookies with the
+    /// same name on different paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cookies: Vec<CookieJarEntry>,
+    /// HTTP request headers the consumer attaches to outbound requests
+    /// for the bound origin. Typically `Authorization: Bearer …` for
+    /// the SIOP / OAuth paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<RequestHeader>,
+    /// Optional localStorage entries to set on the origin (SPAs that
+    /// store session material there rather than in cookies).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_storage: Vec<StorageEntry>,
+    /// Optional sessionStorage entries to set on the origin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_storage: Vec<StorageEntry>,
+    /// The web origin this session is for. Consumers MUST refuse to
+    /// inject the session into any other origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_origin: Option<String>,
+    /// Refresh policy hint for the consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_hint: Option<RefreshHint>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RefreshHint {
+    /// Don't refresh on your own; the maintainer drives renewal.
+    MaintainerOnly,
+    /// Call back to vault/proxy-login when the third party returns 401.
+    On401,
+    /// Pre-emptively refresh shortly before `expiresAt`.
+    BeforeExpiry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CookieJarEntry {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<SameSite>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SameSite {
+    Strict,
+    Lax,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageEntry {
+    pub key: String,
+    pub value: String,
+}
+
 /// List vault entries matching `filter`, ordered by `last_used_at`
 /// descending (entries without `last_used_at` sort last). Returns the
 /// metadata projection only — secrets stay in the keyspace.
