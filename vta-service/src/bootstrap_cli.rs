@@ -817,6 +817,9 @@ pub async fn run_context_create(
             created_at: vti_common::auth::session::now_epoch(),
             created_by: format!("vta-context-create:{}", auth.did),
             expires_at,
+            kind: Default::default(),
+            capabilities: Vec::new(),
+            device: None,
             version: 0,
         };
         crate::acl::store_acl_entry(&acl_ks, &entry).await?;
@@ -1108,6 +1111,9 @@ pub async fn run_context_reprovision(
             created_at: Utc::now().timestamp() as u64,
             created_by: auth.did.clone(),
             expires_at: None,
+            kind: Default::default(),
+            capabilities: Vec::new(),
+            device: None,
             version: 0,
         };
         crate::acl::store_acl_entry(&state.acl_ks, &entry).await?;

@@ -1194,6 +1194,9 @@ async fn seed_initial_admin(
             .as_secs(),
         created_by: "cli:setup-from-file".into(),
         expires_at: None,
+        kind: Default::default(),
+        capabilities: Vec::new(),
+        device: None,
         version: 0,
     };
     acl::store_acl_entry(&acl_ks, &entry).await?;

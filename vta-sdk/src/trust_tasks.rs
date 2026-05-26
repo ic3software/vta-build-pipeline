@@ -238,6 +238,23 @@ pub const TASK_AUDIT_UPDATE_RETENTION_1_0: &str =
 pub const TASK_DISCOVERY_CAPABILITIES_1_0: &str =
     "https://trusttasks.org/spec/vta/discovery/capabilities/1.0";
 
+// ─── Vault slice (spec/vault/*/0.1) ──────────────────────────────────────
+//
+// Canonical public Trust Tasks from the dtgwg-trust-tasks-tf registry.
+// M1 ships the two read-only tasks (list + get); upsert, delete, sync,
+// proxy-login, release, usage land in M2+.
+
+/// `spec/vault/list/0.1` — query the metadata view of stored vault
+/// entries, filtered by context, target, secret-kind, tag, etc. Secret
+/// material is never returned by this task. Auth: any caller with the
+/// derived `VaultRead` capability (i.e. role ∈ {Admin, Initiator,
+/// Application, Reader}).
+pub const TASK_VAULT_LIST_0_1: &str = "https://trusttasks.org/spec/vault/list/0.1";
+
+/// `spec/vault/get/0.1` — fetch the metadata view of a single entry by
+/// id. Same auth as vault/list.
+pub const TASK_VAULT_GET_0_1: &str = "https://trusttasks.org/spec/vault/get/0.1";
+
 // ─── Config slice (spec/vta/config/*) ────────────────────────────────────
 
 /// `spec/vta/config/get/1.0` — read the current VTA configuration
@@ -663,6 +680,9 @@ pub const ALL_URIS: &[&str] = &[
     TASK_AUDIT_UPDATE_RETENTION_1_0,
     // Discovery
     TASK_DISCOVERY_CAPABILITIES_1_0,
+    // Vault slice (public 0.1 spec)
+    TASK_VAULT_LIST_0_1,
+    TASK_VAULT_GET_0_1,
     // Config slice
     TASK_CONFIG_GET_1_0,
     TASK_CONFIG_UPDATE_1_0,

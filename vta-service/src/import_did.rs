@@ -65,6 +65,9 @@ pub async fn run_import_did(args: ImportDidArgs) -> Result<(), Box<dyn std::erro
             .as_secs(),
         created_by: "cli:import-did".into(),
         expires_at: None,
+        kind: Default::default(),
+        capabilities: Vec::new(),
+        device: None,
         version: 0,
     };
 
