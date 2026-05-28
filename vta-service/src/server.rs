@@ -313,6 +313,10 @@ pub async fn build_app_state(
     })
 }
 
+// `config` is only mutated when the `webvh` feature is on (mirror of
+// runtime-state into the in-memory `config.services`). Allow the lint
+// in other feature combos so `cargo check -D warnings` stays clean.
+#[cfg_attr(not(feature = "webvh"), allow(unused_mut))]
 pub async fn run(
     mut config: AppConfig,
     store: Store,
@@ -905,7 +909,6 @@ pub async fn run(
 }
 
 /// Storage thread: runs session cleanup loop and persists the store on shutdown.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn run_storage_thread(
     store: Store,
