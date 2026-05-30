@@ -9744,6 +9744,7 @@ name = "vti-common"
 version = "0.8.0"
 dependencies = [
  "aes-gcm",
+ "affinidi-did-resolver-cache-sdk",
  "affinidi-tdk",
  "async-trait",
  "axum",
@@ -9760,6 +9761,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "libc",
+ "multibase",
  "rand 0.10.1",
  "serde",
  "serde_json",
