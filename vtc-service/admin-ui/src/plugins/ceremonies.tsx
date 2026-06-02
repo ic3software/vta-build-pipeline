@@ -20,6 +20,7 @@ import { postJson } from "@/lib/api";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { formatIso } from "@/lib/format";
 import {
+  type PolicyRow,
   type Purpose,
   CEREMONY_PURPOSES,
   OTHER_PURPOSES,
@@ -28,8 +29,16 @@ import {
   fetchPolicies,
   uploadPolicy,
 } from "@/lib/policies-api";
-import { blankIR, parseRego } from "@/lib/rule-ir";
-import { RuleEditor } from "@/plugins/RuleEditor";
+import {
+  type ExplainFacts,
+  type RuleIR,
+  blankIR,
+  diffIR,
+  explainDecision,
+  irToEnglish,
+  parseRego,
+} from "@/lib/rule-ir";
+import { EnglishView, RuleEditor } from "@/plugins/RuleEditor";
 import {
   type CeremonyKey,
   type CeremonyManifest,
@@ -84,6 +93,61 @@ function pluckDecision(resp: TestResponse): Verdict | null {
   const v = value as Record<string, unknown>;
   if (typeof v.effect !== "string") return null;
   return { effect: v.effect as Effect, with: v.with as Record<string, unknown> };
+}
+
+// ---------------------------------------------------------------------------
+// request_more loop — a verdict can ask for more evidence (`with.needs`).
+// The simulator models the negotiation: satisfy a need and re-run, the
+// way an applicant would supply it and re-present.
+// ---------------------------------------------------------------------------
+
+/** The `needs` array from a request_more verdict, as strings. */
+function verdictNeeds(verdict: Verdict | null): string[] {
+  const needs = verdict?.with?.needs;
+  return Array.isArray(needs) ? needs.map(String) : [];
+}
+
+/** A need the simulator knows how to satisfy by patching the facts. */
+function isSatisfiable(need: string): boolean {
+  const kind = need.split(":")[0];
+  return ["agreed", "cred", "credential", "trusted"].includes(kind ?? "");
+}
+
+type Facts = Record<string, unknown>;
+
+/** Apply a satisfied need to the facts — e.g. `agreed:code-of-conduct`
+ * sets the agreement flag; `trusted:WitnessCredential` adds a trusted
+ * credential to the presentation. */
+function satisfyNeed(facts: Facts, need: string): Facts {
+  const f = structuredClone(facts) as Facts;
+  const [kind, ...rest] = need.split(":");
+  const arg = rest.join(":");
+  const evidence = (f.evidence ??= {}) as Record<string, unknown>;
+  if (kind === "agreed") {
+    const request = (evidence.request ??= {}) as Record<string, unknown>;
+    request.agreements = {
+      ...((request.agreements as Record<string, unknown>) ?? {}),
+      [arg]: true,
+    };
+  } else if (kind === "cred" || kind === "credential" || kind === "trusted") {
+    const subject = f.subject as { did?: string } | undefined;
+    const presentation = (evidence.presentation ??= {
+      verified: true,
+      holder: subject?.did,
+      credentials: [],
+    }) as Record<string, unknown>;
+    presentation.credentials = [
+      ...((presentation.credentials as unknown[]) ?? []),
+      {
+        type: arg,
+        issuer: "did:example:satisfied",
+        issuer_trusted: true,
+        status: "valid",
+        claims: {},
+      },
+    ];
+  }
+  return f;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +217,10 @@ function CeremonyPanel({ ceremony }: { ceremony: CeremonyManifest }) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authoring, setAuthoring] = useState(false);
+  // Needs the operator has chosen to satisfy for the request_more loop.
+  const [satisfied, setSatisfied] = useState<string[]>([]);
+  // The facts that produced the current verdict — fed to the trace.
+  const [lastFacts, setLastFacts] = useState<ExplainFacts | null>(null);
 
   const policyQuery = useQuery({
     queryKey: ["active-policy", ceremony.purpose],
@@ -167,7 +235,25 @@ function CeremonyPanel({ ceremony }: { ceremony: CeremonyManifest }) {
     setError(null);
     setPhase(-1);
     setAuthoring(false);
+    setSatisfied([]);
+    setLastFacts(null);
   }, [ceremony]);
+
+  // The active policy's IR, when it was authored visually — enables the
+  // local decision trace.
+  const activeIR = policyQuery.data
+    ? parseRego(policyQuery.data.regoSource)
+    : null;
+
+  // Editing the base evidence invalidates any satisfied needs.
+  const onFieldsChange = (v: FieldValues) => {
+    setForm(v);
+    setSatisfied([]);
+  };
+  const toggleNeed = (need: string) =>
+    setSatisfied((s) =>
+      s.includes(need) ? s.filter((n) => n !== need) : [...s, need],
+    );
 
   const canSimulate = ceremony.wired === "live";
 
@@ -184,7 +270,9 @@ function CeremonyPanel({ ceremony }: { ceremony: CeremonyManifest }) {
     }
 
     try {
-      const facts = ceremony.buildFacts(form);
+      let facts = ceremony.buildFacts(form);
+      for (const need of satisfied) facts = satisfyNeed(facts, need);
+      setLastFacts(facts as ExplainFacts);
       const resp = await postJson<TestResponse>(
         `/v1/policies/${policy.id}/test`,
         { query: `data.${ceremony.pkg}.decision`, input: facts },
@@ -288,7 +376,7 @@ function CeremonyPanel({ ceremony }: { ceremony: CeremonyManifest }) {
               <SimFields
                 fields={ceremony.fields}
                 values={form}
-                onChange={setForm}
+                onChange={onFieldsChange}
               />
 
               <button
@@ -310,16 +398,34 @@ function CeremonyPanel({ ceremony }: { ceremony: CeremonyManifest }) {
               )}
 
               {verdict && !error && (
-                <div className="cer-verdict">
-                  <span className={`cer-vbadge ${verdict.effect}`}>
-                    {verdict.effect}
-                  </span>
-                  <div className="cer-vwith">
-                    {verdict.with
-                      ? JSON.stringify(verdict.with, null, 2)
-                      : "{}"}
+                <>
+                  <div className="cer-verdict">
+                    <span className={`cer-vbadge ${verdict.effect}`}>
+                      {verdict.effect}
+                    </span>
+                    <div className="cer-vwith">
+                      {verdict.with
+                        ? JSON.stringify(verdict.with, null, 2)
+                        : "{}"}
+                    </div>
                   </div>
-                </div>
+                  {verdict.effect === "request_more" && (
+                    <NeedsLoop
+                      needs={verdictNeeds(verdict)}
+                      satisfied={satisfied}
+                      onToggle={toggleNeed}
+                      onRerun={run}
+                      running={running}
+                    />
+                  )}
+                  {activeIR && lastFacts && (
+                    <DecisionTrace
+                      ir={activeIR}
+                      facts={lastFacts}
+                      verdictEffect={verdict.effect}
+                    />
+                  )}
+                </>
               )}
             </>
           )}
@@ -353,6 +459,46 @@ function CeremonyPanel({ ceremony }: { ceremony: CeremonyManifest }) {
 /** Rego package for a ceremony purpose (role-change → role_change). */
 function pkgFor(purpose: Purpose): string {
   return `vtc.${purpose === "roleChange" ? "role_change" : purpose}`;
+}
+
+// Active policy source — a plain-English summary when it was authored
+// visually (carries the IR header), with a toggle to the raw Rego. A
+// hand-written policy shows only the Rego.
+function ActivePolicyView({ source }: { source: string }) {
+  const ir = parseRego(source);
+  const [view, setView] = useState<"english" | "rego">(
+    ir ? "english" : "rego",
+  );
+  if (!ir) return <pre className="cer-policy">{source}</pre>;
+  return (
+    <>
+      <div className="rule-view-tabs" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "english"}
+          className={view === "english" ? "on" : ""}
+          onClick={() => setView("english")}
+        >
+          Plain English
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "rego"}
+          className={view === "rego" ? "on" : ""}
+          onClick={() => setView("rego")}
+        >
+          Rego
+        </button>
+      </div>
+      {view === "english" ? (
+        <EnglishView lines={irToEnglish(ir)} />
+      ) : (
+        <pre className="cer-policy">{source}</pre>
+      )}
+    </>
+  );
 }
 
 function PolicyManager({
@@ -390,6 +536,23 @@ function PolicyManager({
     onSuccess: () => {
       setEditing(false);
       void qc.invalidateQueries({ queryKey: ["policies", purpose] });
+    },
+  });
+
+  // Fail-forward rollback: never rewind the chain — copy the chosen
+  // revision's source into a NEW revision and activate that. History
+  // only ever grows; the active pointer always moves forward.
+  const rollback = useMutation({
+    mutationFn: async (row: PolicyRow) => {
+      const created = await uploadPolicy({
+        purpose,
+        regoSource: row.regoSource,
+      });
+      await activatePolicy(created.id);
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["policies", purpose] });
+      void qc.invalidateQueries({ queryKey: ["active-policy", purpose] });
     },
   });
 
@@ -434,7 +597,7 @@ function PolicyManager({
               sha <b>{active.sha256.slice(0, 12)}…</b>
             </span>
           </div>
-          <pre className="cer-policy">{active.regoSource}</pre>
+          <ActivePolicyView source={active.regoSource} />
         </>
       )}
       {!query.isLoading && !active && (
@@ -452,34 +615,29 @@ function PolicyManager({
           </div>
           <div className="cer-versions">
             {items.map((p) => (
-              <div
+              <VersionRow
                 key={p.id}
-                className={`cer-ver${p.isActive ? " active" : ""}`}
-              >
-                <span className="cer-ver-v">v{p.version}</span>
-                <span className="cer-ver-meta">{formatIso(p.createdAt)}</span>
-                {p.isActive ? (
-                  <span className="cer-chip" style={{ color: "var(--vd-allow)" }}>
-                    active
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    className="cer-ver-activate"
-                    disabled={activate.isPending}
-                    onClick={async () => {
-                      const ok = await confirm({
-                        title: `Activate ${purpose} v${p.version}?`,
-                        message: `The current active policy for "${purpose}" becomes archived.`,
-                        confirmLabel: "Activate",
-                      });
-                      if (ok) activate.mutate(p.id);
-                    }}
-                  >
-                    Activate
-                  </button>
-                )}
-              </div>
+                row={p}
+                active={active}
+                purpose={purpose}
+                busy={activate.isPending || rollback.isPending}
+                onActivate={async () => {
+                  const ok = await confirm({
+                    title: `Activate ${purpose} v${p.version}?`,
+                    message: `The current active policy for "${purpose}" becomes archived.`,
+                    confirmLabel: "Activate",
+                  });
+                  if (ok) activate.mutate(p.id);
+                }}
+                onRollback={async () => {
+                  const ok = await confirm({
+                    title: `Roll back ${purpose} to v${p.version}?`,
+                    message: `Fail-forward: v${p.version}'s content is copied into a new revision and activated. The chain isn't rewound.`,
+                    confirmLabel: "Roll back",
+                  });
+                  if (ok) rollback.mutate(p);
+                }}
+              />
             ))}
           </div>
         </>
@@ -522,6 +680,122 @@ function PolicyManager({
         />
       )}
     </>
+  );
+}
+
+// One row in the version history. A non-active row can be compared to
+// the live policy (route-level diff) and either activated (a newer
+// draft) or rolled back to (an older revision, fail-forward).
+function VersionRow({
+  row,
+  active,
+  purpose,
+  busy,
+  onActivate,
+  onRollback,
+}: {
+  row: PolicyRow;
+  active: PolicyRow | null;
+  purpose: Purpose;
+  busy: boolean;
+  onActivate: () => void;
+  onRollback: () => void;
+}) {
+  const [comparing, setComparing] = useState(false);
+  const isOlder = active ? row.version < active.version : false;
+
+  return (
+    <div className={`cer-ver${row.isActive ? " active" : ""}`}>
+      <div className="cer-ver-head">
+        <span className="cer-ver-v">v{row.version}</span>
+        <span className="cer-ver-meta">{formatIso(row.createdAt)}</span>
+        {row.isActive ? (
+          <span className="cer-chip" style={{ color: "var(--vd-allow)" }}>
+            active
+          </span>
+        ) : (
+          <>
+            {active && !row.isActive && (
+              <button
+                type="button"
+                className="cer-ver-compare"
+                aria-expanded={comparing}
+                onClick={() => setComparing((v) => !v)}
+              >
+                {comparing ? "Hide diff" : "Compare ▾"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="cer-ver-activate"
+              disabled={busy}
+              onClick={isOlder ? onRollback : onActivate}
+            >
+              {isOlder ? "Roll back" : "Activate"}
+            </button>
+          </>
+        )}
+      </div>
+      {comparing && active && (
+        <VersionDiff purpose={purpose} from={active} to={row} />
+      )}
+    </div>
+  );
+}
+
+// The route-level diff between the live policy and another revision —
+// "what changes if this becomes active". Falls back to a note when
+// either side wasn't authored visually (no IR to compare).
+function VersionDiff({
+  purpose,
+  from,
+  to,
+}: {
+  purpose: Purpose;
+  from: PolicyRow;
+  to: PolicyRow;
+}) {
+  const fromIr = parseRego(from.regoSource);
+  const toIr = parseRego(to.regoSource);
+  if (!fromIr || !toIr) {
+    return (
+      <p className="cer-sub" style={{ fontSize: "var(--text-xs)" }}>
+        A structured diff needs both revisions authored visually — one here
+        is hand-written Rego.
+      </p>
+    );
+  }
+  const diffs = diffIR(fromIr, toIr);
+  const changed = diffs.filter((d) => d.status !== "unchanged");
+  return (
+    <div className="cer-diff">
+      <div className="cer-diff-head">
+        v{from.version} <span aria-hidden>→</span> v{to.version}
+      </div>
+      {changed.length === 0 ? (
+        <p className="cer-sub" style={{ fontSize: "var(--text-xs)" }}>
+          No route-level changes — the decision is identical.
+        </p>
+      ) : (
+        changed.map((d) => (
+          <div key={`${purpose}-${d.name}`} className={`diff-route ${d.status}`}>
+            <span className="diff-mark" aria-hidden>
+              {d.status === "added" ? "+" : d.status === "removed" ? "−" : "~"}
+            </span>
+            <div className="diff-body">
+              <span className="diff-name">{d.name}</span>
+              {d.status === "added" && <em> route added</em>}
+              {d.status === "removed" && <em> route removed</em>}
+              {d.changes.map((c, i) => (
+                <span key={i} className="diff-change">
+                  {c}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
   );
 }
 
@@ -650,6 +924,114 @@ function SimFields({
           </div>
         ))}
     </>
+  );
+}
+
+// The request_more negotiation, in miniature: the verdict listed what
+// it needs; the operator satisfies the ones the simulator understands
+// and re-runs, modelling the applicant supplying the evidence.
+function NeedsLoop({
+  needs,
+  satisfied,
+  onToggle,
+  onRerun,
+  running,
+}: {
+  needs: string[];
+  satisfied: string[];
+  onToggle: (need: string) => void;
+  onRerun: () => void;
+  running: boolean;
+}) {
+  const anySelected = needs.some(
+    (n) => isSatisfiable(n) && satisfied.includes(n),
+  );
+  return (
+    <div className="cer-needs">
+      <div className="cer-needs-title">Satisfy to continue</div>
+      {needs.map((n) => {
+        const ok = isSatisfiable(n);
+        return (
+          <label
+            key={n}
+            className={`cer-need${ok ? "" : " unsupported"}`}
+            title={ok ? undefined : "The simulator can't auto-satisfy this need"}
+          >
+            <input
+              type="checkbox"
+              disabled={!ok}
+              checked={ok && satisfied.includes(n)}
+              onChange={() => onToggle(n)}
+            />
+            <code>{n}</code>
+            {!ok && <span className="cer-need-note">manual</span>}
+          </label>
+        );
+      })}
+      <button
+        type="button"
+        className="cer-run"
+        style={{ marginTop: "var(--space-2)" }}
+        onClick={onRerun}
+        disabled={running || !anySelected}
+      >
+        {running ? "Evaluating…" : "Re-run with satisfied evidence ▸"}
+      </button>
+    </div>
+  );
+}
+
+// "Why this verdict" — the local first-match trace over the active
+// policy's routes: which conditions held, which route fired. Derived
+// from the IR, so it explains visually-authored policies; a note flags
+// the rare case where the live Rego was hand-edited away from its IR.
+function DecisionTrace({
+  ir,
+  facts,
+  verdictEffect,
+}: {
+  ir: RuleIR;
+  facts: ExplainFacts;
+  verdictEffect: Effect;
+}) {
+  const trace = explainDecision(ir, facts);
+  const drift = trace.fired ? trace.fired.effect !== verdictEffect : true;
+  return (
+    <div className="cer-trace">
+      <div className="cer-trace-title">Why this verdict</div>
+      {trace.routes.map((r, i) => (
+        <div
+          key={i}
+          className={`trace-route eff-${r.effect}${r.fired ? " fired" : ""}${
+            !r.reached ? " skipped" : ""
+          }`}
+        >
+          <div className="trace-head">
+            <span className="trace-mark" aria-hidden>
+              {r.fired ? "▶" : r.reached ? "·" : "⌀"}
+            </span>
+            <span className="trace-name">{r.name}</span>
+            {r.fired && <span className="trace-fired">fired</span>}
+            {!r.reached && <span className="trace-note">not reached</span>}
+          </div>
+          {r.reached && !r.isCatchAll && (
+            <ul className="trace-conds">
+              {r.conditions.map((c, j) => (
+                <li key={j} className={c.passed ? "pass" : "fail"}>
+                  <span aria-hidden>{c.passed ? "✓" : "✗"}</span> {c.label}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+      {drift && (
+        <p className="cer-trace-drift">
+          The live verdict differs from this trace — the active policy may
+          have been hand-edited away from its visual form.
+        </p>
+      )}
+    </div>
   );
 }
 
