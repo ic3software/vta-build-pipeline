@@ -45,6 +45,8 @@
 //! pre-status-list state in tests.
 
 pub mod custom_endorsement;
+pub mod dtg;
+pub mod invitation;
 pub mod signer;
 pub mod vec;
 pub mod vmc;
