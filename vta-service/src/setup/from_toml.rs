@@ -506,11 +506,30 @@ pub async fn apply_inputs(inputs: WizardInputs) -> Result<(), Box<dyn std::error
         } => {
             let _med_ctx =
                 create_seed_context(&contexts_ks, context, "DIDComm Messaging Mediator").await?;
-            // Operator-supplied vars first; then `URL` (and any auto-derived
+            // Operator-supplied vars first; then `URL` (and the auto-derived
             // `WS_URL`) so the wizard's notion of the endpoint always wins
-            // even if an operator typo'd it under template_vars.
+            // even if an operator typo'd it under template_vars. `WS_URL`
+            // is required by the `didcomm-mediator` template since it
+            // started advertising HTTP + WSS in a single `#service` block.
             let mut effective_vars: HashMap<String, serde_json::Value> = template_vars.clone();
             effective_vars.insert("URL".into(), json!(url));
+            // Mirror the mediator-setup convention: `{base}/ws` for the
+            // WebSocket upgrade alongside `{base}/` for HTTP DIDComm.
+            // Defined in `affinidi-messaging-mediator/tools/mediator-setup/
+            // src/generators/did_peer.rs::websocket_service_uri`.
+            let scheme_swapped = if let Some(rest) = url.strip_prefix("https://") {
+                format!("wss://{rest}")
+            } else if let Some(rest) = url.strip_prefix("http://") {
+                format!("ws://{rest}")
+            } else {
+                return Err(format!(
+                    "messaging.url '{url}' must start with http:// or https:// so the \
+                     wizard can derive WS_URL"
+                )
+                .into());
+            };
+            let ws_url = format!("{}/ws", scheme_swapped.trim_end_matches('/'));
+            effective_vars.insert("WS_URL".into(), json!(ws_url));
 
             // `url` is the DIDComm endpoint; `webvh_url` is the DID-document
             // hosting URL. They are usually the same host but are semantically
