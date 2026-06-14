@@ -23,7 +23,7 @@ use crate::keys::KeyType;
 use crate::operations;
 use crate::server::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateKeyRequest {
     pub key_type: KeyType,
     pub derivation_path: Option<String>,
@@ -34,6 +34,16 @@ pub struct CreateKeyRequest {
 }
 
 /// POST /keys — create a new key record. Auth: Admin or Initiator. Context-scoped.
+#[utoipa::path(
+    post, path = "/keys", tag = "keys",
+    security(("bearer_jwt" = [])),
+    request_body = CreateKeyRequest,
+    responses(
+        (status = 201, description = "Key created", body = CreateKeyResultBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin/initiator"),
+    ),
+)]
 pub async fn create_key(
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -60,6 +70,17 @@ pub async fn create_key(
 }
 
 /// GET /keys/{key_id}/secret — retrieve private key material. Auth: Admin or Initiator.
+#[utoipa::path(
+    get, path = "/keys/{key_id}/secret", tag = "keys",
+    security(("bearer_jwt" = [])),
+    params(("key_id" = String, Path, description = "Key identifier")),
+    responses(
+        (status = 200, description = "Private key material", body = GetKeySecretResultBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin/initiator"),
+        (status = 404, description = "Key not found"),
+    ),
+)]
 pub async fn get_key_secret(
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -79,6 +100,16 @@ pub async fn get_key_secret(
 }
 
 /// GET /keys/{key_id} — retrieve a single key record. Auth: any authenticated user.
+#[utoipa::path(
+    get, path = "/keys/{key_id}", tag = "keys",
+    security(("bearer_jwt" = [])),
+    params(("key_id" = String, Path, description = "Key identifier")),
+    responses(
+        (status = 200, description = "Key record", body = KeyRecord),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 404, description = "Key not found"),
+    ),
+)]
 pub async fn get_key(
     auth: AuthClaims,
     State(state): State<AppState>,
@@ -89,6 +120,17 @@ pub async fn get_key(
 }
 
 /// DELETE /keys/{key_id} — revoke/invalidate a key. Auth: Admin or Initiator.
+#[utoipa::path(
+    delete, path = "/keys/{key_id}", tag = "keys",
+    security(("bearer_jwt" = [])),
+    params(("key_id" = String, Path, description = "Key identifier")),
+    responses(
+        (status = 200, description = "Key revoked", body = RevokeKeyResultBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin/initiator"),
+        (status = 404, description = "Key not found"),
+    ),
+)]
 pub async fn invalidate_key(
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -106,12 +148,24 @@ pub async fn invalidate_key(
     Ok(Json(result))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RenameKeyRequest {
     pub key_id: String,
 }
 
 /// PATCH /keys/{key_id} — rename a key's identifier. Auth: Admin or Initiator.
+#[utoipa::path(
+    patch, path = "/keys/{key_id}", tag = "keys",
+    security(("bearer_jwt" = [])),
+    params(("key_id" = String, Path, description = "Key identifier")),
+    request_body = RenameKeyRequest,
+    responses(
+        (status = 200, description = "Key renamed", body = RenameKeyResultBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin/initiator"),
+        (status = 404, description = "Key not found"),
+    ),
+)]
 pub async fn rename_key(
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -130,7 +184,8 @@ pub async fn rename_key(
     Ok(Json(result))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListKeysQuery {
     pub offset: Option<u64>,
     pub limit: Option<u64>,
@@ -139,6 +194,15 @@ pub struct ListKeysQuery {
 }
 
 /// GET /keys — list key records with optional filters. Auth: any authenticated user. Context-scoped.
+#[utoipa::path(
+    get, path = "/keys", tag = "keys",
+    security(("bearer_jwt" = [])),
+    params(ListKeysQuery),
+    responses(
+        (status = 200, description = "Key records", body = ListKeysResultBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+    ),
+)]
 pub async fn list_keys(
     auth: AuthClaims,
     State(state): State<AppState>,
@@ -162,6 +226,15 @@ pub async fn list_keys(
 // ── Seed endpoints ────────────────────────────────────────────────
 
 /// GET /keys/seeds — list all seed records. Auth: Admin or Initiator.
+#[utoipa::path(
+    get, path = "/keys/seeds", tag = "keys",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Seed records", body = ListSeedsResultBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin/initiator"),
+    ),
+)]
 pub async fn list_seeds(
     _auth: AdminAuth,
     State(state): State<AppState>,
@@ -170,12 +243,22 @@ pub async fn list_seeds(
     Ok(Json(result))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RotateSeedRequest {
     pub mnemonic: Option<String>,
 }
 
 /// POST /keys/seeds/rotate — rotate the active seed, optionally supplying a mnemonic. Auth: Admin or Initiator.
+#[utoipa::path(
+    post, path = "/keys/seeds/rotate", tag = "keys",
+    security(("bearer_jwt" = [])),
+    request_body = RotateSeedRequest,
+    responses(
+        (status = 200, description = "Seed rotated", body = RotateSeedResultBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin/initiator"),
+    ),
+)]
 pub async fn rotate_seed(
     _auth: AdminAuth,
     State(state): State<AppState>,
@@ -196,13 +279,24 @@ pub async fn rotate_seed(
 
 // ── Sign endpoint ─────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SignRequest {
     pub payload: String,
     pub algorithm: SignAlgorithm,
 }
 
 /// POST /keys/{key_id}/sign — sign a base64url payload with the specified key. Auth: Application or higher.
+#[utoipa::path(
+    post, path = "/keys/{key_id}/sign", tag = "keys",
+    security(("bearer_jwt" = [])),
+    params(("key_id" = String, Path, description = "Key identifier")),
+    request_body = SignRequest,
+    responses(
+        (status = 200, description = "Signature", body = SignResultBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 404, description = "Key not found"),
+    ),
+)]
 pub async fn sign_with_key(
     auth: AuthClaims,
     State(state): State<AppState>,
@@ -231,7 +325,7 @@ pub async fn sign_with_key(
 
 // ── Import key endpoints ─────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WrappingKeyResponse {
     pub kid: String,
     pub kty: String,
@@ -240,6 +334,15 @@ pub struct WrappingKeyResponse {
 }
 
 /// GET /keys/import/wrapping-key — get an ephemeral X25519 public key for REST key wrapping.
+#[utoipa::path(
+    get, path = "/keys/import/wrapping-key", tag = "keys",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Ephemeral wrapping public key", body = WrappingKeyResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn get_wrapping_key(
     _auth: AdminAuth,
     State(state): State<AppState>,
@@ -286,6 +389,7 @@ pub async fn get_wrapping_key(
 ///     vta_sdk::sealed_transfer::SealedPayloadV1::RawPrivateKey
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(utoipa::ToSchema)]
 pub struct ImportKeyRestRequest {
     pub key_type: KeyType,
     /// Sealed-transfer armored bundle — preferred REST transport.
@@ -297,6 +401,16 @@ pub struct ImportKeyRestRequest {
 }
 
 /// POST /keys/import — import an externally-created private key. Auth: Admin only.
+#[utoipa::path(
+    post, path = "/keys/import", tag = "keys",
+    security(("bearer_jwt" = [])),
+    request_body = ImportKeyRestRequest,
+    responses(
+        (status = 201, description = "Key imported", body = CreateKeyResultBody),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn import_key(
     auth: AdminAuth,
     State(state): State<AppState>,
