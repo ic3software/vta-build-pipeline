@@ -47,6 +47,7 @@ pub const TYPE_URI_MAX_BYTES: usize = 512;
 /// **Issues** (mints) or **Accepts** (recognises as evidence).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub enum SchemaKind {
     /// The VTC mints this credential type.
     Issues,
@@ -57,6 +58,7 @@ pub enum SchemaKind {
 /// One registered credential-type schema in the community's schema store.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct SchemaEntry {
     /// The credential type URI / `vct`. Primary key — URL-encoded into the key.
     pub type_uri: String,

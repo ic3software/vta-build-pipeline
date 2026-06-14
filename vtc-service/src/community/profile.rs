@@ -34,6 +34,7 @@ pub const MAX_EXTENSIONS_BYTES: usize = 16 * 1024;
 /// + the admin UX read this shape directly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct CommunityProfile {
     /// Immutable — set at install time. PUT requests cannot change
     /// this; see [`CommunityProfileUpdate`].
@@ -81,6 +82,7 @@ impl CommunityProfile {
 /// clears the blob; omitting it (`None`) leaves it untouched.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct CommunityProfileUpdate {
     pub name: Option<String>,
     pub description: Option<String>,

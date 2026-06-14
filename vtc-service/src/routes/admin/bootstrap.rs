@@ -35,13 +35,14 @@ use crate::community::{CommunityProfile, load_profile, store_profile};
 use crate::install::InstallTokenSigner;
 use crate::server::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BootstrapRequest {
     pub setup_session_token: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct BootstrapResponse {
     pub admin_did: String,
     /// `event_id` of the persisted `CommunityInstalled` audit
@@ -50,6 +51,14 @@ pub struct BootstrapResponse {
     pub event_id: Uuid,
 }
 
+#[utoipa::path(
+    post, path = "/admin/bootstrap", tag = "admin",
+    request_body = BootstrapRequest,
+    responses(
+        (status = 200, description = "First admin bootstrapped; community installed", body = BootstrapResponse),
+        (status = 409, description = "An admin already exists"),
+    ),
+)]
 pub async fn bootstrap(
     State(state): State<AppState>,
     Json(req): Json<BootstrapRequest>,

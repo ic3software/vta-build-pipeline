@@ -52,7 +52,7 @@ use crate::server::AppState;
 
 // ─── Publish ─────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct PublishBody {
     /// The self-issued VRC. Must be a JSON-LD VC body with
     /// `type` array including `VerifiableRecognitionCredential`,
@@ -64,6 +64,7 @@ pub struct PublishBody {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct PublishResponse {
     pub id: Uuid,
     pub issuer_did: String,
@@ -71,6 +72,16 @@ pub struct PublishResponse {
     pub vrc_sha256: String,
 }
 
+#[utoipa::path(
+    post, path = "/relationships", tag = "relationships",
+    security(("bearer_jwt" = [])),
+    request_body = PublishBody,
+    responses(
+        (status = 201, description = "Relationship (VRC) published", body = PublishResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not the VRC issuer or policy denied"),
+    ),
+)]
 pub async fn publish(
     auth: AuthClaims,
     State(state): State<AppState>,
@@ -210,10 +221,22 @@ pub async fn publish(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RevokeResponse {
     pub id: String,
 }
 
+#[utoipa::path(
+    delete, path = "/relationships/{id}", tag = "relationships",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Relationship (VRC) id")),
+    responses(
+        (status = 200, description = "Relationship (VRC) revoked", body = RevokeResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not the issuer or an admin"),
+        (status = 404, description = "Relationship not found"),
+    ),
+)]
 pub async fn revoke(
     auth: AuthClaims,
     State(state): State<AppState>,

@@ -52,6 +52,7 @@ use crate::status_list;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RenewResponse {
     pub did: String,
     pub vmc: JsonValue,
@@ -68,6 +69,16 @@ pub struct RenewResponse {
     pub personhood_changed: bool,
 }
 
+/// POST /members/me/renew — renew VMC + role VEC. Auth: any authenticated member.
+#[utoipa::path(
+    post, path = "/members/me/renew", tag = "members",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Membership renewed", body = RenewResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 404, description = "Caller is not a member"),
+    ),
+)]
 pub async fn renew(
     auth: AuthClaims,
     State(state): State<AppState>,

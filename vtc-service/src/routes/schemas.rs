@@ -34,6 +34,7 @@ use crate::server::AppState;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RegisterSchemaBody {
     pub type_uri: String,
     #[serde(default)]
@@ -46,6 +47,16 @@ pub struct RegisterSchemaBody {
 }
 
 /// `POST /v1/schemas` — register (or update) a per-type schema entry.
+#[utoipa::path(
+    post, path = "/schemas", tag = "schemas",
+    security(("bearer_jwt" = [])),
+    request_body = RegisterSchemaBody,
+    responses(
+        (status = 201, description = "Schema registered", body = SchemaEntry),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn register(
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -81,6 +92,15 @@ pub async fn register(
 }
 
 /// `GET /v1/schemas` — list every registered per-type schema.
+#[utoipa::path(
+    get, path = "/schemas", tag = "schemas",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "List of registered schemas", body = Vec<SchemaEntry>),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn list(
     _auth: AdminAuth,
     State(state): State<AppState>,
@@ -89,6 +109,17 @@ pub async fn list(
 }
 
 /// `GET /v1/schemas/{type_uri}` — fetch one registered schema.
+#[utoipa::path(
+    get, path = "/schemas/{type_uri}", tag = "schemas",
+    security(("bearer_jwt" = [])),
+    params(("type_uri" = String, Path, description = "Credential type URI")),
+    responses(
+        (status = 200, description = "Schema entry", body = SchemaEntry),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "Schema not found"),
+    ),
+)]
 pub async fn get_one(
     _auth: AdminAuth,
     State(state): State<AppState>,
@@ -102,11 +133,23 @@ pub async fn get_one(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct DeleteResponse {
     pub id: String,
 }
 
 /// `DELETE /v1/schemas/{type_uri}` — remove a registered schema.
+#[utoipa::path(
+    delete, path = "/schemas/{type_uri}", tag = "schemas",
+    security(("bearer_jwt" = [])),
+    params(("type_uri" = String, Path, description = "Credential type URI")),
+    responses(
+        (status = 200, description = "Schema deleted", body = DeleteResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "Schema not found"),
+    ),
+)]
 pub async fn delete_one(
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -124,6 +167,7 @@ pub async fn delete_one(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RegisterAcceptsBody {
     pub id: String,
     pub query: JsonValue,
@@ -134,6 +178,16 @@ pub struct RegisterAcceptsBody {
 /// `POST /v1/schemas/accepts` — register (or update) an Accepts criterion. The
 /// DCQL query is validated and every referenced type checked against the
 /// registry by [`store_accepts`].
+#[utoipa::path(
+    post, path = "/schemas/accepts", tag = "schemas",
+    security(("bearer_jwt" = [])),
+    request_body = RegisterAcceptsBody,
+    responses(
+        (status = 201, description = "Accepts criterion registered", body = AcceptsCriterion),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn register_accepts(
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -158,6 +212,15 @@ pub async fn register_accepts(
 }
 
 /// `GET /v1/schemas/accepts` — list every Accepts criterion.
+#[utoipa::path(
+    get, path = "/schemas/accepts", tag = "schemas",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "List of Accepts criteria", body = Vec<AcceptsCriterion>),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn list_accepts_route(
     _auth: AdminAuth,
     State(state): State<AppState>,
@@ -166,6 +229,17 @@ pub async fn list_accepts_route(
 }
 
 /// `GET /v1/schemas/accepts/{id}` — fetch one Accepts criterion.
+#[utoipa::path(
+    get, path = "/schemas/accepts/{id}", tag = "schemas",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Accepts criterion id")),
+    responses(
+        (status = 200, description = "Accepts criterion", body = AcceptsCriterion),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "Accepts criterion not found"),
+    ),
+)]
 pub async fn get_accepts_route(
     _auth: AdminAuth,
     State(state): State<AppState>,
@@ -178,6 +252,17 @@ pub async fn get_accepts_route(
 }
 
 /// `DELETE /v1/schemas/accepts/{id}` — remove an Accepts criterion.
+#[utoipa::path(
+    delete, path = "/schemas/accepts/{id}", tag = "schemas",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Accepts criterion id")),
+    responses(
+        (status = 200, description = "Accepts criterion deleted", body = DeleteResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "Accepts criterion not found"),
+    ),
+)]
 pub async fn delete_accepts_route(
     auth: AdminAuth,
     State(state): State<AppState>,

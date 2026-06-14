@@ -21,7 +21,7 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::auth::AuthClaims;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct FieldOption {
     pub value: &'static str,
     pub label: &'static str,
@@ -32,6 +32,7 @@ pub struct FieldOption {
 /// matches `truthy`).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct ShowWhen {
     pub field: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,6 +43,7 @@ pub struct ShowWhen {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct FieldDef {
     pub key: &'static str,
     pub label: &'static str,
@@ -58,6 +60,7 @@ pub struct FieldDef {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct CeremonyManifest {
     pub purpose: &'static str,
     pub pkg: &'static str,
@@ -306,6 +309,14 @@ fn manifests() -> Vec<CeremonyManifest> {
 /// `GET /v1/ceremonies` — list the ceremony manifests. Authenticated
 /// (any session); the payload is admin-UI metadata, not secret, but
 /// the surface lives behind the same gate as the rest of the API.
+#[utoipa::path(
+    get, path = "/ceremonies", tag = "ceremonies",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Ceremony manifests", body = [CeremonyManifest]),
+        (status = 401, description = "Missing or invalid bearer token"),
+    ),
+)]
 pub async fn list(_claims: AuthClaims) -> Json<Vec<CeremonyManifest>> {
     Json(manifests())
 }

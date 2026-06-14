@@ -36,12 +36,26 @@ pub const JOIN_STATUS_DOMAIN_TAG: &[u8] = b"vtc-join-status/v1\0";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct StatusRequestBody {
     pub applicant_did: String,
     /// Hex-encoded Ed25519 signature over the canonical body.
     pub signature: String,
 }
 
+/// POST /join-requests/{id}/status — applicant-facing lifecycle poll.
+/// Public: the holder-binding signature (REST) / authcrypt sender (DIDComm)
+/// IS the auth.
+#[utoipa::path(
+    post, path = "/join-requests/{id}/status", tag = "join-requests",
+    params(("id" = String, Path, description = "Join request id")),
+    request_body = StatusRequestBody,
+    responses(
+        (status = 200, description = "Join request lifecycle status", body = JoinRequestStatusResponseBody),
+        (status = 400, description = "Holder-binding validation failed"),
+        (status = 404, description = "Join request not found"),
+    ),
+)]
 pub async fn status(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

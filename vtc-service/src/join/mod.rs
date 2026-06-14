@@ -31,6 +31,7 @@ pub use storage::{
 /// State of a join request through its lifecycle.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(utoipa::ToSchema)]
 pub enum JoinStatus {
     /// Submitted; awaiting admin / moderator decision.
     Pending,
@@ -71,6 +72,7 @@ impl std::fmt::Display for JoinStatus {
 /// One join request. Stored under `join_requests:<id>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct JoinRequest {
     pub id: Uuid,
     pub applicant_did: String,

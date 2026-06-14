@@ -59,6 +59,7 @@ static ACTIVATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct UploadBody {
     /// Wire-form camelCase purpose (`"join"`, `"removal"`,
     /// `"crossCommunityRoles"`, …). Validated by serde against
@@ -71,6 +72,7 @@ pub struct UploadBody {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct UploadResponse {
     pub id: Uuid,
     /// SHA-256 of the source bytes, lowercase hex. Matches what
@@ -83,6 +85,7 @@ pub struct UploadResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct ActivateResponse {
     pub id: Uuid,
     pub purpose: PolicyPurpose,
@@ -94,6 +97,7 @@ pub struct ActivateResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct TestBody {
     /// Rego query to evaluate against the candidate policy
     /// (e.g. `"data.vtc.join.allow"`). Caller chooses the query so
@@ -107,6 +111,7 @@ pub struct TestBody {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct TestResponse {
     pub id: Uuid,
     pub purpose: PolicyPurpose,
@@ -123,6 +128,16 @@ pub struct TestResponse {
 
 /// Compile + persist a new policy revision. Does NOT activate it —
 /// `POST /v1/policies/{id}/activate` is a separate call.
+#[utoipa::path(
+    post, path = "/policies", tag = "policies",
+    security(("bearer_jwt" = [])),
+    request_body = UploadBody,
+    responses(
+        (status = 201, description = "Policy revision compiled + stored", body = UploadResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn upload(
     admin: AdminAuth,
     State(state): State<AppState>,
@@ -200,6 +215,17 @@ pub async fn upload(
 // POST /v1/policies/{id}/activate
 // ---------------------------------------------------------------------------
 
+#[utoipa::path(
+    post, path = "/policies/{id}/activate", tag = "policies",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Policy revision id")),
+    responses(
+        (status = 200, description = "Policy revision activated", body = ActivateResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "Policy not found"),
+    ),
+)]
 pub async fn activate(
     admin: AdminAuth,
     State(state): State<AppState>,
@@ -274,6 +300,18 @@ pub async fn activate(
 /// **Does not activate** the policy and does not mutate any state
 /// beyond log lines. Used by operators to dry-run a candidate
 /// upload before flipping the active pointer.
+#[utoipa::path(
+    post, path = "/policies/{id}/test", tag = "policies",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Policy revision id")),
+    request_body = TestBody,
+    responses(
+        (status = 200, description = "Policy evaluation result", body = TestResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "Policy not found"),
+    ),
+)]
 pub async fn test(
     admin: AdminAuth,
     State(state): State<AppState>,

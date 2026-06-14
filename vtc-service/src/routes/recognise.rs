@@ -73,7 +73,7 @@ use affinidi_vc::VerifiableCredential;
 /// plus this VTC's DID as the `domain`. The route verifies the holder proof,
 /// the embedded issuer proofs, the status list, and the registry recognition
 /// itself.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RecogniseRequest {
     /// A W3C Data-Integrity VP, holder-signed with
     /// `proofPurpose: authentication`.
@@ -83,6 +83,7 @@ pub struct RecogniseRequest {
 /// Response body for `POST /v1/auth/recognise/challenge`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RecogniseChallengeResponse {
     /// Single-use nonce the holder must bind into the VP's top-level `nonce`.
     pub nonce: String,
@@ -92,6 +93,7 @@ pub struct RecogniseChallengeResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RecogniseResponse {
     pub session_id: String,
     pub data: RecogniseData,
@@ -99,6 +101,7 @@ pub struct RecogniseResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RecogniseData {
     /// Minted JWT. Carries the *mapped local* role, not the
     /// foreign one.
@@ -115,6 +118,12 @@ pub struct RecogniseData {
 /// `POST /v1/auth/recognise/challenge` — issue a single-use, TTL'd nonce the
 /// holder binds into their recognise VP. Bound to this VTC's DID as the
 /// audience, so the resulting VP can't be replayed against a different VTC.
+#[utoipa::path(
+    post, path = "/auth/recognise/challenge", tag = "recognise",
+    responses(
+        (status = 200, description = "Single-use recognition nonce", body = RecogniseChallengeResponse),
+    ),
+)]
 pub async fn recognise_challenge(
     State(state): State<AppState>,
 ) -> Result<Json<RecogniseChallengeResponse>, AppError> {
@@ -131,6 +140,16 @@ pub async fn recognise_challenge(
     Ok(Json(RecogniseChallengeResponse { nonce, expires_at }))
 }
 
+/// `POST /v1/auth/recognise` — cross-community session mint from a
+/// holder-signed VP embedding a foreign VEC + VMC.
+#[utoipa::path(
+    post, path = "/auth/recognise", tag = "recognise",
+    request_body = RecogniseRequest,
+    responses(
+        (status = 200, description = "Minted cross-community session", body = RecogniseResponse),
+        (status = 403, description = "Holder-binding, recognition gate, or role-mapping denied"),
+    ),
+)]
 pub async fn recognise(
     State(state): State<AppState>,
     Json(req): Json<RecogniseRequest>,

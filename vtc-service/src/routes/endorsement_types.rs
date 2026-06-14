@@ -47,6 +47,7 @@ const LIST_MAX_LIMIT: usize = 200;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RegisterBody {
     pub type_uri: String,
     #[serde(default)]
@@ -55,6 +56,16 @@ pub struct RegisterBody {
     pub description: Option<String>,
 }
 
+#[utoipa::path(
+    post, path = "/endorsement-types", tag = "endorsement-types",
+    security(("bearer_jwt" = [])),
+    request_body = RegisterBody,
+    responses(
+        (status = 201, description = "Endorsement type registered", body = EndorsementType),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn register(
     auth: AdminAuth,
     State(state): State<AppState>,
@@ -115,11 +126,22 @@ pub async fn register(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema, utoipa::IntoParams)]
 pub struct ListQuery {
     pub cursor: Option<String>,
     pub limit: Option<usize>,
 }
 
+#[utoipa::path(
+    get, path = "/endorsement-types", tag = "endorsement-types",
+    security(("bearer_jwt" = [])),
+    params(ListQuery),
+    responses(
+        (status = 200, description = "Paginated list of endorsement types", body = Paginated<EndorsementType>),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn list(
     _auth: AdminAuth,
     State(state): State<AppState>,
@@ -152,10 +174,22 @@ pub async fn list(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct DeleteResponse {
     pub type_uri: String,
 }
 
+#[utoipa::path(
+    delete, path = "/endorsement-types/{type_uri}", tag = "endorsement-types",
+    security(("bearer_jwt" = [])),
+    params(("type_uri" = String, Path, description = "Endorsement type URI")),
+    responses(
+        (status = 200, description = "Endorsement type deleted", body = DeleteResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "Endorsement type not found"),
+    ),
+)]
 pub async fn delete(
     auth: AdminAuth,
     State(state): State<AppState>,

@@ -46,6 +46,7 @@ use crate::server::AppState;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct CreateInviteRequest {
     /// Admin DID the install URL grants a passkey for.
     pub did: String,
@@ -63,6 +64,7 @@ pub struct CreateInviteRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct CreateInviteResponse {
     /// `jti` of the minted install token — also the key the GET +
     /// DELETE surfaces use.
@@ -85,6 +87,7 @@ pub struct CreateInviteResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct InviteSummary {
     pub jti: String,
     pub status: InviteStatus,
@@ -105,6 +108,7 @@ pub struct InviteSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(utoipa::ToSchema)]
 pub enum InviteStatus {
     Issued,
     Consumed,
@@ -113,12 +117,14 @@ pub enum InviteStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct ListInvitesResponse {
     pub invites: Vec<InviteSummary>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RevokeInviteResponse {
     pub jti: String,
 }
@@ -129,6 +135,17 @@ pub struct RevokeInviteResponse {
 
 const MAX_TTL_SECONDS: u64 = 24 * 60 * 60;
 
+#[utoipa::path(
+    post, path = "/admin/invites", tag = "admin",
+    security(("bearer_jwt" = [])),
+    request_body = CreateInviteRequest,
+    responses(
+        (status = 200, description = "Install URL + one-time claim code minted", body = CreateInviteResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 409, description = "Target DID already has a non-admin ACL grant"),
+    ),
+)]
 pub async fn create_invite(
     _admin: AdminAuth,
     State(state): State<AppState>,
@@ -236,6 +253,15 @@ pub async fn create_invite(
 // GET handler
 // ---------------------------------------------------------------------------
 
+#[utoipa::path(
+    get, path = "/admin/invites", tag = "admin",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Outstanding + terminal install-token invites", body = ListInvitesResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn list_invites(
     _admin: AdminAuth,
     State(state): State<AppState>,
@@ -263,6 +289,17 @@ pub async fn list_invites(
 // DELETE handler
 // ---------------------------------------------------------------------------
 
+#[utoipa::path(
+    delete, path = "/admin/invites/{jti}", tag = "admin",
+    security(("bearer_jwt" = [])),
+    params(("jti" = String, Path, description = "Invite token id (jti)")),
+    responses(
+        (status = 200, description = "Invite revoked", body = RevokeInviteResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "Invite not found"),
+    ),
+)]
 pub async fn revoke_invite(
     _admin: AdminAuth,
     State(state): State<AppState>,

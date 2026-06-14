@@ -155,6 +155,7 @@ pub async fn prepare_join_query(
 /// for `holderDid` from the named Accepts criterion.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct SendQueryRequest {
     /// The holder the query is for (delivered to it over DIDComm by the VTC or a
     /// relayer — relayer ≠ holder is supported; the holder still proves binding).
@@ -167,6 +168,7 @@ pub struct SendQueryRequest {
 /// the thread the holder presents on.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct SendQueryResponse {
     /// The DIDComm thread id the holder must reply on (the challenge is keyed by
     /// it; the `present` handler consumes it).
@@ -174,6 +176,7 @@ pub struct SendQueryResponse {
     /// Echoed for the caller's correlation.
     pub holder_did: String,
     /// The `credential-exchange/query` body to deliver to the holder.
+    #[schema(value_type = Object)]
     pub query: QueryBody,
     /// Whether the VTC pushed the query to the holder over DIDComm. `false` when
     /// no mediator is configured or the push failed — the caller can still relay
@@ -188,6 +191,19 @@ pub struct SendQueryResponse {
 /// push is unavailable — relayer ≠ holder is supported). The holder presents on
 /// the returned `threadId`, and the `credential-exchange/present` handler
 /// consumes the challenge.
+/// POST /join-requests/query — prepare + push a credential-exchange query to
+/// a holder for a registered Accepts criterion. Auth: Admin.
+#[utoipa::path(
+    post, path = "/join-requests/query", tag = "join-requests",
+    security(("bearer_jwt" = [])),
+    request_body = SendQueryRequest,
+    responses(
+        (status = 200, description = "Prepared query + thread to present on", body = SendQueryResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "No such Accepts criterion registered"),
+    ),
+)]
 pub async fn send_query(
     _auth: AdminAuth,
     State(state): State<AppState>,

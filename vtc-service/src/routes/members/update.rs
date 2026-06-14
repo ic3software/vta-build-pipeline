@@ -39,6 +39,7 @@ use crate::server::AppState;
 /// with no fields is a no-op (200 with the current row).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct UpdateMemberRequest {
     pub role: Option<VtcRole>,
     pub publish_consent: Option<bool>,
@@ -46,6 +47,19 @@ pub struct UpdateMemberRequest {
     pub extensions: Option<JsonValue>,
 }
 
+/// PATCH /members/{did} — update member role + profile fields. Auth: Admin.
+#[utoipa::path(
+    patch, path = "/members/{did}", tag = "members",
+    security(("bearer_jwt" = [])),
+    params(("did" = String, Path, description = "Member DID")),
+    request_body = UpdateMemberRequest,
+    responses(
+        (status = 200, description = "Updated member record", body = MemberResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin / role change denied by policy"),
+        (status = 404, description = "Member not found"),
+    ),
+)]
 pub async fn update_member(
     auth: AdminAuth,
     State(state): State<AppState>,

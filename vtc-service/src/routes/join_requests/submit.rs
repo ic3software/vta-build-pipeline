@@ -79,6 +79,7 @@ const JOIN_SUBMIT_FUTURE_SKEW_SECS: i64 = 60;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct SubmitRequestBody {
     pub applicant_did: String,
     pub vp: JsonValue,
@@ -110,6 +111,7 @@ pub struct HolderBinding<'a> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct SubmitResponse {
     pub request_id: Uuid,
     pub status: String,
@@ -131,6 +133,17 @@ pub struct JoinSubmitOutcome {
     pub admit: Option<Box<AdmitOutcome>>,
 }
 
+/// POST /join-requests — submit a join request. Public: the holder-binding
+/// signature (REST) or authcrypt sender (DIDComm) IS the auth.
+#[utoipa::path(
+    post, path = "/join-requests", tag = "join-requests",
+    request_body = SubmitRequestBody,
+    responses(
+        (status = 201, description = "Join request submitted", body = SubmitResponse),
+        (status = 400, description = "Holder-binding / audience / freshness validation failed"),
+        (status = 409, description = "An open join request already exists for this applicant"),
+    ),
+)]
 pub async fn submit(
     State(state): State<AppState>,
     Json(req): Json<SubmitRequestBody>,

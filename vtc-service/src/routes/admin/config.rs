@@ -44,7 +44,7 @@ use vti_common::audit::{
 /// PATCH request body: arbitrary `key → value` map. Keys not in
 /// [`crate::config_store::REGISTRY`] are reported back under
 /// `rejected` rather than silently dropped.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct PatchRequest {
     #[serde(flatten)]
     pub overrides: HashMap<String, Value>,
@@ -54,6 +54,7 @@ pub struct PatchRequest {
 /// which await restart, and which were rejected.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct PatchResponse {
     pub applied: Vec<String>,
     pub pending_restart: Vec<String>,
@@ -62,13 +63,22 @@ pub struct PatchResponse {
 
 /// One rejected key + the reason. Surfaced to the caller so the
 /// admin UX can present a meaningful error inline.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RejectedKey {
     pub key: String,
     pub reason: String,
 }
 
 /// GET handler.
+#[utoipa::path(
+    get, path = "/admin/config", tag = "admin",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Four-layer-merged effective config", body = EffectiveConfig),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn get_config(
     _admin: AdminAuth,
     State(state): State<AppState>,
@@ -80,6 +90,16 @@ pub async fn get_config(
 }
 
 /// PATCH handler.
+#[utoipa::path(
+    patch, path = "/admin/config", tag = "admin",
+    security(("bearer_jwt" = [])),
+    request_body = PatchRequest,
+    responses(
+        (status = 200, description = "Applied / pending-restart / rejected keys", body = PatchResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn patch_config(
     admin: AdminAuth,
     State(state): State<AppState>,
@@ -197,6 +217,7 @@ const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = 30;
 /// the next restart.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct ReloadResponse {
     pub keys_reloaded: Vec<String>,
 }
@@ -212,6 +233,15 @@ pub struct ReloadResponse {
 /// runtime-state subscribers (tracing subscriber filter handle,
 /// session-cleanup interval, etc.) will plug into the same diff
 /// loop.
+#[utoipa::path(
+    post, path = "/admin/config/reload", tag = "admin",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Keys re-applied in-memory", body = ReloadResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn reload_config(
     admin: AdminAuth,
     State(state): State<AppState>,
@@ -278,6 +308,7 @@ pub async fn reload_config(
 /// check passes.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct RestartResponse {
     /// Which supervisor the daemon detected (so the operator's
     /// admin UX can echo it back).
@@ -299,6 +330,15 @@ pub struct RestartResponse {
 /// On success the handler emits `RestartRequested` to the audit
 /// log *before* signalling shutdown — so the row survives even if
 /// the drain wedges.
+#[utoipa::path(
+    post, path = "/admin/config/restart", tag = "admin",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Restart requested", body = RestartResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn restart_config(
     admin: AdminAuth,
     State(state): State<AppState>,
@@ -403,6 +443,7 @@ pub const EXPORT_SCHEMA_VERSION: u32 = 1;
 /// per-host and aren't portable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct ConfigExport {
     pub schema_version: u32,
     pub exported_at: DateTime<Utc>,
@@ -410,6 +451,15 @@ pub struct ConfigExport {
     pub config_overrides: HashMap<String, Value>,
 }
 
+#[utoipa::path(
+    post, path = "/admin/config/export", tag = "admin",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Portable config + community-profile export", body = ConfigExport),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn export_config(
     _admin: AdminAuth,
     State(state): State<AppState>,
@@ -433,7 +483,7 @@ pub async fn export_config(
 /// Query string for `POST /v1/admin/config/import`. Default is
 /// `confirm=false` (dry-run / diff). The operator UX shows the diff,
 /// then re-submits with `?confirm=true` to apply.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ImportQuery {
     #[serde(default)]
     pub confirm: bool,
@@ -446,6 +496,7 @@ pub struct ImportQuery {
 /// alone", not "clear it".
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct FieldDiff {
     pub key: String,
     pub old_value: Option<Value>,
@@ -457,6 +508,7 @@ pub struct FieldDiff {
 /// confirm it lists the keys that actually persisted.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(utoipa::ToSchema)]
 pub struct ImportResponse {
     /// Was the request a dry-run? Mirrors the inbound `?confirm`
     /// flag so an admin UX caching the response can render the
@@ -480,6 +532,17 @@ pub struct ImportResponse {
     pub rejected: Vec<RejectedKey>,
 }
 
+#[utoipa::path(
+    post, path = "/admin/config/import", tag = "admin",
+    security(("bearer_jwt" = [])),
+    params(("confirm" = Option<bool>, Query, description = "Apply the import (true) or dry-run diff (false, default)")),
+    request_body = ConfigExport,
+    responses(
+        (status = 200, description = "Import diff (dry-run) or applied keys", body = ImportResponse),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Caller is not an admin"),
+    ),
+)]
 pub async fn import_config(
     admin: AdminAuth,
     State(state): State<AppState>,
