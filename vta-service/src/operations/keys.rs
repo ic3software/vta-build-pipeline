@@ -813,6 +813,7 @@ pub async fn get_key_secret_internal(
 pub async fn sign_payload(
     keys_ks: &KeyspaceHandle,
     imported_ks: &KeyspaceHandle,
+    contexts_ks: &KeyspaceHandle,
     seed_store: &Arc<dyn SeedStore>,
     auth: &AuthClaims,
     key_id: &str,
@@ -833,6 +834,23 @@ pub async fn sign_payload(
 
     if let Some(ref ctx) = record.context_id {
         auth.require_context(ctx)?;
+        // Context policy is a resource-bound guardrail: it constrains the key's
+        // context regardless of the actor — even the super-admin. This is what
+        // lets a higher authority (e.g. a VTC/fleet-pushed policy) or the
+        // owner's own policy bind every signer; the owner relaxes it via policy
+        // CRUD, never by bypassing it here. Resolved across the whole ancestor
+        // chain, so a child context can only narrow the set, never widen it. An
+        // unscoped key (no context) has no policy and is naturally unrestricted
+        // (and super-admin-only, gated below).
+        let policy = crate::contexts::effective_context_policy(contexts_ks, ctx).await?;
+        if !policy.allows_signing_key(key_id) {
+            return Err(AppError::Forbidden(format!(
+                "signing key {key_id} is not permitted by the policy of context {ctx}"
+            )));
+        }
+        if let Some(limit) = policy.quota_for("sign") {
+            crate::contexts::enforce_daily_quota(contexts_ks, ctx, "sign", limit).await?;
+        }
     } else if !auth.is_super_admin() {
         return Err(AppError::Forbidden(
             "only super admin can use unscoped keys".into(),
@@ -1345,6 +1363,7 @@ mod tests {
         let result = sign_payload(
             &h.keys_ks,
             &h.imported_ks,
+            &h.contexts_ks,
             &h.seed_store,
             &auth,
             &key.key_id,
@@ -1364,6 +1383,139 @@ mod tests {
         assert!(!decoded.is_empty(), "decoded signature must be non-empty");
         // Ed25519 signatures are 64 bytes
         assert_eq!(decoded.len(), 64, "Ed25519 signature should be 64 bytes");
+    }
+
+    /// Context policy gates the signing oracle as a *resource-bound* guardrail:
+    /// the key's context policy binds every signer — a context-scoped actor and
+    /// the super-admin alike — while a key the policy permits still signs.
+    #[tokio::test]
+    async fn sign_payload_honours_context_policy_signable_keys() {
+        use crate::contexts::{ContextRecord, store_context};
+        use vta_sdk::context_policy::ContextPolicy;
+
+        let h = TestHarness::new().await;
+        let admin = h.super_admin_auth();
+
+        // A context whose policy only permits a *different* key id.
+        let now = chrono::Utc::now();
+        store_context(
+            &h.contexts_ks,
+            &ContextRecord {
+                id: "locked-ctx".into(),
+                name: "locked".into(),
+                did: None,
+                description: None,
+                parent: None,
+                base_path: "m/26'/2'/9'".into(),
+                index: 9,
+                created_at: now,
+                updated_at: now,
+                context_policy: Some(ContextPolicy {
+                    signable_keys: Some(["allowed-key".to_string()].into_iter().collect()),
+                    ..ContextPolicy::unrestricted()
+                }),
+            },
+        )
+        .await
+        .expect("store locked-ctx");
+
+        let key = create_key(
+            &h.keys_ks,
+            &h.contexts_ks,
+            &h.seed_store,
+            &h.audit_ks,
+            &admin,
+            CreateKeyParams {
+                key_type: KeyType::Ed25519,
+                derivation_path: None,
+                key_id: Some("blocked-key".into()),
+                mnemonic: None,
+                label: None,
+                context_id: Some("locked-ctx".into()),
+            },
+            "test",
+        )
+        .await
+        .expect("create_key");
+
+        // A context-scoped actor is denied: blocked-key is not in the allow-list.
+        let scoped = AuthClaims {
+            did: "did:key:z6MkScopedStaff".to_string(),
+            role: Role::Admin,
+            allowed_contexts: vec!["locked-ctx".to_string()],
+            session_id: "test-session".into(),
+            access_expires_at: 0,
+            amr: Vec::new(),
+            acr: String::new(),
+        };
+        let denied = sign_payload(
+            &h.keys_ks,
+            &h.imported_ks,
+            &h.contexts_ks,
+            &h.seed_store,
+            &scoped,
+            &key.key_id,
+            b"payload",
+            &SignAlgorithm::EdDSA,
+            "test",
+        )
+        .await;
+        assert!(
+            matches!(denied, Err(crate::error::AppError::Forbidden(_))),
+            "context-scoped sign of a non-allowed key must be Forbidden, got {denied:?}"
+        );
+
+        // Resource-bound: even the super-admin is gated by the key's context
+        // policy. (The owner relaxes it via policy CRUD, not by bypassing here.)
+        let denied_admin = sign_payload(
+            &h.keys_ks,
+            &h.imported_ks,
+            &h.contexts_ks,
+            &h.seed_store,
+            &admin,
+            &key.key_id,
+            b"payload",
+            &SignAlgorithm::EdDSA,
+            "test",
+        )
+        .await;
+        assert!(
+            matches!(denied_admin, Err(crate::error::AppError::Forbidden(_))),
+            "super-admin is also bound by the key's context policy, got {denied_admin:?}"
+        );
+
+        // A key the policy *does* permit signs fine for the scoped actor.
+        let allowed = create_key(
+            &h.keys_ks,
+            &h.contexts_ks,
+            &h.seed_store,
+            &h.audit_ks,
+            &admin,
+            CreateKeyParams {
+                key_type: KeyType::Ed25519,
+                derivation_path: None,
+                key_id: Some("allowed-key".into()),
+                mnemonic: None,
+                label: None,
+                context_id: Some("locked-ctx".into()),
+            },
+            "test",
+        )
+        .await
+        .expect("create allowed-key");
+        sign_payload(
+            &h.keys_ks,
+            &h.imported_ks,
+            &h.contexts_ks,
+            &h.seed_store,
+            &scoped,
+            &allowed.key_id,
+            b"payload",
+            &SignAlgorithm::EdDSA,
+            "test",
+        )
+        .await
+        .expect("policy permits allowed-key");
     }
 
     /// Regression test for the missing role floor on `get_key` /

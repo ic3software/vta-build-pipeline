@@ -420,6 +420,7 @@ didcomm_handler!(
         operations::keys::sign_payload(
             &s.keys_ks,
             &s.imported_ks,
+            &s.contexts_ks,
             &s.seed_store,
             &auth,
             &body.key_id,
@@ -516,6 +517,7 @@ didcomm_handler!(
             name: body.name,
             did: body.did,
             description: body.description,
+            context_policy: body.context_policy,
         },
         "didcomm",
     )
@@ -1903,6 +1905,7 @@ pub async fn handle_credential_query(
         operations::credential_exchange::present_query(
             &app_state.vault_ks,
             &app_state.keys_ks,
+            &app_state.contexts_ks,
             &app_state.seed_store,
             &auth,
             &body,

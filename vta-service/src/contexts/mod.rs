@@ -1,6 +1,8 @@
 pub use vta_sdk::contexts::ContextRecord;
 
 use chrono::Utc;
+use vta_sdk::context_path::parent_path;
+use vta_sdk::context_policy::ContextPolicy;
 
 use crate::error::AppError;
 use crate::store::KeyspaceHandle;
@@ -12,6 +14,62 @@ fn ctx_key(id: &str) -> String {
 /// Retrieve a context by ID.
 pub async fn get_context(ks: &KeyspaceHandle, id: &str) -> Result<Option<ContextRecord>, AppError> {
     ks.get(ctx_key(id)).await
+}
+
+/// Resolve the *effective* [`ContextPolicy`] for `context_id` by intersecting
+/// the policies of every context on the path root→leaf (field-wise, additive
+/// narrowing — see [`ContextPolicy`] docs). Contexts with no policy (or a
+/// missing record) contribute nothing; a chain that constrains nothing resolves
+/// to [`ContextPolicy::unrestricted`], i.e. today's behaviour.
+///
+/// Because enforcement always resolves the whole chain, a permissive policy
+/// written at a child level can never widen what an ancestor allows.
+pub async fn effective_context_policy(
+    ks: &KeyspaceHandle,
+    context_id: &str,
+) -> Result<ContextPolicy, AppError> {
+    // Collect ids leaf→root, then resolve root→leaf.
+    let mut ids: Vec<String> = Vec::new();
+    let mut cur: Option<String> = Some(context_id.to_string());
+    while let Some(id) = cur {
+        cur = parent_path(&id).map(str::to_string);
+        ids.push(id);
+    }
+    ids.reverse();
+
+    let mut policies: Vec<ContextPolicy> = Vec::new();
+    for id in &ids {
+        if let Some(rec) = get_context(ks, id).await? {
+            if let Some(policy) = rec.context_policy {
+                policies.push(policy);
+            }
+        }
+    }
+    Ok(ContextPolicy::resolve(policies.iter()))
+}
+
+/// Enforce a per-day operation quota for a context (the `quotas` arm of
+/// [`ContextPolicy`]). Atomically counts this operation in the current UTC day
+/// and returns `Forbidden` once the ceiling is reached. Counters are keyed by
+/// day (`quota:{context}:{op}:{YYYY-MM-DD}`) in the contexts keyspace, so they
+/// roll over automatically and stale days are inert (a future sweep can prune
+/// them). `allocate_u32` is 0-indexed, so the call that returns `limit` is the
+/// `(limit+1)`-th — rejecting it allows exactly `limit` operations per day.
+pub async fn enforce_daily_quota(
+    ks: &KeyspaceHandle,
+    context_id: &str,
+    op_class: &str,
+    limit: u64,
+) -> Result<(), AppError> {
+    let day = Utc::now().format("%Y-%m-%d");
+    let key = format!("quota:{context_id}:{op_class}:{day}");
+    let slot = vti_common::store::counter::allocate_u32(ks, &key).await?;
+    if u64::from(slot) >= limit {
+        return Err(AppError::Forbidden(format!(
+            "daily quota exceeded for {op_class} in context {context_id} ({limit}/day)"
+        )));
+    }
+    Ok(())
 }
 
 /// Store (create or overwrite) a context record.
@@ -106,6 +164,7 @@ pub async fn create_context(
         index,
         created_at: now,
         updated_at: now,
+        context_policy: None,
     };
     if !store_new_context(contexts_ks, &record)
         .await
@@ -139,6 +198,25 @@ mod tests {
                 .expect("keyspace"),
             dir,
         )
+    }
+
+    #[tokio::test]
+    async fn daily_quota_allows_up_to_limit_then_forbids() {
+        let (ks, _dir) = temp_ks();
+        // Limit 2: the first two operations pass, the third is refused.
+        enforce_daily_quota(&ks, "sales", "sign", 2).await.unwrap();
+        enforce_daily_quota(&ks, "sales", "sign", 2).await.unwrap();
+        let err = enforce_daily_quota(&ks, "sales", "sign", 2).await;
+        assert!(matches!(err, Err(AppError::Forbidden(_))), "{err:?}");
+
+        // A different op-class (and a different context) has an independent
+        // counter.
+        enforce_daily_quota(&ks, "sales", "vault/release", 1)
+            .await
+            .unwrap();
+        let err2 = enforce_daily_quota(&ks, "sales", "vault/release", 1).await;
+        assert!(matches!(err2, Err(AppError::Forbidden(_))), "{err2:?}");
+        enforce_daily_quota(&ks, "eng", "sign", 2).await.unwrap();
     }
 
     /// Regression test for the context-index race: N concurrent
