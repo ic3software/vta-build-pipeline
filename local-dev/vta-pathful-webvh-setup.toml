@@ -1,0 +1,40 @@
+# Local dev setup — VTA with pathful did:webvh identity
+#
+# DID resolves at /tenant/vta/did.jsonl (has path segments after the domain).
+#
+# Run once to initialise:
+#   cargo run -p vta-service --features webvh -- setup --from local-dev/vta-pathful-webvh-setup.toml
+#
+# Then start the service:
+#   cargo run -p vta-service --features webvh -- --config /tmp/vta-dev-path/config.toml
+#
+# Verify:
+#   curl http://localhost:3000/tenant/vta/did.jsonl    → 200 with log
+#   curl http://localhost:3000/.well-known/did.jsonl   → 404 (pathful DID does not use well-known)
+#   curl http://localhost:3000/other/path/did.jsonl    → 404 (wrong path)
+
+config_path     = "/tmp/vta-dev-path/config.toml"
+data_dir        = "/tmp/vta-dev-path/data"
+public_url      = "http://localhost:3000"
+data_dir_exists = "delete"   # re-run friendly; wipes and re-inits on each setup call
+
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[log]
+level  = "debug"
+format = "text"
+
+[secrets]
+# Plaintext file under data_dir — dev only, never for production.
+backend = "plaintext"
+
+[messaging]
+# No mediator for local dev.
+kind = "skip"
+
+[vta_did]
+kind = "create_webvh"
+# Subpath present → pathful DID → resolves at /tenant/vta/did.jsonl
+url  = "http://localhost:3000/tenant/vta"

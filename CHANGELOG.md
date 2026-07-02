@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### vta-service — reliability: preload VTA self DID into resolver cache
+
+`vta-service` now preloads its own `did:webvh` DID document into the
+`DIDCacheClient` during auth/resolver initialization, using the locally stored
+`did.jsonl` log (`WEBVH` keyspace) as the source of truth.
+
+This avoids self-resolution network round-trips (and related startup/runtime
+failures) when a VTA cannot reach its own public domain from inside private
+network environments.
+
+Behavior is best-effort and non-fatal: if local log state is missing or
+malformed, the service logs a warning and falls back to normal resolver
+behavior.
+
 ### vti-common — security: keyspace values bound to their location (AAD); breaking on-disk format
 
 AES-256-GCM keyspace encryption now authenticates every value against its
