@@ -295,6 +295,13 @@ pub async fn update_did_webvh(
     webvh_store::store_did_log(webvh_ks, &record.did, &new_log_jsonl)
         .await
         .map_err(|e| UpdateDidWebvhError::Persistence(format!("store_did_log: {e}")))?;
+    // Single source of truth for the post-mutation self-DID resolver refresh:
+    // reseed the in-process cache straight from the log we just built, before it
+    // leaves this function. Every runtime DID-log mutation (did-webvh update and
+    // all `services {…}` ops, which funnel through here) is covered by this one
+    // call — do not re-add per-caller refreshes at the protocol layer.
+    super::super::refresh_resolver_doc_from_log(did_resolver, &record.did, &new_log_jsonl, channel)
+        .await;
 
     if !derived_auth.is_empty() {
         install_derived_webvh_keys(

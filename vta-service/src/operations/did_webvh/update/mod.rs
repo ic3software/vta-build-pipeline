@@ -797,6 +797,66 @@ mod pre_rotation_e2e_tests {
         assert_chain_validates(&ts, &did).await;
     }
 
+    /// After a did-log mutation, resolver cache must be refreshed to the newest
+    /// document (not left at the pre-update value from startup/create).
+    #[tokio::test]
+    async fn update_refreshes_resolver_with_latest_document() {
+        let (ts, seed_store) = setup("ctx-refresh").await;
+        let cfg = ts_app_config(&ts);
+        let auth = admin_auth();
+        let resolver = build_resolver().await;
+        let bridge = dummy_bridge();
+        let auth_locks = crate::operations::did_webvh::WebvhAuthLocks::new();
+        let deps = webvh_deps(&ts, &seed_store, &resolver, &bridge, &auth_locks);
+
+        let (did, scid) = create_did(
+            &ts,
+            &seed_store,
+            &cfg,
+            &auth,
+            &resolver,
+            &bridge,
+            "ctx-refresh",
+            0,
+        )
+        .await;
+        sleep(VERSION_TIME_GAP).await;
+
+        update_did_webvh(
+            &deps,
+            &auth,
+            &scid,
+            UpdateDidWebvhOptions {
+                document: Some(doc_patch(&did, "v2")),
+                ..Default::default()
+            },
+            None,
+            "test",
+        )
+        .await
+        .expect("update");
+
+        let resolved = resolver
+            .resolve(&did)
+            .await
+            .expect("resolve did from refreshed cache");
+        assert!(resolved.cache_hit, "updated DID should resolve from cache");
+
+        let log = crate::webvh_store::get_did_log(&ts.webvh_ks, &did)
+            .await
+            .expect("get did log")
+            .expect("did log present");
+        let expected_value = crate::operations::protocol::document::current_document_from_log(&log)
+            .expect("extract current DID document");
+        let expected_doc =
+            serde_json::from_value(expected_value).expect("deserialize expected DID document");
+
+        assert_eq!(
+            resolved.doc, expected_doc,
+            "resolver cache should reflect latest persisted did.jsonl document"
+        );
+    }
+
     /// Regression test for the bug operators hit running
     /// `pnm services rest disable` against a pre-rotation-enabled
     /// VTA. With pre_rotation_count = 1 (the interactive setup

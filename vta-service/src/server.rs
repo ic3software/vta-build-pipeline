@@ -894,12 +894,19 @@ pub async fn run(
                         secrets,
                     );
 
-                    // Build a TDKConfig for the DIDComm listener so it uses the
-                    // same resolver mode as the VTA (network-mode in TEE enclaves).
+                    // Build a TDKConfig for the DIDComm listener. Reuse the
+                    // already-initialized app-state resolver when available so
+                    // the listener sees the same seeded self-DID cache entry
+                    // (e.g. `preload_self_did_document`), instead of creating
+                    // a fresh resolver that starts cold and may hit network.
+                    // Fall back to resolver-url mode for degraded/startup paths
+                    // where app-state auth init yielded no resolver.
                     let listener_tdk_config = {
                         let mut builder = affinidi_tdk::common::config::TDKConfig::builder()
                             .with_load_environment(false);
-                        if let Some(ref url) = config.resolver_url {
+                        if let Some(ref did_resolver) = app_state.did_resolver {
+                            builder = builder.with_did_resolver(did_resolver.clone());
+                        } else if let Some(ref url) = config.resolver_url {
                             let resolver_config = DIDCacheConfigBuilder::default()
                                 .with_network_mode(url)
                                 .build();
@@ -1764,17 +1771,17 @@ async fn init_auth(
 /// `did:web` and other network-resolved methods have no local log to seed from,
 /// so they are left to normal resolver behaviour.
 ///
-/// Staleness: this runs once at init. Runtime `services {…}` operations mutate
-/// the VTA's own DID document (and republish `did.jsonl`), which this seeded
-/// entry does **not** track. That is bounded and safe for the intended purpose:
-/// per the runtime-service-management invariant, `verificationMethod` stays
-/// byte-identical across those mutations, so the keys DIDComm pack/unpack needs
-/// are never stale — only advertised `service` entries could drift in the VTA's
-/// *self*-view. Re-seeding on DID-document mutation is a possible follow-up (the
-/// service-management ops already hold the fresh log).
+/// Staleness: this runs once at init, and the seeded resolver is now reused by
+/// the DIDComm listener path (so auth + listener share one cache view). Every
+/// runtime DID-log mutation — the did-webvh lifecycle (`create` / `update`) and
+/// all protocol `services {…}` ops, which funnel through `update_did_webvh` —
+/// reseeds this shared entry via `refresh_resolver_doc_from_log` right after the
+/// new log is persisted, so service-advertisement changes stay in sync in the
+/// VTA's in-process self-view.
 ///
-/// Best-effort: if local state is missing or malformed we warn and fall back to
-/// normal resolver behaviour (never a poisoned cache).
+/// Best-effort and fail-safe: if local state is missing or malformed we warn and
+/// keep the last-known-good cache entry (never evict, never poison), falling back
+/// to normal resolver behaviour where none exists.
 async fn preload_self_did_document(
     did_resolver: &mut DIDCacheClient,
     vta_did: &str,

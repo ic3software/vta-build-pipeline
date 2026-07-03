@@ -154,6 +154,10 @@ pub(crate) async fn publish_patch<E: From<UpdateDidWebvhError>>(
     patched: JsonValue,
     channel: &str,
 ) -> Result<crate::operations::did_webvh::UpdateDidWebvhResult, E> {
+    // `update_did_webvh` owns the post-mutation self-DID resolver refresh (it
+    // reseeds the cache from the freshly-built log right after persisting it —
+    // see `did_webvh::update::orchestrator`). Every service-management op funnels
+    // through here, so there's no separate protocol-layer refresh to do.
     update_did_webvh(
         &deps.webvh(),
         auth,
