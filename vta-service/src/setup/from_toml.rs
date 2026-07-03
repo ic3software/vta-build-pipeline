@@ -803,6 +803,7 @@ pub async fn apply_inputs(
     drop(imported_ks);
     drop(contexts_ks);
     drop(webvh_ks);
+    drop(audit_ks);
     drop(did_templates_ks);
     drop(store);
 
