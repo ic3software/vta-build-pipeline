@@ -2,7 +2,7 @@
 name = "vta-sdk"
 description = "SDK for Verifiable Trust Agents operating in Verifiable Trust Communities"
 readme = "README.md"
-version = "0.19.2"
+version = "0.19.3"
 edition.workspace = true
 publish.workspace = true
 authors.workspace = true
@@ -138,6 +138,16 @@ provision-client = [
   "session",
   "dep:tracing",
   "dep:trust-tasks-rs",
+]
+# Per-DID mediator ACL configuration on DIDComm connect.
+# Requires a live ATM (`session`) and the trust-tasks wire types (`trust-tasks-rs`).
+# Used by both VTA (after listener connects) and PNM (after DIDComm session opens).
+acl-setup = [
+  "session",
+  "dep:trust-tasks-rs",
+  "dep:sha2",
+  "dep:tracing",
+  "dep:tokio",
 ]
 # DCQL credential selection + holder-bound OID4VP `vp_token` assembly
 # (`vp` module). `select_credentials` wraps the always-compiled

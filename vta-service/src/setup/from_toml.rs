@@ -360,6 +360,10 @@ pub enum MessagingInput {
         did: String,
         #[serde(default)]
         mediator_host: Option<String>,
+        /// Automatically provision a per-DID allow-all ACL on the mediator
+        /// after the DIDComm connection is established. Defaults to `false`.
+        #[serde(default)]
+        setup_acl: bool,
     },
     /// Mint a new mediator DID using the built-in `didcomm-mediator`
     /// template. The mediator gets its own trust context (default name
@@ -394,6 +398,10 @@ pub enum MessagingInput {
     /// `url` and cannot be overridden here; `WS_URL` comes from the
     /// `ws_url` field above (or its `url`-derived default), so setting
     /// `WS_URL` in `template_vars` has no effect.
+    ///
+    /// `setup_acl` — when `true`, the VTA automatically provisions a
+    /// per-DID allow-all ACL on the mediator after connecting. Required
+    /// when the mediator uses `ExplicitAllow` mode. Defaults to `false`.
     CreateMediator {
         #[serde(default = "default_mediator_context")]
         context: String,
@@ -406,6 +414,8 @@ pub enum MessagingInput {
         mediator_host: Option<String>,
         #[serde(default)]
         template_vars: HashMap<String, serde_json::Value>,
+        #[serde(default)]
+        setup_acl: bool,
     },
 }
 
@@ -624,10 +634,15 @@ pub async fn apply_inputs(
     // 10. Messaging.
     let messaging = match &inputs.messaging {
         MessagingInput::Skip => None,
-        MessagingInput::Existing { did, mediator_host } => Some(MessagingConfig {
+        MessagingInput::Existing {
+            did,
+            mediator_host,
+            setup_acl,
+        } => Some(MessagingConfig {
             mediator_url: String::new(),
             mediator_did: did.clone(),
             mediator_host: mediator_host.clone(),
+            setup_acl: *setup_acl,
         }),
         MessagingInput::CreateMediator {
             context,
@@ -636,6 +651,7 @@ pub async fn apply_inputs(
             webvh_url,
             mediator_host,
             template_vars,
+            setup_acl,
         } => {
             let _med_ctx =
                 create_seed_context(&contexts_ks, context, "DIDComm Messaging Mediator").await?;
@@ -697,6 +713,7 @@ pub async fn apply_inputs(
                 mediator_url: url.clone(),
                 mediator_did,
                 mediator_host: mediator_host.clone(),
+                setup_acl: *setup_acl,
             })
         }
     };
@@ -1923,6 +1940,75 @@ mod tests {
             other => panic!("expected Existing, got {other:?}"),
         }
         validate_inputs(&inputs).expect("Existing+mediator_host should validate");
+    }
+
+    /// `setup_acl` is optional and defaults to `false` when absent — back-compat
+    /// for existing configs that predate the field.
+    #[test]
+    fn setup_acl_defaults_to_false() {
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [messaging]
+            kind = "create_mediator"
+            url  = "https://mediator.example.com"
+        "#;
+        let inputs = parse(raw).expect("parses");
+        match &inputs.messaging {
+            MessagingInput::CreateMediator { setup_acl, .. } => {
+                assert!(!setup_acl, "setup_acl must default to false");
+            }
+            other => panic!("expected CreateMediator, got {other:?}"),
+        }
+        validate_inputs(&inputs).expect("absent setup_acl should validate");
+    }
+
+    /// `setup_acl = true` is preserved through parsing and carried into
+    /// `MessagingConfig` — the value in TOML must appear in the final config.
+    #[test]
+    fn setup_acl_true_is_preserved_and_propagates() {
+        use crate::config::MessagingConfig;
+
+        let raw = r#"
+            config_path = "/tmp/vta-test/config.toml"
+            data_dir    = "/tmp/vta-test/data"
+            public_url  = "https://trust.example.com"
+
+            [secrets]
+            backend = "keyring"
+
+            [messaging]
+            kind      = "existing"
+            did       = "did:webvh:scid:mediator.example.com:mediator"
+            setup_acl = true
+        "#;
+        let inputs = parse(raw).expect("parses");
+        let (did, mediator_host, setup_acl) = match &inputs.messaging {
+            MessagingInput::Existing {
+                did,
+                mediator_host,
+                setup_acl,
+            } => (did.clone(), mediator_host.clone(), *setup_acl),
+            other => panic!("expected Existing, got {other:?}"),
+        };
+        assert!(setup_acl, "setup_acl must be true after parsing");
+        validate_inputs(&inputs).expect("setup_acl = true should validate");
+
+        let cfg = MessagingConfig {
+            mediator_url: String::new(),
+            mediator_did: did,
+            mediator_host,
+            setup_acl,
+        };
+        assert!(
+            cfg.setup_acl,
+            "setup_acl must propagate into MessagingConfig"
+        );
     }
 
     #[test]

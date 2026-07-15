@@ -557,6 +557,7 @@ fn prompt_messaging(vta_mediator: Option<String>) -> Result<Option<MessagingConf
         mediator_url: String::new(),
         mediator_did,
         mediator_host: None,
+        setup_acl: false,
     }))
 }
 

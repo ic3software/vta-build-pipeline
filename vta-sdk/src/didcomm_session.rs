@@ -244,6 +244,23 @@ impl DIDCommSession {
             }
         }
 
+        // Set this client's ACL on the mediator to accept all message types.
+        // `set_client_acl_on_connection` is itself fire-and-forget (it spawns a
+        // background task and returns immediately), so no extra spawn here — the
+        // connect path is not blocked on the mediator round-trip. Only compiled-in
+        // when the `acl-setup` feature is enabled (requires `session` +
+        // `trust-tasks-rs`). PNM enables `acl-setup`; SDK consumers that omit it
+        // are unaffected.
+        #[cfg(feature = "acl-setup")]
+        crate::acl_setup::set_client_acl_on_connection(
+            &atm,
+            client_did,
+            mediator_did,
+            "didcomm-session",
+            "pnm",
+        )
+        .await;
+
         debug!("DIDComm session connected via mediator {mediator_did} (WebSocket mode)");
 
         let shutdown = Arc::new(AtomicBool::new(false));

@@ -255,6 +255,7 @@ impl TestVtcBuilder {
                 mediator_url: String::new(),
                 mediator_did: mediator_did.clone(),
                 mediator_host: None,
+                setup_acl: false,
             });
         }
 

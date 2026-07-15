@@ -87,6 +87,8 @@ pub mod hex;
 pub mod context_path;
 pub mod identifier;
 
+#[cfg(feature = "acl-setup")]
+pub mod acl_setup;
 #[cfg(feature = "session")]
 pub mod agent_session;
 #[cfg(feature = "attest-verify")]

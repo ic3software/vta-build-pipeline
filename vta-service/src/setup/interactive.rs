@@ -553,7 +553,16 @@ async fn configure_messaging(p: &dyn Prompter) -> Result<MessagingInput, DynErr>
                 }),
             )?;
             let mediator_host = prompt_optional_mediator_host(p)?;
-            Ok(MessagingInput::Existing { did, mediator_host })
+            let setup_acl = p.confirm(
+                "Automatically provision ACL on mediator after connecting? \
+(enable if mediator uses ExplicitAllow mode)",
+                false,
+            )?;
+            Ok(MessagingInput::Existing {
+                did,
+                mediator_host,
+                setup_acl,
+            })
         }
         1 => {
             let context = p
@@ -606,6 +615,12 @@ async fn configure_messaging(p: &dyn Prompter) -> Result<MessagingInput, DynErr>
                 template_vars.insert("ROUTING_KEYS".into(), json!(routing_keys));
             }
 
+            let setup_acl = p.confirm(
+                "Automatically provision ACL on mediator after connecting? \
+(enable if mediator uses ExplicitAllow mode)",
+                false,
+            )?;
+
             Ok(MessagingInput::CreateMediator {
                 context,
                 url,
@@ -613,6 +628,7 @@ async fn configure_messaging(p: &dyn Prompter) -> Result<MessagingInput, DynErr>
                 webvh_url: Some(webvh_url),
                 mediator_host,
                 template_vars,
+                setup_acl,
             })
         }
         _ => Ok(MessagingInput::Skip),
@@ -1143,6 +1159,7 @@ mod tests {
             text("https://dids.example.com/mediator"), // mediator DID URL (split host)
             text(""),                                  // mediator host (skip)
             text(""),                                  // routing keys (skip)
+            Answer::Bool(false),                       // setup_acl (disable)
             Answer::Index(1),                          // VTA DID = did:key
         ];
         let p = ScriptedPrompter::new(answers);
@@ -1185,6 +1202,7 @@ mod tests {
             url       = "https://mediator.example.com"
             ws_url    = "wss://mediator.example.com/ws"
             webvh_url = "https://dids.example.com/mediator"
+            setup_acl = false
 
             [vta_did]
             kind = "create_did_key"

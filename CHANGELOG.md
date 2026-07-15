@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+### vti-common (0.11.5)
+
+* Added `setup_acl: bool` (default `false`) to `MessagingConfig`.
+
+### vtc-service (0.11.3)
+
+* Fixed `MessagingConfig` initialisers to include the new `setup_acl` field.
+
+### vta-service (0.11.0) — automatic ACL provisioning on startup
+
+* Enabled the SDK's `acl-setup` feature and integrated automatic
+  mediator ACL provisioning into VTA startup.
+* VTA now provisions the required DID-level mediator ACL immediately
+  after establishing its DIDComm listener connection, eliminating the
+  need for manual ACL setup.
+* Reuses the shared ACL provisioning implementation provided by
+  `vta-sdk`.
+* Allows VTA deployments to operate correctly with mediators with
+  stricter ACL enforcement policies.
+* ACL provisioning is performed transparently during startup and does
+  not alter existing DIDComm workflows beyond automatically ensuring
+  the required mediator access rules are present.
+* Added `setup_acl` boolean to `[messaging]` in `config.toml` and the
+  `vta setup` wizard / `--from <toml>` schema. When `true`, the VTA
+  automatically provisions its per-DID allow-all ACL on the mediator
+  after connecting (required for mediators using `ExplicitAllow` mode).
+  Defaults to `false`; existing configs are unaffected.
+
+### cnm-cli (0.11.0) / pnm-cli (0.11.0) — automatic ACL setup on DIDComm connect
+
+* Enabled the SDK's `acl-setup` feature by default in the CLIs.
+* DIDComm connections now automatically provision mediator ACLs during
+  connection establishment.
+* Improves interoperability with mediators enforcing DID-level ACL
+  policies by removing the manual ACL setup requirement.
+* Keeps CLIs workflows unchanged while ensuring ACL provisioning is
+  performed transparently in the background.
+
+### vta-sdk (0.19.3) — automatic mediator ACL provisioning for DIDComm connections
+
+- Added an optional `acl-setup` feature that automatically provisions
+  DID-level mediator ACLs when a DIDComm connection is established.
+  The implementation hashes the client DID (SHA-256), creates an
+  allow-all `MediatorAcl`, and submits it via
+  `atm.trust_tasks().acl_set()` in a non-blocking background task.
+- `connect_with_secrets()` now invokes ACL provisioning after DIDComm
+  transport initialization when the `acl-setup` feature is enabled.
+  Existing behavior is unchanged when the feature is not enabled.
+- Introduced a shared `acl_setup` module containing reusable ACL
+  provisioning logic for SDK consumers.
+- New feature dependencies:
+  `trust-tasks-rs`, `sha2`, `tracing`, and `tokio`
+  (all gated behind `acl-setup`).
+- This change enables SDK consumers to operate against mediators with
+  stricter ACL enforcement policies without requiring manual DID-level
+  ACL configuration.
+
 ### vta-sdk (0.19.2) — declare the `task-consent` Trust Task family
 
 `task-consent/decision/1.0` (PR #645) introduced a new Trust Task family, but

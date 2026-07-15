@@ -148,10 +148,13 @@ service = "vta-prod"   # default "vta"; use a unique name per VTA on the same ho
 # document at runtime. `mediator_host` is the external hostname the VTA
 # should resolve when dialling — used in TEE network mode where outbound
 # traffic goes via a vsock proxy that needs the upstream hostname for SNI.
+# `setup_acl` provisions a per-DID allow-all ACL on the mediator after
+# connecting (required for mediators using ExplicitAllow mode; default false).
 # [messaging]
 # kind          = "existing"
 # did           = "did:webvh:.../mediator"
 # mediator_host = "mediator.example.com"   # optional; TEE deployments only
+# setup_acl     = false                    # optional; default false
 
 # Mint a new mediator DID using the built-in `didcomm-mediator` template.
 #
@@ -174,6 +177,7 @@ service = "vta-prod"   # default "vta"; use a unique name per VTA on the same ho
 kind      = "create_mediator"
 context   = "mediator"   # default "mediator"; trust context the mediator's keys live in
 url       = "https://mediator.example.com"
+# setup_acl     = false                    # optional; enable for ExplicitAllow mediators
 # webvh_url     = "https://trust.example.com/dids/mediator"
 # mediator_host = "mediator.example.com"
 

@@ -42,6 +42,7 @@ use affinidi_messaging_didcomm_service::{
 use affinidi_tdk_common::profiles::TDKProfile;
 #[cfg(feature = "didcomm")]
 use tokio_util::sync::CancellationToken;
+use vta_sdk::acl_setup;
 
 /// TEE context passed by the caller (main.rs or vta-enclave).
 /// None when running outside a TEE.
@@ -1047,6 +1048,33 @@ pub async fn run(
                                     endpoint: messaging_config.mediator_url.clone(),
                                 })
                                 .await;
+
+                            // Set the VTA's own ACL on the mediator to accept all messages.
+                            // This happens after the connection succeeds, so we have a live
+                            // transport to send the trust task. The ACL setting is
+                            // fire-and-forget (spawns internally) — startup is not blocked.
+                            // The ACL is keyed on the VTA's DID, so it authorises the account
+                            // for both DIDComm *and* TSP, which share this one mediator socket.
+                            // Only runs when `setup_acl = true` in the messaging config
+                            // (set during VTA setup for mediators using ExplicitAllow mode).
+                            if messaging_config.setup_acl {
+                                if let Some(atm) = app_state.atm.as_ref() {
+                                    acl_setup::set_client_acl_on_connection(
+                                        atm,
+                                        vta_did,
+                                        messaging_config.mediator_did.as_str(),
+                                        "vta-main",
+                                        "vta",
+                                    )
+                                    .await;
+                                } else {
+                                    warn!(
+                                        "setup_acl = true but no ATM available; \
+                                         skipping mediator ACL provisioning"
+                                    );
+                                }
+                            }
+
                             info!("DIDComm service started");
                             Some(service)
                         }

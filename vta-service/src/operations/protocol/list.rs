@@ -271,6 +271,7 @@ mod tests {
             mediator_did: "did:peer:2.MEDIATOR".into(),
             mediator_url: "ws://mediator:7037".into(),
             mediator_host: None,
+            setup_acl: false,
         });
         cfg.config_path = dir.path().join("vta.toml");
         let config = Arc::new(RwLock::new(cfg));

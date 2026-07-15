@@ -357,6 +357,9 @@ async fn persist_new_mediator(
             mediator_url: mediator_endpoint.to_string(),
             mediator_did: mediator_did.to_string(),
             mediator_host: None,
+            // Preserve the existing setup_acl setting if the config already has
+            // a messaging section; otherwise default to false.
+            setup_acl: cfg.messaging.as_ref().is_some_and(|m| m.setup_acl),
         });
         let contents = toml::to_string_pretty(&*cfg)
             .map_err(|e| UpdateDidcommError::ConfigPersistence(e.to_string()))?;

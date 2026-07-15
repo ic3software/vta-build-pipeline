@@ -78,6 +78,12 @@ pub struct MessagingConfig {
     /// Not used by the VTA itself (which connects via the local vsock proxy).
     #[serde(default)]
     pub mediator_host: Option<String>,
+    /// Automatically provision a per-DID allow-all ACL on the mediator after
+    /// establishing the DIDComm connection. Required when the mediator uses
+    /// `ExplicitAllow` mode; harmless (and default-off) with `ExplicitDeny`.
+    /// Set `setup_acl = true` during setup to enable. Defaults to `false`.
+    #[serde(default)]
+    pub setup_acl: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

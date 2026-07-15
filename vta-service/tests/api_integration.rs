@@ -377,6 +377,7 @@ async fn didcomm_status_returns_mediator_and_websocket_state_when_enabled() {
             mediator_url: "wss://mediator.example.com".into(),
             mediator_did: "did:peer:2.med".into(),
             mediator_host: None,
+            setup_acl: false,
         });
     }
     let token = ctx.auth_token("did:key:z6MkTest", "admin", vec![]).await;
@@ -3191,6 +3192,7 @@ async fn enable_didcomm_already_enabled_returns_409_with_suggested_fix() {
             mediator_url: "wss://mediator.example.com".into(),
             mediator_did: "did:peer:2.med".into(),
             mediator_host: None,
+            setup_acl: false,
         });
     }
     let (status, body) = app
